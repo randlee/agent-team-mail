@@ -17,6 +17,7 @@ pub const DEFAULT_QUEUE_CAPACITY: usize = 4096;
 pub const DEFAULT_MAX_EVENT_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_BYTES: u64 = 50 * 1024 * 1024;
 pub const DEFAULT_MAX_FILES: u32 = 5;
+pub const DEFAULT_RETENTION_DAYS: u32 = 7;
 
 pub const SOCKET_ERROR_VERSION_MISMATCH: &str = "VERSION_MISMATCH";
 pub const SOCKET_ERROR_INVALID_PAYLOAD: &str = "INVALID_PAYLOAD";
@@ -66,6 +67,7 @@ pub struct LogConfig {
     pub message_preview_enabled: bool,
     pub max_bytes: u64,
     pub max_files: u32,
+    pub retention_days: u32,
     pub queue_capacity: usize,
     pub max_event_bytes: usize,
 }
@@ -93,6 +95,11 @@ impl LogConfig {
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(DEFAULT_MAX_FILES);
+        let retention_days = std::env::var("ATM_LOG_RETENTION_DAYS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|days| *days > 0)
+            .unwrap_or(DEFAULT_RETENTION_DAYS);
 
         Self {
             log_path,
@@ -101,6 +108,7 @@ impl LogConfig {
             message_preview_enabled,
             max_bytes,
             max_files,
+            retention_days,
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             max_event_bytes: DEFAULT_MAX_EVENT_BYTES,
         }
@@ -124,6 +132,11 @@ pub struct Logger {
     config: LogConfig,
 }
 
+/// Apply canonical redaction rules to a logging event.
+pub fn redact_event(event: &mut LogEventV1) {
+    event.redact();
+}
+
 impl Logger {
     pub fn new(config: LogConfig) -> Self {
         Self { config }
@@ -133,12 +146,24 @@ impl Logger {
         &self.config
     }
 
+    /// Validate, redact, and append an event to the canonical JSONL log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation fails, serialization fails, the event
+    /// exceeds `max_event_bytes`, or filesystem writes fail.
     pub fn emit(&self, event: &LogEventV1) -> Result<(), LoggerError> {
         let line = self.prepare_line(event)?;
         self.append_line_to_canonical(&line)?;
         Ok(())
     }
 
+    /// Write one event to a per-source spool file for deferred fan-in merge.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation/serialization fails, the event exceeds
+    /// `max_event_bytes`, or spool file creation/appending fails.
     pub fn write_to_spool(
         &self,
         event: &LogEventV1,
@@ -154,6 +179,15 @@ impl Logger {
         Ok(path)
     }
 
+    /// Merge spool fragments into the canonical log in deterministic order.
+    ///
+    /// Supports crash-recovery of stale `.claiming` files from interrupted
+    /// prior merges.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when reading the spool directory or writing to the
+    /// canonical log fails.
     pub fn merge_spool(&self) -> Result<u64, LoggerError> {
         if !self.config.spool_dir.exists() {
             return Ok(0);
@@ -162,10 +196,12 @@ impl Logger {
         let mut spool_files: Vec<PathBuf> = fs::read_dir(&self.config.spool_dir)?
             .filter_map(|entry| entry.ok().map(|e| e.path()))
             .filter(|path| {
-                path.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|name| name.ends_with(".jsonl") && !name.ends_with(".claiming"))
-                    .unwrap_or(false)
+                path.is_file()
+                    && path
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .map(|ext| ext == "jsonl" || ext == "claiming")
+                        .unwrap_or(false)
             })
             .collect();
         spool_files.sort();
@@ -174,17 +210,32 @@ impl Logger {
         let mut events: Vec<(LogEventV1, String)> = Vec::new();
 
         for path in spool_files {
-            let claiming = path.with_extension("claiming");
-            if fs::rename(&path, &claiming).is_err() {
-                continue;
-            }
+            let claiming = if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext == "claiming")
+            {
+                path.clone()
+            } else {
+                let claiming = path.with_extension("claiming");
+                if fs::rename(&path, &claiming).is_err() {
+                    continue;
+                }
+                claiming
+            };
             let ordering_key = claiming
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or_default()
                 .to_string();
 
-            let content = fs::read_to_string(&claiming)?;
+            let content = match fs::read_to_string(&claiming) {
+                Ok(content) => content,
+                Err(_) => {
+                    let _ = fs::remove_file(&claiming);
+                    continue;
+                }
+            };
             for line in content.lines() {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
@@ -219,7 +270,7 @@ impl Logger {
     fn prepare_line(&self, event: &LogEventV1) -> Result<String, LoggerError> {
         let mut event = event.clone();
         event.validate()?;
-        event.redact();
+        redact_event(&mut event);
         let line = serde_json::to_string(&event)?;
         let size = line.len();
         if size > self.config.max_event_bytes {
@@ -259,12 +310,24 @@ impl Logger {
 }
 
 pub fn spool_file_name(source_binary: &str, pid: u32, unix_millis: u128) -> String {
-    format!(
-        "{}-{}-{}.jsonl",
-        source_binary.replace('/', "_"),
-        pid,
-        unix_millis
-    )
+    let sanitized = sanitize_source_binary(source_binary);
+    format!("{}-{}-{}.jsonl", sanitized, pid, unix_millis)
+}
+
+fn sanitize_source_binary(source_binary: &str) -> String {
+    let mut out = String::with_capacity(source_binary.len());
+    for ch in source_binary.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "unknown".to_string()
+    } else {
+        out
+    }
 }
 
 fn rotate_log_files(base: &Path, max_files: u32) -> Result<(), LoggerError> {
@@ -313,20 +376,25 @@ mod tests {
     #[test]
     #[serial]
     fn config_defaults_and_env_overrides() {
+        let tmp = TempDir::new().expect("temp dir");
+        let custom_log = tmp.path().join("custom-atm.log");
+        let home_root = tmp.path().join("home-root");
         // SAFETY: test-scoped env mutation.
         unsafe {
             std::env::set_var("ATM_LOG", "debug");
             std::env::set_var("ATM_LOG_MSG", "1");
-            std::env::set_var("ATM_LOG_FILE", "/tmp/custom-atm.log");
+            std::env::set_var("ATM_LOG_FILE", &custom_log);
             std::env::set_var("ATM_LOG_MAX_BYTES", "1024");
             std::env::set_var("ATM_LOG_MAX_FILES", "7");
+            std::env::set_var("ATM_LOG_RETENTION_DAYS", "9");
         }
-        let cfg = LogConfig::from_home(Path::new("/tmp/home-root"));
+        let cfg = LogConfig::from_home(&home_root);
         assert_eq!(cfg.level, LogLevel::Debug);
         assert!(cfg.message_preview_enabled);
-        assert_eq!(cfg.log_path, PathBuf::from("/tmp/custom-atm.log"));
+        assert_eq!(cfg.log_path, custom_log);
         assert_eq!(cfg.max_bytes, 1024);
         assert_eq!(cfg.max_files, 7);
+        assert_eq!(cfg.retention_days, 9);
         assert_eq!(cfg.queue_capacity, DEFAULT_QUEUE_CAPACITY);
         assert_eq!(cfg.max_event_bytes, DEFAULT_MAX_EVENT_BYTES);
         // SAFETY: cleanup after test.
@@ -336,6 +404,7 @@ mod tests {
             std::env::remove_var("ATM_LOG_FILE");
             std::env::remove_var("ATM_LOG_MAX_BYTES");
             std::env::remove_var("ATM_LOG_MAX_FILES");
+            std::env::remove_var("ATM_LOG_RETENTION_DAYS");
         }
     }
 
@@ -343,6 +412,12 @@ mod tests {
     fn spool_filename_format_matches_contract() {
         let name = spool_file_name("atm-daemon", 44201, 123456789);
         assert_eq!(name, "atm-daemon-44201-123456789.jsonl");
+    }
+
+    #[test]
+    fn spool_filename_sanitizes_windows_unsafe_chars() {
+        let name = spool_file_name(r"atm\daemon:core?*", 44201, 123456789);
+        assert_eq!(name, "atm_daemon_core__-44201-123456789.jsonl");
     }
 
     #[test]
@@ -355,6 +430,7 @@ mod tests {
             message_preview_enabled: false,
             max_bytes: 1,
             max_files: 2,
+            retention_days: DEFAULT_RETENTION_DAYS,
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             max_event_bytes: DEFAULT_MAX_EVENT_BYTES,
         };
@@ -379,6 +455,7 @@ mod tests {
             message_preview_enabled: false,
             max_bytes: DEFAULT_MAX_BYTES,
             max_files: DEFAULT_MAX_FILES,
+            retention_days: DEFAULT_RETENTION_DAYS,
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             max_event_bytes: 256,
         };
@@ -403,6 +480,7 @@ mod tests {
             message_preview_enabled: false,
             max_bytes: DEFAULT_MAX_BYTES,
             max_files: DEFAULT_MAX_FILES,
+            retention_days: DEFAULT_RETENTION_DAYS,
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             max_event_bytes: DEFAULT_MAX_EVENT_BYTES,
         };
@@ -439,6 +517,93 @@ mod tests {
             leftover.is_empty(),
             "spool files should be deleted after merge"
         );
+    }
+
+    #[test]
+    fn merge_spool_recovers_stale_claiming_files() {
+        let tmp = TempDir::new().expect("temp dir");
+        let cfg = LogConfig {
+            log_path: tmp.path().join("atm.log.jsonl"),
+            spool_dir: tmp.path().join("log-spool"),
+            level: LogLevel::Info,
+            message_preview_enabled: false,
+            max_bytes: DEFAULT_MAX_BYTES,
+            max_files: DEFAULT_MAX_FILES,
+            retention_days: DEFAULT_RETENTION_DAYS,
+            queue_capacity: DEFAULT_QUEUE_CAPACITY,
+            max_event_bytes: DEFAULT_MAX_EVENT_BYTES,
+        };
+        fs::create_dir_all(&cfg.spool_dir).expect("create spool dir");
+        let stale_claiming = cfg.spool_dir.join("atm-44201-1000.claiming");
+        let ev = make_event("2026-03-09T00:00:01Z");
+        fs::write(
+            &stale_claiming,
+            format!("{}\n", serde_json::to_string(&ev).expect("serialize")),
+        )
+        .expect("write stale claiming");
+
+        let logger = Logger::new(cfg.clone());
+        let merged = logger.merge_spool().expect("merge spool");
+        assert_eq!(merged, 1);
+        assert!(!stale_claiming.exists());
+
+        let log_content = fs::read_to_string(&cfg.log_path).expect("read log");
+        let lines: Vec<_> = log_content.lines().collect();
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn write_to_spool_creates_dir_and_appends() {
+        let tmp = TempDir::new().expect("temp dir");
+        let cfg = LogConfig {
+            log_path: tmp.path().join("atm.log.jsonl"),
+            spool_dir: tmp.path().join("log-spool"),
+            level: LogLevel::Info,
+            message_preview_enabled: false,
+            max_bytes: DEFAULT_MAX_BYTES,
+            max_files: DEFAULT_MAX_FILES,
+            retention_days: DEFAULT_RETENTION_DAYS,
+            queue_capacity: DEFAULT_QUEUE_CAPACITY,
+            max_event_bytes: DEFAULT_MAX_EVENT_BYTES,
+        };
+        let logger = Logger::new(cfg);
+        let ev = make_event("2026-03-09T00:00:01Z");
+        let path1 = logger.write_to_spool(&ev, 1000).expect("spool write 1");
+        let path2 = logger.write_to_spool(&ev, 1000).expect("spool write 2");
+        assert_eq!(path1, path2);
+        let spool_content = fs::read_to_string(path1).expect("read spool");
+        let lines: Vec<_> = spool_content.lines().collect();
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn rotate_log_files_max_files_zero_removes_base() {
+        let tmp = TempDir::new().expect("temp dir");
+        let base = tmp.path().join("atm.log.jsonl");
+        fs::write(&base, "line\n").expect("write base");
+        rotate_log_files(&base, 0).expect("rotate");
+        assert!(!base.exists());
+    }
+
+    #[test]
+    fn rotate_log_files_evicts_oldest_when_limit_reached() {
+        let tmp = TempDir::new().expect("temp dir");
+        let base = tmp.path().join("atm.log.jsonl");
+        fs::write(&base, "base\n").expect("write base");
+        fs::write(rotation_path(&base, 1), "one\n").expect("write .1");
+        fs::write(rotation_path(&base, 2), "two\n").expect("write .2");
+
+        rotate_log_files(&base, 2).expect("rotate");
+
+        assert_eq!(
+            fs::read_to_string(rotation_path(&base, 1)).expect("read .1"),
+            "base\n"
+        );
+        assert_eq!(
+            fs::read_to_string(rotation_path(&base, 2)).expect("read .2"),
+            "one\n"
+        );
+        assert!(!rotation_path(&base, 3).exists());
     }
 
     #[test]

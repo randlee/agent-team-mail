@@ -22,6 +22,7 @@
 //! starts a fresh base file. The oldest rotation file (`.N`) is removed.
 
 use agent_team_mail_core::logging_event::LogEventV1;
+use sc_observability::DEFAULT_QUEUE_CAPACITY;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -112,7 +113,7 @@ pub type LogEventQueue = Arc<Mutex<BoundedQueue>>;
 
 /// Create a new [`LogEventQueue`] with the default capacity of 4096.
 pub fn new_log_event_queue() -> LogEventQueue {
-    Arc::new(Mutex::new(BoundedQueue::new(4096)))
+    Arc::new(Mutex::new(BoundedQueue::new(DEFAULT_QUEUE_CAPACITY)))
 }
 
 // ── Writer configuration ──────────────────────────────────────────────────────
