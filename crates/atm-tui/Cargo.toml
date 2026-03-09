@@ -13,7 +13,7 @@ name = "atm-tui"
 path = "src/main.rs"
 
 [dependencies]
-agent-team-mail-core = { path = "../atm-core", version = "=0.43.3" }
+agent-team-mail-core = { path = "../atm-core", version = "=0.43.4" }
 sc-observability.workspace = true
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
