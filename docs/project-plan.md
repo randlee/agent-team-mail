@@ -1519,6 +1519,7 @@ observability scope.
 
 **Goal**: Make daemon registry the canonical session authority and eliminate
 identity/session ambiguity by standardizing on `session_id` across ATM surfaces.
+**Prerequisites**: Phase AH baseline complete.
 
 **Planning doc**: `docs/phase-aj-planning.md`  
 **Test plan**: `docs/test-plan-phase-AJ.md`
@@ -1538,6 +1539,7 @@ identity/session ambiguity by standardizing on `session_id` across ATM surfaces.
 
 **Goal**: Ship non-optional OpenTelemetry across in-scope tools while keeping
 local structured logging always-on and fail-open.
+**Prerequisites**: Phase AH and Phase AJ complete.
 
 **Planning doc**: `docs/phase-ak-planning.md`  
 **Requirements**: `docs/observability/requirements.md`  
