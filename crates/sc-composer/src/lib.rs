@@ -20,6 +20,7 @@ use render::render_template;
 use validate::{evaluate_context, prepare_template, validate_request};
 
 pub use diagnostics::Diagnostic;
+pub use resolver::ResolveResult;
 pub use validate::ValidationReport;
 
 /// Supported runtime profiles for default agent file resolution policy.
@@ -183,6 +184,18 @@ pub fn compose(request: &ComposeRequest) -> Result<ComposeResult, ComposerError>
 /// Validate a compose request without producing output.
 pub fn validate(request: &ComposeRequest) -> Result<ValidationReport, ComposerError> {
     validate_request(request)
+}
+
+/// Resolve the input template/profile path and return full probe trace.
+pub fn resolve(request: &ComposeRequest) -> Result<ResolveResult, ComposerError> {
+    resolver::resolve_input_path(request)
+}
+
+/// Discover template variables in Jinja content.
+pub fn discover_template_variables(content: &str) -> Vec<String> {
+    frontmatter::extract_template_variables(content)
+        .into_iter()
+        .collect()
 }
 
 #[cfg(test)]
