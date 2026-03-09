@@ -2,7 +2,7 @@
 
 **Version**: 0.6
 **Date**: 2026-03-05
-**Status**: Phase AG in progress (v0.42.0, integration PR #554 pending).
+**Status**: Phase AG complete (v0.42.0, integration PR #554 pending merge to develop).
 
 ---
 
