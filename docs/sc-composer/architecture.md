@@ -10,6 +10,16 @@
 - Reusable as a library by multiple products.
 - Standalone CLI for local workflows and CI validation.
 
+## 1.1 Secondary Architecture Registry
+
+This primary architecture document registers observability architecture details in:
+
+- `docs/observability/architecture.md`
+- `docs/observability/requirements.md`
+
+`sc-composer` must consume that shared observability contract through
+`sc-observability` and must not define divergent logging semantics here.
+
 ## 2. Top-Level Components
 
 ### 2.1 `sc-composer` (library)
@@ -22,7 +32,8 @@ Core modules:
 - `render`: Jinja2 rendering facade (strict undefined).
 - `validate`: required/unknown variable policy checks.
 - `diagnostics`: structured error/warning model and JSON schema.
-- `observability`: structured logging facade aligned with ATM logging schema.
+- `observability`: facade backed by `sc-observability` and aligned with
+  `docs/observability/architecture.md`.
 - `pipeline`: block composition (`agent` + `guidance` + `user`).
 
 Resolver extension policy:

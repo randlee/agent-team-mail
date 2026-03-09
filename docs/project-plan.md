@@ -2,7 +2,7 @@
 
 **Version**: 0.6
 **Date**: 2026-03-05
-**Status**: Phase AF complete (v0.41.0, integration PR #530 pending).
+**Status**: Phase AF complete (v0.41.0). Phase AH planning in progress.
 
 ---
 
@@ -1460,7 +1460,44 @@ the current tranche focused on onboarding contract closure.
 **Completed**: 128+ sprints across 28 phases (CI green)
 **Current version**: v0.41.0
 **Current phase**: Phase AF (COMPLETE)
-**Next planned phase**: Phase AG (TBD)
+**Next planned phase**: Phase AH (observability unification + OTel baseline)
+
+---
+
+## 17.17 Phase AH: Observability Unification + OTel Baseline
+
+**Goal**: Extract `sc-observability` as a shared logging platform across ATM
+tools, close deferred AG observability/render/docs gaps, and ship a safe
+optional OpenTelemetry baseline with sub-agent-first trace coverage.
+
+**Planning doc**: `docs/phase-ah-planning.md`
+**Requirements doc**: `docs/observability/requirements.md`
+**Architecture doc**: `docs/observability/architecture.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Issues | Status |
+|---|---|---|---|
+| AH.1 | Shared crate foundation (`sc-observability`) | #556 | PLANNED |
+| AH.2 | `sc-compose` migration to shared logging | #556 | PLANNED |
+| AH.3 | Diagnostics + output derivation closure | #555, #557 | PLANNED |
+| AH.4 | ATM/SCMUX integration + OTel baseline | #556 | PLANNED |
+| AH.5 | Install/release docs closeout | #558 | PLANNED |
+
+---
+
+## 17.18 Phase AI: GH Monitor Reporting Surfaces
+
+**Goal**: Add GH monitor dashboard/report UX for PR triage without expanding AH
+observability scope.
+
+**Planning doc**: `docs/phase-ai-planning.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Issues | Status |
+|---|---|---|---|
+| AI.1 | `atm gh monitor list` rollup dashboard + `--json` | #560 | PLANNED |
+| AI.2 | `atm gh monitor report <PR>` built-in report + `--json` | #561 | PLANNED |
+| AI.3 | Template customization (`--template`) + optional `init-report` | #561 | PLANNED |
 
 ---
 

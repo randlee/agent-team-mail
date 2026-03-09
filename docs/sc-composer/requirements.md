@@ -205,29 +205,18 @@ Render output path rules:
 
 ### FR-9: Unified Logging (ATM-Compatible)
 
-`sc-compose` is a full CLI and must emit structured logs compatible with
-ATM logging conventions.
+Detailed observability requirements are defined in:
+- `docs/observability/requirements.md`
+- `docs/observability/architecture.md`
 
-Required behavior:
-- Use the same event schema conventions and field naming as ATM unified logging
-  (shared observability surface, not a divergent schema).
-- Log at minimum:
-  - command start/end,
-  - template/profile resolution decisions,
-  - include expansion decisions and failures,
-  - validation failures,
-  - render success/failure (with output target metadata, not full content).
-- Support human-friendly and JSON log output modes.
-- Support log level control (`error|warn|info|debug|trace`).
-- Logging must be enabled by default with safe message truncation behavior for
-  large rendered content.
-- Standalone default log root must be `sc-compose` scoped (for example,
-  `~/.config/sc-compose/logs`), not ATM-owned paths.
-- When embedded as a library in another product, logger sink/path must be
-  host-injected so events flow to host logging paths (for example ATM logger
-  path) without duplicating logging implementations.
-- Log records must never include secrets from environment/input unless explicitly
-  requested by a debug-redaction override.
+`sc-compose`/`sc-composer` requirements in this document are integration-specific:
+- Must use `sc-observability` as the logging implementation (no duplicate local logger).
+- Must emit command lifecycle and composition diagnostics events required by
+  observability requirements.
+- Standalone defaults must keep `sc-compose` sink paths tool-scoped.
+- Embedded usage must permit host-injected sink/path configuration.
+- OTel support remains optional and feature-gated, aligned with observability
+  baseline trace/metric naming.
 
 ## 4. Non-Functional Requirements
 
