@@ -2,7 +2,7 @@
 
 **Version**: 0.7
 **Date**: 2026-03-09
-**Status**: Phase AG complete (v0.42.0). Phase AH planning in progress.
+**Status**: Phases AH and AI complete (v0.43.0). Phase AJ planning next.
 
 ---
 
@@ -171,7 +171,10 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AD | Cross-Platform Script Standardization | Python-first script conversion and runtime policy hardening across ATM tooling | COMPLETE |
 | AE | GH Monitor Reliability + Daemon Logging | Stabilize gh-monitor status/lifecycle contracts and daemon observability behavior | COMPLETE |
 | AF | External Agent Lifecycle Hardening | Close lifecycle, cleanup, transient registration, and reliability/documentation hardening | COMPLETE |
-| AG | sc-composer Full Implementation + CLI | Deliver `sc-composer` library + `sc-compose` CLI and integrate with `atm teams spawn` via direct library APIs | PLANNED |
+| AG | sc-composer Full Implementation + CLI | Deliver `sc-composer` library + `sc-compose` CLI and integrate with `atm teams spawn` via direct library APIs | COMPLETE |
+| AH | sc-observability Unification + ATM Ecosystem Logging | Shared logging crate, sc-compose migration, ATM ecosystem integration, doctor/status health surfaces | COMPLETE |
+| AI | GH Monitor Dashboard + Detailed PR Reporting | `atm gh monitor list`, `atm gh monitor report`, `--template` rendering, init-report | COMPLETE |
+| AJ | OpenTelemetry Baseline + Observability API Completion | OTel feature gate, sc_observability::init() API, log injection for library calls, scmux/schook integration | PLANNED |
 
 ---
 
@@ -1463,10 +1466,10 @@ the current tranche focused on onboarding contract closure.
 | | AG.3 | `sc-compose` Binary + Logging Baseline | COMPLETE | [#552](https://github.com/randlee/agent-team-mail/pull/552) |
 | | AG.4 | ATM Spawn Integration (`--system-prompt .j2`) | COMPLETE | [#553](https://github.com/randlee/agent-team-mail/pull/553) |
 
-**Completed**: 133+ sprints across 29 phases (CI green)
-**Current version**: v0.42.0
-**Current phase**: Phase AG (COMPLETE)
-**Next planned phase**: Phase AH (observability unification + OTel baseline)
+**Completed**: 138+ sprints across 31 phases (CI green)
+**Current version**: v0.43.0
+**Current phase**: Phase AI (COMPLETE)
+**Next planned phase**: Phase AJ (OTel baseline + observability API completion)
 
 ---
 
@@ -1486,7 +1489,7 @@ optional OpenTelemetry baseline with sub-agent-first trace coverage.
 | AH.1 | Shared crate foundation (`sc-observability`) + spool/size-guard/socket-error/L1a contracts | #556 | COMPLETE |
 | AH.2 | `sc-compose` migration to shared logging | #556 | COMPLETE |
 | AH.3 | Diagnostics + output derivation closure | #555, #557 | COMPLETE |
-| AH.4 | ATM/daemon/tui/mcp/scmux/schook integration + doctor/status health surfaces + OTel baseline | #556 | COMPLETE |
+| AH.4 | ATM/daemon/tui/mcp/scmux/schook integration + doctor/status health surfaces | #556 | COMPLETE |
 | AH.5 | Runbook + install/release docs closeout | #558 | COMPLETE |
 
 ---
@@ -1501,10 +1504,36 @@ observability scope.
 ### Planned Sprint Map
 | Sprint | Focus | Issues | Status |
 |---|---|---|---|
-| AI.0 | `gh_monitor` cold-start init bug fix prerequisite | #564 | PLANNED |
-| AI.1 | `atm gh monitor list` rollup dashboard + `--json` | #560 | PLANNED |
-| AI.2 | `atm gh monitor report <PR>` built-in report + `--json` | #561 | PLANNED |
-| AI.3 | Template customization (`--template`) + optional `init-report` | #561 (follow-up) | PLANNED |
+| AI.0 | `gh_monitor` cold-start init bug fix prerequisite | #564 | COMPLETE |
+| AI.1 | `atm gh monitor list` rollup dashboard + `--json` | #560 | COMPLETE |
+| AI.2 | `atm gh monitor report <PR>` built-in report + `--json` | #561 | COMPLETE |
+| AI.3 | Template customization (`--template`) + optional `init-report` | #561 (follow-up) | COMPLETE |
+
+---
+
+## 17.19 Phase AJ: OpenTelemetry Baseline + Observability API Completion
+
+**Goal**: Deliver the OTel feature gate deferred from AH, complete the `sc_observability::init()`
+zero-config API, define and implement log injection for library calls, and integrate
+`scmux`/`schook` with `sc-observability`.
+
+**Planning doc**: `docs/phase-aj-planning.md` _(planning session pending)_
+**Requirements doc**: `docs/observability/requirements.md` (§9 OTel — deferred from AH)
+**Architecture doc**: `docs/observability/architecture.md` (§9 OTel — deferred from AH)
+
+### Deferred inputs from Phase AH
+- AH-OBS-5/5a/5b: OTel optional feature gate, trace/metric baseline, sub-agent-first instrumentation
+- AH-OBS-1: scmux and schook `sc-observability` adoption
+- AH-OBS-2: `sc_observability::init("<tool>")` zero-config API
+- Log injection contract: library calls from ATM tools must route logs to host tool's log file
+
+### Planned Sprint Map
+| Sprint | Focus | Issues | Status |
+|---|---|---|---|
+| AJ.1 | `sc_observability::init()` API + log injection contract | TBD | PLANNED |
+| AJ.2 | OTel feature gate + trace/metric baseline | TBD | PLANNED |
+| AJ.3 | scmux/schook sc-observability adoption | TBD | PLANNED |
+| AJ.4 | Integration hardening + docs | TBD | PLANNED |
 
 ---
 

@@ -133,6 +133,10 @@ Lifecycle and hook coverage:
 
 ## 9. OpenTelemetry Requirements
 
+> **Status**: Deferred to Phase AJ. OTel support is not implemented in Phase AH.
+> Implementation planning will occur in the Phase AJ planning session.
+> The requirements below are the target specification for Phase AJ.
+
 - OTel export support is optional and feature-gated (default off).
 - Local structured file logging remains available regardless of OTel state.
 - Initial OTel baseline must include:
