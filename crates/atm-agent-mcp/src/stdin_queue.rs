@@ -43,7 +43,6 @@ use std::time::{Duration, SystemTime};
 use tokio::io::AsyncWrite;
 use tokio::sync::Mutex;
 
-
 /// Returns the queue directory for the given team and agent.
 ///
 /// Uses [`agent_team_mail_core::home::get_home_dir`] for cross-platform home dir.

@@ -1,0 +1,93 @@
+schema_version = 1
+
+[[crates]]
+artifact = "agent-team-mail-core"
+package = "agent-team-mail-core"
+cargo_toml = "crates/atm-core/Cargo.toml"
+required = true
+publish = true
+publish_order = 10
+preflight_check = "full"
+wait_after_publish_seconds = 60
+verify_install = false
+
+[[crates]]
+artifact = "agent-team-mail"
+package = "agent-team-mail"
+cargo_toml = "crates/atm/Cargo.toml"
+required = true
+publish = true
+publish_order = 20
+preflight_check = "locked"
+wait_after_publish_seconds = 60
+verify_install = true
+
+[[crates]]
+artifact = "agent-team-mail-daemon"
+package = "agent-team-mail-daemon"
+cargo_toml = "crates/atm-daemon/Cargo.toml"
+required = true
+publish = true
+publish_order = 30
+preflight_check = "locked"
+wait_after_publish_seconds = 60
+verify_install = false
+
+[[crates]]
+artifact = "agent-team-mail-mcp"
+package = "agent-team-mail-mcp"
+cargo_toml = "crates/atm-agent-mcp/Cargo.toml"
+required = true
+publish = true
+publish_order = 40
+preflight_check = "locked"
+wait_after_publish_seconds = 60
+verify_install = false
+
+[[crates]]
+artifact = "agent-team-mail-tui"
+package = "agent-team-mail-tui"
+cargo_toml = "crates/atm-tui/Cargo.toml"
+required = true
+publish = true
+publish_order = 50
+preflight_check = "locked"
+wait_after_publish_seconds = 0
+verify_install = false
+
+[[crates]]
+artifact = "sc-composer"
+package = "sc-composer"
+cargo_toml = "crates/sc-composer/Cargo.toml"
+required = true
+publish = true
+publish_order = 5
+preflight_check = "full"
+wait_after_publish_seconds = 60
+verify_install = false
+
+[[crates]]
+artifact = "sc-compose"
+package = "sc-compose"
+cargo_toml = "crates/sc-compose/Cargo.toml"
+required = true
+publish = true
+publish_order = 70
+preflight_check = "locked"
+wait_after_publish_seconds = 0
+verify_install = false
+
+[[release_binaries]]
+name = "atm"
+
+[[release_binaries]]
+name = "atm-daemon"
+
+[[release_binaries]]
+name = "atm-agent-mcp"
+
+[[release_binaries]]
+name = "atm-tui"
+
+[[release_binaries]]
+name = "sc-compose"

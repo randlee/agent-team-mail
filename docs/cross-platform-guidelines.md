@@ -118,3 +118,11 @@ grep -rn "'/tmp/" crates/ && echo "FAIL: Found /tmp hardcoding" || echo "OK"
 - Rust's `fs::read_to_string()` returns platform-native line endings.
 - When comparing file content in tests, avoid hardcoding `\n`. Use `.contains()` or `.lines()` for line-by-line comparison.
 - The `.gitattributes` file should enforce consistent line endings for source files.
+
+## Lifecycle Transition Event Scope
+
+- Lifecycle transition events that rely on PID liveness transitions (`member_state_change`,
+  `member_activity_change`, `session_id_change`, `process_id_change`) are currently
+  **Unix-only** because PID existence probing is Unix-specific in this code path.
+- Implement these assertions and CI expectations behind `#[cfg(unix)]` until a
+  Windows-equivalent PID validation backend is added.

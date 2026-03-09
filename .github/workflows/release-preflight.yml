@@ -1,0 +1,251 @@
+name: Release Preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version candidate (e.g. 0.26.0 or v0.26.0)"
+        required: true
+        type: string
+      run_by_agent:
+        description: "Must be 'publisher' (agent ownership assertion)"
+        required: true
+        default: "publisher"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_ARTIFACT_MANIFEST: release/publish-artifacts.toml
+    steps:
+      - name: Enforce publisher ownership input
+        shell: bash
+        run: |
+          set -euo pipefail
+          runner='${{ github.event.inputs.run_by_agent }}'
+          if [[ "$runner" != "publisher" ]]; then
+            echo "Preflight must be executed by publisher agent. Got run_by_agent='$runner'" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Normalize version input
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw='${{ github.event.inputs.version }}'
+          tag="$raw"
+          [[ "$tag" == v* ]] || tag="v${tag}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid version: '$raw' (expected X.Y.Z or vX.Y.Z)" >&2
+            exit 1
+          fi
+          version="${tag#v}"
+          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release_version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Verify release artifact manifest exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "${RELEASE_ARTIFACT_MANIFEST}"
+
+      - name: Preflight guard — fail if release version already exists on crates.io
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/release_artifacts.py check-version-unpublished \
+            --manifest "${RELEASE_ARTIFACT_MANIFEST}" \
+            --version '${{ steps.meta.outputs.release_version }}'
+
+      - name: Generate preflight release inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ steps.meta.outputs.release_version }}'
+          tag='${{ steps.meta.outputs.release_tag }}'
+          commit="$(git rev-parse HEAD)"
+          generated_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          source_ref="${GITHUB_REF:-refs/heads/develop}"
+          mkdir -p release
+          python3 scripts/release_artifacts.py emit-inventory \
+            --manifest "${RELEASE_ARTIFACT_MANIFEST}" \
+            --version "$version" \
+            --tag "$tag" \
+            --commit "$commit" \
+            --source-ref "$source_ref" \
+            --generated-at "$generated_at" \
+            --output release/release-inventory.json
+
+      - name: Validate inventory schema + deterministic constraints
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          schema_path = Path("docs/release-inventory-schema.json")
+          inventory_path = Path("release/release-inventory.json")
+          schema = json.loads(schema_path.read_text(encoding="utf-8"))
+          inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+
+          required_top = ["releaseVersion", "releaseTag", "releaseCommit", "generatedAt", "items"]
+          for field in required_top:
+              if field not in inventory:
+                  raise SystemExit(f"inventory missing required top-level field: {field}")
+
+          items = inventory.get("items", [])
+          if not isinstance(items, list) or not items:
+              raise SystemExit("inventory.items must be a non-empty array")
+
+          required_item = ["artifact", "version", "sourceRef", "publishTarget", "verifyCommands", "required"]
+          artifacts = []
+          for idx, item in enumerate(items):
+              if not isinstance(item, dict):
+                  raise SystemExit(f"inventory.items[{idx}] must be an object")
+              for field in required_item:
+                  if field not in item:
+                      raise SystemExit(f"inventory.items[{idx}] missing required field: {field}")
+              if not isinstance(item["verifyCommands"], list) or not item["verifyCommands"]:
+                  raise SystemExit(f"inventory.items[{idx}].verifyCommands must be non-empty")
+              if not isinstance(item["required"], bool):
+                  raise SystemExit(f"inventory.items[{idx}].required must be boolean")
+              artifacts.append(item["artifact"])
+
+          if len(artifacts) != len(set(artifacts)):
+              raise SystemExit("inventory has duplicate artifact entries")
+          if artifacts != sorted(artifacts):
+              raise SystemExit("inventory items must be sorted by artifact for deterministic ordering")
+
+          item_required = set(schema["$defs"]["item"]["required"])
+          missing = set(required_item) - item_required
+          if missing:
+              raise SystemExit(f"schema missing required item fields: {', '.join(sorted(missing))}")
+
+          print("release inventory validation passed")
+          PY
+
+      - name: Validate workspace/crate versions match preflight version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.meta.outputs.release_version }}'
+          python3 - <<'PY' "$VERSION" "$RELEASE_ARTIFACT_MANIFEST"
+          import sys
+          import tomllib
+          from pathlib import Path
+          from subprocess import check_output
+
+          version = sys.argv[1]
+          manifest = sys.argv[2]
+          root = Path(".")
+          root_toml = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
+          ws_ver = root_toml.get("workspace", {}).get("package", {}).get("version")
+          if ws_ver != version:
+              raise SystemExit(f"workspace version mismatch: expected {version}, got {ws_ver}")
+
+          crates = check_output(
+              ["python3", "scripts/release_artifacts.py", "list-cargo-tomls", "--manifest", manifest],
+              text=True,
+          ).splitlines()
+          for rel in crates:
+              data = tomllib.loads((root / rel).read_text(encoding="utf-8"))
+              pkg = data.get("package", {})
+              v = pkg.get("version")
+              if isinstance(v, str):
+                  if v != version:
+                      raise SystemExit(f"{rel}: version mismatch: expected {version}, got {v}")
+              elif isinstance(v, dict):
+                  if v.get("workspace") is not True:
+                      raise SystemExit(f"{rel}: expected workspace version, got {v}")
+              elif v is not None:
+                  raise SystemExit(f"{rel}: unrecognized version shape: {v}")
+          print("workspace + crate versions validated")
+          PY
+
+      - name: Run dependency-aware preflight crate checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t full_checks < <(
+            python3 scripts/release_artifacts.py list-preflight \
+              --manifest "${RELEASE_ARTIFACT_MANIFEST}" \
+              --mode full
+          )
+          for crate in "${full_checks[@]}"; do
+            [[ -n "$crate" ]] || continue
+            echo "::group::${crate} package"
+            cargo package -p "$crate" --locked --no-verify
+            echo "::endgroup::"
+            echo "::group::${crate} publish-dry-run"
+            cargo publish -p "$crate" --dry-run --locked --no-verify
+            echo "::endgroup::"
+          done
+
+          mapfile -t locked_checks < <(
+            python3 scripts/release_artifacts.py list-preflight \
+              --manifest "${RELEASE_ARTIFACT_MANIFEST}" \
+              --mode locked
+          )
+          for crate in "${locked_checks[@]}"; do
+            [[ -n "$crate" ]] || continue
+            echo "::group::${crate} locked-check"
+            cargo check -p "$crate" --locked
+            echo "::endgroup::"
+          done
+
+      - name: Emit preflight report artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          python3 - <<'PY'
+          import json
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          report = {
+            "preflightStatus": "pass",
+            "generatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "workflow": "release-preflight.yml",
+            "ownerAssertion": "publisher",
+            "inventoryLocation": "release/release-inventory.json",
+            "checks": [
+              "version-not-already-published",
+              "inventory-generation",
+              "inventory-schema-validation",
+              "workspace-version-alignment",
+              "preflight-full-checks",
+              "preflight-locked-checks",
+            ],
+            "notes": [
+              "preflight validates readiness from develop prior to develop->main merge",
+              "preflight does not publish crates or create tags/releases",
+              "non-core publish --dry-run is deferred to release workflow after core publish",
+            ],
+          }
+          Path("release/publisher-preflight-report.json").write_text(
+              json.dumps(report, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload preflight artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-preflight
+          path: |
+            release/release-inventory.json
+            release/publisher-preflight-report.json

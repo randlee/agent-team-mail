@@ -1,2 +1,2 @@
-{"line":"[client_prompt|arch-atm|mcp_primary] cmd ls -la","is_turn_boundary":false}
-{"line":"[client_prompt|arch-atm|mcp_primary] cmd ok","is_turn_boundary":false}
+{"line":"[client_prompt|arch-atm|mcp_primary] cmd.output ls -la","is_turn_boundary":false}
+{"line":"[client_prompt|arch-atm|mcp_primary] cmd.completed ok","is_turn_boundary":false}

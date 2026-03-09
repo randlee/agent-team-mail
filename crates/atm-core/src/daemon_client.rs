@@ -37,6 +37,24 @@ use std::path::PathBuf;
 /// Protocol version for the socket JSON protocol.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// Lock metadata written by the daemon after acquiring the singleton lock.
+///
+/// This metadata is used by CLI autostart/health paths to validate daemon
+/// identity (PID/home scope/executable) before trusting a pre-existing process.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DaemonLockMetadata {
+    /// Daemon PID that currently owns the lock.
+    pub pid: u32,
+    /// Canonicalized executable path of the daemon process when available.
+    pub executable_path: String,
+    /// Canonicalized ATM home scope used by the daemon instance.
+    pub home_scope: String,
+    /// Daemon version string.
+    pub version: String,
+    /// RFC3339 UTC timestamp for metadata write.
+    pub written_at: String,
+}
+
 /// Identifies the origin of a lifecycle event sent via the `hook-event` command.
 ///
 /// The `source` field is optional in the hook-event payload for backward
@@ -152,6 +170,85 @@ pub struct AgentSummary {
     pub state: String,
 }
 
+/// Canonical daemon-backed member-state snapshot returned by team-scoped
+/// `list-agents` queries.
+///
+/// This struct is the single liveness/status source consumed by CLI diagnostic
+/// surfaces (`atm doctor`, `atm status`, `atm members`). It is derived by the
+/// daemon from session-registry + tracker evidence and must not be inferred
+/// from config `isActive`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanonicalMemberState {
+    /// Agent/member name.
+    pub agent: String,
+    /// Canonical daemon status (`active`, `idle`, `offline`, `unknown`).
+    pub state: String,
+    /// Canonical activity hint (`busy`, `idle`, `unknown`).
+    #[serde(default)]
+    pub activity: String,
+    /// Session UUID from the daemon registry when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Process ID from the daemon registry when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_id: Option<u32>,
+    /// Most recent liveness confirmation timestamp from daemon PID checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_alive_at: Option<String>,
+    /// Human-readable derivation reason.
+    #[serde(default)]
+    pub reason: String,
+    /// Source of truth used for state derivation.
+    #[serde(default)]
+    pub source: String,
+    /// Whether this member currently exists in team `config.json`.
+    ///
+    /// Defaults to `true` for backward compatibility with older daemon payloads
+    /// that did not include this field.
+    #[serde(default = "default_in_config_true", skip_serializing_if = "is_true")]
+    pub in_config: bool,
+}
+
+fn default_in_config_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+/// Render CLI-facing status taxonomy from daemon canonical member state.
+///
+/// Output values are constrained to `Active|Idle|Dead|Unknown`.
+pub fn canonical_status_label(state: Option<&CanonicalMemberState>) -> &'static str {
+    match state.map(|s| s.state.as_str()) {
+        Some("active") => "Active",
+        Some("idle") => "Idle",
+        Some("offline") | Some("dead") => "Dead",
+        _ => "Unknown",
+    }
+}
+
+/// Render CLI-facing activity taxonomy from daemon canonical member state.
+///
+/// Output values are constrained to `Busy|Idle|Unknown`.
+pub fn canonical_activity_label(state: Option<&CanonicalMemberState>) -> &'static str {
+    match state.map(|s| s.activity.as_str()) {
+        Some("busy") => "Busy",
+        Some("idle") => "Idle",
+        _ => "Unknown",
+    }
+}
+
+/// Return best-effort binary liveness from daemon canonical member state.
+pub fn canonical_liveness_bool(state: Option<&CanonicalMemberState>) -> Option<bool> {
+    match state.map(|s| s.state.as_str()) {
+        Some("active") | Some("idle") => Some(true),
+        Some("offline") | Some("dead") => Some(false),
+        _ => None,
+    }
+}
+
 /// Configuration for launching a new agent via the daemon.
 ///
 /// Sent as the payload of a `"launch"` socket command.
@@ -174,6 +271,17 @@ pub struct LaunchConfig {
     /// `ATM_IDENTITY` and `ATM_TEAM` are always set automatically and do not
     /// need to be included here.
     pub env_vars: std::collections::HashMap<String, String>,
+    /// Runtime adapter kind (e.g., `"codex"`, `"gemini"`).
+    ///
+    /// Older clients may omit this field; daemon should treat missing as
+    /// runtime default (`codex`).
+    #[serde(default)]
+    pub runtime: Option<String>,
+    /// Optional runtime-native session ID used for resume-aware launches.
+    ///
+    /// For Gemini this maps to the Gemini session UUID that should be resumed.
+    #[serde(default)]
+    pub resume_session_id: Option<String>,
 }
 
 /// Result of a successful agent launch returned by the daemon.
@@ -271,6 +379,56 @@ pub fn daemon_pid_path() -> anyhow::Result<PathBuf> {
     Ok(home.join(".claude/daemon/atm-daemon.pid"))
 }
 
+/// Compute the daemon singleton lock path.
+///
+/// The path is `${ATM_HOME}/.config/atm/daemon.lock`.
+pub fn daemon_lock_path() -> anyhow::Result<PathBuf> {
+    let home = crate::home::get_home_dir()?;
+    Ok(home.join(".config/atm/daemon.lock"))
+}
+
+/// Compute the daemon singleton lock metadata path.
+///
+/// The path is `${ATM_HOME}/.config/atm/daemon.lock.meta.json`.
+pub fn daemon_lock_metadata_path() -> anyhow::Result<PathBuf> {
+    let home = crate::home::get_home_dir()?;
+    Ok(home.join(".config/atm/daemon.lock.meta.json"))
+}
+
+/// Write daemon lock metadata atomically for the current process.
+///
+/// Called by `atm-daemon` after lock acquisition so CLI identity checks can
+/// validate PID/home-scope/executable coherence.
+pub fn write_daemon_lock_metadata(home: &std::path::Path, version: &str) -> anyhow::Result<()> {
+    let metadata_path = home.join(".config/atm/daemon.lock.meta.json");
+    if let Some(parent) = metadata_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let executable_path = std::env::current_exe()
+        .ok()
+        .and_then(|p| std::fs::canonicalize(p).ok())
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let home_scope = std::fs::canonicalize(home)
+        .unwrap_or_else(|_| home.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+
+    let metadata = DaemonLockMetadata {
+        pid: std::process::id(),
+        executable_path,
+        home_scope,
+        version: version.to_string(),
+        written_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let json = serde_json::to_vec_pretty(&metadata)?;
+    let tmp = metadata_path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(tmp, metadata_path)?;
+    Ok(())
+}
+
 /// Check whether the daemon appears to be running by reading its PID file and
 /// verifying the process is alive.
 ///
@@ -296,6 +454,25 @@ pub fn daemon_is_running() -> bool {
     }
 }
 
+/// Ensure the ATM daemon is running, starting it if needed.
+///
+/// On Unix:
+/// - Delegates to the full Unix implementation used by runtime queries,
+///   including startup lock coordination, socket probing, and event logging.
+///
+/// On non-Unix platforms this is a no-op and returns `Ok(())`.
+pub fn ensure_daemon_running() -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        ensure_daemon_running_unix()
+    }
+
+    #[cfg(not(unix))]
+    {
+        Ok(())
+    }
+}
+
 /// Send a single request to the daemon and return the parsed response.
 ///
 /// Returns `Ok(None)` when the daemon is not running or the socket cannot be
@@ -308,7 +485,26 @@ pub fn daemon_is_running() -> bool {
 pub fn query_daemon(request: &SocketRequest) -> anyhow::Result<Option<SocketResponse>> {
     #[cfg(unix)]
     {
-        query_daemon_unix(request)
+        query_daemon_unix(request, std::time::Duration::from_millis(500))
+    }
+
+    #[cfg(not(unix))]
+    {
+        Ok(None)
+    }
+}
+
+/// Send a single request to the daemon with a caller-specified socket timeout.
+///
+/// Use this variant for commands that may legitimately wait on external I/O
+/// before returning (for example `gh-monitor` and `gh-monitor-control`).
+pub fn query_daemon_with_timeout(
+    request: &SocketRequest,
+    read_timeout: std::time::Duration,
+) -> anyhow::Result<Option<SocketResponse>> {
+    #[cfg(unix)]
+    {
+        query_daemon_unix(request, read_timeout)
     }
 
     #[cfg(not(unix))]
@@ -445,6 +641,78 @@ pub fn query_list_agents() -> anyhow::Result<Option<Vec<AgentSummary>>> {
     }
 }
 
+/// Query the daemon for the list of tracked agents scoped to a specific team.
+///
+/// Returns `Ok(None)` when the daemon is not reachable.
+pub fn query_list_agents_for_team(team: &str) -> anyhow::Result<Option<Vec<AgentSummary>>> {
+    let request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "list-agents".to_string(),
+        payload: serde_json::json!({ "team": team }),
+    };
+
+    let response = match query_daemon(&request)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    if !response.is_ok() {
+        return Ok(None);
+    }
+
+    let payload = match response.payload {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    match serde_json::from_value::<Vec<AgentSummary>>(payload) {
+        Ok(agents) => Ok(Some(agents)),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Query the daemon for canonical member-state snapshots scoped to one team.
+///
+/// Returns:
+/// - `Ok(None)` when the daemon is not reachable.
+/// - `Err(...)` when daemon response payload is present but does not match the
+///   canonical state schema.
+pub fn query_team_member_states(team: &str) -> anyhow::Result<Option<Vec<CanonicalMemberState>>> {
+    let request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "list-agents".to_string(),
+        payload: serde_json::json!({ "team": team }),
+    };
+
+    let response = match query_daemon(&request)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    if !response.is_ok() {
+        return Ok(None);
+    }
+
+    let payload = match response.payload {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    decode_canonical_member_states_payload(payload).map(Some)
+}
+
+fn decode_canonical_member_states_payload(
+    payload: serde_json::Value,
+) -> anyhow::Result<Vec<CanonicalMemberState>> {
+    serde_json::from_value::<Vec<CanonicalMemberState>>(payload).map_err(|err| {
+        anyhow::anyhow!(
+            "invalid canonical member-state payload from daemon list-agents(team): {err}"
+        )
+    })
+}
+
 /// Pane and log file information returned by the `agent-pane` command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentPaneInfo {
@@ -502,6 +770,128 @@ pub struct SessionQueryResult {
     pub process_id: u32,
     /// Whether the OS process is currently running.
     pub alive: bool,
+    /// Runtime kind (`codex`, `gemini`, etc.) when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    /// Runtime-native session/thread identifier when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_session_id: Option<String>,
+    /// Backend pane identifier when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+    /// Runtime home/state directory when configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_home: Option<String>,
+}
+
+/// Result of attempting to register a daemon session hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisterHintOutcome {
+    /// Hint was accepted by the daemon.
+    Registered,
+    /// Daemon is unreachable; caller should continue without failing.
+    DaemonUnavailable,
+    /// Connected daemon does not support the register-hint command.
+    UnsupportedDaemon,
+}
+
+/// GH monitor target kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GhMonitorTargetKind {
+    Pr,
+    Workflow,
+    Run,
+}
+
+/// Request payload for daemon-routed `gh-monitor` command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GhMonitorRequest {
+    pub team: String,
+    pub target_kind: GhMonitorTargetKind,
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_cwd: Option<String>,
+}
+
+/// Request payload for daemon-routed `gh-status` command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GhStatusRequest {
+    pub team: String,
+    pub target_kind: GhMonitorTargetKind,
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_cwd: Option<String>,
+}
+
+/// Lifecycle action for the GitHub monitor plugin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GhMonitorLifecycleAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+/// Request payload for daemon-routed `gh-monitor-control` command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GhMonitorControlRequest {
+    pub team: String,
+    pub action: GhMonitorLifecycleAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drain_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_cwd: Option<String>,
+}
+
+/// Daemon response payload for `gh-monitor-control` / `gh-monitor-health`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GhMonitorHealth {
+    pub team: String,
+    #[serde(default)]
+    pub configured: bool,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<String>,
+    pub lifecycle_state: String,
+    pub availability_state: String,
+    pub in_flight: u64,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Daemon response payload for `gh-monitor`/`gh-status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GhMonitorStatus {
+    pub team: String,
+    #[serde(default)]
+    pub configured: bool,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<String>,
+    pub target_kind: GhMonitorTargetKind,
+    pub target: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// Query the daemon for the session record of a named agent.
@@ -530,6 +920,50 @@ pub fn query_session(name: &str) -> anyhow::Result<Option<SessionQueryResult>> {
 
     if !response.is_ok() {
         // Daemon returned error (agent not found) — treat as no session info
+        return Ok(None);
+    }
+
+    let payload = match response.payload {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    match serde_json::from_value::<SessionQueryResult>(payload) {
+        Ok(result) => Ok(Some(result)),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Query the daemon for the session record of a named agent scoped to a team.
+///
+/// Returns:
+/// - `Ok(Some(result))` when the agent is registered and matches the team's
+///   current lead-session context.
+/// - `Ok(None)` when the daemon is not running, the agent is not registered
+///   for that team context, or the platform does not support Unix sockets.
+/// - `Err` only for unexpected I/O errors *after* a connection is established.
+///
+/// # Arguments
+///
+/// * `team` - Team name (e.g., `"atm-dev"`)
+/// * `name` - Agent name to look up (e.g., `"team-lead"`)
+pub fn query_session_for_team(
+    team: &str,
+    name: &str,
+) -> anyhow::Result<Option<SessionQueryResult>> {
+    let request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "session-query-team".to_string(),
+        payload: serde_json::json!({ "team": team, "name": name }),
+    };
+
+    let response = match query_daemon(&request)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    if !response.is_ok() {
         return Ok(None);
     }
 
@@ -673,6 +1107,217 @@ pub fn send_control(
         .map_err(|e| anyhow::anyhow!("Failed to parse ControlAck from daemon response: {e}"))
 }
 
+/// Send a best-effort session registration hint to the daemon.
+///
+/// This command is used by external runtimes (Codex/Gemini) that cannot emit
+/// Claude-style lifecycle hooks. It updates the daemon session registry using
+/// canonical daemon paths instead of writing session identity into config.json.
+///
+/// Backward compatibility contract:
+/// - daemon unreachable -> [`RegisterHintOutcome::DaemonUnavailable`] (silent skip)
+/// - daemon unknown-command -> [`RegisterHintOutcome::UnsupportedDaemon`] so callers can
+///   fail with explicit upgrade guidance.
+#[allow(clippy::too_many_arguments)]
+pub fn register_hint(
+    team: &str,
+    agent: &str,
+    session_id: &str,
+    process_id: u32,
+    runtime: Option<&str>,
+    runtime_session_id: Option<&str>,
+    pane_id: Option<&str>,
+    runtime_home: Option<&str>,
+) -> anyhow::Result<RegisterHintOutcome> {
+    let request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "register-hint".to_string(),
+        payload: serde_json::json!({
+            "team": team,
+            "agent": agent,
+            "session_id": session_id,
+            "process_id": process_id,
+            "runtime": runtime,
+            "runtime_session_id": runtime_session_id,
+            "pane_id": pane_id,
+            "runtime_home": runtime_home,
+            "identity": std::env::var("ATM_IDENTITY")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
+        }),
+    };
+
+    let response = match query_daemon(&request)? {
+        Some(r) => r,
+        None => return Ok(RegisterHintOutcome::DaemonUnavailable),
+    };
+
+    decode_register_hint_response(response)
+}
+
+/// Send a daemon-routed GitHub monitor request (`command: "gh-monitor"`).
+///
+/// Returns:
+/// - `Ok(Some(status))` when the daemon accepted the request and returned
+///   monitor status.
+/// - `Ok(None)` when daemon/socket is unavailable.
+/// - `Err` when daemon returns an explicit command error.
+pub fn gh_monitor(request: &GhMonitorRequest) -> anyhow::Result<Option<GhMonitorStatus>> {
+    let socket_request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "gh-monitor".to_string(),
+        payload: serde_json::to_value(request)?,
+    };
+
+    // `gh-monitor` may wait for CI run discovery up to start_timeout_secs.
+    let start_timeout_secs = request.start_timeout_secs.unwrap_or(120);
+    let read_timeout = std::time::Duration::from_secs((start_timeout_secs + 30).min(600));
+    let response = match query_daemon_with_timeout(&socket_request, read_timeout)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    decode_gh_monitor_response(response).map(Some)
+}
+
+/// Query daemon-routed GitHub monitor status (`command: "gh-status"`).
+///
+/// Returns:
+/// - `Ok(Some(status))` when daemon has monitor state for the target.
+/// - `Ok(None)` when daemon/socket is unavailable.
+/// - `Err` when daemon returns an explicit command error.
+pub fn gh_status(request: &GhStatusRequest) -> anyhow::Result<Option<GhMonitorStatus>> {
+    let socket_request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "gh-status".to_string(),
+        payload: serde_json::to_value(request)?,
+    };
+
+    let response = match query_daemon(&socket_request)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    decode_gh_monitor_response(response).map(Some)
+}
+
+/// Send a daemon-routed GitHub monitor lifecycle request
+/// (`command: "gh-monitor-control"`).
+pub fn gh_monitor_control(
+    request: &GhMonitorControlRequest,
+) -> anyhow::Result<Option<GhMonitorHealth>> {
+    let socket_request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "gh-monitor-control".to_string(),
+        payload: serde_json::to_value(request)?,
+    };
+
+    // Stop/restart can drain in-flight monitors for drain_timeout_secs.
+    let drain_timeout_secs = request.drain_timeout_secs.unwrap_or(30);
+    let read_timeout = std::time::Duration::from_secs((drain_timeout_secs + 30).min(600));
+    let response = match query_daemon_with_timeout(&socket_request, read_timeout)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    decode_gh_monitor_health_response(response).map(Some)
+}
+
+/// Query daemon-routed GitHub monitor plugin health
+/// (`command: "gh-monitor-health"`).
+pub fn gh_monitor_health(team: &str) -> anyhow::Result<Option<GhMonitorHealth>> {
+    gh_monitor_health_with_context(team, None)
+}
+
+/// Query daemon-routed GitHub monitor plugin health with explicit config cwd.
+pub fn gh_monitor_health_with_context(
+    team: &str,
+    config_cwd: Option<String>,
+) -> anyhow::Result<Option<GhMonitorHealth>> {
+    let socket_request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "gh-monitor-health".to_string(),
+        payload: serde_json::json!({
+            "team": team,
+            "config_cwd": config_cwd,
+        }),
+    };
+
+    let response = match query_daemon(&socket_request)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    decode_gh_monitor_health_response(response).map(Some)
+}
+
+fn decode_gh_monitor_response(response: SocketResponse) -> anyhow::Result<GhMonitorStatus> {
+    if !response.is_ok() {
+        let Some(err) = response.error else {
+            anyhow::bail!("Daemon returned gh-monitor error status without error payload");
+        };
+        anyhow::bail!(
+            "Daemon returned error for {} command: {}: {}",
+            response.request_id,
+            err.code,
+            err.message
+        );
+    }
+
+    let payload = response
+        .payload
+        .ok_or_else(|| anyhow::anyhow!("Daemon returned ok status but no payload"))?;
+
+    serde_json::from_value::<GhMonitorStatus>(payload)
+        .map_err(|e| anyhow::anyhow!("Failed to parse GhMonitorStatus from daemon response: {e}"))
+}
+
+fn decode_gh_monitor_health_response(response: SocketResponse) -> anyhow::Result<GhMonitorHealth> {
+    if !response.is_ok() {
+        let Some(err) = response.error else {
+            anyhow::bail!("Daemon returned gh-monitor health error status without error payload");
+        };
+        anyhow::bail!(
+            "Daemon returned error for {} command: {}: {}",
+            response.request_id,
+            err.code,
+            err.message
+        );
+    }
+
+    let payload = response
+        .payload
+        .ok_or_else(|| anyhow::anyhow!("Daemon returned ok status but no payload"))?;
+
+    serde_json::from_value::<GhMonitorHealth>(payload)
+        .map_err(|e| anyhow::anyhow!("Failed to parse GhMonitorHealth from daemon response: {e}"))
+}
+
+fn decode_register_hint_response(response: SocketResponse) -> anyhow::Result<RegisterHintOutcome> {
+    if response.is_ok() {
+        return Ok(RegisterHintOutcome::Registered);
+    }
+
+    let Some(err) = response.error else {
+        anyhow::bail!("Daemon returned register-hint error status without error payload");
+    };
+
+    if err.code == "UNKNOWN_COMMAND" {
+        return Ok(RegisterHintOutcome::UnsupportedDaemon);
+    }
+
+    anyhow::bail!(
+        "Daemon returned error for register-hint command: {}: {}",
+        err.code,
+        err.message
+    )
+}
+
 /// Generate a compact request identifier (UUID v4 as a short string).
 fn new_request_id() -> String {
     // Use a simple monotonic counter for environments without UUID support.
@@ -690,23 +1335,51 @@ fn new_request_id() -> String {
 // ── Unix implementation ──────────────────────────────────────────────────────
 
 #[cfg(unix)]
-fn query_daemon_unix(request: &SocketRequest) -> anyhow::Result<Option<SocketResponse>> {
+fn query_daemon_unix(
+    request: &SocketRequest,
+    read_timeout: std::time::Duration,
+) -> anyhow::Result<Option<SocketResponse>> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     let socket_path = daemon_socket_path()?;
 
-    // Attempt connection — return None if socket not present or connection refused
+    // First attempt connection directly.
     let stream = match UnixStream::connect(&socket_path) {
         Ok(s) => s,
-        Err(_) => return Ok(None),
+        Err(_) => {
+            // Optional daemon auto-start path, enabled by ATM_DAEMON_AUTOSTART.
+            if daemon_autostart_enabled() {
+                ensure_daemon_running_unix()?;
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    match UnixStream::connect(&socket_path) {
+                        Ok(s) => break s,
+                        Err(e) if Instant::now() < deadline => {
+                            let _ = e;
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                        Err(e) => {
+                            anyhow::bail!(
+                                "daemon auto-start attempted but socket remained unavailable at {}: {e}",
+                                socket_path.display()
+                            )
+                        }
+                    }
+                }
+            } else {
+                return Ok(None);
+            }
+        }
     };
 
-    // Set a short timeout so a stale/hung daemon does not block the CLI
-    let timeout = Duration::from_millis(500);
-    stream.set_read_timeout(Some(timeout)).ok();
-    stream.set_write_timeout(Some(timeout)).ok();
+    // Keep writes short; allow caller-specific read timeout for long-running
+    // daemon operations such as gh monitor startup/drain paths.
+    stream.set_read_timeout(Some(read_timeout)).ok();
+    stream
+        .set_write_timeout(Some(Duration::from_millis(500)))
+        .ok();
 
     let request_line = serde_json::to_string(request)?;
 
@@ -732,6 +1405,515 @@ fn query_daemon_unix(request: &SocketRequest) -> anyhow::Result<Option<SocketRes
     };
 
     Ok(Some(response))
+}
+
+#[cfg(unix)]
+fn daemon_autostart_enabled() -> bool {
+    let Ok(raw) = std::env::var("ATM_DAEMON_AUTOSTART") else {
+        // Opt-out model: autostart is enabled by default when unset.
+        return true;
+    };
+    !matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no"
+    )
+}
+
+#[cfg(unix)]
+fn resolve_daemon_binary() -> std::ffi::OsString {
+    if let Some(override_bin) = std::env::var_os("ATM_DAEMON_BIN")
+        && !override_bin.is_empty()
+    {
+        return override_bin;
+    }
+
+    let name = std::ffi::OsString::from("atm-daemon");
+
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Some(dir) = current_exe.parent()
+    {
+        let sibling = dir.join(std::path::Path::new(&name));
+        if sibling.exists() {
+            return sibling.into_os_string();
+        }
+    }
+
+    name
+}
+
+#[cfg(unix)]
+fn ensure_daemon_running_unix() -> anyhow::Result<()> {
+    use crate::event_log::{EventFields, emit_event_best_effort};
+    use crate::io::InboxError;
+    use std::io::ErrorKind;
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let home = crate::home::get_home_dir()?;
+    let daemon_running = daemon_is_running();
+    let socket_connectable = daemon_socket_connectable(&home);
+    if daemon_running || socket_connectable {
+        if let Some(reason) = detect_daemon_identity_mismatch(&home, socket_connectable) {
+            restart_mismatched_daemon(&home, &reason)?;
+        } else {
+            return Ok(());
+        }
+    }
+
+    cleanup_stale_daemon_runtime_files(&home);
+
+    let startup_lock_path = home.join(".config/atm/daemon-start.lock");
+    if let Some(parent) = startup_lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Serialize daemon startup across concurrent CLI processes.
+    let _startup_lock = match crate::io::lock::acquire_lock(&startup_lock_path, 3) {
+        Ok(lock) => Some(lock),
+        Err(InboxError::LockTimeout { .. }) => {
+            // Another process likely holds the startup lock and is spawning the daemon.
+            // Wait briefly for that startup attempt to converge.
+            for _ in 0..10 {
+                if daemon_is_running() || daemon_socket_connectable(&home) {
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            // Startup did not converge yet. Re-attempt lock acquisition so any
+            // fallback spawn still occurs under lock (single-daemon invariant).
+            match crate::io::lock::acquire_lock(&startup_lock_path, 10) {
+                Ok(lock) => Some(lock),
+                Err(e) => anyhow::bail!(
+                    "timed out waiting for daemon startup lock holder to bring daemon online: {} ({e})",
+                    startup_lock_path.display()
+                ),
+            }
+        }
+        Err(e) => anyhow::bail!(
+            "failed to acquire daemon startup lock {}: {e}",
+            startup_lock_path.display()
+        ),
+    };
+
+    let daemon_running = daemon_is_running();
+    let socket_connectable = daemon_socket_connectable(&home);
+    if daemon_running || socket_connectable {
+        if let Some(reason) = detect_daemon_identity_mismatch(&home, socket_connectable) {
+            restart_mismatched_daemon(&home, &reason)?;
+        } else {
+            return Ok(());
+        }
+    }
+
+    let daemon_bin = resolve_daemon_binary();
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm",
+        action: "daemon_autostart_attempt",
+        result: Some("attempt".to_string()),
+        target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
+        ..Default::default()
+    });
+    let mut child = match Command::new(&daemon_bin)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            let error = if e.kind() == ErrorKind::NotFound {
+                format!(
+                    "failed to auto-start daemon: binary '{}' not found in PATH (or ATM_DAEMON_BIN override)",
+                    std::path::PathBuf::from(&daemon_bin).display()
+                )
+            } else {
+                format!(
+                    "failed to auto-start daemon via '{}': {e}",
+                    std::path::PathBuf::from(&daemon_bin).display()
+                )
+            };
+            emit_event_best_effort(EventFields {
+                level: "error",
+                source: "atm",
+                action: "daemon_autostart_failure",
+                result: Some("spawn_error".to_string()),
+                target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
+                error: Some(error.clone()),
+                ..Default::default()
+            });
+            anyhow::bail!("{error}");
+        }
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if daemon_is_running() || daemon_socket_connectable(&home) {
+            emit_event_best_effort(EventFields {
+                level: "info",
+                source: "atm",
+                action: "daemon_autostart_success",
+                result: Some("ok".to_string()),
+                target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
+                ..Default::default()
+            });
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait()? {
+            let stderr_tail = child.stderr.take().and_then(|mut stderr| {
+                let mut buf = Vec::new();
+                stderr.read_to_end(&mut buf).ok()?;
+                if buf.is_empty() {
+                    return None;
+                }
+                let trimmed = if buf.len() > 4096 {
+                    &buf[buf.len() - 4096..]
+                } else {
+                    &buf
+                };
+                let text = String::from_utf8_lossy(trimmed).trim().to_string();
+                if text.is_empty() { None } else { Some(text) }
+            });
+            let error = match stderr_tail {
+                Some(tail) => {
+                    format!(
+                        "daemon process exited during startup with status {status}; stderr_tail={tail}"
+                    )
+                }
+                None => format!("daemon process exited during startup with status {status}"),
+            };
+            emit_event_best_effort(EventFields {
+                level: "error",
+                source: "atm",
+                action: "daemon_autostart_failure",
+                result: Some("process_exit".to_string()),
+                target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
+                error: Some(error.clone()),
+                ..Default::default()
+            });
+            anyhow::bail!("{error}");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let socket_path = home.join(".claude/daemon/atm-daemon.sock");
+    let pid_path = home.join(".claude/daemon/atm-daemon.pid");
+    let timeout_error = format!(
+        "daemon startup timed out after 5s; pid_file_exists={}, socket_exists={}, pid_path={}, socket_path={}",
+        pid_path.exists(),
+        socket_path.exists(),
+        pid_path.display(),
+        socket_path.display()
+    );
+    emit_event_best_effort(EventFields {
+        level: "warn",
+        source: "atm",
+        action: "daemon_autostart_timeout",
+        result: Some("timeout".to_string()),
+        target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
+        error: Some(timeout_error.clone()),
+        ..Default::default()
+    });
+    emit_event_best_effort(EventFields {
+        level: "error",
+        source: "atm",
+        action: "daemon_autostart_failure",
+        result: Some("timeout".to_string()),
+        target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
+        error: Some(timeout_error.clone()),
+        ..Default::default()
+    });
+    anyhow::bail!("{timeout_error}")
+}
+
+#[cfg(unix)]
+fn daemon_socket_connectable(home: &std::path::Path) -> bool {
+    use std::os::unix::net::UnixStream;
+    let socket_path = home.join(".claude/daemon/atm-daemon.sock");
+    UnixStream::connect(socket_path).is_ok()
+}
+
+#[cfg(unix)]
+fn cleanup_stale_daemon_runtime_files(home: &std::path::Path) {
+    let socket_path = home.join(".claude/daemon/atm-daemon.sock");
+    let pid_path = home.join(".claude/daemon/atm-daemon.pid");
+
+    let pid_state = read_daemon_pid_state(&pid_path);
+    if matches!(
+        pid_state,
+        PidState::Dead | PidState::Missing | PidState::Malformed
+    ) {
+        let _ = std::fs::remove_file(&pid_path);
+    }
+
+    // Remove stale socket only when daemon ownership is known-dead.
+    let ownership_known_dead = matches!(
+        pid_state,
+        PidState::Dead | PidState::Missing | PidState::Malformed
+    );
+    if socket_path.exists() && ownership_known_dead && !daemon_socket_connectable(home) {
+        let _ = std::fs::remove_file(&socket_path);
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PidState {
+    Missing,
+    Malformed,
+    Unreadable,
+    Dead,
+    Alive,
+}
+
+#[cfg(unix)]
+fn read_daemon_pid_state(pid_path: &std::path::Path) -> PidState {
+    if !pid_path.exists() {
+        return PidState::Missing;
+    }
+    let content = match std::fs::read_to_string(pid_path) {
+        Ok(s) => s,
+        Err(_) => return PidState::Unreadable,
+    };
+    let pid = match content.trim().parse::<i32>() {
+        Ok(pid) => pid,
+        Err(_) => return PidState::Malformed,
+    };
+    if pid_alive(pid) {
+        PidState::Alive
+    } else {
+        PidState::Dead
+    }
+}
+
+#[cfg(unix)]
+fn detect_daemon_identity_mismatch(
+    home: &std::path::Path,
+    socket_connectable: bool,
+) -> Option<String> {
+    let pid_path = home.join(".claude/daemon/atm-daemon.pid");
+    let status_path = home.join(".claude/daemon/status.json");
+    let metadata_path = home.join(".config/atm/daemon.lock.meta.json");
+
+    let pid_from_file = std::fs::read_to_string(&pid_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok());
+    let status_json = std::fs::read_to_string(&status_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok());
+    let pid_from_status = status_json
+        .as_ref()
+        .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
+        .map(|pid| pid as u32);
+    let version_from_status = status_json
+        .as_ref()
+        .and_then(|json| json.get("version").and_then(serde_json::Value::as_str))
+        .map(std::string::ToString::to_string);
+    let mut metadata = std::fs::read_to_string(&metadata_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<DaemonLockMetadata>(&s).ok());
+
+    if metadata.is_none() && !socket_connectable {
+        return None;
+    }
+
+    if metadata.is_none()
+        && let Some(candidate_pid) = pid_from_file.or(pid_from_status)
+        && pid_alive(candidate_pid as i32)
+    {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        metadata = std::fs::read_to_string(&metadata_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<DaemonLockMetadata>(&s).ok());
+    }
+
+    if metadata.is_none() {
+        return Some(
+            "daemon identity mismatch: lock metadata missing (soft mismatch, restart required)"
+                .to_string(),
+        );
+    }
+
+    let pid = metadata
+        .as_ref()
+        .map(|m| m.pid)
+        .or(pid_from_file)
+        .or(pid_from_status);
+
+    let pid = pid?;
+    if !pid_alive(pid as i32) {
+        return Some(format!("daemon identity mismatch: pid {pid} is not alive"));
+    }
+
+    if let Some(meta) = &metadata {
+        if let Some(file_pid) = pid_from_file
+            && file_pid != meta.pid
+        {
+            return Some(format!(
+                "daemon identity mismatch: pid file ({file_pid}) != lock metadata ({})",
+                meta.pid
+            ));
+        }
+
+        let expected_home = std::fs::canonicalize(home)
+            .unwrap_or_else(|_| home.to_path_buf())
+            .to_string_lossy()
+            .to_string();
+        if !meta.home_scope.is_empty() && meta.home_scope != expected_home {
+            return Some(format!(
+                "daemon identity mismatch: home scope '{}' != expected '{}'",
+                meta.home_scope, expected_home
+            ));
+        }
+
+        if let Some(cmdline) = pid_command_line(pid as i32)
+            && let Some(matches) =
+                pid_command_matches_expected_binary(&cmdline, &resolve_daemon_binary())
+            && !matches
+        {
+            return Some(format!(
+                "daemon identity mismatch: running command '{}' != expected daemon binary '{}'",
+                cmdline,
+                std::path::PathBuf::from(resolve_daemon_binary()).display()
+            ));
+        }
+    }
+
+    if let Some(ver) = version_from_status
+        && ver != env!("CARGO_PKG_VERSION")
+    {
+        return Some(format!(
+            "daemon version mismatch: running={ver} expected={}",
+            env!("CARGO_PKG_VERSION")
+        ));
+    }
+
+    None
+}
+
+#[cfg(unix)]
+fn pid_command_line(pid: i32) -> Option<String> {
+    let output = std::process::Command::new("ps")
+        .arg("-p")
+        .arg(pid.to_string())
+        .arg("-o")
+        .arg("command=")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
+#[cfg(unix)]
+fn pid_command_matches_expected_binary(
+    cmdline: &str,
+    expected_bin: &std::ffi::OsStr,
+) -> Option<bool> {
+    let actual = cmdline.split_whitespace().next()?;
+    let expected = std::path::PathBuf::from(expected_bin);
+    let actual_path = std::path::PathBuf::from(actual);
+
+    if expected.as_os_str().is_empty() {
+        return None;
+    }
+
+    if expected.components().count() > 1 {
+        let expected_canon = std::fs::canonicalize(&expected).unwrap_or(expected.clone());
+        let actual_canon = std::fs::canonicalize(&actual_path).unwrap_or(actual_path.clone());
+        Some(expected_canon == actual_canon)
+    } else {
+        let expected_name = expected.file_name()?;
+        Some(actual_path.file_name() == Some(expected_name))
+    }
+}
+
+#[cfg(unix)]
+fn restart_mismatched_daemon(home: &std::path::Path, reason: &str) -> anyhow::Result<()> {
+    use crate::event_log::{EventFields, emit_event_best_effort};
+    use std::time::Duration;
+
+    let pid_path = home.join(".claude/daemon/atm-daemon.pid");
+    let pid = std::fs::read_to_string(&pid_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok());
+
+    emit_event_best_effort(EventFields {
+        level: "warn",
+        source: "atm",
+        action: "daemon_identity_restart",
+        result: Some("restart_attempt".to_string()),
+        error: Some(reason.to_string()),
+        ..Default::default()
+    });
+
+    if let Some(pid) = pid
+        && pid_alive(pid)
+    {
+        send_signal(pid, 15);
+        for _ in 0..20 {
+            if !pid_alive(pid) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if pid_alive(pid) {
+            send_signal(pid, 9);
+            for _ in 0..20 {
+                if !pid_alive(pid) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        if pid_alive(pid) {
+            emit_event_best_effort(EventFields {
+                level: "warn",
+                source: "atm",
+                action: "daemon_identity_restart",
+                result: Some("kill_incomplete".to_string()),
+                error: Some(format!(
+                    "stale daemon pid {pid} still alive after SIGTERM/SIGKILL; proceeding with runtime file replacement"
+                )),
+                ..Default::default()
+            });
+        }
+    }
+
+    let lock_path = home.join(".config/atm/daemon.lock");
+    if let Some(parent) = lock_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _lock_guard = crate::io::lock::acquire_lock(&lock_path, 5).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to acquire daemon lock at {} before runtime cleanup: {e}",
+            lock_path.display()
+        )
+    })?;
+
+    // Replace runtime files aggressively for identity-mismatch recovery. This is
+    // scope-local and avoids broad process sweeps while allowing a fresh daemon
+    // to bind canonical paths.
+    let daemon_dir = home.join(".claude/daemon");
+    let _ = std::fs::remove_file(daemon_dir.join("atm-daemon.sock"));
+    let _ = std::fs::remove_file(daemon_dir.join("atm-daemon.pid"));
+    let _ = std::fs::remove_file(daemon_dir.join("status.json"));
+    cleanup_stale_daemon_runtime_files(home);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn send_signal(pid: i32, sig: i32) {
+    // SAFETY: kill is invoked with a specific PID and signal; errors are ignored
+    // by design because this is a best-effort stale-daemon cleanup path.
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    // SAFETY: FFI call to libc kill; inputs are plain integers.
+    let _ = unsafe { kill(pid, sig) };
 }
 
 #[cfg(unix)]
@@ -843,6 +2025,22 @@ fn pid_alive(pid: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+
+    fn with_autostart_disabled<T>(f: impl FnOnce() -> T) -> T {
+        let old = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+        // SAFETY: test-only env mutation guarded by #[serial] on callers.
+        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "0") };
+        let out = f();
+        // SAFETY: test-only env mutation guarded by #[serial] on callers.
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+            }
+        }
+        out
+    }
 
     #[test]
     fn test_socket_request_serialization() {
@@ -902,22 +2100,635 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_query_daemon_no_socket_returns_none() {
-        // Without a running daemon the query should gracefully return None.
-        // We ensure no real socket path is present by using a non-existent dir.
-        // This test is platform-independent: on non-unix it always returns None.
-        let req = SocketRequest {
-            version: PROTOCOL_VERSION,
-            request_id: "req-test".to_string(),
-            command: "agent-state".to_string(),
-            payload: serde_json::json!({}),
+        with_autostart_disabled(|| {
+            // Without a running daemon the query should gracefully return None.
+            // We ensure no real socket path is present by using a non-existent dir.
+            // This test is platform-independent: on non-unix it always returns None.
+            let req = SocketRequest {
+                version: PROTOCOL_VERSION,
+                request_id: "req-test".to_string(),
+                command: "agent-state".to_string(),
+                payload: serde_json::json!({}),
+            };
+            // Override socket path resolution is not straightforward without DI;
+            // the test relies on the daemon not being present in the test environment.
+            // On CI this will always be None. Locally too unless daemon is running.
+            let result = query_daemon(&req);
+            assert!(result.is_ok());
+            // If daemon happens to be running, we just check the call didn't panic.
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_daemon_autostart_flag_parsing() {
+        let old = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+
+        // Unset => enabled (opt-out model).
+        // SAFETY: serialized env mutation in test.
+        unsafe { std::env::remove_var("ATM_DAEMON_AUTOSTART") };
+        assert!(daemon_autostart_enabled());
+
+        // SAFETY: serialized env mutation in test.
+        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "1") };
+        assert!(daemon_autostart_enabled());
+        // SAFETY: serialized env mutation in test.
+        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "true") };
+        assert!(daemon_autostart_enabled());
+        // SAFETY: serialized env mutation in test.
+        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "yes") };
+        assert!(daemon_autostart_enabled());
+        // SAFETY: serialized env mutation in test.
+        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "0") };
+        assert!(!daemon_autostart_enabled());
+        // SAFETY: serialized env mutation in test.
+        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "false") };
+        assert!(!daemon_autostart_enabled());
+        // SAFETY: serialized env mutation in test.
+        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "no") };
+        assert!(!daemon_autostart_enabled());
+        // Invalid values remain enabled unless explicitly falsey.
+        // SAFETY: serialized env mutation in test.
+        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "maybe") };
+        assert!(daemon_autostart_enabled());
+
+        // SAFETY: serialized env mutation in test.
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_resolve_daemon_binary_honors_override() {
+        let old = std::env::var("ATM_DAEMON_BIN").ok();
+        let tmp = tempfile::tempdir().unwrap();
+        let custom = tmp.path().join("custom-atm-daemon");
+        std::fs::write(&custom, "#!/bin/sh\nexit 0\n").unwrap();
+        // SAFETY: serialized env mutation in test.
+        unsafe { std::env::set_var("ATM_DAEMON_BIN", &custom) };
+        let resolved = resolve_daemon_binary();
+        assert_eq!(std::path::PathBuf::from(resolved), custom);
+        // SAFETY: serialized env mutation in test.
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
+                None => std::env::remove_var("ATM_DAEMON_BIN"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_cleanup_stale_runtime_files_removes_dead_pid_file() {
+        use std::fs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let daemon_dir = home.join(".claude/daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+
+        let pid_path = daemon_dir.join("atm-daemon.pid");
+        fs::write(&pid_path, "999999\n").unwrap();
+        assert!(pid_path.exists());
+
+        cleanup_stale_daemon_runtime_files(home);
+        assert!(
+            !pid_path.exists(),
+            "stale PID file should be removed when PID is not alive"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_cleanup_stale_runtime_files_handles_malformed_pid() {
+        use std::fs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let daemon_dir = home.join(".claude/daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+
+        let pid_path = daemon_dir.join("atm-daemon.pid");
+        let socket_path = daemon_dir.join("atm-daemon.sock");
+        fs::write(&pid_path, "not-a-pid\n").unwrap();
+        fs::write(&socket_path, "stale").unwrap();
+
+        cleanup_stale_daemon_runtime_files(home);
+
+        assert!(
+            !pid_path.exists(),
+            "malformed PID file should be removed during cleanup"
+        );
+        assert!(
+            !socket_path.exists(),
+            "stale socket should be removed when PID ownership is known-dead"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_cleanup_stale_runtime_files_unreadable_pid_does_not_remove_socket() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let daemon_dir = home.join(".claude/daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+
+        let pid_path = daemon_dir.join("atm-daemon.pid");
+        let socket_path = daemon_dir.join("atm-daemon.sock");
+        fs::write(&pid_path, "123\n").unwrap();
+        fs::write(&socket_path, "stale").unwrap();
+        let mut perms = fs::metadata(&pid_path).unwrap().permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&pid_path, perms).unwrap();
+
+        cleanup_stale_daemon_runtime_files(home);
+        assert!(
+            socket_path.exists(),
+            "socket must not be removed when PID ownership cannot be read"
+        );
+
+        // Restore permissions so tempdir cleanup succeeds.
+        let mut restore = fs::metadata(&pid_path).unwrap().permissions();
+        restore.set_mode(0o600);
+        fs::set_permissions(&pid_path, restore).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_ensure_daemon_running_includes_stderr_tail_on_startup_exit() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let script_path = home.join("fake-daemon-fail.sh");
+        let script = r#"#!/bin/sh
+set -eu
+echo "fatal: invalid plugin config" >&2
+exit 42
+"#;
+        fs::write(&script_path, script).unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let old_home = std::env::var("ATM_HOME").ok();
+        let old_bin = std::env::var("ATM_DAEMON_BIN").ok();
+        let old_auto = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home);
+            std::env::set_var("ATM_DAEMON_BIN", &script_path);
+            std::env::set_var("ATM_DAEMON_AUTOSTART", "1");
+        }
+
+        let err = ensure_daemon_running_unix().expect_err("startup should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("stderr_tail="),
+            "error must include captured stderr tail: {msg}"
+        );
+        assert!(
+            msg.contains("invalid plugin config"),
+            "stderr tail should include daemon stderr content: {msg}"
+        );
+
+        unsafe {
+            match old_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+            match old_bin {
+                Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
+                None => std::env::remove_var("ATM_DAEMON_BIN"),
+            }
+            match old_auto {
+                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_ensure_daemon_running_timeout_when_spawned_process_never_creates_runtime_files() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let script_path = home.join("fake-daemon-never-ready.sh");
+        let script = r#"#!/bin/sh
+set -eu
+sleep 10
+"#;
+        fs::write(&script_path, script).unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let old_home = std::env::var("ATM_HOME").ok();
+        let old_bin = std::env::var("ATM_DAEMON_BIN").ok();
+        let old_auto = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home);
+            std::env::set_var("ATM_DAEMON_BIN", &script_path);
+            std::env::set_var("ATM_DAEMON_AUTOSTART", "1");
+        }
+
+        let err = ensure_daemon_running_unix().expect_err("startup should time out");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("daemon startup timed out after 5s"),
+            "timeout error should include actionable timeout details: {msg}"
+        );
+        assert!(
+            msg.contains("pid_path="),
+            "timeout error should include pid path"
+        );
+        assert!(
+            msg.contains("socket_path="),
+            "timeout error should include socket path"
+        );
+
+        unsafe {
+            match old_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+            match old_bin {
+                Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
+                None => std::env::remove_var("ATM_DAEMON_BIN"),
+            }
+            match old_auto {
+                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_ensure_daemon_running_serializes_concurrent_start() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Arc;
+        use std::thread;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let script_path = home.join("fake-daemon.sh");
+
+        let script = r#"#!/bin/sh
+set -eu
+home="${ATM_HOME:?}"
+mkdir -p "$home/.claude/daemon"
+mkdir -p "$home/spawn-markers"
+touch "$home/spawn-markers/spawn.$$"
+echo $$ > "$home/.claude/daemon/atm-daemon.pid"
+sleep 2
+"#;
+        fs::write(&script_path, script).unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let old_home = std::env::var("ATM_HOME").ok();
+        let old_bin = std::env::var("ATM_DAEMON_BIN").ok();
+        let old_auto = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home);
+            std::env::set_var("ATM_DAEMON_BIN", &script_path);
+            std::env::set_var("ATM_DAEMON_AUTOSTART", "1");
+        }
+
+        let mut handles = Vec::new();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        for _ in 0..2 {
+            let b = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                b.wait();
+                ensure_daemon_running_unix().unwrap();
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let count = fs::read_dir(home.join("spawn-markers"))
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .count();
+        assert_eq!(
+            count, 1,
+            "concurrent startup attempts should spawn at most one daemon process"
+        );
+
+        unsafe {
+            match old_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+            match old_bin {
+                Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
+                None => std::env::remove_var("ATM_DAEMON_BIN"),
+            }
+            match old_auto {
+                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_write_daemon_lock_metadata_contains_identity_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        write_daemon_lock_metadata(home, "9.9.9-test").expect("write lock metadata");
+
+        let path = home.join(".config/atm/daemon.lock.meta.json");
+        let raw = std::fs::read_to_string(&path).expect("read lock metadata");
+        let meta: DaemonLockMetadata = serde_json::from_str(&raw).expect("parse lock metadata");
+
+        assert_eq!(meta.pid, std::process::id());
+        assert_eq!(meta.version, "9.9.9-test");
+        assert!(
+            !meta.executable_path.trim().is_empty(),
+            "executable path must be populated"
+        );
+        assert!(
+            !meta.home_scope.trim().is_empty(),
+            "home scope must be populated"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_ensure_daemon_running_recovers_from_dead_pid_metadata() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        fs::create_dir_all(home.join(".claude/daemon")).unwrap();
+        fs::create_dir_all(home.join(".config/atm")).unwrap();
+
+        // Simulate stale metadata from a dead prior daemon instance.
+        fs::write(home.join(".claude/daemon/atm-daemon.pid"), "999999\n").unwrap();
+        let stale = DaemonLockMetadata {
+            pid: 999999,
+            executable_path: std::env::temp_dir()
+                .join("old-atm-daemon")
+                .to_string_lossy()
+                .to_string(),
+            home_scope: home.to_string_lossy().to_string(),
+            version: "0.0.1".to_string(),
+            written_at: chrono::Utc::now().to_rfc3339(),
         };
-        // Override socket path resolution is not straightforward without DI;
-        // the test relies on the daemon not being present in the test environment.
-        // On CI this will always be None. Locally too unless daemon is running.
-        let result = query_daemon(&req);
-        assert!(result.is_ok());
-        // If daemon happens to be running, we just check the call didn't panic.
+        fs::write(
+            home.join(".config/atm/daemon.lock.meta.json"),
+            serde_json::to_string_pretty(&stale).unwrap(),
+        )
+        .unwrap();
+
+        let script_path = home.join("fake-daemon-start.sh");
+        let script = format!(
+            r#"#!/bin/sh
+set -eu
+home="${{ATM_HOME:?}}"
+mkdir -p "$home/.claude/daemon"
+pid=$$
+echo "$pid" > "$home/.claude/daemon/atm-daemon.pid"
+cat > "$home/.claude/daemon/status.json" <<'JSON'
+{{"timestamp":"2026-01-01T00:00:00Z","pid":0,"version":"{}","uptime_secs":1,"plugins":[],"teams":[]}}
+JSON
+python3 - <<'PY'
+import json, os
+home=os.environ["ATM_HOME"]
+path=os.path.join(home, ".claude", "daemon", "status.json")
+with open(path, "r", encoding="utf-8") as f:
+    obj=json.load(f)
+obj["pid"]=os.getpid()
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(obj, f)
+open(os.path.join(home, "started-ok"), "w").write("ok")
+PY
+sleep 8
+"#,
+            env!("CARGO_PKG_VERSION")
+        );
+        fs::write(&script_path, script).unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let old_home = std::env::var("ATM_HOME").ok();
+        let old_bin = std::env::var("ATM_DAEMON_BIN").ok();
+        let old_auto = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home);
+            std::env::set_var("ATM_DAEMON_BIN", &script_path);
+            std::env::set_var("ATM_DAEMON_AUTOSTART", "1");
+        }
+
+        ensure_daemon_running_unix().expect("must recover from dead stale pid metadata");
+        let marker = home.join("started-ok");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline && !marker.exists() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(marker.exists(), "expected replacement daemon to start");
+
+        if let Ok(pid_str) = std::fs::read_to_string(home.join(".claude/daemon/atm-daemon.pid"))
+            && let Ok(pid) = pid_str.trim().parse::<i32>()
+            && pid_alive(pid)
+        {
+            send_signal(pid, 15);
+        }
+
+        unsafe {
+            match old_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+            match old_bin {
+                Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
+                None => std::env::remove_var("ATM_DAEMON_BIN"),
+            }
+            match old_auto {
+                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_ensure_daemon_running_restarts_identity_mismatch_daemon() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        fs::create_dir_all(home.join(".claude/daemon")).unwrap();
+        fs::create_dir_all(home.join(".config/atm")).unwrap();
+
+        let stale_script = home.join("stale-daemon.sh");
+        let stale = r#"#!/bin/sh
+set -eu
+home="${ATM_HOME:?}"
+mkdir -p "$home/.claude/daemon"
+pid=$$
+echo "$pid" > "$home/.claude/daemon/atm-daemon.pid"
+cat > "$home/.claude/daemon/status.json" <<'JSON'
+{"timestamp":"2026-01-01T00:00:00Z","pid":0,"version":"0.0.1","uptime_secs":1,"plugins":[],"teams":[]}
+JSON
+python3 - <<'PY'
+import json, os
+home=os.environ["ATM_HOME"]
+path=os.path.join(home, ".claude", "daemon", "status.json")
+with open(path, "r", encoding="utf-8") as f:
+    obj=json.load(f)
+obj["pid"]=os.getpid()
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(obj, f)
+PY
+exec python3 - "$home/.claude/daemon/atm-daemon.sock" <<'PY'
+import os, signal, socket, sys, time
+path=sys.argv[1]
+try:
+    os.unlink(path)
+except FileNotFoundError:
+    pass
+srv=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(path)
+srv.listen(1)
+def shutdown(*_):
+    try:
+        srv.close()
+    finally:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+    sys.exit(0)
+signal.signal(signal.SIGTERM, shutdown)
+signal.signal(signal.SIGINT, shutdown)
+while True:
+    time.sleep(1)
+PY
+"#;
+        fs::write(&stale_script, stale).unwrap();
+        let mut stale_perms = fs::metadata(&stale_script).unwrap().permissions();
+        stale_perms.set_mode(0o755);
+        fs::set_permissions(&stale_script, stale_perms).unwrap();
+
+        let expected_script = home.join("expected-daemon.sh");
+        let expected = format!(
+            r#"#!/bin/sh
+set -eu
+home="${{ATM_HOME:?}}"
+mkdir -p "$home/.claude/daemon"
+pid=$$
+echo "$pid" > "$home/.claude/daemon/atm-daemon.pid"
+cat > "$home/.claude/daemon/status.json" <<'JSON'
+{{"timestamp":"2026-01-01T00:00:00Z","pid":0,"version":"{}","uptime_secs":1,"plugins":[],"teams":[]}}
+JSON
+python3 - <<'PY'
+import json, os
+home=os.environ["ATM_HOME"]
+path=os.path.join(home, ".claude", "daemon", "status.json")
+with open(path, "r", encoding="utf-8") as f:
+    obj=json.load(f)
+obj["pid"]=os.getpid()
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(obj, f)
+open(os.path.join(home, "replacement-started"), "w").write("ok")
+PY
+sleep 8
+"#,
+            env!("CARGO_PKG_VERSION")
+        );
+        fs::write(&expected_script, expected).unwrap();
+        let mut expected_perms = fs::metadata(&expected_script).unwrap().permissions();
+        expected_perms.set_mode(0o755);
+        fs::set_permissions(&expected_script, expected_perms).unwrap();
+
+        let old_home = std::env::var("ATM_HOME").ok();
+        let old_bin = std::env::var("ATM_DAEMON_BIN").ok();
+        let old_auto = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home);
+            std::env::set_var("ATM_DAEMON_AUTOSTART", "0");
+        }
+        let mut stale_child = std::process::Command::new(&stale_script)
+            .env("ATM_HOME", &home)
+            .spawn()
+            .expect("spawn stale daemon");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        unsafe {
+            std::env::set_var("ATM_DAEMON_BIN", &expected_script);
+            std::env::set_var("ATM_DAEMON_AUTOSTART", "1");
+        }
+        ensure_daemon_running_unix().expect("mismatch daemon should be restarted");
+
+        assert!(
+            home.join("replacement-started").exists(),
+            "replacement daemon marker missing"
+        );
+        let new_pid: i32 = std::fs::read_to_string(home.join(".claude/daemon/atm-daemon.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        if stale_child.try_wait().ok().flatten().is_none() {
+            let _ = stale_child.kill();
+            let _ = stale_child.wait();
+        }
+        assert!(new_pid > 1, "replacement daemon pid must be valid");
+
+        if pid_alive(new_pid) {
+            send_signal(new_pid, 15);
+        }
+
+        unsafe {
+            match old_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+            match old_bin {
+                Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
+                None => std::env::remove_var("ATM_DAEMON_BIN"),
+            }
+            match old_auto {
+                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+            }
+        }
     }
 
     #[test]
@@ -946,11 +2757,103 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_query_agent_state_no_daemon_returns_none() {
-        // Graceful fallback: no daemon → Ok(None)
-        let result = query_agent_state("arch-ctm", "atm-dev");
-        assert!(result.is_ok());
-        // Result is None unless daemon happens to be running
+        with_autostart_disabled(|| {
+            // Graceful fallback: no daemon → Ok(None)
+            let result = query_agent_state("arch-ctm", "atm-dev");
+            assert!(result.is_ok());
+            // Result is None unless daemon happens to be running
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_query_team_member_states_offline_returns_none() {
+        with_autostart_disabled(|| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let old_home = std::env::var("ATM_HOME").ok();
+            // SAFETY: serialized test env mutation.
+            unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+
+            let result = query_team_member_states("atm-dev");
+
+            // SAFETY: serialized test env mutation cleanup.
+            unsafe {
+                match old_home {
+                    Some(v) => std::env::set_var("ATM_HOME", v),
+                    None => std::env::remove_var("ATM_HOME"),
+                }
+            }
+
+            assert!(
+                matches!(result, Ok(None)),
+                "offline daemon must map to Ok(None), got: {result:?}"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_query_team_member_states_invalid_payload_returns_err() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        with_autostart_disabled(|| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let daemon_dir = tmp.path().join(".claude/daemon");
+            std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+            let socket_path = daemon_dir.join("atm-daemon.sock");
+
+            let listener = UnixListener::bind(&socket_path).expect("bind socket");
+            let handle = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut request_line = String::new();
+                let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+                reader.read_line(&mut request_line).expect("read request");
+                assert!(
+                    request_line.contains("\"command\":\"list-agents\""),
+                    "expected list-agents request, got: {request_line}"
+                );
+
+                let response = SocketResponse {
+                    version: PROTOCOL_VERSION,
+                    request_id: "req-test".to_string(),
+                    status: "ok".to_string(),
+                    payload: Some(serde_json::json!({
+                        "agent": "arch-ctm",
+                        "state": "active"
+                    })),
+                    error: None,
+                };
+                let line = serde_json::to_string(&response).expect("serialize response");
+                stream.write_all(line.as_bytes()).expect("write response");
+                stream.write_all(b"\n").expect("write newline");
+            });
+
+            let old_home = std::env::var("ATM_HOME").ok();
+            // SAFETY: serialized test env mutation.
+            unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+
+            let result = query_team_member_states("atm-dev");
+
+            // SAFETY: serialized test env mutation cleanup.
+            unsafe {
+                match old_home {
+                    Some(v) => std::env::set_var("ATM_HOME", v),
+                    None => std::env::remove_var("ATM_HOME"),
+                }
+            }
+
+            handle.join().expect("mock daemon thread");
+            let err = result.expect_err("invalid payload must return Err");
+            assert!(
+                err.to_string()
+                    .contains("invalid canonical member-state payload"),
+                "unexpected error: {err}"
+            );
+        });
     }
 
     #[test]
@@ -962,11 +2865,14 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_query_agent_pane_no_daemon_returns_none() {
-        // Graceful fallback: no daemon → Ok(None)
-        let result = query_agent_pane("arch-ctm");
-        assert!(result.is_ok());
-        // Result is None unless daemon happens to be running
+        with_autostart_disabled(|| {
+            // Graceful fallback: no daemon → Ok(None)
+            let result = query_agent_pane("arch-ctm");
+            assert!(result.is_ok());
+            // Result is None unless daemon happens to be running
+        });
     }
 
     #[test]
@@ -981,6 +2887,8 @@ mod tests {
             prompt: Some("Review the bridge module".to_string()),
             timeout_secs: 30,
             env_vars,
+            runtime: Some("codex".to_string()),
+            resume_session_id: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -991,6 +2899,8 @@ mod tests {
         assert_eq!(decoded.command, "codex --yolo");
         assert_eq!(decoded.prompt.as_deref(), Some("Review the bridge module"));
         assert_eq!(decoded.timeout_secs, 30);
+        assert_eq!(decoded.runtime.as_deref(), Some("codex"));
+        assert!(decoded.resume_session_id.is_none());
         assert_eq!(
             decoded.env_vars.get("EXTRA_VAR").map(String::as_str),
             Some("value")
@@ -1006,6 +2916,8 @@ mod tests {
             prompt: None,
             timeout_secs: 60,
             env_vars: std::collections::HashMap::new(),
+            runtime: None,
+            resume_session_id: Some("sess-123".to_string()),
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -1014,6 +2926,8 @@ mod tests {
         assert_eq!(decoded.agent, "worker-1");
         assert!(decoded.prompt.is_none());
         assert!(decoded.env_vars.is_empty());
+        assert!(decoded.runtime.is_none());
+        assert_eq!(decoded.resume_session_id.as_deref(), Some("sess-123"));
     }
 
     #[test]
@@ -1058,6 +2972,10 @@ mod tests {
             session_id: "abc123".to_string(),
             process_id: 12345,
             alive: true,
+            runtime: None,
+            runtime_session_id: None,
+            pane_id: None,
+            runtime_home: None,
         };
         let json = serde_json::to_string(&result).unwrap();
         let decoded: SessionQueryResult = serde_json::from_str(&json).unwrap();
@@ -1073,39 +2991,71 @@ mod tests {
         assert_eq!(result.session_id, "xyz789");
         assert_eq!(result.process_id, 99);
         assert!(!result.alive);
+        assert!(result.runtime.is_none());
+        assert!(result.runtime_session_id.is_none());
     }
 
     #[test]
+    #[serial]
     fn test_query_session_no_daemon_returns_none() {
-        // Graceful fallback: no daemon → Ok(None)
-        let result = query_session("team-lead");
-        assert!(result.is_ok());
-        // None unless daemon happens to be running
+        with_autostart_disabled(|| {
+            // Graceful fallback: no daemon → Ok(None)
+            let result = query_session("team-lead");
+            assert!(result.is_ok());
+            // None unless daemon happens to be running
+        });
     }
 
     #[test]
+    #[serial]
     fn test_launch_agent_no_daemon_returns_none() {
-        if daemon_is_running() {
-            // Shared dev machines may have daemon active; this test validates
-            // no-daemon behavior only.
-            return;
-        }
-        let config = LaunchConfig {
-            agent: "test-agent".to_string(),
-            team: "test-team".to_string(),
-            command: "codex --yolo".to_string(),
-            prompt: None,
-            timeout_secs: 5,
-            env_vars: std::collections::HashMap::new(),
-        };
-        // Without a running daemon the call should gracefully return Ok(None).
-        // On non-Unix platforms it always returns None.
-        // On Unix with no daemon socket present it also returns None.
-        let result = launch_agent(&config);
-        // The result should be Ok (no I/O error on missing socket)
-        assert!(result.is_ok());
-        // Result is None unless daemon happens to be running and handling "launch"
-        // (which it won't be in a unit test environment)
+        with_autostart_disabled(|| {
+            if daemon_is_running() {
+                // Shared dev machines may have daemon active; this test validates
+                // no-daemon behavior only.
+                return;
+            }
+            let config = LaunchConfig {
+                agent: "test-agent".to_string(),
+                team: "test-team".to_string(),
+                command: "codex --yolo".to_string(),
+                prompt: None,
+                timeout_secs: 5,
+                env_vars: std::collections::HashMap::new(),
+                runtime: Some("codex".to_string()),
+                resume_session_id: None,
+            };
+            // Without a running daemon the call should gracefully return Ok(None).
+            // On non-Unix platforms it always returns None.
+            // On Unix with no daemon socket present it also returns None.
+            let result = launch_agent(&config);
+            // The result should be Ok (no I/O error on missing socket)
+            assert!(result.is_ok());
+            // Result is None unless daemon happens to be running and handling "launch"
+            // (which it won't be in a unit test environment)
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_register_hint_no_daemon_is_silent_skip() {
+        with_autostart_disabled(|| {
+            if daemon_is_running() {
+                return;
+            }
+            let outcome = register_hint(
+                "atm-dev",
+                "arch-ctm",
+                "local:arch-ctm:test:1234",
+                1234,
+                Some("codex"),
+                Some("local:arch-ctm:test:1234"),
+                None,
+                None,
+            )
+            .expect("register-hint must not error when daemon unavailable");
+            assert_eq!(outcome, RegisterHintOutcome::DaemonUnavailable);
+        });
     }
 
     #[test]
@@ -1118,6 +3068,149 @@ mod tests {
         let decoded: AgentSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.agent, "arch-ctm");
         assert_eq!(decoded.state, "idle");
+    }
+
+    #[test]
+    fn test_canonical_member_state_serialization() {
+        let state = CanonicalMemberState {
+            agent: "arch-ctm".to_string(),
+            state: "active".to_string(),
+            activity: "busy".to_string(),
+            session_id: Some("sess-123".to_string()),
+            process_id: Some(4242),
+            last_alive_at: Some("2026-03-08T00:00:00Z".to_string()),
+            reason: "session active with live pid".to_string(),
+            source: "session_registry".to_string(),
+            in_config: true,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let decoded: CanonicalMemberState = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.agent, "arch-ctm");
+        assert_eq!(decoded.state, "active");
+        assert_eq!(decoded.activity, "busy");
+        assert_eq!(decoded.session_id.as_deref(), Some("sess-123"));
+        assert_eq!(decoded.process_id, Some(4242));
+        assert_eq!(
+            decoded.last_alive_at.as_deref(),
+            Some("2026-03-08T00:00:00Z")
+        );
+        assert!(decoded.in_config);
+    }
+
+    #[test]
+    fn test_canonical_status_activity_labels_and_liveness() {
+        let active = CanonicalMemberState {
+            agent: "arch-ctm".to_string(),
+            state: "active".to_string(),
+            activity: "busy".to_string(),
+            session_id: None,
+            process_id: None,
+            last_alive_at: None,
+            reason: String::new(),
+            source: String::new(),
+            in_config: true,
+        };
+        let idle = CanonicalMemberState {
+            state: "idle".to_string(),
+            activity: "idle".to_string(),
+            ..active.clone()
+        };
+        let dead = CanonicalMemberState {
+            state: "offline".to_string(),
+            activity: "unknown".to_string(),
+            ..active.clone()
+        };
+
+        assert_eq!(canonical_status_label(Some(&active)), "Active");
+        assert_eq!(canonical_status_label(Some(&idle)), "Idle");
+        assert_eq!(canonical_status_label(Some(&dead)), "Dead");
+        assert_eq!(canonical_status_label(None), "Unknown");
+
+        assert_eq!(canonical_activity_label(Some(&active)), "Busy");
+        assert_eq!(canonical_activity_label(Some(&idle)), "Idle");
+        assert_eq!(canonical_activity_label(Some(&dead)), "Unknown");
+        assert_eq!(canonical_activity_label(None), "Unknown");
+
+        assert_eq!(canonical_liveness_bool(Some(&active)), Some(true));
+        assert_eq!(canonical_liveness_bool(Some(&idle)), Some(true));
+        assert_eq!(canonical_liveness_bool(Some(&dead)), Some(false));
+        assert_eq!(canonical_liveness_bool(None), None);
+    }
+
+    #[test]
+    fn test_decode_canonical_member_states_payload_rejects_invalid_schema() {
+        let invalid = serde_json::json!({
+            "agent": "arch-ctm",
+            "state": "active"
+        });
+        let err = decode_canonical_member_states_payload(invalid).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid canonical member-state payload")
+        );
+    }
+
+    #[test]
+    fn test_decode_canonical_member_states_payload_accepts_valid_schema() {
+        let valid = serde_json::json!([
+            {
+                "agent": "arch-ctm",
+                "state": "active",
+                "activity": "busy",
+                "session_id": "sess-1",
+                "process_id": 1234,
+                "reason": "session active",
+                "source": "session_registry",
+                "in_config": false
+            }
+        ]);
+        let states = decode_canonical_member_states_payload(valid).expect("valid payload");
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].agent, "arch-ctm");
+        assert_eq!(states[0].state, "active");
+        assert!(!states[0].in_config);
+    }
+
+    #[test]
+    fn test_decode_canonical_member_state_defaults_in_config_true_when_missing() {
+        let json = r#"{
+            "agent":"arch-ctm",
+            "state":"active",
+            "activity":"busy",
+            "reason":"session active",
+            "source":"session_registry"
+        }"#;
+        let state: CanonicalMemberState = serde_json::from_str(json).expect("decode");
+        assert!(state.in_config);
+    }
+
+    #[test]
+    fn test_decode_register_hint_response_ok_registered() {
+        let response = SocketResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "req-1".to_string(),
+            status: "ok".to_string(),
+            payload: Some(serde_json::json!({ "processed": true })),
+            error: None,
+        };
+        let outcome = decode_register_hint_response(response).expect("ok response");
+        assert_eq!(outcome, RegisterHintOutcome::Registered);
+    }
+
+    #[test]
+    fn test_decode_register_hint_response_unknown_command_maps_to_unsupported() {
+        let response = SocketResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "req-1".to_string(),
+            status: "error".to_string(),
+            payload: None,
+            error: Some(SocketError {
+                code: "UNKNOWN_COMMAND".to_string(),
+                message: "Unknown command: 'register-hint'".to_string(),
+            }),
+        };
+        let outcome = decode_register_hint_response(response).expect("unknown command handled");
+        assert_eq!(outcome, RegisterHintOutcome::UnsupportedDaemon);
     }
 
     // Unix-only: test PID alive check for the current process
@@ -1135,6 +3228,41 @@ mod tests {
         // On Linux and macOS the max PID is 4194304 or similar; i32::MAX exceeds
         // the kernel's PID range and kill() will return ESRCH (no such process).
         assert!(!pid_alive(i32::MAX));
+    }
+
+    /// When `ATM_DAEMON_BIN` is set to a nonexistent path, `ensure_daemon_running`
+    /// must return `Err` (spawn fails) rather than silently succeeding.
+    /// This confirms that the `ATM_DAEMON_BIN` env var is read by the public API.
+    ///
+    /// The test is skipped when a live daemon is already running to avoid
+    /// interfering with the running process.
+    ///
+    /// `#[serial]` is required because the test mutates the process environment.
+    #[test]
+    #[serial]
+    fn test_ensure_daemon_running_reads_atm_daemon_bin() {
+        // Skip if a live daemon is already running.
+        if daemon_is_running() {
+            return;
+        }
+        unsafe {
+            std::env::set_var("ATM_DAEMON_BIN", "/nonexistent-bin-for-atm-test");
+        }
+        let result = ensure_daemon_running();
+        unsafe {
+            std::env::remove_var("ATM_DAEMON_BIN");
+        }
+        // On non-Unix the function is a no-op and always returns Ok(()).
+        #[cfg(unix)]
+        assert!(
+            result.is_err(),
+            "spawn of nonexistent binary must return Err on Unix"
+        );
+        #[cfg(not(unix))]
+        assert!(
+            result.is_ok(),
+            "ensure_daemon_running is a no-op on non-Unix"
+        );
     }
 
     // ── LifecycleSource / LifecycleSourceKind ────────────────────────────────
@@ -1246,6 +3374,8 @@ mod tests {
             action: ControlAction::Stdin,
             payload: Some("hello".to_string()),
             content_ref: None,
+            elicitation_id: None,
+            decision: None,
         };
 
         let result = send_control(&req);
@@ -1254,6 +3384,246 @@ mod tests {
         assert!(
             result.is_err(),
             "send_control should return Err when daemon is not running"
+        );
+    }
+
+    // ── Windows-specific tests ───────────────────────────────────────────────
+    //
+    // These tests validate the Windows code paths for daemon auto-start readiness
+    // and lock behavior. On Windows, all daemon socket communication is intentionally
+    // unavailable (Unix domain sockets only), so the contract is that every public
+    // function returns `Ok(None)` or `false` without panicking or returning an error.
+    //
+    // Requirement: requirements.md §T.1 cross-platform row — "Windows CI coverage
+    // must validate spawn/readiness/lock behavior".
+
+    /// On Windows, `query_daemon` must return `Ok(None)` for any request.
+    ///
+    /// The daemon uses Unix domain sockets which are unavailable on Windows.
+    /// The graceful fallback ensures the CLI degrades silently rather than
+    /// failing with a platform-specific error.
+    #[cfg(windows)]
+    #[test]
+    #[serial]
+    fn windows_query_daemon_returns_ok_none() {
+        let req = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "req-win-test".to_string(),
+            command: "agent-state".to_string(),
+            payload: serde_json::json!({ "agent": "arch-ctm", "team": "atm-dev" }),
+        };
+        let result = query_daemon(&req);
+        assert!(
+            result.is_ok(),
+            "query_daemon must not return Err on Windows"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "query_daemon must return Ok(None) on Windows (no Unix socket available)"
+        );
+    }
+
+    /// On Windows, `daemon_is_running` must return `false` without panicking.
+    ///
+    /// The PID-file check uses Unix `kill(pid, 0)` which is unavailable on Windows.
+    /// The Windows branch always returns `false` — validated here so CI catches
+    /// any accidental regression that re-introduces a Unix-only code path.
+    #[cfg(windows)]
+    #[test]
+    fn windows_daemon_is_running_returns_false() {
+        // No daemon can be running on Windows (no Unix socket / PID-kill support).
+        assert!(
+            !daemon_is_running(),
+            "daemon_is_running must return false on Windows"
+        );
+    }
+
+    /// On Windows, `subscribe_stream_events` must return `Ok(None)`.
+    ///
+    /// Stream subscriptions require a long-lived Unix domain socket connection.
+    /// The Windows branch short-circuits to `Ok(None)` so callers can treat the
+    /// absence of stream events as equivalent to a daemon that is not running.
+    #[cfg(windows)]
+    #[test]
+    fn windows_subscribe_stream_events_returns_ok_none() {
+        let result = subscribe_stream_events();
+        assert!(
+            result.is_ok(),
+            "subscribe_stream_events must not return Err on Windows"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "subscribe_stream_events must return Ok(None) on Windows"
+        );
+    }
+
+    /// On Windows, `query_agent_state` must return `Ok(None)`.
+    ///
+    /// Exercises the full call path (including payload serialisation) to confirm
+    /// that the Windows `Ok(None)` short-circuit in `query_daemon` propagates
+    /// correctly through the higher-level wrapper.
+    #[cfg(windows)]
+    #[test]
+    #[serial]
+    fn windows_query_agent_state_returns_ok_none() {
+        let result = query_agent_state("arch-ctm", "atm-dev");
+        assert!(
+            result.is_ok(),
+            "query_agent_state must not return Err on Windows"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "query_agent_state must return Ok(None) on Windows"
+        );
+    }
+
+    /// On Windows, `query_session` must return `Ok(None)`.
+    #[cfg(windows)]
+    #[test]
+    #[serial]
+    fn windows_query_session_returns_ok_none() {
+        let result = query_session("team-lead");
+        assert!(
+            result.is_ok(),
+            "query_session must not return Err on Windows"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "query_session must return Ok(None) on Windows"
+        );
+    }
+
+    /// On Windows, `launch_agent` must return `Ok(None)`.
+    ///
+    /// Confirms that the auto-start path (which requires Unix `fork`/`exec`
+    /// semantics) never executes on Windows and the call degrades gracefully.
+    #[cfg(windows)]
+    #[test]
+    #[serial]
+    fn windows_launch_agent_returns_ok_none() {
+        let config = LaunchConfig {
+            agent: "test-agent".to_string(),
+            team: "test-team".to_string(),
+            command: "codex --yolo".to_string(),
+            prompt: None,
+            timeout_secs: 5,
+            env_vars: std::collections::HashMap::new(),
+            runtime: Some("codex".to_string()),
+            resume_session_id: None,
+        };
+        let result = launch_agent(&config);
+        assert!(
+            result.is_ok(),
+            "launch_agent must not return Err on Windows (no daemon socket)"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "launch_agent must return Ok(None) on Windows"
+        );
+    }
+
+    /// On Windows, the startup lock (`acquire_lock`) must be acquirable and
+    /// automatically released on drop.
+    ///
+    /// The `ensure_daemon_running_unix` function is gated `#[cfg(unix)]` and
+    /// never runs on Windows, but the startup-lock path (`fs2::LockFileEx`) is
+    /// the same cross-platform primitive used throughout atm-core.  This test
+    /// confirms the Windows lock backend works correctly in the context of the
+    /// daemon startup directory layout.
+    #[cfg(windows)]
+    #[test]
+    fn windows_startup_lock_acquires_and_releases() {
+        use crate::io::lock::acquire_lock;
+        use std::fs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_dir = tmp.path().join("config").join("atm");
+        fs::create_dir_all(&lock_dir).unwrap();
+        let lock_path = lock_dir.join("daemon-start.lock");
+
+        // Acquire the lock — mirrors what ensure_daemon_running_unix does.
+        let lock = acquire_lock(&lock_path, 3);
+        assert!(
+            lock.is_ok(),
+            "startup lock must be acquirable on Windows: {:?}",
+            lock.err()
+        );
+
+        // Explicit drop releases the lock (Windows holds handles; explicit drop
+        // ensures the LockFileEx unlock fires before we try to re-acquire).
+        drop(lock.unwrap());
+
+        // Re-acquire to confirm the lock was actually released.
+        let lock2 = acquire_lock(&lock_path, 1);
+        assert!(
+            lock2.is_ok(),
+            "startup lock must be re-acquirable after release on Windows"
+        );
+    }
+
+    /// On Windows, `daemon_socket_path` must produce a path ending with the
+    /// expected suffix regardless of the underlying home-directory resolver.
+    #[cfg(windows)]
+    #[test]
+    fn windows_daemon_socket_path_has_correct_suffix() {
+        let path = daemon_socket_path().unwrap();
+        let s = path.to_string_lossy();
+        assert!(
+            s.ends_with("atm-daemon.sock"),
+            "daemon_socket_path must end with 'atm-daemon.sock' on Windows, got: {s}"
+        );
+        assert!(
+            s.contains(".claude") && s.contains("daemon"),
+            "daemon_socket_path must contain '.claude/daemon' on Windows, got: {s}"
+        );
+    }
+
+    /// On Windows, `daemon_pid_path` must produce a path ending with the
+    /// expected suffix.
+    #[cfg(windows)]
+    #[test]
+    fn windows_daemon_pid_path_has_correct_suffix() {
+        let path = daemon_pid_path().unwrap();
+        let s = path.to_string_lossy();
+        assert!(
+            s.ends_with("atm-daemon.pid"),
+            "daemon_pid_path must end with 'atm-daemon.pid' on Windows, got: {s}"
+        );
+        assert!(
+            s.contains(".claude") && s.contains("daemon"),
+            "daemon_pid_path must contain '.claude/daemon' on Windows, got: {s}"
+        );
+    }
+
+    /// On Windows, `send_control` must return `Err` (not panic) when the daemon
+    /// is not reachable, because `send_control` intentionally propagates absence
+    /// as an error (unlike the `Ok(None)` contract of other public functions).
+    #[cfg(windows)]
+    #[test]
+    fn windows_send_control_no_daemon_returns_err() {
+        use crate::control::{CONTROL_SCHEMA_VERSION, ControlAction, ControlRequest};
+
+        let req = ControlRequest {
+            v: CONTROL_SCHEMA_VERSION,
+            request_id: "req-win-ctrl".to_string(),
+            msg_type: "control.stdin.request".to_string(),
+            signal: None,
+            sent_at: "2026-02-21T00:00:00Z".to_string(),
+            team: "atm-dev".to_string(),
+            session_id: String::new(),
+            agent_id: "arch-ctm".to_string(),
+            sender: "tui".to_string(),
+            action: ControlAction::Stdin,
+            payload: Some("hello".to_string()),
+            content_ref: None,
+            elicitation_id: None,
+            decision: None,
+        };
+
+        let result = send_control(&req);
+        assert!(
+            result.is_err(),
+            "send_control must return Err on Windows when daemon is not reachable"
         );
     }
 
@@ -1276,6 +3646,8 @@ mod tests {
             action: ControlAction::Interrupt,
             payload: None,
             content_ref: None,
+            elicitation_id: None,
+            decision: None,
         };
 
         // The socket-level request_id is an independent correlation ID generated

@@ -41,3 +41,6 @@ temp/
 .DS_Store
 .AppleDouble
 .LSOverride
+
+# Local nested worktrees used during orchestration
+.claude/worktrees/

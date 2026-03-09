@@ -3,6 +3,11 @@
 **Status**: Active / Evolving
 **Date**: 2026-02-20 (updated from 2026-02-11)
 
+> Note: Some findings below are historical observations from pre-R.0b behavior.
+> Canonical shutdown/cleanup behavior is now defined in `docs/requirements.md`
+> section 4.3.1 and section 8.6 (shutdown_request-first teardown, timeout/kill
+> fallback, and coupled roster+mailbox cleanup after confirmed termination).
+
 ---
 
 ## Background
@@ -31,7 +36,7 @@ However, when an agent respawns with a **new session**, the last-seen watermark 
 
 - **Clean inbox** (few messages): Plain instructions are generally acted on
 - **Noisy inbox** (many old messages): Plain instructions are treated as stale history and ignored
-- **With call-to-action tag**: Instructions prefixed with `[PENDING ACTION]` or `[OFFLINE MESSAGE - Acknowledge and respond]` are reliably acted on regardless of inbox noise
+- **With call-to-action tag**: Instructions prefixed with `[OFFLINE MESSAGE - Acknowledge and respond]` (via `--offline-action` flag) are reliably acted on regardless of inbox noise
 
 The root cause is disambiguation — without a signal, the agent cannot distinguish "new task waiting for me" from "old task that was already handled by a previous instance."
 
@@ -133,7 +138,7 @@ Claude Code reads `leadSessionId` (and likely other team config) once at session
 
 1. **Offline delivery documented** in API docs ✅
 2. **Use spawn prompts for task assignment** — more reliable than inbox queuing ✅
-3. **`[PENDING ACTION]` tag pattern** — defensive measure for queued messages ✅
+3. **`--offline-action` flag** — optional call-to-action prefix for queued messages (no prefix by default) ✅
 4. **`atm send` offline detection** — warns if recipient `isActive == false` ✅
 5. **`--since-last-seen` cursor** — default for `atm read`, prevents inbox flooding ✅
 

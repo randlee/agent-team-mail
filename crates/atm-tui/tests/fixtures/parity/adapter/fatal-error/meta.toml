@@ -1,0 +1,5 @@
+name = "fatal-error"
+transport = "app-server"
+codex_version = "0.15.0"
+schema_version = "v1"
+notes = "fatal stream error and failed completion"

@@ -50,12 +50,45 @@ async fn main() -> Result<()> {
         unsafe { std::env::set_var("ATM_LOG", "debug") };
     }
 
-    // Determine home dir early so we can set up DaemonWriter logging.
-    // We do a quick best-effort resolution here; the full home_dir call below
-    // will produce the canonical error if it fails.
-    let log_file = agent_team_mail_core::home::get_home_dir()
-        .map(|h| h.join(".config/atm/atm-daemon.jsonl"))
-        .unwrap_or_else(|_| std::path::PathBuf::from("atm-daemon.jsonl"));
+    // Determine home directory early for lock/log path resolution.
+    let home_dir =
+        agent_team_mail_core::home::get_home_dir().context("Failed to determine home directory")?;
+
+    // Enforce single-instance daemon ownership with an exclusive process lock.
+    let daemon_lock_path = home_dir.join(".config/atm/daemon.lock");
+    std::fs::create_dir_all(
+        daemon_lock_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(".")),
+    )
+    .with_context(|| {
+        format!(
+            "Failed to create daemon lock directory: {}",
+            daemon_lock_path.display()
+        )
+    })?;
+    let daemon_lock = agent_team_mail_core::io::lock::acquire_lock(&daemon_lock_path, 0).map_err(
+        |e| match e {
+            agent_team_mail_core::io::InboxError::LockTimeout { .. } => anyhow::anyhow!(
+                "atm-daemon already running (lock held at {}). Refusing second instance.",
+                daemon_lock_path.display()
+            ),
+            other => anyhow::anyhow!(
+                "Failed to acquire daemon lock at {}: {}",
+                daemon_lock_path.display(),
+                other
+            ),
+        },
+    )?;
+    agent_team_mail_core::daemon_client::write_daemon_lock_metadata(
+        &home_dir,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .context("Failed to write daemon lock metadata")?;
+
+    // Resolve canonical log writer config once and reuse for startup merge + writer task.
+    let log_writer_config = LogWriterConfig::from_env(&home_dir);
+    let log_file = log_writer_config.log_path.clone();
 
     let _log_guards = logging::init_unified(
         "atm-daemon",
@@ -71,10 +104,6 @@ async fn main() -> Result<()> {
     if args.daemon {
         info!("Daemon mode requested (note: fork/detach not yet implemented)");
     }
-
-    // Determine home and current directories for config resolution
-    let home_dir =
-        agent_team_mail_core::home::get_home_dir().context("Failed to determine home directory")?;
 
     // Merge any spool files written by producers while the daemon was offline.
     // This runs before the socket server starts so no new spool files can arrive
@@ -157,15 +186,15 @@ async fn main() -> Result<()> {
     // Create plugin registry
     let mut registry = PluginRegistry::new();
 
-    // Register CI Monitor plugin if configured
-    if let Some(ci_config) = plugin_ctx.plugin_config("ci_monitor")
+    // Register GH Monitor plugin if configured
+    if let Some(ci_config) = plugin_ctx.plugin_config("gh_monitor")
         && ci_config
             .get("enabled")
             .and_then(|v| v.as_bool())
             .unwrap_or(true)
     {
         registry.register(agent_team_mail_daemon::plugins::ci_monitor::CiMonitorPlugin::new());
-        info!("Registered CI Monitor plugin");
+        info!("Registered GH Monitor plugin");
     }
 
     // Register Issues plugin if configured
@@ -317,7 +346,6 @@ async fn main() -> Result<()> {
 
     // Create the bounded log event queue and async writer task.
     let log_event_queue = new_log_event_queue();
-    let log_writer_config = LogWriterConfig::from_env(&home_dir);
     let log_cancel = cancel_token.clone();
     tokio::spawn(run_log_writer_task(
         log_event_queue.clone(),
@@ -329,6 +357,7 @@ async fn main() -> Result<()> {
     let run_result = daemon::run(
         &mut registry,
         &plugin_ctx,
+        daemon_lock,
         cancel_token,
         status_writer,
         state_store,

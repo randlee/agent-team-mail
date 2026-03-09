@@ -1,3 +1,3 @@
-{"line":"[user_steer|randlee|tui_user] approval.request allow?","is_turn_boundary":true}
-{"line":"[user_steer|randlee|tui_user] approval.rejected denied","is_turn_boundary":true}
-{"line":"[user_steer|randlee|tui_user] approval.resolved granted","is_turn_boundary":true}
+{"line":"[user_steer|randlee|tui_user] approval.exec.request allow?","is_turn_boundary":true}
+{"line":"[user_steer|randlee|tui_user] approval.review.rejected denied","is_turn_boundary":true}
+{"line":"[user_steer|randlee|tui_user] approval.review.resolved granted","is_turn_boundary":true}

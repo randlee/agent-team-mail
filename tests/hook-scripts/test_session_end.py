@@ -2,6 +2,7 @@
 
 import json
 import os
+import platform
 import sys
 import tempfile
 from io import StringIO
@@ -37,6 +38,7 @@ class TestSessionEnd(unittest.TestCase):
         toml_content: str | None = None,
         socket_file_exists: bool = True,
         socket_side_effect=None,
+        parent_pid: int | None = None,
     ) -> tuple[int, list[bytes]]:
         """Run session-end.main(), return (exit_code, sendall_calls)."""
         send_calls: list[bytes] = []
@@ -56,6 +58,8 @@ class TestSessionEnd(unittest.TestCase):
                 sock_dir.mkdir(parents=True, exist_ok=True)
                 if socket_file_exists:
                     (sock_dir / "atm-daemon.sock").touch()
+                    if platform.system() == "Windows":
+                        (sock_dir / "atm-daemon.port").write_text("12345")
 
                 mock_sock = MagicMock()
                 mock_sock.__enter__ = MagicMock(return_value=mock_sock)
@@ -71,7 +75,11 @@ class TestSessionEnd(unittest.TestCase):
                      patch.dict(os.environ, {"ATM_HOME": str(atm_home)}), \
                      patch("socket.socket", return_value=mock_sock):
                     mod = _load_module("session_end", _SESSION_END_PATH)
-                    rc = mod.main()
+                    if parent_pid is None:
+                        rc = mod.main()
+                    else:
+                        with patch("os.getppid", return_value=parent_pid):
+                            rc = mod.main()
             finally:
                 os.chdir(orig_dir)
 
@@ -86,10 +94,12 @@ class TestSessionEnd(unittest.TestCase):
     def test_atm_toml_present_sends_session_end_event(self):
         """With .atm.toml present, sends session_end event to socket."""
         toml = '[core]\ndefault_team = "atm-dev"\nidentity = "team-lead"\n'
+        expected_parent_pid = 5151
         rc, calls = self._run(
             {"session_id": "sess-end-001"},
             toml_content=toml,
             socket_file_exists=True,
+            parent_pid=expected_parent_pid,
         )
         self.assertEqual(rc, 0)
         self.assertEqual(len(calls), 1)
@@ -101,6 +111,7 @@ class TestSessionEnd(unittest.TestCase):
         self.assertEqual(request["payload"]["team"], "atm-dev")
         self.assertEqual(request["payload"]["reason"], "session_exit")
         self.assertEqual(request["payload"]["source"]["kind"], "claude_hook")
+        self.assertEqual(request["payload"]["process_id"], expected_parent_pid)
 
     def test_socket_error_exit_zero(self):
         """Socket error → still exits 0 (fail-open)."""

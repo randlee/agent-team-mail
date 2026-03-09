@@ -11,6 +11,7 @@ use crate::plugin::PluginError;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tracing::debug;
 
 /// Codex TMUX backend payload with tmux-specific metadata
@@ -22,6 +23,12 @@ pub struct TmuxPayload {
     pub pane_id: String,
     /// Window name
     pub window_name: String,
+    /// Runtime kind (e.g., "codex", "gemini")
+    pub runtime: String,
+    /// Runtime-specific session identifier if known.
+    pub runtime_session_id: Option<String>,
+    /// Runtime state/home directory if configured.
+    pub runtime_home: Option<String>,
 }
 
 /// Codex TMUX backend — spawns Codex in tmux panes
@@ -179,6 +186,9 @@ impl WorkerAdapter for CodexTmuxBackend {
             session: self.tmux_session.clone(),
             pane_id: pane_id.clone(),
             window_name: agent_id.to_string(),
+            runtime: "codex".to_string(),
+            runtime_session_id: None,
+            runtime_home: None,
         };
 
         Ok(WorkerHandle {
@@ -253,7 +263,7 @@ impl WorkerAdapter for CodexTmuxBackend {
         for (key, value) in env_vars {
             // Validate key to prevent shell injection via variable name
             if key.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                let export_cmd = format!("export {key}={value}");
+                let export_cmd = format!("export {key}={}", shell_single_quote(value));
                 self.sender
                     .send_text_and_enter(
                         &pane_id,
@@ -286,6 +296,15 @@ impl WorkerAdapter for CodexTmuxBackend {
             session: self.tmux_session.clone(),
             pane_id: pane_id.clone(),
             window_name: agent_id.to_string(),
+            runtime: env_vars
+                .get("ATM_RUNTIME")
+                .cloned()
+                .unwrap_or_else(|| "codex".to_string()),
+            runtime_session_id: env_vars.get("ATM_RUNTIME_SESSION_ID").cloned(),
+            runtime_home: env_vars
+                .get("ATM_RUNTIME_HOME")
+                .cloned()
+                .or_else(|| env_vars.get("GEMINI_CLI_HOME").cloned()),
         };
 
         Ok(WorkerHandle {
@@ -318,31 +337,146 @@ impl WorkerAdapter for CodexTmuxBackend {
     }
 
     async fn shutdown(&mut self, handle: &WorkerHandle) -> Result<(), PluginError> {
-        // Gracefully close the tmux pane
-        let output = Command::new("tmux")
-            .arg("kill-pane")
-            .arg("-t")
-            .arg(&handle.backend_id)
-            .output()
-            .map_err(|e| PluginError::Runtime {
-                message: format!("Failed to kill tmux pane: {e}"),
-                source: Some(Box::new(e)),
-            })?;
-
-        if !output.status.success() {
-            let pane_id = &handle.backend_id;
-            let agent_id = &handle.agent_id;
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!("Failed to kill pane {pane_id} for agent {agent_id}: {stderr}");
-            // Don't return error — pane may already be gone
-        } else {
-            let pane_id = &handle.backend_id;
-            let agent_id = &handle.agent_id;
-            debug!("Shut down tmux pane {pane_id} for agent {agent_id}");
+        if let Some(payload) = handle.payload_ref::<TmuxPayload>()
+            && payload.runtime == "gemini"
+            && let Some(pid) = pane_pid(&handle.backend_id)
+        {
+            let wait_timeout = gemini_shutdown_wait_timeout();
+            send_sigint_to_pane(&handle.backend_id)?;
+            if !wait_for_pid_exit(pid, wait_timeout) {
+                send_sigterm(pid);
+                if !wait_for_pid_exit(pid, wait_timeout) {
+                    send_sigkill(pid);
+                }
+            }
         }
 
-        Ok(())
+        kill_pane(&handle.backend_id, &handle.agent_id)
     }
+}
+
+fn kill_pane(pane_id: &str, agent_id: &str) -> Result<(), PluginError> {
+    let output = Command::new("tmux")
+        .arg("kill-pane")
+        .arg("-t")
+        .arg(pane_id)
+        .output()
+        .map_err(|e| PluginError::Runtime {
+            message: format!("Failed to kill tmux pane: {e}"),
+            source: Some(Box::new(e)),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!("Failed to kill pane {pane_id} for agent {agent_id}: {stderr}");
+    } else {
+        debug!("Shut down tmux pane {pane_id} for agent {agent_id}");
+    }
+    Ok(())
+}
+
+fn send_sigint_to_pane(pane_id: &str) -> Result<(), PluginError> {
+    let output = Command::new("tmux")
+        .arg("send-keys")
+        .arg("-t")
+        .arg(pane_id)
+        .arg("C-c")
+        .output()
+        .map_err(|e| PluginError::Runtime {
+            message: format!("Failed to send C-c to pane {pane_id}: {e}"),
+            source: Some(Box::new(e)),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(PluginError::Runtime {
+            message: format!("Failed to send C-c to pane {pane_id}: {stderr}"),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
+fn pane_pid(pane_id: &str) -> Option<u32> {
+    let output = Command::new("tmux")
+        .args(["display-message", "-t", pane_id, "-p", "#{pane_pid}"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()
+        .ok()
+}
+
+fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !is_pid_alive(pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    false
+}
+
+fn gemini_shutdown_wait_timeout() -> Duration {
+    let secs = std::env::var("ATM_GEMINI_SHUTDOWN_WAIT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .unwrap_or(10);
+    Duration::from_secs(secs)
+}
+
+fn is_pid_alive(pid: u32) -> bool {
+    if !is_valid_signal_pid(pid) {
+        return false;
+    }
+    agent_team_mail_core::pid::is_pid_alive(pid)
+}
+
+fn send_sigkill(pid: u32) {
+    if !is_valid_signal_pid(pid) {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: SIGKILL to a specific process ID.
+        let _ = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+}
+
+fn send_sigterm(pid: u32) {
+    if !is_valid_signal_pid(pid) {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: SIGTERM to a specific process ID.
+        let _ = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+}
+
+fn is_valid_signal_pid(pid: u32) -> bool {
+    pid > 1 && pid <= i32::MAX as u32
+}
+
+fn shell_single_quote(input: &str) -> String {
+    if input.is_empty() {
+        return "''".to_string();
+    }
+    format!("'{}'", input.replace('\'', "'\"'\"'"))
 }
 
 #[cfg(test)]
@@ -395,11 +529,16 @@ mod tests {
             session: "test-session".to_string(),
             pane_id: "%42".to_string(),
             window_name: "arch-ctm@planning".to_string(),
+            runtime: "codex".to_string(),
+            runtime_session_id: None,
+            runtime_home: None,
         };
 
         assert_eq!(payload.session, "test-session");
         assert_eq!(payload.pane_id, "%42");
         assert_eq!(payload.window_name, "arch-ctm@planning");
+        assert_eq!(payload.runtime, "codex");
+        assert!(payload.runtime_session_id.is_none());
     }
 
     #[test]
@@ -408,9 +547,42 @@ mod tests {
             session: "test-session".to_string(),
             pane_id: "%42".to_string(),
             window_name: "arch-ctm@planning".to_string(),
+            runtime: "codex".to_string(),
+            runtime_session_id: Some("sess-1".to_string()),
+            runtime_home: None,
         };
 
         let cloned = payload.clone();
         assert_eq!(cloned, payload);
+    }
+
+    #[test]
+    fn test_is_pid_alive_with_live_and_dead_pid() {
+        let live_pid = std::process::id();
+        assert!(is_pid_alive(live_pid));
+        assert!(!is_pid_alive(u32::MAX));
+    }
+
+    #[test]
+    fn test_wait_for_pid_exit_with_dead_pid_returns_true() {
+        assert!(wait_for_pid_exit(u32::MAX, Duration::from_millis(5)));
+    }
+
+    #[test]
+    fn test_send_sigkill_dead_pid_does_not_panic() {
+        send_sigkill(u32::MAX);
+    }
+
+    #[test]
+    fn test_shell_single_quote_escapes_single_quotes() {
+        assert_eq!(shell_single_quote(""), "''");
+        assert_eq!(shell_single_quote("abc"), "'abc'");
+        assert_eq!(shell_single_quote("a'b"), "'a'\"'\"'b'");
+    }
+
+    #[test]
+    fn test_send_sigint_to_pane_invalid_target_returns_error() {
+        let result = send_sigint_to_pane("%999999");
+        assert!(result.is_err());
     }
 }

@@ -10,6 +10,7 @@ rust-version.workspace = true
 description = "CLI for agent-team-mail: send, read, and manage messages for AI agent teams"
 keywords = ["ai-agents", "messaging", "team-communication", "claude", "cli"]
 categories = ["command-line-utilities", "development-tools"]
+include = ["src/**", "scripts/**", "README.md", "LICENSE", "Cargo.toml"]
 
 [[bin]]
 name = "atm"
@@ -17,9 +18,11 @@ path = "src/main.rs"
 
 [dependencies]
 agent-team-mail-core.workspace = true
+sc-composer.workspace = true
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
-serde_json = "1"
+serde_json.workspace = true
+toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
@@ -27,9 +30,18 @@ dirs = "5"
 thiserror = "2"
 notify = "7"
 tracing.workspace = true
+sysinfo = { version = "0.31", default-features = false, features = ["system"] }
+crossterm = "0.28"
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+sysinfo = { version = "0.31", default-features = false, features = ["system"] }
 
 [dev-dependencies]
-tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
 serial_test = "3"
+tokio = { version = "1", features = ["macros", "process", "rt-multi-thread", "time"] }

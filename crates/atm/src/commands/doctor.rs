@@ -1,0 +1,2266 @@
+//! `atm doctor` — daemon/team health diagnostics.
+
+use anyhow::{Context, Result};
+use clap::Args;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
+use agent_team_mail_core::daemon_client::{
+    AgentSummary, CanonicalMemberState, SessionQueryResult, daemon_is_running, daemon_pid_path,
+    daemon_socket_path, query_list_agents, query_list_agents_for_team, query_session_for_team,
+    query_team_member_states,
+};
+use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::log_reader::{LogFilter, LogReader};
+use agent_team_mail_core::schema::TeamConfig;
+use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
+
+use crate::util::hook_identity::read_hook_file;
+use crate::util::member_labels::UNREGISTERED_MARKER;
+use crate::util::settings::get_home_dir;
+
+#[derive(Args, Debug)]
+pub struct DoctorArgs {
+    /// Team name (uses configured default when omitted)
+    #[arg(long)]
+    team: Option<String>,
+
+    /// Output report as stable JSON schema
+    #[arg(long)]
+    json: bool,
+
+    /// Override log window start (ISO-8601 timestamp or duration, e.g. 30m, 2h, 1d)
+    #[arg(long)]
+    since: Option<String>,
+
+    /// Restrict log diagnostics to error-level events only
+    #[arg(long)]
+    errors_only: bool,
+
+    /// Use full log window from team-lead session start
+    #[arg(long)]
+    full: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+enum Severity {
+    Critical,
+    Warn,
+    Info,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Finding {
+    severity: Severity,
+    check: String,
+    code: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Recommendation {
+    command: String,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FindingCounts {
+    critical: usize,
+    warn: usize,
+    info: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Summary {
+    team: String,
+    generated_at: String,
+    has_critical: bool,
+    counts: FindingCounts,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LogWindow {
+    mode: String,
+    start: String,
+    end: String,
+    elapsed_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+struct EnvOverrideValue {
+    source: String,
+    value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct EnvOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    atm_home: Option<EnvOverrideValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    atm_team: Option<EnvOverrideValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    atm_identity: Option<EnvOverrideValue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DoctorReport {
+    summary: Summary,
+    findings: Vec<Finding>,
+    recommendations: Vec<Recommendation>,
+    log_window: LogWindow,
+    env_overrides: EnvOverrides,
+    #[serde(skip_serializing, skip_deserializing, default)]
+    member_snapshot: Vec<MemberSnapshot>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct MemberSnapshot {
+    name: String,
+    agent_type: String,
+    model: String,
+    status: String,
+    activity: String,
+    session_id: Option<String>,
+    process_id: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct DoctorState {
+    // RFC3339 timestamp of last doctor invocation per team.
+    last_call_by_team: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DaemonStatusSnapshot {
+    #[serde(default)]
+    plugins: Vec<PluginStatusSnapshot>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PluginStatusSnapshot {
+    name: String,
+    status: String,
+    #[serde(default)]
+    last_error: Option<String>,
+}
+
+pub fn execute(args: DoctorArgs) -> Result<()> {
+    // Prime daemon connectivity early so doctor reflects post-autostart health.
+    // Must be best-effort: doctor should still produce a report when daemon is
+    // unavailable or autostart fails.
+    // Intentionally uses the unscoped query for connectivity priming only;
+    // doctor findings themselves use team-scoped checks below.
+    let _ = query_list_agents();
+
+    let current_dir = std::env::current_dir()?;
+    let home_dir = get_home_dir()?;
+
+    let config = resolve_config(
+        &ConfigOverrides {
+            team: args.team.clone(),
+            ..Default::default()
+        },
+        &current_dir,
+        &home_dir,
+    )?;
+    let team = config.core.default_team.clone();
+
+    let report = build_report(&home_dir, &team, &args)?;
+
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm",
+        action: "doctor",
+        team: Some(team.clone()),
+        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+        agent_id: Some(config.core.identity.clone()),
+        agent_name: Some(config.core.identity.clone()),
+        result: Some(
+            if report.summary.has_critical {
+                "critical_findings"
+            } else {
+                "ok"
+            }
+            .to_string(),
+        ),
+        count: Some(report.findings.len() as u64),
+        ..Default::default()
+    });
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_human(&report);
+    }
+
+    persist_last_call(&home_dir, &team)?;
+
+    if report.summary.has_critical {
+        std::process::exit(2);
+    }
+
+    Ok(())
+}
+
+/// Build a doctor report JSON snapshot for monitor consumers.
+///
+/// This reuses the same evaluation path as `atm doctor` without terminal UI
+/// side effects, so monitor logic does not duplicate health checks.
+pub(crate) fn monitor_report_json(home_dir: &Path, team: &str) -> Result<serde_json::Value> {
+    let args = DoctorArgs {
+        team: Some(team.to_string()),
+        json: true,
+        since: None,
+        errors_only: false,
+        full: false,
+    };
+    let report = build_report(home_dir, team, &args)?;
+    Ok(serde_json::to_value(report)?)
+}
+
+fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<DoctorReport> {
+    let now = Utc::now();
+    let team_dir = home_dir.join(".claude/teams").join(team);
+    let config_path = team_dir.join("config.json");
+
+    let mut findings: Vec<Finding> = Vec::new();
+    let mut daemon_states_by_agent: HashMap<String, CanonicalMemberState> = HashMap::new();
+
+    if !team_dir.exists() {
+        findings.push(finding(
+            Severity::Critical,
+            "config_runtime_drift",
+            "TEAM_DIR_MISSING",
+            format!("Team directory missing: {}", team_dir.display()),
+        ));
+    }
+
+    let team_config = if config_path.exists() {
+        let content = fs::read_to_string(&config_path)
+            .with_context(|| format!("Failed to read {}", config_path.display()))?;
+        Some(serde_json::from_str::<TeamConfig>(&content).context("Failed to parse team config")?)
+    } else {
+        findings.push(finding(
+            Severity::Critical,
+            "config_runtime_drift",
+            "TEAM_CONFIG_MISSING",
+            format!("Team config missing: {}", config_path.display()),
+        ));
+        None
+    };
+
+    // Check 1: daemon health (lock/socket/PID/status coherence)
+    findings.extend(check_daemon_health(home_dir));
+    findings.extend(check_plugin_init_failures(home_dir));
+
+    // Check 2 + 3 + 4: session/roster/mailbox integrity
+    if let Some(cfg) = &team_config {
+        let (pid_findings, daemon_states) =
+            check_pid_session_reconciliation_with_query(team, cfg, query_team_member_states);
+        daemon_states_by_agent = daemon_states;
+        findings.extend(pid_findings);
+        findings.extend(check_roster_session_integrity(team, cfg));
+        findings.extend(check_mailbox_integrity(team_dir.join("inboxes"), team, cfg));
+    }
+
+    // Check 5: config/runtime drift
+    findings.extend(check_config_runtime_drift(team, &args.team));
+
+    // Check 6: unified log diagnostics
+    let (window_start, mode) =
+        compute_log_window_start(home_dir, team, team_config.as_ref(), args)?;
+    let window_end = now;
+    findings.extend(check_log_diagnostics(
+        home_dir,
+        window_start,
+        window_end,
+        args.errors_only,
+    ));
+
+    findings.sort_by_key(|f| match f.severity {
+        Severity::Critical => 0,
+        Severity::Warn => 1,
+        Severity::Info => 2,
+    });
+
+    let recommendations = build_recommendations(team, &findings, has_register_session_context());
+
+    let counts = count_findings(&findings);
+    let summary = Summary {
+        team: team.to_string(),
+        generated_at: now.to_rfc3339(),
+        has_critical: counts.critical > 0,
+        counts,
+    };
+
+    Ok(DoctorReport {
+        summary,
+        findings,
+        recommendations,
+        log_window: LogWindow {
+            mode,
+            start: window_start.to_rfc3339(),
+            end: window_end.to_rfc3339(),
+            elapsed_secs: window_end
+                .signed_duration_since(window_start)
+                .num_seconds()
+                .max(0) as u64,
+        },
+        env_overrides: active_env_overrides(),
+        member_snapshot: build_member_snapshot(team_config.as_ref(), &daemon_states_by_agent),
+    })
+}
+
+fn build_member_snapshot(
+    team_config: Option<&TeamConfig>,
+    daemon_states_by_agent: &HashMap<String, CanonicalMemberState>,
+) -> Vec<MemberSnapshot> {
+    let mut names = BTreeSet::new();
+    let mut config_members: HashMap<&str, &agent_team_mail_core::schema::AgentMember> =
+        HashMap::new();
+
+    if let Some(cfg) = team_config {
+        for member in &cfg.members {
+            names.insert(member.name.clone());
+            config_members.insert(member.name.as_str(), member);
+        }
+    }
+    for state in daemon_states_by_agent.values() {
+        names.insert(state.agent.clone());
+    }
+
+    names
+        .into_iter()
+        .map(|name| {
+            if let Some(member) = config_members.get(name.as_str()) {
+                MemberSnapshot {
+                    name: name.clone(),
+                    agent_type: member.agent_type.clone(),
+                    model: member.model.clone(),
+                    status: snapshot_status_from_canonical_state(
+                        daemon_states_by_agent.get(name.as_str()),
+                    ),
+                    activity: snapshot_activity_from_canonical_state(
+                        daemon_states_by_agent.get(name.as_str()),
+                    ),
+                    session_id: daemon_states_by_agent
+                        .get(name.as_str())
+                        .and_then(|s| s.session_id.clone()),
+                    process_id: daemon_states_by_agent
+                        .get(name.as_str())
+                        .and_then(|s| s.process_id),
+                }
+            } else {
+                MemberSnapshot {
+                    name: format!("{name} {UNREGISTERED_MARKER}"),
+                    agent_type: UNREGISTERED_MARKER.to_string(),
+                    model: UNREGISTERED_MARKER.to_string(),
+                    status: snapshot_status_from_canonical_state(
+                        daemon_states_by_agent.get(name.as_str()),
+                    ),
+                    activity: snapshot_activity_from_canonical_state(
+                        daemon_states_by_agent.get(name.as_str()),
+                    ),
+                    session_id: daemon_states_by_agent
+                        .get(name.as_str())
+                        .and_then(|s| s.session_id.clone()),
+                    process_id: daemon_states_by_agent
+                        .get(name.as_str())
+                        .and_then(|s| s.process_id),
+                }
+            }
+        })
+        .collect()
+}
+
+fn snapshot_status_from_canonical_state(state: Option<&CanonicalMemberState>) -> String {
+    match state.map(|s| s.state.as_str()) {
+        Some("active") | Some("idle") => "Online".to_string(),
+        Some("offline") | Some("dead") => "Offline".to_string(),
+        _ => "Unknown".to_string(),
+    }
+}
+
+fn snapshot_activity_from_canonical_state(state: Option<&CanonicalMemberState>) -> String {
+    match state.map(|s| s.activity.as_str()) {
+        Some("busy") => "Busy".to_string(),
+        Some("idle") => "Idle".to_string(),
+        _ => "Unknown".to_string(),
+    }
+}
+
+fn finding(severity: Severity, check: &str, code: &str, message: String) -> Finding {
+    Finding {
+        severity,
+        check: check.to_string(),
+        code: code.to_string(),
+        message,
+    }
+}
+
+fn nonempty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn env_override(name: &str) -> Option<EnvOverrideValue> {
+    nonempty_env(name).map(|value| EnvOverrideValue {
+        source: "env".to_string(),
+        value,
+    })
+}
+
+fn active_env_overrides() -> EnvOverrides {
+    EnvOverrides {
+        atm_home: env_override("ATM_HOME"),
+        atm_team: env_override("ATM_TEAM"),
+        atm_identity: env_override("ATM_IDENTITY"),
+    }
+}
+
+fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
+    let mut findings = Vec::new();
+
+    let running = daemon_is_running();
+    let socket_path =
+        daemon_socket_path().unwrap_or_else(|_| home_dir.join(".claude/daemon/atm-daemon.sock"));
+    let pid_path =
+        daemon_pid_path().unwrap_or_else(|_| home_dir.join(".claude/daemon/atm-daemon.pid"));
+    let lock_path = home_dir.join(".config/atm/daemon.lock");
+    let status_path = home_dir.join(".claude/daemon/status.json");
+
+    if !running {
+        findings.push(finding(
+            Severity::Critical,
+            "daemon_health",
+            "DAEMON_NOT_RUNNING",
+            "Daemon is not running or PID cannot be verified".to_string(),
+        ));
+    }
+
+    if socket_path.exists() && !running {
+        findings.push(finding(
+            Severity::Warn,
+            "daemon_health",
+            "STALE_SOCKET",
+            format!(
+                "Socket exists but daemon not running: {}",
+                socket_path.display()
+            ),
+        ));
+    }
+
+    if !socket_path.exists() && running {
+        findings.push(finding(
+            Severity::Warn,
+            "daemon_health",
+            "SOCKET_MISSING",
+            format!(
+                "Daemon appears running but socket missing: {}",
+                socket_path.display()
+            ),
+        ));
+    }
+
+    if !pid_path.exists() {
+        findings.push(finding(
+            Severity::Warn,
+            "daemon_health",
+            "PID_FILE_MISSING",
+            format!("Daemon PID file missing: {}", pid_path.display()),
+        ));
+    }
+
+    if !lock_path.exists() {
+        findings.push(finding(
+            Severity::Info,
+            "daemon_health",
+            "LOCK_FILE_MISSING",
+            format!("Daemon lock file not present: {}", lock_path.display()),
+        ));
+    }
+
+    if !status_path.exists() {
+        findings.push(finding(
+            Severity::Warn,
+            "daemon_health",
+            "STATUS_FILE_MISSING",
+            format!("Daemon status file missing: {}", status_path.display()),
+        ));
+    }
+
+    findings
+}
+
+fn check_plugin_init_failures(home_dir: &Path) -> Vec<Finding> {
+    let status_path = home_dir.join(".claude/daemon/status.json");
+    let raw = match fs::read_to_string(&status_path) {
+        Ok(raw) => raw,
+        Err(_) => return Vec::new(),
+    };
+
+    let snapshot: DaemonStatusSnapshot = match serde_json::from_str(&raw) {
+        Ok(parsed) => parsed,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut findings = Vec::new();
+    for plugin in snapshot.plugins {
+        if plugin.status != "disabled_init_error" {
+            continue;
+        }
+        findings.push(finding(
+            Severity::Warn,
+            "daemon_health",
+            "PLUGIN_INIT_FAILED",
+            format!(
+                "Plugin '{}' failed initialization and is disabled: {}",
+                plugin.name,
+                plugin
+                    .last_error
+                    .unwrap_or_else(|| "plugin init failed".to_string())
+            ),
+        ));
+    }
+    findings
+}
+
+fn check_pid_session_reconciliation_with_query<F>(
+    team: &str,
+    cfg: &TeamConfig,
+    query_states: F,
+) -> (Vec<Finding>, HashMap<String, CanonicalMemberState>)
+where
+    F: Fn(&str) -> anyhow::Result<Option<Vec<CanonicalMemberState>>>,
+{
+    let mut findings = Vec::new();
+    let (daemon_states, query_unreachable, unreachable_reason): (
+        HashMap<String, CanonicalMemberState>,
+        bool,
+        Option<String>,
+    ) = match query_states(team) {
+        Ok(Some(states)) => (
+            states
+                .into_iter()
+                .map(|s| (s.agent.clone(), s))
+                .collect::<HashMap<_, _>>(),
+            false,
+            None,
+        ),
+        Ok(None) => (
+            HashMap::new(),
+            true,
+            Some(format!(
+                "Daemon team-scoped state query unavailable for team '{team}'"
+            )),
+        ),
+        Err(err) => (
+            HashMap::new(),
+            true,
+            Some(format!(
+                "Daemon team-scoped state query failed for team '{team}': {err}"
+            )),
+        ),
+    };
+
+    if let Some(reason) = unreachable_reason {
+        findings.push(finding(
+            Severity::Warn,
+            "daemon_health",
+            "DAEMON_UNREACHABLE",
+            reason,
+        ));
+    }
+
+    for state in daemon_states.values() {
+        if state.source != "pid_backend_validation" {
+            continue;
+        }
+        if let Some(details) = parse_pid_backend_mismatch_reason(&state.reason) {
+            findings.push(finding(
+                Severity::Warn,
+                "pid_session_reconciliation",
+                "PID_PROCESS_MISMATCH",
+                format!(
+                    "Member '{}' failed daemon PID/backend validation: backend='{}' expected='{}' actual='{}' pid={}{}",
+                    state.agent,
+                    details.backend,
+                    details.expected,
+                    details.actual,
+                    details.pid,
+                    if state.in_config {
+                        String::new()
+                    } else {
+                        " (daemon-only session)".to_string()
+                    }
+                ),
+            ));
+        } else {
+            findings.push(finding(
+                Severity::Warn,
+                "pid_session_reconciliation",
+                "PID_PROCESS_MISMATCH",
+                format!(
+                    "Member '{}' failed daemon PID/backend validation: {}{}",
+                    state.agent,
+                    state.reason,
+                    if state.in_config {
+                        String::new()
+                    } else {
+                        " (daemon-only session)".to_string()
+                    }
+                ),
+            ));
+        }
+    }
+
+    for member in &cfg.members {
+        let daemon_state = daemon_states.get(&member.name);
+        match daemon_state.map(|s| s.state.as_str()) {
+            Some("offline") | Some("dead") if member.is_active == Some(true) => {
+                findings.push(finding(
+                    Severity::Warn,
+                    "pid_session_reconciliation",
+                    "ACTIVE_FLAG_STALE",
+                    format!(
+                        "Member '{}' has activity hint isActive=true but daemon state is dead (pid={})",
+                        member.name,
+                        daemon_state
+                            .and_then(|s| s.process_id)
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| "unknown".to_string())
+                    ),
+                ))
+            }
+            Some("active") | Some("idle") if member.is_active != Some(true) => {
+                findings.push(finding(
+                    Severity::Warn,
+                    "pid_session_reconciliation",
+                    "GHOST_SESSION",
+                    format!(
+                        "Member '{}' has activity hint isActive!=true but daemon reports live state '{}'",
+                        member.name,
+                        daemon_state
+                            .map(|s| s.state.as_str())
+                            .unwrap_or("unknown")
+                    ),
+                ))
+            }
+            _ if member.is_active == Some(true) && query_unreachable => findings.push(finding(
+                Severity::Warn,
+                "pid_session_reconciliation",
+                "ACTIVE_WITHOUT_SESSION",
+                format!(
+                    "Member '{}' has activity hint isActive=true but daemon state query unavailable",
+                    member.name
+                ),
+            )),
+            _ if member.is_active == Some(true) => findings.push(finding(
+                Severity::Warn,
+                "pid_session_reconciliation",
+                "ACTIVE_WITHOUT_SESSION",
+                format!(
+                    "Member '{}' has activity hint isActive=true but no daemon state record found",
+                    member.name
+                ),
+            )),
+            _ => {}
+        }
+    }
+
+    (findings, daemon_states)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PidMismatchDetails {
+    backend: String,
+    expected: String,
+    actual: String,
+    pid: u32,
+}
+
+fn parse_pid_backend_mismatch_reason(reason: &str) -> Option<PidMismatchDetails> {
+    let rest = reason.strip_prefix("pid/backend mismatch: backend='")?;
+    let (backend, rest) = rest.split_once("' expected='")?;
+    let (expected, rest) = rest.split_once("' actual='")?;
+    let (actual, pid_part) = rest.rsplit_once("' pid=")?;
+    let pid = pid_part.parse::<u32>().ok()?;
+    Some(PidMismatchDetails {
+        backend: backend.to_string(),
+        expected: expected.to_string(),
+        actual: actual.to_string(),
+        pid,
+    })
+}
+
+fn check_roster_session_integrity(team: &str, cfg: &TeamConfig) -> Vec<Finding> {
+    check_roster_session_integrity_with_query(team, cfg, query_list_agents_for_team)
+}
+
+fn check_roster_session_integrity_with_query<F>(
+    team: &str,
+    cfg: &TeamConfig,
+    list_agents_for_team: F,
+) -> Vec<Finding>
+where
+    F: Fn(&str) -> anyhow::Result<Option<Vec<AgentSummary>>>,
+{
+    let mut findings = Vec::new();
+    let roster: HashSet<String> = cfg.members.iter().map(|m| m.name.clone()).collect();
+
+    if let Ok(Some(agents)) = list_agents_for_team(team) {
+        for tracked in agents {
+            if !roster.contains(&tracked.agent) {
+                findings.push(finding(
+                    Severity::Warn,
+                    "roster_session_integrity",
+                    "DAEMON_TRACKS_UNKNOWN_AGENT",
+                    format!(
+                        "Daemon tracks '{}' which is not in team '{}' roster",
+                        tracked.agent, team
+                    ),
+                ));
+            }
+        }
+    }
+
+    findings
+}
+
+fn check_mailbox_integrity(inboxes_dir: PathBuf, team: &str, cfg: &TeamConfig) -> Vec<Finding> {
+    check_mailbox_integrity_with_query(inboxes_dir, team, cfg, query_session_for_team)
+}
+
+fn check_mailbox_integrity_with_query<F>(
+    inboxes_dir: PathBuf,
+    team: &str,
+    cfg: &TeamConfig,
+    query_session: F,
+) -> Vec<Finding>
+where
+    F: Fn(&str, &str) -> anyhow::Result<Option<SessionQueryResult>>,
+{
+    let mut findings = Vec::new();
+    let roster: HashSet<String> = cfg.members.iter().map(|m| m.name.clone()).collect();
+
+    let mut local_mailboxes: HashSet<String> = HashSet::new();
+    if inboxes_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&inboxes_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if !name.ends_with(".json") {
+                    continue;
+                }
+                let stem = name.trim_end_matches(".json");
+                if stem.contains('.') {
+                    continue; // per-origin files not teardown authority
+                }
+                local_mailboxes.insert(stem.to_string());
+            }
+        }
+    }
+
+    for mailbox in &local_mailboxes {
+        if !roster.contains(mailbox) {
+            findings.push(finding(
+                Severity::Critical,
+                "mailbox_teardown_integrity",
+                "ORPHAN_MAILBOX",
+                format!(
+                    "Mailbox '{}' exists without matching roster member in team '{}'",
+                    mailbox, team
+                ),
+            ));
+        }
+    }
+
+    for member in &cfg.members {
+        let session = query_session(team, &member.name).ok().flatten();
+        if let Some(s) = session
+            && !s.alive
+        {
+            if member.name == "team-lead" {
+                findings.push(finding(
+                    Severity::Warn,
+                    "mailbox_teardown_integrity",
+                    "LEAD_SESSION_RECOVERY_REQUIRED",
+                    format!(
+                        "Team lead has dead session (pid={}) and requires session recovery/reregister",
+                        s.process_id
+                    ),
+                ));
+                continue;
+            }
+
+            let has_mailbox = local_mailboxes.contains(&member.name);
+            if has_mailbox {
+                findings.push(finding(
+                    Severity::Critical,
+                    "mailbox_teardown_integrity",
+                    "TERMINAL_MEMBER_NOT_CLEANED",
+                    format!(
+                        "Member '{}' has dead session but still exists in roster and mailbox",
+                        member.name
+                    ),
+                ));
+            } else {
+                findings.push(finding(
+                    Severity::Critical,
+                    "mailbox_teardown_integrity",
+                    "PARTIAL_TEARDOWN",
+                    format!(
+                        "Member '{}' has dead session and missing mailbox but still exists in roster",
+                        member.name
+                    ),
+                ));
+            }
+        }
+    }
+
+    findings
+}
+
+fn check_config_runtime_drift(team: &str, explicit_team_arg: &Option<String>) -> Vec<Finding> {
+    let mut findings = Vec::new();
+
+    if let Ok(env_team) = std::env::var("ATM_TEAM")
+        && env_team != team
+    {
+        findings.push(finding(
+            Severity::Info,
+            "config_runtime_drift",
+            "ENV_TEAM_MISMATCH",
+            format!(
+                "ATM_TEAM='{}' differs from resolved team='{}'",
+                env_team, team
+            ),
+        ));
+    }
+
+    if explicit_team_arg.is_none() {
+        findings.push(finding(
+            Severity::Info,
+            "config_runtime_drift",
+            "TEAM_FROM_DEFAULT",
+            "Team resolved from config default (no --team override)".to_string(),
+        ));
+    }
+
+    findings
+}
+
+fn check_log_diagnostics(
+    home_dir: &Path,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    errors_only: bool,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+
+    let log_path = home_dir.join(".config/atm/atm.log.jsonl");
+    let delta = end.signed_duration_since(start);
+    let since_std = if delta < Duration::zero() {
+        std::time::Duration::from_secs(0)
+    } else {
+        delta
+            .to_std()
+            .unwrap_or_else(|_| std::time::Duration::from_secs(0))
+    };
+
+    let filter = LogFilter {
+        level: if errors_only {
+            Some("error".to_string())
+        } else {
+            None
+        },
+        since: Some(since_std),
+        ..Default::default()
+    };
+
+    let reader = LogReader::new(log_path.clone(), filter);
+    let events = match reader.read_filtered() {
+        Ok(v) => v,
+        Err(e) => {
+            findings.push(finding(
+                Severity::Warn,
+                "log_diagnostics",
+                "LOG_READ_FAILED",
+                format!("Failed to read {}: {e}", log_path.display()),
+            ));
+            return findings;
+        }
+    };
+
+    if events.is_empty() {
+        if !errors_only {
+            findings.push(finding(
+                Severity::Info,
+                "log_diagnostics",
+                "NO_EVENTS_IN_WINDOW",
+                "No matching log events found in selected window".to_string(),
+            ));
+        }
+        return findings;
+    }
+
+    let (warn_count, err_count) = events.iter().fold((0usize, 0usize), |(w, e), ev| {
+        if ev.level.eq_ignore_ascii_case("error") {
+            (w, e + 1)
+        } else if ev.level.eq_ignore_ascii_case("warn") {
+            (w + 1, e)
+        } else {
+            (w, e)
+        }
+    });
+
+    if err_count > 0 {
+        findings.push(finding(
+            Severity::Warn,
+            "log_diagnostics",
+            "ERROR_EVENTS_PRESENT",
+            format!("Found {err_count} error-level event(s) in log window"),
+        ));
+    }
+    if !errors_only && warn_count > 0 {
+        findings.push(finding(
+            Severity::Info,
+            "log_diagnostics",
+            "WARN_EVENTS_PRESENT",
+            format!("Found {warn_count} warning-level event(s) in log window"),
+        ));
+    }
+
+    findings
+}
+
+fn parse_since_input(input: &str) -> Result<DateTime<Utc>> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(input) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+
+    let trimmed = input.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        anyhow::bail!("value cannot be empty");
+    }
+
+    let (num, suffix) = trimmed.split_at(trimmed.len().saturating_sub(1));
+    let value: i64 = num
+        .parse()
+        .with_context(|| format!("invalid duration number: '{num}'"))?;
+    if value <= 0 {
+        anyhow::bail!("duration must be a positive integer (got {value})");
+    }
+    let dur = match suffix {
+        "s" => Duration::seconds(value),
+        "m" => Duration::minutes(value),
+        "h" => Duration::hours(value),
+        "d" => Duration::days(value),
+        _ => anyhow::bail!("invalid duration unit '{suffix}' (expected one of: s, m, h, d)"),
+    };
+
+    Ok(Utc::now() - dur)
+}
+
+fn read_doctor_state(home_dir: &Path) -> DoctorState {
+    let path = home_dir.join(".config/atm/doctor-state.json");
+    let Ok(content) = fs::read_to_string(path) else {
+        return DoctorState::default();
+    };
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+fn persist_last_call(home_dir: &Path, team: &str) -> Result<()> {
+    let mut state = read_doctor_state(home_dir);
+    state
+        .last_call_by_team
+        .insert(team.to_string(), Utc::now().to_rfc3339());
+
+    let path = home_dir.join(".config/atm/doctor-state.json");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, serde_json::to_vec_pretty(&state)?)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn compute_log_window_start(
+    home_dir: &Path,
+    team: &str,
+    cfg: Option<&TeamConfig>,
+    args: &DoctorArgs,
+) -> Result<(DateTime<Utc>, String)> {
+    if let Some(since) = &args.since {
+        let since_mode = if DateTime::parse_from_rfc3339(since.trim()).is_ok() {
+            "since_timestamp"
+        } else {
+            "since_duration"
+        };
+        let dt = parse_since_input(since).with_context(|| {
+            format!(
+                "Invalid --since value: '{since}'. Use ISO-8601 or positive duration like 30m/2h/1d"
+            )
+        })?;
+        return Ok((dt, since_mode.to_string()));
+    }
+
+    let fallback = Utc::now() - Duration::hours(1);
+    let team_lead_start = cfg
+        .and_then(|c| c.members.iter().find(|m| m.name == "team-lead"))
+        .and_then(|m| DateTime::<Utc>::from_timestamp_millis(m.joined_at as i64))
+        .unwrap_or(fallback);
+
+    if args.full {
+        return Ok((team_lead_start, "full".to_string()));
+    }
+
+    let state = read_doctor_state(home_dir);
+    let last_call = state
+        .last_call_by_team
+        .get(team)
+        .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
+        .map(|dt| dt.with_timezone(&Utc));
+
+    let start = match last_call {
+        Some(lc) if lc > team_lead_start => lc,
+        _ => team_lead_start,
+    };
+    Ok((start, "default_incremental".to_string()))
+}
+
+fn count_findings(findings: &[Finding]) -> FindingCounts {
+    let mut counts = FindingCounts {
+        critical: 0,
+        warn: 0,
+        info: 0,
+    };
+
+    for f in findings {
+        match f.severity {
+            Severity::Critical => counts.critical += 1,
+            Severity::Warn => counts.warn += 1,
+            Severity::Info => counts.info += 1,
+        }
+    }
+
+    counts
+}
+
+fn has_register_session_context() -> bool {
+    if let Ok(session_id) = std::env::var("CLAUDE_SESSION_ID")
+        && !session_id.trim().is_empty()
+    {
+        return true;
+    }
+    read_hook_file()
+        .ok()
+        .flatten()
+        .map(|d| !d.session_id.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn build_recommendations(
+    team: &str,
+    findings: &[Finding],
+    has_session_context: bool,
+) -> Vec<Recommendation> {
+    let mut recs: Vec<Recommendation> = Vec::new();
+
+    let has = |code: &str| findings.iter().any(|f| f.code == code);
+
+    if has("DAEMON_NOT_RUNNING") || has("DAEMON_UNREACHABLE") {
+        recs.push(Recommendation {
+            command: "atm-daemon".to_string(),
+            reason: "Start daemon to enable session/teardown reconciliation".to_string(),
+        });
+    }
+
+    if has("ORPHAN_MAILBOX") || has("TERMINAL_MEMBER_NOT_CLEANED") || has("PARTIAL_TEARDOWN") {
+        recs.push(Recommendation {
+            command: format!("atm teams cleanup {team}"),
+            reason:
+                "Reconcile stale roster/mailbox teardown drift (dead terminal members are cleanup-eligible; active sessions are preserved)".to_string(),
+        });
+    }
+
+    if has("ACTIVE_WITHOUT_SESSION") || has("ACTIVE_FLAG_STALE") || has("GHOST_SESSION") {
+        recs.push(Recommendation {
+            command: format!("atm teams cleanup {team}"),
+            reason: "Reconcile stale non-lead session state and mailbox/roster drift".to_string(),
+        });
+    }
+
+    if has("LEAD_SESSION_RECOVERY_REQUIRED") {
+        if has_session_context {
+            recs.push(Recommendation {
+                command: format!("atm register {team}"),
+                reason: "Refresh team-lead/session state before additional lifecycle actions"
+                    .to_string(),
+            });
+        } else {
+            recs.push(Recommendation {
+                command: format!("atm --as team-lead register {team}"),
+                reason: "No session context detected. Run from a managed Claude session (or set CLAUDE_SESSION_ID) before retrying register.".to_string(),
+            });
+        }
+    }
+
+    recs
+}
+
+fn print_human(report: &DoctorReport) {
+    print!("{}", render_human(report));
+}
+
+fn format_session_short(session_id: Option<&str>) -> String {
+    let Some(session) = session_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return "-".to_string();
+    };
+
+    if looks_like_uuid(session) {
+        return session.chars().take(8).collect();
+    }
+
+    if let Some(rest) = session.strip_prefix("local:")
+        && let Some(name) = rest.split(':').next()
+        && !name.is_empty()
+    {
+        return format!("local:{name}");
+    }
+
+    session.to_string()
+}
+
+fn looks_like_uuid(value: &str) -> bool {
+    let mut parts = value.split('-');
+    for expected_len in [8usize, 4, 4, 4, 12] {
+        let Some(part) = parts.next() else {
+            return false;
+        };
+        if part.len() != expected_len || !part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+    parts.next().is_none()
+}
+
+fn render_human(report: &DoctorReport) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("ATM Doctor — team {}\n", report.summary.team));
+    out.push_str(&format!("Generated: {}\n\n", report.summary.generated_at));
+
+    out.push_str(&format!(
+        "Findings: critical={} warn={} info={}\n",
+        report.summary.counts.critical, report.summary.counts.warn, report.summary.counts.info
+    ));
+    out.push_str(&format!(
+        "Log window: {}\n\n",
+        render_log_window_human(&report.log_window)
+    ));
+
+    if report.env_overrides.atm_home.is_some()
+        || report.env_overrides.atm_team.is_some()
+        || report.env_overrides.atm_identity.is_some()
+    {
+        out.push_str("Active env overrides:\n");
+        if let Some(v) = &report.env_overrides.atm_home {
+            out.push_str(&format!("  ATM_HOME={} (source={})\n", v.value, v.source));
+        }
+        if let Some(v) = &report.env_overrides.atm_team {
+            out.push_str(&format!("  ATM_TEAM={} (source={})\n", v.value, v.source));
+        }
+        if let Some(v) = &report.env_overrides.atm_identity {
+            out.push_str(&format!(
+                "  ATM_IDENTITY={} (source={})\n",
+                v.value, v.source
+            ));
+        }
+        out.push('\n');
+    }
+
+    if !report.member_snapshot.is_empty() {
+        out.push_str("Members:\n");
+        out.push_str(&format!(
+            "  {:<20} {:<20} {:<24} {:<10} {:<10} {:<8} {}\n",
+            "Name", "Type", "Model", "Status", "Activity", "PID", "Session ID"
+        ));
+        out.push_str(&format!("  {}\n", "─".repeat(120)));
+        for m in &report.member_snapshot {
+            let pid = m
+                .process_id
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            let session = format_session_short(m.session_id.as_deref());
+            out.push_str(&format!(
+                "  {:<20} {:<20} {:<24} {:<10} {:<10} {:<8} {}\n",
+                m.name, m.agent_type, m.model, m.status, m.activity, pid, session
+            ));
+        }
+        out.push('\n');
+    }
+
+    if report.findings.is_empty() {
+        out.push_str("No findings.\n");
+        return out;
+    }
+
+    out.push_str("Findings (ordered by severity):\n");
+    for f in &report.findings {
+        let sev = match f.severity {
+            Severity::Critical => "CRITICAL",
+            Severity::Warn => "WARN",
+            Severity::Info => "INFO",
+        };
+        out.push_str(&format!(
+            "- [{sev}] {} ({}): {}\n",
+            f.check, f.code, f.message
+        ));
+    }
+
+    if !report.recommendations.is_empty() {
+        out.push_str("\nRecommended actions:\n");
+        for r in &report.recommendations {
+            out.push_str(&format!("- {}  # {}\n", r.command, r.reason));
+        }
+    }
+
+    out
+}
+
+fn render_log_window_human(window: &LogWindow) -> String {
+    let elapsed = human_duration(window.elapsed_secs);
+    match window.mode.as_str() {
+        "default_incremental" | "since_duration" => format!("last {elapsed}"),
+        "since_timestamp" => parse_utc_timestamp(&window.start)
+            .map(|dt| format!("since {} ({elapsed})", dt.format("%Y-%m-%d %H:%M:%S UTC")))
+            .unwrap_or_else(|| fallback_log_window_human(window)),
+        "full" => format!("since session start ({elapsed})"),
+        _ => fallback_log_window_human(window),
+    }
+}
+
+fn fallback_log_window_human(window: &LogWindow) -> String {
+    format!("{} -> {} ({})", window.start, window.end, window.mode)
+}
+
+fn parse_utc_timestamp(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+fn human_duration(seconds: u64) -> String {
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    if seconds < 3_600 {
+        return format!("{}m", seconds / 60);
+    }
+    if seconds < 86_400 {
+        return format!("{}h", seconds / 3_600);
+    }
+    format!("{}d", seconds / 86_400)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_team_mail_core::schema::AgentMember;
+    use serial_test::serial;
+
+    struct EnvGuard {
+        vars: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn isolate(keys: &'static [&'static str]) -> Self {
+            let mut vars = Vec::with_capacity(keys.len());
+            unsafe {
+                for key in keys {
+                    vars.push((*key, std::env::var(key).ok()));
+                    std::env::remove_var(key);
+                }
+            }
+            Self { vars }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                for (key, original) in &self.vars {
+                    match original {
+                        Some(v) => std::env::set_var(key, v),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
+    const OVERRIDE_ENV_KEYS: &[&str] = &["ATM_HOME", "ATM_TEAM", "ATM_IDENTITY"];
+
+    fn member(name: &str, is_active: Option<bool>, joined_at: u64) -> AgentMember {
+        AgentMember {
+            agent_id: format!("{name}@atm-dev"),
+            name: name.to_string(),
+            agent_type: "general-purpose".to_string(),
+            model: "sonnet".to_string(),
+            prompt: None,
+            color: None,
+            plan_mode_required: None,
+            joined_at,
+            tmux_pane_id: None,
+            cwd: std::env::temp_dir().to_string_lossy().to_string(),
+            subscriptions: vec![],
+            backend_type: None,
+            is_active,
+            last_active: None,
+            session_id: None,
+            external_backend_type: None,
+            external_model: None,
+            unknown_fields: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn parse_since_input_supports_duration() {
+        assert!(parse_since_input("30m").is_ok());
+        assert!(parse_since_input("2h").is_ok());
+        assert!(parse_since_input("1d").is_ok());
+        assert!(parse_since_input("bogus").is_err());
+    }
+
+    #[test]
+    fn parse_since_input_supports_rfc3339() {
+        let dt = parse_since_input("2026-02-27T20:00:00Z").expect("valid rfc3339");
+        assert_eq!(dt.to_rfc3339(), "2026-02-27T20:00:00+00:00");
+    }
+
+    #[test]
+    fn parse_since_input_rejects_zero_duration() {
+        let err = parse_since_input("0m")
+            .expect_err("zero duration must be rejected")
+            .to_string();
+        assert!(err.contains("positive integer"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_since_input_rejects_negative_duration() {
+        let err = parse_since_input("-5m")
+            .expect_err("negative duration must be rejected")
+            .to_string();
+        assert!(err.contains("positive integer"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_since_input_accepts_positive_durations() {
+        assert!(parse_since_input("5m").is_ok());
+        assert!(parse_since_input("1h").is_ok());
+    }
+
+    #[test]
+    fn format_session_short_formats_uuid_and_local_ids() {
+        assert_eq!(
+            format_session_short(Some("123e4567-e89b-12d3-a456-426614174000")),
+            "123e4567"
+        );
+        assert_eq!(
+            format_session_short(Some("local:team-lead:1772608955543:20111")),
+            "local:team-lead"
+        );
+        assert_eq!(format_session_short(Some("sess-1")), "sess-1");
+        assert_eq!(format_session_short(None), "-");
+        assert_eq!(format_session_short(Some("   ")), "-");
+    }
+
+    #[test]
+    fn snapshot_status_from_canonical_state_maps_active_offline_unknown() {
+        let active = CanonicalMemberState {
+            agent: "a".to_string(),
+            state: "active".to_string(),
+            activity: "busy".to_string(),
+            session_id: Some("s1".to_string()),
+            process_id: Some(1234),
+            last_alive_at: None,
+            reason: "x".to_string(),
+            source: "session_registry".to_string(),
+            in_config: true,
+        };
+        let dead = CanonicalMemberState {
+            state: "offline".to_string(),
+            ..active.clone()
+        };
+        let unknown = CanonicalMemberState {
+            state: "unknown".to_string(),
+            ..active.clone()
+        };
+        assert_eq!(
+            snapshot_status_from_canonical_state(Some(&active)),
+            "Online".to_string()
+        );
+        assert_eq!(
+            snapshot_status_from_canonical_state(Some(&dead)),
+            "Offline".to_string()
+        );
+        assert_eq!(
+            snapshot_status_from_canonical_state(Some(&unknown)),
+            "Unknown".to_string()
+        );
+        assert_eq!(snapshot_status_from_canonical_state(None), "Unknown");
+    }
+
+    #[test]
+    fn build_member_snapshot_includes_daemon_only_members_as_unregistered() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "sess-0".to_string(),
+            members: vec![member("team-lead", Some(false), 0)],
+            unknown_fields: HashMap::new(),
+        };
+        let mut daemon_states = HashMap::new();
+        daemon_states.insert(
+            "arch-ctm".to_string(),
+            CanonicalMemberState {
+                agent: "arch-ctm".to_string(),
+                state: "active".to_string(),
+                activity: "busy".to_string(),
+                session_id: Some("sess-1".to_string()),
+                process_id: Some(4242),
+                last_alive_at: None,
+                reason: "session active".to_string(),
+                source: "session_registry".to_string(),
+                in_config: false,
+            },
+        );
+
+        let snapshot = build_member_snapshot(Some(&cfg), &daemon_states);
+        let ghost = snapshot
+            .iter()
+            .find(|m| m.name.contains("arch-ctm"))
+            .expect("daemon-only member missing from snapshot");
+        assert!(
+            ghost.name.contains(UNREGISTERED_MARKER),
+            "daemon-only member name should include marker"
+        );
+        assert_eq!(ghost.agent_type, UNREGISTERED_MARKER);
+        assert_eq!(ghost.model, UNREGISTERED_MARKER);
+    }
+
+    #[test]
+    fn build_recommendations_includes_daemon_start() {
+        let findings = vec![finding(
+            Severity::Critical,
+            "daemon_health",
+            "DAEMON_NOT_RUNNING",
+            "x".to_string(),
+        )];
+        let recs = build_recommendations("atm-dev", &findings, true);
+        assert!(recs.iter().any(|r| r.command == "atm-daemon"));
+    }
+
+    #[test]
+    fn build_recommendations_includes_daemon_start_for_unreachable() {
+        let findings = vec![finding(
+            Severity::Warn,
+            "daemon_health",
+            "DAEMON_UNREACHABLE",
+            "x".to_string(),
+        )];
+        let recs = build_recommendations("atm-dev", &findings, true);
+        assert!(recs.iter().any(|r| r.command == "atm-daemon"));
+    }
+
+    #[test]
+    fn build_recommendations_routes_active_without_session_to_cleanup_with_context() {
+        let findings = vec![finding(
+            Severity::Warn,
+            "pid_session_reconciliation",
+            "ACTIVE_WITHOUT_SESSION",
+            "x".to_string(),
+        )];
+        let recs = build_recommendations("atm-dev", &findings, true);
+        assert!(
+            recs.iter()
+                .any(|r| r.command == "atm teams cleanup atm-dev")
+        );
+    }
+
+    #[test]
+    fn build_recommendations_routes_active_without_session_to_cleanup_without_context() {
+        let findings = vec![finding(
+            Severity::Warn,
+            "pid_session_reconciliation",
+            "ACTIVE_WITHOUT_SESSION",
+            "x".to_string(),
+        )];
+        let recs = build_recommendations("atm-dev", &findings, false);
+        assert!(
+            recs.iter()
+                .any(|r| r.command == "atm teams cleanup atm-dev")
+        );
+    }
+
+    #[test]
+    fn count_findings_counts_all_levels() {
+        let findings = vec![
+            finding(Severity::Critical, "a", "A", "x".to_string()),
+            finding(Severity::Warn, "b", "B", "x".to_string()),
+            finding(Severity::Info, "c", "C", "x".to_string()),
+        ];
+        let counts = count_findings(&findings);
+        assert_eq!(counts.critical, 1);
+        assert_eq!(counts.warn, 1);
+        assert_eq!(counts.info, 1);
+    }
+
+    #[test]
+    fn compute_log_window_prefers_max_of_team_start_and_last_call() {
+        let tmp = tempfile::tempdir().unwrap();
+        let team = "atm-dev";
+        let mut state = DoctorState::default();
+        state
+            .last_call_by_team
+            .insert(team.to_string(), "2026-02-27T21:00:00Z".to_string());
+        let state_path = tmp.path().join(".config/atm/doctor-state.json");
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+
+        let cfg = TeamConfig {
+            name: team.to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: format!("team-lead@{team}"),
+            lead_session_id: "sess".to_string(),
+            members: vec![member("team-lead", Some(true), 1772216400000)], // ~2026-02-27T19:00:00Z
+            unknown_fields: HashMap::new(),
+        };
+
+        let args = DoctorArgs {
+            team: Some(team.to_string()),
+            json: false,
+            since: None,
+            errors_only: false,
+            full: false,
+        };
+
+        let (start, mode) = compute_log_window_start(tmp.path(), team, Some(&cfg), &args).unwrap();
+        assert_eq!(mode, "default_incremental");
+        assert_eq!(start.to_rfc3339(), "2026-02-27T21:00:00+00:00");
+    }
+
+    #[test]
+    fn compute_log_window_since_duration_sets_duration_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let args = DoctorArgs {
+            team: Some("atm-dev".to_string()),
+            json: false,
+            since: Some("30m".to_string()),
+            errors_only: false,
+            full: false,
+        };
+        let (_start, mode) = compute_log_window_start(tmp.path(), "atm-dev", None, &args).unwrap();
+        assert_eq!(mode, "since_duration");
+    }
+
+    #[test]
+    fn compute_log_window_since_timestamp_sets_timestamp_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let args = DoctorArgs {
+            team: Some("atm-dev".to_string()),
+            json: false,
+            since: Some("2026-03-03T10:00:00Z".to_string()),
+            errors_only: false,
+            full: false,
+        };
+        let (start, mode) = compute_log_window_start(tmp.path(), "atm-dev", None, &args).unwrap();
+        assert_eq!(mode, "since_timestamp");
+        assert_eq!(start.to_rfc3339(), "2026-03-03T10:00:00+00:00");
+    }
+
+    #[test]
+    fn check_mailbox_integrity_detects_orphan_mailbox() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inboxes = tmp.path().join("inboxes");
+        fs::create_dir_all(&inboxes).unwrap();
+        fs::write(inboxes.join("orphan.json"), "[]").unwrap();
+
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("team-lead", Some(true), 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        let findings = check_mailbox_integrity(inboxes, "atm-dev", &cfg);
+        assert!(findings.iter().any(|f| f.code == "ORPHAN_MAILBOX"));
+    }
+
+    #[test]
+    fn check_roster_session_integrity_excludes_other_teams_when_scoped() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![
+                member("team-lead", Some(true), 0),
+                member("arch-ctm", Some(true), 0),
+            ],
+            unknown_fields: HashMap::new(),
+        };
+
+        // Seed simulated daemon state for two teams. The scoped query provider
+        // returns only members for the requested team.
+        let atm_dev_agents = vec![
+            AgentSummary {
+                agent: "team-lead".to_string(),
+                state: "idle".to_string(),
+            },
+            AgentSummary {
+                agent: "arch-ctm".to_string(),
+                state: "active".to_string(),
+            },
+        ];
+        let other_team_agents = vec![AgentSummary {
+            agent: "researcher".to_string(),
+            state: "idle".to_string(),
+        }];
+
+        let findings = check_roster_session_integrity_with_query("atm-dev", &cfg, |team| {
+            if team == "atm-dev" {
+                Ok(Some(atm_dev_agents.clone()))
+            } else {
+                Ok(Some(other_team_agents.clone()))
+            }
+        });
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.code == "DAEMON_TRACKS_UNKNOWN_AGENT"),
+            "scoped roster integrity check must ignore agents from other teams"
+        );
+    }
+
+    #[test]
+    fn check_roster_session_integrity_ignores_foreign_team_name_collision() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![
+                member("team-lead", Some(true), 0),
+                member("shared-agent", None, 0),
+            ],
+            unknown_fields: HashMap::new(),
+        };
+
+        let atm_dev_agents = vec![
+            AgentSummary {
+                agent: "team-lead".to_string(),
+                state: "idle".to_string(),
+            },
+            AgentSummary {
+                agent: "shared-agent".to_string(),
+                state: "idle".to_string(),
+            },
+        ];
+        let other_team_agents = vec![AgentSummary {
+            agent: "shared-agent".to_string(),
+            state: "active".to_string(),
+        }];
+
+        let findings = check_roster_session_integrity_with_query("atm-dev", &cfg, |team| {
+            if team == "atm-dev" {
+                Ok(Some(atm_dev_agents.clone()))
+            } else {
+                Ok(Some(other_team_agents.clone()))
+            }
+        });
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.code == "DAEMON_TRACKS_UNKNOWN_AGENT"),
+            "foreign-team same-name agents must not bleed into this team's roster checks"
+        );
+    }
+
+    #[test]
+    fn build_recommendations_routes_lead_recovery_to_register_only() {
+        let findings = vec![finding(
+            Severity::Warn,
+            "mailbox_teardown_integrity",
+            "LEAD_SESSION_RECOVERY_REQUIRED",
+            "x".to_string(),
+        )];
+        let recs = build_recommendations("atm-dev", &findings, true);
+        assert!(recs.iter().any(|r| r.command == "atm register atm-dev"));
+        assert!(
+            !recs
+                .iter()
+                .any(|r| r.command == "atm teams cleanup atm-dev")
+        );
+    }
+
+    #[test]
+    fn check_mailbox_integrity_classifies_dead_team_lead_as_recovery_warning() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inboxes = tmp.path().join("inboxes");
+        fs::create_dir_all(&inboxes).unwrap();
+
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("team-lead", Some(true), 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        let dead_lead_session = SessionQueryResult {
+            session_id: "lead-session".to_string(),
+            process_id: 4242,
+            alive: false,
+            runtime: None,
+            runtime_session_id: None,
+            pane_id: None,
+            runtime_home: None,
+        };
+        let findings = check_mailbox_integrity_with_query(inboxes, "atm-dev", &cfg, |_, name| {
+            if name == "team-lead" {
+                Ok(Some(dead_lead_session.clone()))
+            } else {
+                Ok(None)
+            }
+        });
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.code == "LEAD_SESSION_RECOVERY_REQUIRED"),
+            "dead team-lead must produce explicit recovery warning"
+        );
+        assert!(!findings.iter().any(|f| f.code == "PARTIAL_TEARDOWN"));
+    }
+
+    #[test]
+    fn check_mailbox_integrity_keeps_dead_non_lead_as_critical_cleanup_finding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inboxes = tmp.path().join("inboxes");
+        fs::create_dir_all(&inboxes).unwrap();
+        fs::write(inboxes.join("arch-ctm.json"), "[]").unwrap();
+
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![
+                member("team-lead", Some(true), 0),
+                member("arch-ctm", Some(true), 0),
+            ],
+            unknown_fields: HashMap::new(),
+        };
+
+        let dead_member_session = SessionQueryResult {
+            session_id: "member-session".to_string(),
+            process_id: 4243,
+            alive: false,
+            runtime: None,
+            runtime_session_id: None,
+            pane_id: None,
+            runtime_home: None,
+        };
+        let findings = check_mailbox_integrity_with_query(inboxes, "atm-dev", &cfg, |_, name| {
+            if name == "arch-ctm" {
+                Ok(Some(dead_member_session.clone()))
+            } else {
+                Ok(None)
+            }
+        });
+
+        assert!(
+            findings.iter().any(
+                |f| f.code == "TERMINAL_MEMBER_NOT_CLEANED" && f.severity == Severity::Critical
+            ),
+            "dead non-lead with mailbox must remain critical cleanup finding"
+        );
+    }
+
+    #[test]
+    fn build_recommendations_routes_non_lead_teardown_to_cleanup() {
+        let findings = vec![finding(
+            Severity::Critical,
+            "mailbox_teardown_integrity",
+            "TERMINAL_MEMBER_NOT_CLEANED",
+            "x".to_string(),
+        )];
+        let recs = build_recommendations("atm-dev", &findings, true);
+        assert!(
+            recs.iter()
+                .any(|r| r.command == "atm teams cleanup atm-dev")
+        );
+    }
+
+    #[test]
+    fn build_recommendations_routes_active_without_session_to_cleanup() {
+        let findings = vec![finding(
+            Severity::Warn,
+            "pid_session_reconciliation",
+            "ACTIVE_WITHOUT_SESSION",
+            "x".to_string(),
+        )];
+        let recs = build_recommendations("atm-dev", &findings, true);
+        assert!(
+            recs.iter()
+                .any(|r| r.command == "atm teams cleanup atm-dev")
+        );
+        assert!(
+            !recs.iter().any(|r| r.command == "atm register atm-dev"),
+            "non-lead stale/unknown activity should route to cleanup, not register"
+        );
+    }
+
+    #[test]
+    fn check_pid_session_reconciliation_query_error_maps_to_active_without_session() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("worker-a", Some(true), 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
+            Err(anyhow::anyhow!("daemon unavailable"))
+        });
+        assert!(findings.iter().any(|f| {
+            f.code == "ACTIVE_WITHOUT_SESSION" && f.message.contains("query unavailable")
+        }));
+        assert!(findings.iter().any(|f| f.code == "DAEMON_UNREACHABLE"));
+    }
+
+    #[test]
+    fn check_pid_session_reconciliation_query_none_maps_to_daemon_unreachable() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("worker-a", Some(true), 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        let (findings, _) =
+            check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| Ok(None));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.code == "DAEMON_UNREACHABLE" && f.message.contains("unavailable"))
+        );
+        assert!(findings.iter().any(|f| f.code == "ACTIVE_WITHOUT_SESSION"));
+    }
+
+    #[test]
+    fn check_pid_session_reconciliation_ignores_foreign_state_entries() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("team-lead", Some(false), 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
+            Ok(Some(vec![CanonicalMemberState {
+                agent: "foreign-agent".to_string(),
+                state: "offline".to_string(),
+                activity: "unknown".to_string(),
+                session_id: Some("foreign-sess".to_string()),
+                process_id: Some(9),
+                last_alive_at: None,
+                reason: "foreign team state".to_string(),
+                source: "session_registry".to_string(),
+                in_config: false,
+            }]))
+        });
+        assert!(
+            findings.is_empty(),
+            "foreign-team daemon states must not create findings for this team's inactive members"
+        );
+    }
+
+    #[test]
+    fn check_pid_session_reconciliation_detects_ghost_session_for_inactive_hint() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("worker-a", None, 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
+            Ok(Some(vec![CanonicalMemberState {
+                agent: "worker-a".to_string(),
+                state: "active".to_string(),
+                activity: "busy".to_string(),
+                session_id: Some("sess-1".to_string()),
+                process_id: Some(4321),
+                last_alive_at: None,
+                reason: "session active".to_string(),
+                source: "session_registry".to_string(),
+                in_config: true,
+            }]))
+        });
+        assert!(findings.iter().any(|f| f.code == "GHOST_SESSION"));
+    }
+
+    #[test]
+    fn parse_pid_backend_mismatch_reason_extracts_expected_fields() {
+        let parsed = parse_pid_backend_mismatch_reason(
+            "pid/backend mismatch: backend='codex' expected='comm=codex' actual='zsh' pid=4242",
+        )
+        .expect("valid mismatch reason");
+        assert_eq!(parsed.backend, "codex");
+        assert_eq!(parsed.expected, "comm=codex");
+        assert_eq!(parsed.actual, "zsh");
+        assert_eq!(parsed.pid, 4242);
+    }
+
+    #[test]
+    fn check_pid_session_reconciliation_reports_pid_mismatch_for_daemon_only_state() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("team-lead", Some(false), 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
+            Ok(Some(vec![CanonicalMemberState {
+                agent: "arch-ctm".to_string(),
+                state: "offline".to_string(),
+                activity: "unknown".to_string(),
+                session_id: Some("sess-ghost".to_string()),
+                process_id: Some(9999),
+                last_alive_at: None,
+                reason: "pid/backend mismatch: backend='codex' expected='comm=codex' actual='zsh' pid=9999"
+                    .to_string(),
+                source: "pid_backend_validation".to_string(),
+                in_config: false,
+            }]))
+        });
+
+        let mismatch = findings
+            .iter()
+            .find(|f| f.code == "PID_PROCESS_MISMATCH")
+            .expect("expected pid mismatch finding");
+        assert!(mismatch.message.contains("backend='codex'"));
+        assert!(mismatch.message.contains("expected='comm=codex'"));
+        assert!(mismatch.message.contains("actual='zsh'"));
+        assert!(mismatch.message.contains("pid=9999"));
+        assert!(mismatch.message.contains("daemon-only session"));
+    }
+
+    #[test]
+    fn check_config_runtime_drift_flags_env_mismatch() {
+        let team = "atm-dev";
+        let findings = check_config_runtime_drift(team, &Some(team.to_string()));
+        // no assertion on env here; just ensure function emits deterministic info for explicit team.
+        assert!(!findings.iter().any(|f| f.code == "TEAM_FROM_DEFAULT"));
+    }
+
+    #[test]
+    fn check_log_diagnostics_errors_only_suppresses_no_events_info() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_dir = tmp.path().join(".config/atm");
+        fs::create_dir_all(&log_dir).unwrap();
+        fs::write(log_dir.join("atm.log.jsonl"), "").unwrap();
+
+        let start = Utc::now() - Duration::minutes(5);
+        let end = Utc::now();
+        let findings = check_log_diagnostics(tmp.path(), start, end, true);
+
+        assert!(!findings.iter().any(|f| f.code == "NO_EVENTS_IN_WINDOW"));
+    }
+
+    #[test]
+    fn check_log_diagnostics_non_errors_only_emits_no_events_info() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_dir = tmp.path().join(".config/atm");
+        fs::create_dir_all(&log_dir).unwrap();
+        fs::write(log_dir.join("atm.log.jsonl"), "").unwrap();
+
+        let start = Utc::now() - Duration::minutes(5);
+        let end = Utc::now();
+        let findings = check_log_diagnostics(tmp.path(), start, end, false);
+
+        assert!(findings.iter().any(|f| f.code == "NO_EVENTS_IN_WINDOW"));
+    }
+
+    #[test]
+    fn check_plugin_init_failures_reports_disabled_init_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon_dir = tmp.path().join(".claude/daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+        fs::write(
+            daemon_dir.join("status.json"),
+            r#"{
+  "plugins": [
+    {"name": "gh_monitor", "status": "running"},
+    {"name": "issues", "status": "disabled_init_error", "last_error": "plugin init failed: bad token"}
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let findings = check_plugin_init_failures(tmp.path());
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "PLUGIN_INIT_FAILED");
+        assert!(findings[0].message.contains("issues"));
+        assert!(findings[0].message.contains("bad token"));
+    }
+
+    #[test]
+    fn render_human_places_member_snapshot_before_findings() {
+        let report = DoctorReport {
+            summary: Summary {
+                team: "atm-dev".to_string(),
+                generated_at: "2026-03-02T00:00:00Z".to_string(),
+                has_critical: false,
+                counts: FindingCounts {
+                    critical: 0,
+                    warn: 1,
+                    info: 0,
+                },
+            },
+            findings: vec![finding(
+                Severity::Warn,
+                "pid_session_reconciliation",
+                "ACTIVE_WITHOUT_SESSION",
+                "x".to_string(),
+            )],
+            recommendations: vec![],
+            log_window: LogWindow {
+                mode: "default_incremental".to_string(),
+                start: "2026-03-02T00:00:00Z".to_string(),
+                end: "2026-03-02T00:01:00Z".to_string(),
+                elapsed_secs: 60,
+            },
+            env_overrides: EnvOverrides::default(),
+            member_snapshot: vec![MemberSnapshot {
+                name: "team-lead".to_string(),
+                agent_type: "team-lead".to_string(),
+                model: "claude".to_string(),
+                status: "Online".to_string(),
+                activity: "Busy".to_string(),
+                session_id: Some("sess-1".to_string()),
+                process_id: Some(4242),
+            }],
+        };
+        let rendered = render_human(&report);
+        assert!(rendered.contains("Model"));
+        let members_idx = rendered.find("Members:").unwrap();
+        let findings_idx = rendered.find("Findings (ordered by severity):").unwrap();
+        assert!(members_idx < findings_idx);
+    }
+
+    #[test]
+    fn render_log_window_human_uses_elapsed_labels() {
+        let incremental = LogWindow {
+            mode: "default_incremental".to_string(),
+            start: "2026-03-02T00:00:00Z".to_string(),
+            end: "2026-03-02T00:01:00Z".to_string(),
+            elapsed_secs: 60,
+        };
+        assert_eq!(render_log_window_human(&incremental), "last 1m");
+
+        let full = LogWindow {
+            mode: "full".to_string(),
+            start: "2026-03-02T00:00:00Z".to_string(),
+            end: "2026-03-02T02:00:00Z".to_string(),
+            elapsed_secs: 7_200,
+        };
+        assert_eq!(render_log_window_human(&full), "since session start (2h)");
+
+        let since_timestamp = LogWindow {
+            mode: "since_timestamp".to_string(),
+            start: "2026-03-02T00:00:00Z".to_string(),
+            end: "2026-03-02T00:05:00Z".to_string(),
+            elapsed_secs: 300,
+        };
+        assert_eq!(
+            render_log_window_human(&since_timestamp),
+            "since 2026-03-02 00:00:00 UTC (5m)"
+        );
+    }
+
+    #[test]
+    fn doctor_json_schema_excludes_member_snapshot() {
+        let atm_home = std::env::temp_dir()
+            .join("atm-home")
+            .to_string_lossy()
+            .into_owned();
+        let report = DoctorReport {
+            summary: Summary {
+                team: "atm-dev".to_string(),
+                generated_at: "2026-03-02T00:00:00Z".to_string(),
+                has_critical: false,
+                counts: FindingCounts {
+                    critical: 0,
+                    warn: 0,
+                    info: 0,
+                },
+            },
+            findings: vec![],
+            recommendations: vec![],
+            log_window: LogWindow {
+                mode: "default_incremental".to_string(),
+                start: "2026-03-02T00:00:00Z".to_string(),
+                end: "2026-03-02T00:01:00Z".to_string(),
+                elapsed_secs: 60,
+            },
+            env_overrides: EnvOverrides {
+                atm_home: Some(EnvOverrideValue {
+                    source: "env".to_string(),
+                    value: atm_home.clone(),
+                }),
+                atm_team: Some(EnvOverrideValue {
+                    source: "env".to_string(),
+                    value: "atm-dev".to_string(),
+                }),
+                atm_identity: Some(EnvOverrideValue {
+                    source: "env".to_string(),
+                    value: "arch-ctm".to_string(),
+                }),
+            },
+            member_snapshot: vec![MemberSnapshot::default()],
+        };
+        let value = serde_json::to_value(report).unwrap();
+        assert!(value.get("member_snapshot").is_none());
+        assert_eq!(
+            value["env_overrides"]["atm_home"]["source"],
+            serde_json::Value::String("env".to_string())
+        );
+        assert_eq!(
+            value["env_overrides"]["atm_home"]["value"],
+            serde_json::Value::String(atm_home)
+        );
+        assert_eq!(
+            value["env_overrides"]["atm_team"]["value"],
+            serde_json::Value::String("atm-dev".to_string())
+        );
+        assert_eq!(
+            value["env_overrides"]["atm_identity"]["value"],
+            serde_json::Value::String("arch-ctm".to_string())
+        );
+        assert_eq!(
+            value["log_window"]["elapsed_secs"],
+            serde_json::Value::Number(60u64.into())
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn active_env_overrides_ignores_empty_values() {
+        let _env_guard = EnvGuard::isolate(OVERRIDE_ENV_KEYS);
+        unsafe {
+            std::env::set_var("ATM_HOME", "   ");
+            std::env::set_var("ATM_TEAM", "atm-dev");
+            std::env::set_var("ATM_IDENTITY", "");
+        }
+
+        let overrides = active_env_overrides();
+        assert_eq!(overrides.atm_home, None);
+        assert_eq!(
+            overrides.atm_team.as_ref().map(|v| v.value.as_str()),
+            Some("atm-dev")
+        );
+        assert_eq!(
+            overrides.atm_team.as_ref().map(|v| v.source.as_str()),
+            Some("env")
+        );
+        assert_eq!(overrides.atm_identity, None);
+    }
+
+    #[test]
+    fn render_human_includes_active_env_overrides() {
+        let home = std::env::temp_dir()
+            .join("home")
+            .to_string_lossy()
+            .into_owned();
+        let report = DoctorReport {
+            summary: Summary {
+                team: "atm-dev".to_string(),
+                generated_at: "2026-03-02T00:00:00Z".to_string(),
+                has_critical: false,
+                counts: FindingCounts {
+                    critical: 0,
+                    warn: 0,
+                    info: 0,
+                },
+            },
+            findings: vec![],
+            recommendations: vec![],
+            log_window: LogWindow {
+                mode: "default_incremental".to_string(),
+                start: "2026-03-02T00:00:00Z".to_string(),
+                end: "2026-03-02T00:01:00Z".to_string(),
+                elapsed_secs: 60,
+            },
+            env_overrides: EnvOverrides {
+                atm_home: Some(EnvOverrideValue {
+                    source: "env".to_string(),
+                    value: home.clone(),
+                }),
+                atm_team: Some(EnvOverrideValue {
+                    source: "env".to_string(),
+                    value: "atm-dev".to_string(),
+                }),
+                atm_identity: Some(EnvOverrideValue {
+                    source: "env".to_string(),
+                    value: "arch-ctm".to_string(),
+                }),
+            },
+            member_snapshot: vec![],
+        };
+
+        let rendered = render_human(&report);
+        assert!(rendered.contains("Active env overrides:"));
+        assert!(rendered.contains(&format!("ATM_HOME={home} (source=env)")));
+        assert!(rendered.contains("ATM_TEAM=atm-dev"));
+        assert!(rendered.contains("ATM_IDENTITY=arch-ctm"));
+    }
+}

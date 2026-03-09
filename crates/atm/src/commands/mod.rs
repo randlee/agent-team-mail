@@ -8,13 +8,21 @@ mod broadcast;
 mod cleanup;
 mod config_cmd;
 mod daemon;
+mod doctor;
+mod gh;
 mod inbox;
+mod init;
 pub mod launch;
 mod logs;
+mod mcp;
 mod members;
+mod monitor;
 mod read;
+mod register;
 mod request;
+mod runtime_adapter;
 mod send;
+mod spawn;
 mod status;
 mod subscribe;
 mod tail;
@@ -60,6 +68,18 @@ enum Commands {
     /// Show team status overview
     Status(status::StatusArgs),
 
+    /// Interactive wrapper for spawning a new runtime teammate
+    Spawn(spawn::SpawnArgs),
+
+    /// Run daemon/team health diagnostics
+    Doctor(doctor::DoctorArgs),
+
+    /// GitHub CI monitor commands (daemon/plugin routed namespace)
+    Gh(gh::GhArgs),
+
+    /// Run continuous operational health monitor and send ATM alerts
+    Monitor(monitor::MonitorArgs),
+
     /// Show effective configuration
     Config(config_cmd::ConfigArgs),
 
@@ -86,6 +106,15 @@ enum Commands {
 
     /// View and follow the unified ATM daemon log
     Logs(logs::LogsArgs),
+
+    /// Register this agent session with a team
+    Register(register::RegisterArgs),
+
+    /// MCP server setup and management (install for Claude Code, Codex, Gemini)
+    Mcp(mcp::McpArgs),
+
+    /// Install Claude Code hook wiring for ATM session coordination
+    Init(init::InitArgs),
 }
 
 impl Cli {
@@ -100,6 +129,10 @@ impl Cli {
             Commands::Teams(args) => teams::execute(args),
             Commands::Members(args) => members::execute(args),
             Commands::Status(args) => status::execute(args),
+            Commands::Spawn(args) => spawn::execute(args),
+            Commands::Doctor(args) => doctor::execute(args),
+            Commands::Gh(args) => gh::execute(args),
+            Commands::Monitor(args) => monitor::execute(args),
             Commands::Config(args) => config_cmd::execute(args),
             Commands::Cleanup(args) => cleanup::execute(args),
             Commands::Bridge(args) => bridge::execute(args),
@@ -109,6 +142,9 @@ impl Cli {
             Commands::Tail(args) => tail::execute(args),
             Commands::Launch(args) => launch::execute(args),
             Commands::Logs(args) => logs::execute(args),
+            Commands::Register(args) => register::execute(args),
+            Commands::Mcp(args) => mcp::execute(args),
+            Commands::Init(args) => init::execute(args),
         }
     }
 }

@@ -17,8 +17,10 @@ pub enum WaitResult {
 
 /// Wait for a new message to arrive in the inbox
 ///
-/// Uses OS-level file watching (inotify on Linux, FSEvents on macOS, ReadDirectoryChangesW on Windows)
-/// to detect changes to the inbox files. Falls back to polling every 2 seconds if file watching fails.
+/// Uses OS-level file watching (inotify on Linux, kqueue on macOS, ReadDirectoryChangesW on Windows)
+/// to detect changes to the inbox files. Supplements native events with a short periodic poll
+/// (`POLL_INTERVAL`) to handle missed events on unreliable filesystems (e.g., macOS temp dirs).
+/// Falls back to polling every 2 seconds if the native watcher cannot be initialised.
 ///
 /// # Arguments
 ///
@@ -72,6 +74,13 @@ pub fn wait_for_message(
     }
 }
 
+/// Interval for periodic polling inside the watcher loop.
+///
+/// Even when the OS watcher is active, we poll on this interval as a safety net
+/// against missed events (e.g., on macOS temp directories where kqueue/FSEvents
+/// may not deliver events reliably).
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Try file watching approach
 fn try_file_watching(
     inbox_dir: &Path,
@@ -82,7 +91,8 @@ fn try_file_watching(
 ) -> Result<WaitResult> {
     let (tx, rx) = channel();
 
-    // Create watcher with debouncing
+    // Create watcher. The `with_poll_interval` hint applies to PollWatcher backends;
+    // on native backends (kqueue/inotify) it is ignored.
     let mut watcher = RecommendedWatcher::new(
         move |res: Result<Event, notify::Error>| {
             if let Ok(_event) = res {
@@ -94,6 +104,14 @@ fn try_file_watching(
 
     // Watch the inboxes directory
     watcher.watch(inbox_dir, RecursiveMode::NonRecursive)?;
+
+    // Post-setup check: messages may have arrived between the initial count and
+    // when the watcher began watching (watcher setup race). If the count already
+    // exceeds initial_count, return immediately without waiting for an event.
+    let post_setup_count = count_messages(inbox_dir, agent_name, known_hostnames)?;
+    if post_setup_count > initial_count {
+        return Ok(WaitResult::MessageReceived);
+    }
 
     let timeout = Duration::from_secs(timeout_secs);
     let start = Instant::now();
@@ -107,18 +125,21 @@ fn try_file_watching(
 
         let remaining = timeout - elapsed;
 
-        // Wait for file system event or timeout
-        match rx.recv_timeout(remaining) {
-            Ok(()) => {
-                // File changed, re-count messages
+        // Cap the wait at POLL_INTERVAL so we re-check the message count even
+        // when the OS does not deliver a file-change event (e.g., macOS kqueue
+        // on tmpfs directories can be unreliable for rapid writes).
+        let wait_for = std::cmp::min(remaining, POLL_INTERVAL);
+
+        // Wait for file system event or the short poll interval
+        match rx.recv_timeout(wait_for) {
+            Ok(()) | Err(RecvTimeoutError::Timeout) => {
+                // Either an FS event fired or the poll interval elapsed.
+                // In both cases, re-check the message count.
                 let current_count = count_messages(inbox_dir, agent_name, known_hostnames)?;
                 if current_count > initial_count {
                     return Ok(WaitResult::MessageReceived);
                 }
-                // False alarm (e.g., temp file created), continue waiting
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                return Ok(WaitResult::Timeout);
+                // No new messages yet; loop again.
             }
             Err(RecvTimeoutError::Disconnected) => {
                 anyhow::bail!("File watcher disconnected unexpectedly");

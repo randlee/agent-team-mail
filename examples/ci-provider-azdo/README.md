@@ -39,7 +39,7 @@ cp target/release/libatm_ci_provider_azdo.dylib $ATM_HOME/providers/
 In your `.atm.toml`, specify the provider:
 
 ```toml
-[plugins.ci_monitor]
+[plugins.gh_monitor]
 enabled = true
 provider = "azure-pipelines"
 team = "my-team"
@@ -47,7 +47,7 @@ agent = "ci-monitor"
 poll_interval_secs = 300
 
 # Provider-specific configuration (passed to the factory function)
-[plugins.ci_monitor.azure]
+[plugins.gh_monitor.azure]
 organization = "your-org"
 project = "your-project"
 repo = "your-repo"
@@ -56,7 +56,7 @@ repo = "your-repo"
 Or load it explicitly by path using the `providers` table:
 
 ```toml
-[plugins.ci_monitor]
+[plugins.gh_monitor]
 enabled = true
 provider = "azure-pipelines"
 team = "my-team"
@@ -64,17 +64,17 @@ agent = "ci-monitor"
 poll_interval_secs = 300
 
 # Explicit provider library paths
-[plugins.ci_monitor.providers]
+[plugins.gh_monitor.providers]
 azure-pipelines = "~/.config/atm/providers/libatm_ci_provider_azdo.dylib"
 
 # Provider-specific configuration
-[plugins.ci_monitor.azure]
+[plugins.gh_monitor.azure]
 organization = "your-org"
 project = "your-project"
 repo = "your-repo"
 ```
 
-**Note**: The `providers` table is under `[plugins.ci_monitor.providers]`, not `[plugins.ci_monitor.provider_libraries]`. The parser reads the `providers` key and stores library paths in the `provider_libraries` field internally.
+**Note**: The `providers` table is under `[plugins.gh_monitor.providers]`, not `[plugins.gh_monitor.provider_libraries]`. The parser reads the `providers` key and stores library paths in the `provider_libraries` field internally.
 
 ## Architecture
 

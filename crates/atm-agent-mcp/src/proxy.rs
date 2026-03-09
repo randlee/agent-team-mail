@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::process::Child;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::{Duration, timeout};
@@ -763,11 +763,10 @@ impl ProxyServer {
                 // Drain upstream write channel
                 Some(msg) = upstream_rx.recv() => {
                     let serialized = serde_json::to_string(&msg).unwrap_or_default();
-                    let frame = crate::framing::encode_content_length(&serialized);
-                    if upstream_out.write_all(&frame).await.is_err() {
-                        break;
-                    }
-                    if upstream_out.flush().await.is_err() {
+                    if write_newline_delimited(&mut upstream_out, &serialized)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -2442,6 +2441,7 @@ Session ending. Write a concise summary of:\n\
             let drain_team = self.team.clone();
             let drain_stdin = Arc::clone(&self.shared_child_stdin);
             let drain_thread_to_agent = Arc::clone(&self.thread_to_agent);
+            let drain_elicitation_registry = Arc::clone(&self.elicitation_registry);
             Some(tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(30));
                 // Skip the first immediate tick
@@ -2462,6 +2462,13 @@ Session ending. Write a concise summary of:\n\
                             Duration::from_secs(600),
                         )
                         .await;
+                        drain_elicitation_queue_for_agents(
+                            &drain_team,
+                            &agent_ids,
+                            stdin_arc,
+                            &drain_elicitation_registry,
+                        )
+                        .await;
                     }
                 }
             }))
@@ -2479,6 +2486,7 @@ Session ending. Write a concise summary of:\n\
         let shared_stdin_for_reader = Arc::clone(&self.shared_child_stdin);
         let queues_for_reader = Arc::clone(&self.queues);
         let request_counter_for_reader = Arc::clone(&self.request_counter);
+        let elicitation_registry_for_reader = Arc::clone(&self.elicitation_registry);
         let team_for_reader = self.team.clone();
         let idle_flag_for_reader = idle_flag;
         let thread_to_agent_for_reader = Arc::clone(&self.thread_to_agent);
@@ -2516,6 +2524,8 @@ Session ending. Write a concise summary of:\n\
                             };
                             let drain_team = team_for_reader.clone();
                             let drain_stdin = Arc::clone(&shared_stdin_for_reader);
+                            let drain_elicitation_registry =
+                                Arc::clone(&elicitation_registry_for_reader);
                             tokio::spawn(async move {
                                 let stdin_guard = drain_stdin.lock().await;
                                 if let Some(ref stdin_arc) = *stdin_guard {
@@ -2524,6 +2534,13 @@ Session ending. Write a concise summary of:\n\
                                         &agent_ids,
                                         stdin_arc,
                                         Duration::from_secs(600),
+                                    )
+                                    .await;
+                                    drain_elicitation_queue_for_agents(
+                                        &drain_team,
+                                        &agent_ids,
+                                        stdin_arc,
+                                        &drain_elicitation_registry,
                                     )
                                     .await;
                                 }
@@ -2809,42 +2826,84 @@ fn should_publish_watch_event(event: &Value) -> bool {
         .pointer("/params/type")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    matches!(
-        kind,
+    if kind.is_empty() {
+        return false;
+    }
+    let lower = kind.to_ascii_lowercase();
+
+    if matches!(
+        lower.as_str(),
         "task_started"
             | "task_complete"
+            | "user_message"
             | "approval_prompt"
             | "approval_request"
             | "approval_rejected"
             | "approval_approved"
             | "entered_review_mode"
             | "exited_review_mode"
-            | "item/enteredReviewMode"
-            | "item/exitedReviewMode"
+            | "item/enteredreviewmode"
+            | "item/exitedreviewmode"
             | "agent_message_delta"
             | "agent_message"
             | "agent_message_completed"
             | "agent_message_chunk"
+            | "agent_message_content_delta"
             | "reasoning_content_delta"
             | "agent_reasoning_delta"
+            | "reasoning_raw_content_delta"
             | "reasoning_content"
+            | "terminal_interaction"
             | "exec_command_output_delta"
             | "exec_command_started"
             | "exec_command_completed"
             | "exec_command_error"
+            | "request_user_input"
+            | "elicitation_request"
+            | "patch_apply_begin"
+            | "patch_apply_end"
+            | "turn_diff"
+            | "file_change"
             | "item_started"
             | "item_completed"
             | "thread_status_changed"
             | "turn_started"
             | "turn_completed"
+            | "turn_aborted"
             | "turn_interrupted"
             | "turn_cancelled"
             | "cancelled"
             | "interrupt"
             | "idle"
             | "done"
+            | "shutdown_complete"
+            | "session_configured"
+            | "thread_name_updated"
+            | "token_count"
+            | "model_reroute"
+            | "context_compacted"
+            | "thread_rolled_back"
+            | "undo_started"
+            | "undo_completed"
+            | "background_event"
+            | "warning"
+            | "error"
+            | "deprecation_notice"
+            | "plan_update"
+            | "plan_delta"
+            | "mcp_list_tools_response"
+            | "remote_skill_downloaded"
+            | "skills_update_available"
             | "stream_error"
-    )
+    ) {
+        return true;
+    }
+
+    lower.starts_with("mcp_tool_call_")
+        || lower.starts_with("web_search_")
+        || lower.starts_with("realtime_conversation_")
+        || lower.starts_with("collab_")
+        || lower.starts_with("list_")
 }
 
 fn extract_stream_error_event(
@@ -3157,6 +3216,86 @@ async fn drain_stdin_queue_for_agents(
             Err(e) => {
                 tracing::warn!(agent_id, error = %e, "stdin queue drain error");
             }
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct QueuedElicitationResponse {
+    elicitation_id: String,
+    decision: String,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+async fn drain_elicitation_queue_for_agents(
+    team: &str,
+    agent_ids: &[String],
+    shared_stdin: &Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
+    elicitation_registry: &Arc<Mutex<ElicitationRegistry>>,
+) {
+    let home = match agent_team_mail_core::home::get_home_dir() {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    for agent_id in agent_ids {
+        let dir = home
+            .join(".config/atm/agent-sessions")
+            .join(team)
+            .join(agent_id)
+            .join("elicitation_queue");
+        let mut rd = match tokio::fs::read_dir(&dir).await {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let raw = match tokio::fs::read_to_string(&path).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(agent_id, path=%path.display(), error=%e, "failed reading elicitation queue entry");
+                    continue;
+                }
+            };
+            let queued: QueuedElicitationResponse = match serde_json::from_str(&raw) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(agent_id, path=%path.display(), error=%e, "invalid elicitation queue entry");
+                    let _ = tokio::fs::remove_file(&path).await;
+                    continue;
+                }
+            };
+            let response = serde_json::json!({
+                "id": queued.elicitation_id,
+                "result": {
+                    "decision": queued.decision,
+                    "text": queued.text,
+                }
+            });
+            let maybe = elicitation_registry
+                .lock()
+                .await
+                .resolve_for_downstream_id(&serde_json::json!(queued.elicitation_id), response);
+            let Some(downstream) = maybe else {
+                // Keep entry on disk until the matching elicitation is registered.
+                continue;
+            };
+            let serialized = match serde_json::to_string(&downstream) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(agent_id, error=%e, "failed serializing elicitation downstream response");
+                    continue;
+                }
+            };
+            let mut stdin = shared_stdin.lock().await;
+            if let Err(e) = write_newline_delimited(&mut *stdin, &serialized).await {
+                tracing::warn!(agent_id, error=%e, "failed writing elicitation response to child stdin");
+                continue;
+            }
+            let _ = tokio::fs::remove_file(&path).await;
         }
     }
 }
@@ -3991,6 +4130,7 @@ mod tests {
         let canonical_kinds = vec![
             "task_started",
             "task_complete",
+            "user_message",
             "approval_prompt",
             "approval_request",
             "approval_rejected",
@@ -4003,30 +4143,73 @@ mod tests {
             "agent_message",
             "agent_message_completed",
             "agent_message_chunk",
+            "agent_message_content_delta",
             "reasoning_content_delta",
             "agent_reasoning_delta",
+            "reasoning_raw_content_delta",
             "reasoning_content",
             "exec_command_output_delta",
             "exec_command_started",
             "exec_command_completed",
             "exec_command_error",
+            "terminal_interaction",
+            "request_user_input",
+            "elicitation_request",
+            "patch_apply_begin",
+            "patch_apply_end",
+            "turn_diff",
+            "file_change",
             "item_started",
             "item_completed",
             "thread_status_changed",
             "turn_started",
             "turn_completed",
+            "turn_aborted",
             "turn_interrupted",
             "turn_cancelled",
             "cancelled",
             "interrupt",
             "idle",
             "done",
+            "shutdown_complete",
+            "session_configured",
+            "thread_name_updated",
+            "token_count",
+            "model_reroute",
+            "context_compacted",
+            "thread_rolled_back",
+            "undo_started",
+            "undo_completed",
+            "background_event",
+            "warning",
+            "error",
+            "deprecation_notice",
+            "plan_update",
+            "plan_delta",
+            "mcp_list_tools_response",
+            "remote_skill_downloaded",
+            "skills_update_available",
             "stream_error",
         ];
         for kind in canonical_kinds {
             let event = json!({"params":{"type":kind}});
             assert!(should_publish_watch_event(&event), "kind={kind}");
         }
+        assert!(should_publish_watch_event(
+            &json!({"params":{"type":"mcp_tool_call_begin"}})
+        ));
+        assert!(should_publish_watch_event(
+            &json!({"params":{"type":"web_search_end"}})
+        ));
+        assert!(should_publish_watch_event(
+            &json!({"params":{"type":"realtime_conversation_started"}})
+        ));
+        assert!(should_publish_watch_event(
+            &json!({"params":{"type":"collab_agent_message"}})
+        ));
+        assert!(should_publish_watch_event(
+            &json!({"params":{"type":"list_project_templates"}})
+        ));
         assert!(!should_publish_watch_event(
             &json!({"params":{"type":"unknown_new_event_kind"}})
         ));

@@ -177,7 +177,8 @@ pub struct AgentMember {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_type: Option<String>,
 
-    /// Whether agent is currently running
+    /// Activity/busy hint (recent work signal). `true` = busy/sending, `false` = idle.
+    /// NOT a liveness indicator — use daemon session state for liveness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_active: Option<bool>,
 
@@ -249,6 +250,30 @@ impl AgentMember {
         }
         None
     }
+
+    /// Returns the optional roster PID hint from unknown extension fields.
+    ///
+    /// Stored under `processId` to avoid schema-breaking changes while
+    /// preserving forward-compatible round-trips.
+    pub fn process_id_hint(&self) -> Option<u32> {
+        self.unknown_fields
+            .get("processId")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok())
+    }
+
+    /// Sets or clears the roster PID hint extension field (`processId`).
+    pub fn set_process_id_hint(&mut self, pid: Option<u32>) {
+        match pid {
+            Some(value) => {
+                self.unknown_fields
+                    .insert("processId".to_string(), serde_json::json!(value));
+            }
+            None => {
+                self.unknown_fields.remove("processId");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -264,7 +289,7 @@ mod tests {
             "model": "claude-haiku-4-5-20251001",
             "joinedAt": 1770765919076,
             "tmuxPaneId": "",
-            "cwd": "/Users/randlee/Documents/github/test",
+            "cwd": "/atm-test/workspace",
             "subscriptions": []
         }"#;
 
@@ -274,7 +299,7 @@ mod tests {
         assert_eq!(member.agent_type, "general-purpose");
         assert_eq!(member.model, "claude-haiku-4-5-20251001");
         assert_eq!(member.joined_at, 1770765919076);
-        assert_eq!(member.cwd, "/Users/randlee/Documents/github/test");
+        assert_eq!(member.cwd, "/atm-test/workspace");
         assert!(member.prompt.is_none());
         assert!(member.color.is_none());
         assert!(member.subscriptions.is_empty());
@@ -296,7 +321,7 @@ mod tests {
             "planModeRequired": false,
             "joinedAt": 1770772206905,
             "tmuxPaneId": "%14",
-            "cwd": "/Users/randlee/Documents/github/test",
+            "cwd": "/atm-test/workspace",
             "subscriptions": [],
             "backendType": "tmux",
             "isActive": false
@@ -432,6 +457,18 @@ mod tests {
         member.external_backend_type = None;
         // "tmux" does not map to any BackendType variant → falls back to None
         assert!(member.effective_backend_type().is_none());
+    }
+
+    #[test]
+    fn test_process_id_hint_roundtrip() {
+        let mut member = make_minimal_member();
+        assert_eq!(member.process_id_hint(), None);
+
+        member.set_process_id_hint(Some(4242));
+        assert_eq!(member.process_id_hint(), Some(4242));
+
+        member.set_process_id_hint(None);
+        assert_eq!(member.process_id_hint(), None);
     }
 
     // ── BackendType tests ─────────────────────────────────────────────────

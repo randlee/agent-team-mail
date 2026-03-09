@@ -16,10 +16,13 @@
 //! The registry itself is not `Sync`. Callers are expected to wrap it in
 //! `Arc<Mutex<SessionRegistry>>` before sharing between tasks.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Lifecycle state of a tracked agent session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionState {
     /// Session is believed to be running.
     Active,
@@ -27,15 +30,49 @@ pub enum SessionState {
     Dead,
 }
 
+/// Result of attempting a session-scoped dead-mark operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MarkDeadForSessionOutcome {
+    /// Matching active session was marked dead.
+    MarkedDead,
+    /// Matching session was already dead (idempotent replay).
+    AlreadyDead,
+    /// No tracked session exists for the target team/member.
+    UnknownSession,
+    /// Team/member exists but session IDs do not match.
+    SessionMismatch { current_session_id: String },
+}
+
 /// A single agent session record.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
+    /// Team name this session belongs to.
+    pub team: String,
+    /// Agent/member name in the team.
+    pub agent_name: String,
     /// Claude Code session UUID (from `CLAUDE_SESSION_ID`).
     pub session_id: String,
     /// OS process ID of the agent process.
     pub process_id: u32,
     /// Current lifecycle state.
     pub state: SessionState,
+    /// Last state update timestamp (RFC3339 UTC).
+    pub updated_at: String,
+    /// Most recent timestamp where daemon liveness probe confirmed process alive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_alive_at: Option<String>,
+    /// Runtime kind (e.g., `codex`, `gemini`) when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    /// Runtime-native session/thread identifier when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_session_id: Option<String>,
+    /// Runtime backend pane identifier when applicable (e.g., tmux `%42`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+    /// Runtime home/state directory when configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_home: Option<String>,
 }
 
 impl SessionRecord {
@@ -47,25 +84,54 @@ impl SessionRecord {
     }
 }
 
-/// Registry mapping agent names to their session records.
+#[derive(Debug, Clone)]
+struct LivenessCacheEntry {
+    alive: bool,
+    checked_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Registry mapping team-scoped keys to their session records.
 ///
 /// Wrap in `Arc<Mutex<SessionRegistry>>` for concurrent access.
-///
-/// NOTE: Keys are currently bare agent names, not `(team, name)`.
-/// This is sufficient for current single-team deployments but can collide when
-/// multiple teams on one daemon have the same member name.
-/// TODO(atm-daemon): migrate to a team-scoped key once multi-team registry
-/// semantics are implemented.
 #[derive(Debug, Default)]
 pub struct SessionRegistry {
     sessions: HashMap<String, SessionRecord>,
+    persist_path: Option<PathBuf>,
+    liveness_cache: HashMap<u32, LivenessCacheEntry>,
 }
 
 impl SessionRegistry {
+    pub(crate) const PID_LIVENESS_TTL: Duration = Duration::from_secs(5);
+
     /// Create a new, empty registry.
     pub fn new() -> Self {
         Self {
             sessions: HashMap::new(),
+            persist_path: None,
+            liveness_cache: HashMap::new(),
+        }
+    }
+
+    /// Create a registry that persists on every mutation.
+    pub fn with_persist_path(persist_path: PathBuf) -> Self {
+        Self {
+            sessions: HashMap::new(),
+            persist_path: Some(persist_path),
+            liveness_cache: HashMap::new(),
+        }
+    }
+
+    /// Load a persisted registry from disk, or return an empty registry when
+    /// the file is missing/corrupt.
+    pub fn load_or_new(persist_path: PathBuf) -> Self {
+        if let Some(sessions) = load_sessions_from_file(&persist_path) {
+            Self {
+                sessions,
+                persist_path: Some(persist_path),
+                liveness_cache: HashMap::new(),
+            }
+        } else {
+            Self::with_persist_path(persist_path)
         }
     }
 
@@ -75,20 +141,123 @@ impl SessionRegistry {
     /// are replaced. The state is reset to [`SessionState::Active`] on every
     /// upsert.
     pub fn upsert(&mut self, name: &str, session_id: &str, process_id: u32) {
+        self.upsert_for_team("", name, session_id, process_id);
+    }
+
+    /// Insert or update the session record for `team/name`.
+    pub fn upsert_for_team(&mut self, team: &str, name: &str, session_id: &str, process_id: u32) {
+        let key = make_key(team, name);
+        let existing = self.sessions.get(&key).cloned();
+        let runtime = existing.as_ref().and_then(|r| r.runtime.clone());
+        let runtime_session_id = existing.as_ref().and_then(|r| r.runtime_session_id.clone());
+        let pane_id = existing.as_ref().and_then(|r| r.pane_id.clone());
+        let runtime_home = existing.as_ref().and_then(|r| r.runtime_home.clone());
+        self.upsert_runtime_for_team(
+            team,
+            name,
+            session_id,
+            process_id,
+            runtime,
+            runtime_session_id,
+            pane_id,
+            runtime_home,
+        );
+    }
+
+    /// Insert or update the session record for `team/name` with runtime metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_runtime_for_team(
+        &mut self,
+        team: &str,
+        name: &str,
+        session_id: &str,
+        process_id: u32,
+        runtime: Option<String>,
+        runtime_session_id: Option<String>,
+        pane_id: Option<String>,
+        runtime_home: Option<String>,
+    ) {
+        let now_dt = chrono::Utc::now();
+        let now = now_dt.to_rfc3339();
+        let pid_alive = process_id > 1 && is_pid_alive(process_id);
         self.sessions.insert(
-            name.to_string(),
+            make_key(team, name),
             SessionRecord {
+                team: team.to_string(),
+                agent_name: name.to_string(),
                 session_id: session_id.to_string(),
                 process_id,
                 state: SessionState::Active,
+                updated_at: now,
+                last_alive_at: pid_alive.then(|| now_dt.to_rfc3339()),
+                runtime,
+                runtime_session_id,
+                pane_id,
+                runtime_home,
             },
         );
+        if process_id > 1 {
+            self.liveness_cache.insert(
+                process_id,
+                LivenessCacheEntry {
+                    alive: pid_alive,
+                    checked_at: now_dt,
+                },
+            );
+        }
+        self.persist_best_effort();
     }
 
     /// Return an immutable reference to the session record for `name`, or
     /// `None` if the agent is not registered.
     pub fn query(&self, name: &str) -> Option<&SessionRecord> {
-        self.sessions.get(name)
+        if let Some(r) = self.sessions.get(name) {
+            return Some(r);
+        }
+        // Backward-compatible lookup by agent name if unique across teams.
+        let mut iter = self
+            .sessions
+            .values()
+            .filter(|r| r.agent_name == name || make_key(&r.team, &r.agent_name) == name);
+        let first = iter.next()?;
+        if iter.next().is_some() {
+            return None;
+        }
+        Some(first)
+    }
+
+    /// Query a team-scoped session record.
+    pub fn query_for_team(&self, team: &str, name: &str) -> Option<&SessionRecord> {
+        self.sessions.get(&make_key(team, name))
+    }
+
+    /// Query by agent name and reconcile liveness through the bounded cache.
+    pub fn query_with_liveness(&mut self, name: &str) -> Option<SessionRecord> {
+        if self.sessions.contains_key(name) {
+            return self.refresh_record_and_clone(name);
+        }
+        // Backward-compatible lookup by unique agent name.
+        let matches: Vec<String> = self
+            .sessions
+            .iter()
+            .filter_map(|(k, r)| {
+                (r.agent_name == name || make_key(&r.team, &r.agent_name) == name)
+                    .then_some(k.clone())
+            })
+            .collect();
+        if matches.len() != 1 {
+            return None;
+        }
+        self.refresh_record_and_clone(&matches[0])
+    }
+
+    /// Team-scoped query with liveness reconciliation.
+    pub fn query_for_team_with_liveness(
+        &mut self,
+        team: &str,
+        name: &str,
+    ) -> Option<SessionRecord> {
+        self.refresh_record_and_clone(&make_key(team, name))
     }
 
     /// Mark the session for `name` as [`SessionState::Dead`].
@@ -97,7 +266,110 @@ impl SessionRegistry {
     pub fn mark_dead(&mut self, name: &str) {
         if let Some(record) = self.sessions.get_mut(name) {
             record.state = SessionState::Dead;
+            self.liveness_cache.remove(&record.process_id);
+            self.persist_best_effort();
+            return;
         }
+
+        // Backward-compatible mark by unique agent name.
+        let matches: Vec<String> = self
+            .sessions
+            .iter()
+            .filter_map(|(k, r)| (r.agent_name == name).then_some(k.clone()))
+            .collect();
+
+        if matches.len() == 1
+            && let Some(record) = self.sessions.get_mut(&matches[0])
+        {
+            record.state = SessionState::Dead;
+            self.liveness_cache.remove(&record.process_id);
+            self.persist_best_effort();
+        }
+    }
+
+    /// Mark a team-scoped session as dead.
+    pub fn mark_dead_for_team(&mut self, team: &str, name: &str) {
+        if let Some(record) = self.sessions.get_mut(&make_key(team, name)) {
+            record.state = SessionState::Dead;
+            record.updated_at = chrono::Utc::now().to_rfc3339();
+            self.liveness_cache.remove(&record.process_id);
+            self.persist_best_effort();
+        }
+    }
+
+    /// Mark a team-scoped session as dead only when `session_id` matches.
+    pub fn mark_dead_for_team_session(
+        &mut self,
+        team: &str,
+        name: &str,
+        session_id: &str,
+    ) -> MarkDeadForSessionOutcome {
+        let Some(record) = self.sessions.get_mut(&make_key(team, name)) else {
+            return MarkDeadForSessionOutcome::UnknownSession;
+        };
+
+        if record.session_id != session_id {
+            return MarkDeadForSessionOutcome::SessionMismatch {
+                current_session_id: record.session_id.clone(),
+            };
+        }
+
+        if record.state == SessionState::Dead {
+            return MarkDeadForSessionOutcome::AlreadyDead;
+        }
+
+        record.state = SessionState::Dead;
+        record.updated_at = chrono::Utc::now().to_rfc3339();
+        self.liveness_cache.remove(&record.process_id);
+        self.persist_best_effort();
+        MarkDeadForSessionOutcome::MarkedDead
+    }
+
+    /// Remove a team-scoped session record.
+    pub fn remove_for_team(&mut self, team: &str, name: &str) {
+        if let Some(record) = self.sessions.remove(&make_key(team, name)) {
+            self.liveness_cache.remove(&record.process_id);
+            self.persist_best_effort();
+        }
+    }
+
+    /// Return all tracked session records for a team.
+    pub fn sessions_for_team(&self, team: &str) -> Vec<SessionRecord> {
+        self.sessions
+            .values()
+            .filter(|record| record.team == team)
+            .cloned()
+            .collect()
+    }
+
+    /// Return all tracked session records for a team after bounded liveness
+    /// reconciliation.
+    pub fn sessions_for_team_with_liveness(&mut self, team: &str) -> Vec<SessionRecord> {
+        let keys: Vec<String> = self
+            .sessions
+            .iter()
+            .filter_map(|(k, v)| (v.team == team).then_some(k.clone()))
+            .collect();
+        let mut changed = false;
+        for key in &keys {
+            if self.refresh_record_liveness(key) {
+                changed = true;
+            }
+        }
+        if changed {
+            self.persist_best_effort();
+        }
+        keys.into_iter()
+            .filter_map(|k| self.sessions.get(&k).cloned())
+            .collect()
+    }
+
+    /// Return all tracked agent names for a team.
+    pub fn agent_names_for_team(&self, team: &str) -> Vec<String> {
+        self.sessions_for_team(team)
+            .into_iter()
+            .map(|record| record.agent_name)
+            .collect()
     }
 
     /// Return the number of registered sessions.
@@ -109,6 +381,91 @@ impl SessionRegistry {
     pub fn is_empty(&self) -> bool {
         self.sessions.is_empty()
     }
+
+    fn persist_best_effort(&self) {
+        let Some(path) = self.persist_path.as_ref() else {
+            return;
+        };
+
+        if let Err(e) = write_sessions_to_file(path, &self.sessions) {
+            eprintln!(
+                "[session-registry] warn: failed to persist {}: {e}",
+                path.display()
+            );
+        }
+    }
+
+    fn refresh_record_and_clone(&mut self, key: &str) -> Option<SessionRecord> {
+        if !self.sessions.contains_key(key) {
+            return None;
+        }
+        let changed = self.refresh_record_liveness(key);
+        if changed {
+            self.persist_best_effort();
+        }
+        self.sessions.get(key).cloned()
+    }
+
+    fn refresh_record_liveness(&mut self, key: &str) -> bool {
+        let now = chrono::Utc::now();
+        let Some(existing) = self.sessions.get(key) else {
+            return false;
+        };
+        let process_id = existing.process_id;
+        let state = existing.state.clone();
+
+        if process_id <= 1 {
+            let Some(record) = self.sessions.get_mut(key) else {
+                return false;
+            };
+            if record.state != SessionState::Dead {
+                record.state = SessionState::Dead;
+                record.updated_at = now.to_rfc3339();
+                return true;
+            }
+            return false;
+        }
+
+        let (alive, probed) = self.pid_alive_cached(process_id, now);
+        let mut changed = false;
+        if state == SessionState::Active {
+            let Some(record) = self.sessions.get_mut(key) else {
+                return false;
+            };
+            if alive {
+                if probed || record.last_alive_at.is_none() {
+                    record.last_alive_at = Some(now.to_rfc3339());
+                    changed = true;
+                }
+            } else {
+                record.state = SessionState::Dead;
+                record.updated_at = now.to_rfc3339();
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn pid_alive_cached(&mut self, pid: u32, now: chrono::DateTime<chrono::Utc>) -> (bool, bool) {
+        if let Some(entry) = self.liveness_cache.get(&pid) {
+            if now
+                .signed_duration_since(entry.checked_at)
+                .to_std()
+                .is_ok_and(|age| age < Self::PID_LIVENESS_TTL)
+            {
+                return (entry.alive, false);
+            }
+        }
+        let alive = is_pid_alive(pid);
+        self.liveness_cache.insert(
+            pid,
+            LivenessCacheEntry {
+                alive,
+                checked_at: now,
+            },
+        );
+        (alive, true)
+    }
 }
 
 /// Shared, thread-safe session registry handle.
@@ -116,40 +473,88 @@ pub type SharedSessionRegistry = std::sync::Arc<std::sync::Mutex<SessionRegistry
 
 /// Create a new empty [`SharedSessionRegistry`].
 pub fn new_session_registry() -> SharedSessionRegistry {
-    std::sync::Arc::new(std::sync::Mutex::new(SessionRegistry::new()))
+    #[cfg(test)]
+    let registry = SessionRegistry::new();
+
+    #[cfg(not(test))]
+    let registry = match agent_team_mail_core::home::get_home_dir() {
+        Ok(home) => {
+            let path = home.join(".claude/daemon/session-registry.json");
+            SessionRegistry::load_or_new(path)
+        }
+        Err(_) => SessionRegistry::new(),
+    };
+    std::sync::Arc::new(std::sync::Mutex::new(registry))
 }
 
 // ── Platform-specific liveness check ─────────────────────────────────────────
 
 /// Check whether an OS process with the given PID is alive.
 ///
-/// On Unix this uses `kill(pid, 0)` — a read-only existence probe that sends
-/// no signal. On non-Unix platforms this always returns `false`.
+/// Delegates to `atm_core::pid::is_pid_alive` which provides cross-platform
+/// support (Unix via `kill(pid, 0)`, Windows via `OpenProcess`).
 pub fn is_pid_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        pid_alive_unix(pid)
+    if pid <= 1 || pid > i32::MAX as u32 {
+        return false;
     }
-
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
-    }
+    agent_team_mail_core::pid::is_pid_alive(pid)
 }
 
-#[cfg(unix)]
-fn pid_alive_unix(pid: u32) -> bool {
-    // SAFETY: kill(pid, 0) is a read-only existence check; no signal is sent.
-    unsafe extern "C" {
-        fn kill(pid: libc::pid_t, sig: libc::c_int) -> libc::c_int;
-    }
-    let pid_t = pid as libc::pid_t;
-    // SAFETY: kill with sig=0 never sends a signal; it only checks PID existence.
-    let result = unsafe { kill(pid_t, 0) };
-    result == 0
+fn load_sessions_from_file(path: &Path) -> Option<HashMap<String, SessionRecord>> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let persisted: PersistedRegistry = serde_json::from_str(&content).ok()?;
+    Some(
+        persisted
+            .sessions
+            .into_iter()
+            .map(|(k, mut v)| {
+                if v.team.is_empty() || v.agent_name.is_empty() {
+                    let (team, agent_name) = parse_key(&k);
+                    if v.team.is_empty() {
+                        v.team = team;
+                    }
+                    if v.agent_name.is_empty() {
+                        v.agent_name = agent_name;
+                    }
+                }
+                (make_key(&v.team, &v.agent_name), v)
+            })
+            .collect(),
+    )
 }
 
+fn write_sessions_to_file(
+    path: &Path,
+    sessions: &HashMap<String, SessionRecord>,
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let persisted = PersistedRegistry {
+        sessions: sessions.clone(),
+    };
+    let serialized = serde_json::to_string_pretty(&persisted)?;
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, serialized)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedRegistry {
+    sessions: HashMap<String, SessionRecord>,
+}
+
+fn make_key(team: &str, name: &str) -> String {
+    format!("{team}::{name}")
+}
+
+fn parse_key(key: &str) -> (String, String) {
+    match key.split_once("::") {
+        Some((team, name)) => (team.to_string(), name.to_string()),
+        None => ("".to_string(), key.to_string()),
+    }
+}
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -224,6 +629,69 @@ mod tests {
     }
 
     #[test]
+    fn test_mark_dead_for_team_session_marks_matching_active_record_dead() {
+        let mut reg = SessionRegistry::new();
+        reg.upsert_for_team("atm-dev", "arch-ctm", "sess-1", 1234);
+
+        let outcome = reg.mark_dead_for_team_session("atm-dev", "arch-ctm", "sess-1");
+        assert_eq!(outcome, MarkDeadForSessionOutcome::MarkedDead);
+        assert_eq!(
+            reg.query_for_team("atm-dev", "arch-ctm").unwrap().state,
+            SessionState::Dead
+        );
+    }
+
+    #[test]
+    fn test_mark_dead_for_team_session_returns_already_dead_for_duplicate_replay() {
+        let mut reg = SessionRegistry::new();
+        reg.upsert_for_team("atm-dev", "arch-ctm", "sess-1", 1234);
+        reg.mark_dead_for_team("atm-dev", "arch-ctm");
+
+        let outcome = reg.mark_dead_for_team_session("atm-dev", "arch-ctm", "sess-1");
+        assert_eq!(outcome, MarkDeadForSessionOutcome::AlreadyDead);
+        assert_eq!(
+            reg.query_for_team("atm-dev", "arch-ctm").unwrap().state,
+            SessionState::Dead
+        );
+    }
+
+    #[test]
+    fn test_mark_dead_for_team_session_returns_unknown_when_member_not_registered() {
+        let mut reg = SessionRegistry::new();
+        let outcome = reg.mark_dead_for_team_session("atm-dev", "arch-ctm", "sess-1");
+        assert_eq!(outcome, MarkDeadForSessionOutcome::UnknownSession);
+    }
+
+    #[test]
+    fn test_mark_dead_for_team_session_returns_mismatch_without_state_change() {
+        let mut reg = SessionRegistry::new();
+        reg.upsert_for_team("atm-dev", "arch-ctm", "sess-current", 1234);
+
+        let outcome = reg.mark_dead_for_team_session("atm-dev", "arch-ctm", "sess-other");
+        assert_eq!(
+            outcome,
+            MarkDeadForSessionOutcome::SessionMismatch {
+                current_session_id: "sess-current".to_string()
+            }
+        );
+        assert_eq!(
+            reg.query_for_team("atm-dev", "arch-ctm").unwrap().state,
+            SessionState::Active
+        );
+    }
+
+    #[test]
+    fn test_remove_for_team_deletes_only_target_member() {
+        let mut reg = SessionRegistry::new();
+        reg.upsert_for_team("atm-dev", "arch-ctm", "sess-a", 100);
+        reg.upsert_for_team("atm-dev", "arch-gtm", "sess-b", 101);
+
+        reg.remove_for_team("atm-dev", "arch-ctm");
+        assert!(reg.query_for_team("atm-dev", "arch-ctm").is_none());
+        assert!(reg.query_for_team("atm-dev", "arch-gtm").is_some());
+    }
+
+    #[test]
     fn test_multiple_agents() {
         let mut reg = SessionRegistry::new();
         reg.upsert("team-lead", "sess-1", 100);
@@ -232,6 +700,27 @@ mod tests {
 
         assert_eq!(reg.len(), 3);
         assert_eq!(reg.query("arch-ctm").unwrap().process_id, 200);
+    }
+
+    #[test]
+    fn test_sessions_for_team_and_agent_names_are_team_scoped() {
+        let mut reg = SessionRegistry::new();
+        reg.upsert_for_team("atm-dev", "arch-ctm", "sess-1", 111);
+        reg.upsert_for_team("atm-dev", "arch-gtm", "sess-2", 222);
+        reg.upsert_for_team("other-team", "researcher", "sess-3", 333);
+
+        let mut sessions = reg.sessions_for_team("atm-dev");
+        sessions.sort_by(|a, b| a.agent_name.cmp(&b.agent_name));
+        let names_from_sessions: Vec<String> =
+            sessions.iter().map(|s| s.agent_name.clone()).collect();
+        assert_eq!(
+            names_from_sessions,
+            vec!["arch-ctm".to_string(), "arch-gtm".to_string()]
+        );
+
+        let mut names = reg.agent_names_for_team("atm-dev");
+        names.sort();
+        assert_eq!(names, vec!["arch-ctm".to_string(), "arch-gtm".to_string()]);
     }
 
     #[test]
@@ -245,8 +734,96 @@ mod tests {
         assert!(reg.query("team-lead").is_some());
     }
 
+    #[test]
+    fn test_persisted_registry_writes_and_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude/daemon/session-registry.json");
+
+        let mut reg = SessionRegistry::with_persist_path(path.clone());
+        reg.upsert("team-lead", "sess-a", 42);
+        reg.mark_dead("team-lead");
+
+        let loaded = SessionRegistry::load_or_new(path);
+        let rec = loaded.query("team-lead").unwrap();
+        assert_eq!(rec.session_id, "sess-a");
+        assert_eq!(rec.process_id, 42);
+        assert_eq!(rec.state, SessionState::Dead);
+    }
+
+    #[test]
+    fn test_query_for_team_with_liveness_marks_dead_when_pid_is_not_alive() {
+        let mut reg = SessionRegistry::new();
+        let pid = i32::MAX as u32;
+        reg.upsert_for_team("atm-dev", "arch-ctm", "sess-dead", pid);
+        if let Some(entry) = reg.liveness_cache.get_mut(&pid) {
+            entry.checked_at = chrono::Utc::now()
+                - chrono::Duration::from_std(SessionRegistry::PID_LIVENESS_TTL).unwrap()
+                - chrono::Duration::milliseconds(10);
+        }
+        let refreshed = reg
+            .query_for_team_with_liveness("atm-dev", "arch-ctm")
+            .expect("session should exist");
+        assert_eq!(refreshed.state, SessionState::Dead);
+    }
+
+    #[test]
+    fn test_query_for_team_with_liveness_updates_last_alive_timestamp() {
+        let mut reg = SessionRegistry::new();
+        let pid = std::process::id();
+        reg.upsert_for_team("atm-dev", "team-lead", "sess-live", pid);
+        if let Some(record) = reg.sessions.get_mut("atm-dev::team-lead") {
+            record.last_alive_at = None;
+        }
+        let refreshed = reg
+            .query_for_team_with_liveness("atm-dev", "team-lead")
+            .expect("session should exist");
+        assert_eq!(refreshed.state, SessionState::Active);
+        assert!(
+            refreshed.last_alive_at.is_some(),
+            "active liveness probe should refresh last_alive_at"
+        );
+    }
+
+    #[test]
+    fn test_liveness_cache_reprobe_after_ttl_reclassifies_dead() {
+        let mut reg = SessionRegistry::new();
+        let pid = i32::MAX as u32;
+        reg.upsert_for_team("atm-dev", "arch-ctm", "sess-stale", pid);
+        // Force a fresh-but-incorrect cached alive result to verify bounded stale windows.
+        reg.liveness_cache.insert(
+            pid,
+            LivenessCacheEntry {
+                alive: true,
+                checked_at: chrono::Utc::now(),
+            },
+        );
+
+        let first = reg
+            .query_for_team_with_liveness("atm-dev", "arch-ctm")
+            .expect("session should exist");
+        assert_eq!(
+            first.state,
+            SessionState::Active,
+            "fresh cache entry should be honored within TTL"
+        );
+
+        if let Some(entry) = reg.liveness_cache.get_mut(&pid) {
+            entry.checked_at = chrono::Utc::now()
+                - chrono::Duration::from_std(SessionRegistry::PID_LIVENESS_TTL).unwrap()
+                - chrono::Duration::milliseconds(10);
+        }
+
+        let second = reg
+            .query_for_team_with_liveness("atm-dev", "arch-ctm")
+            .expect("session should exist");
+        assert_eq!(
+            second.state,
+            SessionState::Dead,
+            "expired cache entry must trigger re-probe and dead convergence"
+        );
+    }
+
     /// Liveness check: the current process must be alive.
-    #[cfg(unix)]
     #[test]
     fn test_is_pid_alive_current_process() {
         let pid = std::process::id();
@@ -254,21 +831,26 @@ mod tests {
     }
 
     /// Liveness check: an impossible PID should be dead.
-    #[cfg(unix)]
     #[test]
     fn test_is_pid_alive_nonexistent_pid() {
-        // i32::MAX exceeds kernel PID range on Linux/macOS; kill() returns ESRCH.
         assert!(!is_pid_alive(i32::MAX as u32));
     }
 
     /// SessionRecord::is_process_alive uses the current process (always alive).
-    #[cfg(unix)]
     #[test]
     fn test_record_is_process_alive_current() {
         let record = SessionRecord {
+            team: "atm-dev".to_string(),
+            agent_name: "team-lead".to_string(),
             session_id: "test".to_string(),
             process_id: std::process::id(),
             state: SessionState::Active,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            last_alive_at: Some(chrono::Utc::now().to_rfc3339()),
+            runtime: None,
+            runtime_session_id: None,
+            pane_id: None,
+            runtime_home: None,
         };
         assert!(record.is_process_alive());
     }

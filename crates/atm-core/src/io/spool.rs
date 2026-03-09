@@ -144,7 +144,7 @@ pub fn spool_drain(inbox_base: &Path) -> Result<SpoolStatus, InboxError> {
 }
 
 /// Internal implementation that accepts an optional base directory for testing
-fn spool_drain_with_base(
+pub fn spool_drain_with_base(
     inbox_base: &Path,
     base_dir: Option<&Path>,
 ) -> Result<SpoolStatus, InboxError> {
@@ -318,9 +318,6 @@ fn process_spooled_message(
 fn get_spool_dir_with_base(subdir: &str, base_dir: Option<&Path>) -> Result<PathBuf, InboxError> {
     let spool_dir = if let Some(base) = base_dir {
         base.join("spool").join(subdir)
-    } else if let Ok(atm_home) = std::env::var("ATM_HOME") {
-        // When ATM_HOME is set, use it directly (test-friendly)
-        PathBuf::from(atm_home).join("spool").join(subdir)
     } else {
         let home = crate::home::get_home_dir().map_err(|e| InboxError::SpoolError {
             message: format!("Could not determine home directory: {e}"),

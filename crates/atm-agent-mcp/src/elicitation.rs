@@ -151,6 +151,31 @@ impl ElicitationRegistry {
         Some(response)
     }
 
+    /// Resolve a pending elicitation by its downstream request ID.
+    ///
+    /// This is used by local control paths (e.g. TUI approval modal) that
+    /// observe child-facing request IDs from stream events rather than the
+    /// proxy-assigned upstream request ID.
+    pub fn resolve_for_downstream_id(
+        &mut self,
+        downstream_request_id: &serde_json::Value,
+        mut response: serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let key = self.pending.iter().find_map(|(k, v)| {
+            if v.downstream_request_id == *downstream_request_id {
+                Some(k.clone())
+            } else {
+                None
+            }
+        })?;
+        let entry = self.pending.remove(&key)?;
+        if let Some(id_field) = response.get_mut("id") {
+            *id_field = entry.downstream_request_id.clone();
+        }
+        let _ = entry.response_tx.send(response.clone());
+        Some(response)
+    }
+
     /// Cancel all pending elicitations for the given agent, sending `rejection_result`
     /// to each waiting channel.
     ///

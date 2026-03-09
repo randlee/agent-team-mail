@@ -136,7 +136,7 @@ async fn test_ci_failure_delivers_inbox_message() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -188,7 +188,7 @@ async fn test_ci_failure_delivers_inbox_message() {
     assert_eq!(msg.from, "ci-monitor");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_ci_deduplication() {
     let temp_dir = TempDir::new().unwrap();
 
@@ -226,7 +226,7 @@ async fn test_ci_deduplication() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -254,6 +254,11 @@ async fn test_ci_deduplication() {
         dedup_strategy: agent_team_mail_daemon::plugins::ci_monitor::DedupStrategy::PerCommit,
         dedup_ttl_hours: 24,
         report_dir: std::path::PathBuf::from("temp/atm/ci-monitor"),
+        runtime_drift_enabled: false,
+        runtime_drift_threshold_percent: 50,
+        runtime_drift_min_samples: 3,
+        runtime_history_limit: 50,
+        alert_cooldown_secs: 300,
         provider_config: None,
         notify_target: Vec::new(),
         branch_matcher: None,
@@ -264,16 +269,30 @@ async fn test_ci_deduplication() {
         .with_config(test_config);
     plugin.init(&ctx).await.unwrap();
 
-    // Run for more than two poll cycles (21 seconds = 2 full cycles)
+    // Run with simulated time so this test stays fast and deterministic.
     let cancel = CancellationToken::new();
-    let cancel_clone = cancel.clone();
+    let run_cancel = cancel.clone();
+    let run_task = tokio::spawn(async move { plugin.run(run_cancel).await });
 
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(21000)).await;
-        cancel_clone.cancel();
-    });
+    // Drive virtual time until we've observed at least two poll cycles.
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(10)).await;
+        tokio::task::yield_now().await;
+        let list_calls = provider_clone
+            .get_calls()
+            .iter()
+            .filter(|c| matches!(c, MockCall::ListRuns(_)))
+            .count();
+        if list_calls >= 2 {
+            break;
+        }
+    }
 
-    let _ = plugin.run(cancel).await;
+    cancel.cancel();
+    tokio::task::yield_now().await;
+
+    let _ = run_task.await.unwrap();
 
     // Verify list_runs and get_run were called multiple times
     let calls = provider_clone.get_calls();
@@ -336,7 +355,7 @@ async fn test_status_transition_notification() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -370,7 +389,7 @@ async fn test_status_transition_notification() {
     ctx.roster
         .cleanup_plugin(
             "test-team",
-            "ci_monitor",
+            "gh_monitor",
             agent_team_mail_daemon::roster::CleanupMode::Hard,
         )
         .unwrap();
@@ -393,6 +412,173 @@ async fn test_status_transition_notification() {
         messages.len(),
         1,
         "Should deliver notification when run transitions to failure"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_runtime_drift_alert_persisted_across_restart() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let git_provider = GitProvider::GitHub {
+        owner: "test".to_string(),
+        repo: "repo".to_string(),
+    };
+    let mut ctx = create_test_context(&temp_dir, Some(git_provider));
+    create_team_config(ctx.mail.teams_root(), "test-team");
+
+    let mut plugin_config = toml::Table::new();
+    plugin_config.insert("enabled".to_string(), toml::Value::Boolean(true));
+    plugin_config.insert("poll_interval_secs".to_string(), toml::Value::Integer(10));
+    plugin_config.insert(
+        "team".to_string(),
+        toml::Value::String("test-team".to_string()),
+    );
+    plugin_config.insert(
+        "agent".to_string(),
+        toml::Value::String("ci-monitor".to_string()),
+    );
+    plugin_config.insert(
+        "runtime_drift_enabled".to_string(),
+        toml::Value::Boolean(true),
+    );
+    plugin_config.insert(
+        "runtime_drift_threshold_percent".to_string(),
+        toml::Value::Integer(50),
+    );
+    plugin_config.insert(
+        "runtime_drift_min_samples".to_string(),
+        toml::Value::Integer(1),
+    );
+    plugin_config.insert(
+        "runtime_history_limit".to_string(),
+        toml::Value::Integer(20),
+    );
+
+    let mut config = (*ctx.config).clone();
+    config
+        .plugins
+        .insert("gh_monitor".to_string(), plugin_config);
+    ctx = PluginContext::new(
+        ctx.system.clone(),
+        ctx.mail.clone(),
+        Arc::new(config),
+        ctx.roster.clone(),
+    );
+
+    let mut baseline_job = create_test_job(
+        901,
+        "build",
+        CiRunStatus::Completed,
+        Some(CiRunConclusion::Failure),
+    );
+    baseline_job.started_at = Some("2026-02-13T10:01:00Z".to_string());
+    baseline_job.completed_at = Some("2026-02-13T10:04:00Z".to_string()); // 180s
+    let mut baseline_run = create_test_run(
+        901,
+        "CI",
+        "main",
+        CiRunStatus::Completed,
+        Some(CiRunConclusion::Failure),
+    );
+    baseline_run.created_at = "2026-02-13T10:00:00Z".to_string();
+    baseline_run.updated_at = "2026-02-13T10:05:00Z".to_string(); // 300s
+    baseline_run.jobs = Some(vec![baseline_job]);
+    let replayed_baseline_run = baseline_run.clone();
+
+    let mut slow_job = create_test_job(
+        902,
+        "build",
+        CiRunStatus::Completed,
+        Some(CiRunConclusion::Failure),
+    );
+    slow_job.started_at = Some("2026-02-13T11:01:00Z".to_string());
+    slow_job.completed_at = Some("2026-02-13T11:09:00Z".to_string()); // 480s (> +50%)
+    let mut slow_run = create_test_run(
+        902,
+        "CI",
+        "main",
+        CiRunStatus::Completed,
+        Some(CiRunConclusion::Failure),
+    );
+    slow_run.created_at = "2026-02-13T11:00:00Z".to_string();
+    slow_run.updated_at = "2026-02-13T11:15:00Z".to_string(); // 900s (> +50%)
+    slow_run.jobs = Some(vec![slow_job]);
+
+    // First process start: persist baseline history from run #901.
+    let provider_v1 = MockCiProvider::with_runs(vec![baseline_run]);
+    let mut plugin_v1 = CiMonitorPlugin::new().with_provider(Box::new(provider_v1));
+    plugin_v1.init(&ctx).await.unwrap();
+    let cancel_v1 = CancellationToken::new();
+    let run_cancel_v1 = cancel_v1.clone();
+    let run_task_v1 = tokio::spawn(async move { plugin_v1.run(run_cancel_v1).await });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(10)).await;
+    tokio::task::yield_now().await;
+    cancel_v1.cancel();
+    tokio::task::yield_now().await;
+    let _ = run_task_v1.await.unwrap();
+
+    // Restart plugin process and feed run #901 (already processed) and #902.
+    // Run #901 must not produce a duplicate drift alert after restart.
+    ctx.roster
+        .cleanup_plugin(
+            "test-team",
+            "gh_monitor",
+            agent_team_mail_daemon::roster::CleanupMode::Hard,
+        )
+        .unwrap();
+    let provider_v2 = MockCiProvider::with_runs(vec![replayed_baseline_run, slow_run]);
+    let mut plugin_v2 = CiMonitorPlugin::new().with_provider(Box::new(provider_v2));
+    plugin_v2.init(&ctx).await.unwrap();
+    let cancel_v2 = CancellationToken::new();
+    let run_cancel_v2 = cancel_v2.clone();
+    let run_task_v2 = tokio::spawn(async move { plugin_v2.run(run_cancel_v2).await });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(10)).await;
+    tokio::task::yield_now().await;
+    cancel_v2.cancel();
+    tokio::task::yield_now().await;
+    let _ = run_task_v2.await.unwrap();
+
+    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor");
+    let drift_messages: Vec<_> = messages
+        .iter()
+        .filter(|m| m.text.contains("[runtime-drift:"))
+        .collect();
+    assert_eq!(
+        drift_messages.len(),
+        1,
+        "Expected exactly one runtime drift alert across restart replay"
+    );
+    assert!(
+        drift_messages[0].text.contains("[runtime-drift:902]"),
+        "Expected persisted-baseline runtime drift alert for run 902"
+    );
+    assert!(
+        !drift_messages
+            .iter()
+            .any(|m| m.text.contains("[runtime-drift:901]")),
+        "Run 901 replay after restart must not generate a duplicate drift alert"
+    );
+
+    let history_path = temp_dir
+        .path()
+        .join("temp/atm/ci-monitor/runtime-history.json");
+    assert!(
+        history_path.exists(),
+        "runtime history file should be persisted"
+    );
+    let history: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&history_path).unwrap()).unwrap();
+    assert_eq!(
+        history["workflow_samples"]["CI"].as_array().unwrap().len(),
+        2,
+        "workflow baseline should include both samples across restart"
+    );
+    assert_eq!(
+        history["processed_run_ids"].as_array().unwrap().len(),
+        2,
+        "processed run ids should persist across restart"
     );
 }
 
@@ -448,7 +634,7 @@ async fn test_multiple_failures() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -540,7 +726,7 @@ async fn test_branch_filtering() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -643,7 +829,7 @@ async fn test_conclusion_filtering() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -702,7 +888,7 @@ async fn test_synthetic_member_lifecycle() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -726,7 +912,7 @@ async fn test_synthetic_member_lifecycle() {
 
     assert!(ci_monitor.is_some(), "ci-monitor should be registered");
     let bot = ci_monitor.unwrap();
-    assert_eq!(bot["agentType"].as_str().unwrap(), "plugin:ci_monitor");
+    assert_eq!(bot["agentType"].as_str().unwrap(), "plugin:gh_monitor");
     assert_eq!(bot["isActive"].as_bool(), Some(true));
 
     // Shutdown plugin
@@ -772,7 +958,7 @@ async fn test_disabled_plugin_skips_init() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),
@@ -831,7 +1017,7 @@ async fn test_full_lifecycle_init_run_shutdown() {
     let mut config = (*ctx.config).clone();
     config
         .plugins
-        .insert("ci_monitor".to_string(), plugin_config);
+        .insert("gh_monitor".to_string(), plugin_config);
     ctx = PluginContext::new(
         ctx.system.clone(),
         ctx.mail.clone(),

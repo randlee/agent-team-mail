@@ -15,7 +15,11 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     let workdir = temp_dir.path().join("workdir");
     std::fs::create_dir_all(&workdir).ok();
     cmd.env("ATM_HOME", temp_dir.path())
+        .env("ATM_DAEMON_AUTOSTART", "0")
+        .env_remove("ATM_TEAM")
         .env_remove("ATM_IDENTITY")
+        .env_remove("ATM_CONFIG")
+        .env_remove("CLAUDE_SESSION_ID")
         .current_dir(&workdir);
 }
 
@@ -183,11 +187,27 @@ fn test_members_command_json_output() {
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
-    cmd.env("ATM_TEAM", "test-team")
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
         .arg("members")
         .arg("--json")
         .assert()
-        .success();
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let members = json["members"].as_array().unwrap();
+    assert!(!members.is_empty());
+    assert!(
+        members[0].get("liveness").is_some(),
+        "members --json should emit daemon-backed liveness field"
+    );
+    assert!(
+        members[0].get("isActive").is_none(),
+        "members --json should not emit deprecated isActive field"
+    );
 }
 
 #[test]

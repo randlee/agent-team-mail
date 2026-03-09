@@ -158,6 +158,7 @@ Operational model:
 - `docs/tui-mvp-architecture.md` (approved exception language)
 - `docs/atm-agent-mcp/requirements.md` (FR-21, FR-22)
 - `docs/atm-agent-mcp/codex-parity-test-plan.md` (M.3/M.7 contract, golden, and renderer parity gates)
+- `docs/atm-agent-mcp/codex-cli-atm-tui-render-gap-analysis.md` (Phase O render-type gap mapping and remediation priorities)
 
 ## 10. Follow-up Backlog (Phase M planning input)
 
@@ -231,3 +232,23 @@ Implementation principle:
 - Exit criteria:
   - parity suite passes in CI,
   - deviations are explicitly documented and approved.
+
+## 12. Attached Terminal Parity Plan (Phase O.1-O.3)
+
+Goal:
+- Deliver `atm-agent-mcp attach <agent-id>` as an interactive terminal mode with Codex CLI parity for attached-session workflows.
+
+Scope:
+- Preserve existing watch-mode guarantees from this document while adding attached-mode interaction parity.
+- Keep daemon boundaries unchanged: render-stream remains MCP/proxy bound; daemon receives lifecycle/state summaries.
+- Align with `docs/atm-agent-mcp/requirements.md` FR-13.9 and FR-23 as the normative contract.
+
+Sprint outline:
+- O.1 Attach command + stream/control wiring.
+- O.2 Renderer/runtime parity for core attached flows.
+- O.3 Control-path parity (approval/reject, interrupt/cancel, explicit fault states).
+
+Acceptance focus:
+- Attached mode shows parity for prompt lifecycle, tool streaming, approval/reject, interrupt/cancel, and fatal/error paths.
+- Source attribution (`client_prompt`, `atm_mail`, `user_steer`) remains visible without ordering regressions.
+- Attach/detach/re-attach maintains deterministic replay continuity with no duplicate or out-of-order artifacts.

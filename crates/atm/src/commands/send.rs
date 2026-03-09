@@ -1,11 +1,12 @@
 //! Send command implementation
 
 use agent_team_mail_core::config::{Config, ConfigOverrides, resolve_config, resolve_identity};
+use agent_team_mail_core::daemon_client::{RegisterHintOutcome, SessionQueryResult};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
 use agent_team_mail_core::io::inbox::{WriteOutcome, inbox_append};
 use agent_team_mail_core::io::lock::acquire_lock;
-use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
+use agent_team_mail_core::schema::{AgentMember, BackendType, InboxMessage, TeamConfig};
 use anyhow::Result;
 use chrono::Utc;
 use clap::Args;
@@ -21,6 +22,7 @@ use agent_team_mail_core::text::{
 
 use crate::util::addressing::parse_address;
 use crate::util::file_policy::check_file_reference;
+use crate::util::hook_identity::{read_hook_file, read_hook_file_identity, read_session_file};
 use crate::util::settings::get_home_dir;
 
 /// Send a message to a specific agent
@@ -71,6 +73,8 @@ pub fn execute(args: SendArgs) -> Result<()> {
     // Resolve configuration
     let home_dir = get_home_dir()?;
     let current_dir = std::env::current_dir()?;
+    let sender_config = resolve_config(&ConfigOverrides::default(), &current_dir, &home_dir)?;
+    let sender_team = sender_config.core.default_team.clone();
 
     let overrides = ConfigOverrides {
         team: args.team.clone(),
@@ -79,14 +83,32 @@ pub fn execute(args: SendArgs) -> Result<()> {
 
     let mut config = resolve_config(&overrides, &current_dir, &home_dir)?;
 
-    // Override sender identity if --from provided
+    // Override sender identity if --from provided; otherwise resolve via hook file.
     if let Some(ref from) = args.from {
+        // --from always wins.
         config.core.identity = from.clone();
     } else if config.core.identity == "human" {
-        // If identity is still "human" (default), try to auto-detect from team context
-        config.core.identity = detect_sender_identity(&config.core.default_team, &home_dir)
-            .unwrap_or_else(|| "human".to_string());
+        // Default identity — must resolve via PID-based hook file.
+        match read_hook_file_identity() {
+            Ok(Some(identity)) => {
+                config.core.identity = identity;
+            }
+            Ok(None) => {
+                anyhow::bail!(
+                    "Cannot determine sender identity: hook file not found. \
+                     Ensure the atm-identity-write.py PreToolUse hook is configured in \
+                     .claude/settings.json, or use --from <name> to specify identity explicitly."
+                );
+            }
+            Err(e) => {
+                anyhow::bail!(
+                    "Cannot determine sender identity: hook file validation failed: {e}. \
+                     Use --from <name> to specify identity explicitly."
+                );
+            }
+        }
     }
+    // else: identity was explicitly configured (ATM_IDENTITY, .atm.toml) — use as-is.
 
     // Parse addressing (agent@team or just agent) first so alias lookup runs on
     // only the agent token, even when input uses @team suffix.
@@ -123,10 +145,26 @@ pub fn execute(args: SendArgs) -> Result<()> {
     // Get message text from appropriate source
     let message_text = get_message_text(&args)?;
 
-    // Self-send check: warn and prepend warning when sender == recipient
-    let message_text = if config.core.identity == agent_name {
-        let session_id =
-            std::env::var("CLAUDE_SESSION_ID").unwrap_or_else(|_| "unknown".to_string());
+    // Resolve sender session once so concurrent same-identity sessions can be
+    // disambiguated deterministically.
+    let sender_session_id =
+        resolve_sender_session_id_with_context(Some(&sender_team), Some(&config.core.identity))?;
+
+    // Self-send check: warn and prepend warning only when sender/recipient are
+    // same identity in same team and daemon session ownership points to this
+    // session (or ownership is unknown).
+    let message_text = if should_warn_self_send(
+        &config.core.identity,
+        &sender_team,
+        &agent_name,
+        &team_name,
+        sender_session_id.as_deref(),
+    ) {
+        let session_id = sender_session_id
+            .as_deref()
+            .map(str::to_string)
+            .or_else(|| std::env::var("CLAUDE_SESSION_ID").ok())
+            .unwrap_or_else(|| "unknown".to_string());
         let session_short = &session_id[..8.min(session_id.len())];
         let warning = format!(
             "[WARNING: Sent to self — identity={}, session={}. Check ATM_IDENTITY.]",
@@ -151,15 +189,9 @@ pub fn execute(args: SendArgs) -> Result<()> {
         message_text
     };
 
-    // Check if recipient is offline and prepend action text
-    // Only warn if isActive is explicitly false, not on missing/null
-    let recipient_offline = team_config
-        .members
-        .iter()
-        .find(|m| m.name == agent_name)
-        .and_then(|m| m.is_active)
-        .map(|is_active| !is_active)
-        .unwrap_or(false); // Missing or null = not offline
+    // Check if recipient is offline and prepend action text.
+    // Liveness truth comes from daemon session state; isActive is activity-only.
+    let recipient_offline = recipient_has_dead_session(&team_name, &agent_name);
 
     if recipient_offline {
         let action_text = resolve_offline_action(&args, &config);
@@ -180,6 +212,12 @@ pub fn execute(args: SendArgs) -> Result<()> {
         // Non-fatal: log warning but proceed with send
         eprintln!("Warning: Failed to update sender activity: {e}");
     }
+    register_sender_hint(
+        &team_name,
+        &config.core.identity,
+        &team_config,
+        sender_session_id.as_deref(),
+    )?;
 
     // Generate summary
     let summary = args
@@ -199,6 +237,7 @@ pub fn execute(args: SendArgs) -> Result<()> {
 
     // Dry run output
     if args.dry_run {
+        let destination = destination_target(&agent_name, &team_name);
         emit_event_best_effort(EventFields {
             level: "info",
             source: "atm",
@@ -207,7 +246,7 @@ pub fn execute(args: SendArgs) -> Result<()> {
             session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
             agent_id: Some(config.core.identity.clone()),
             agent_name: Some(config.core.identity.clone()),
-            target: Some(agent_name.clone()),
+            target: Some(destination),
             result: Some("ok".to_string()),
             message_text: Some(final_message_text.clone()),
             ..Default::default()
@@ -248,6 +287,13 @@ pub fn execute(args: SendArgs) -> Result<()> {
         }
         WriteOutcome::Queued { .. } => ("queued", None),
     };
+    let destination = destination_target(&agent_name, &team_name);
+    let sender_pid = team_config
+        .members
+        .iter()
+        .find(|m| m.name == config.core.identity)
+        .and_then(detect_sender_process_pid);
+    let recipient_pid = member_pid_hint(&team_config, &agent_name);
     emit_event_best_effort(EventFields {
         level: "info",
         source: "atm",
@@ -256,11 +302,17 @@ pub fn execute(args: SendArgs) -> Result<()> {
         session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
         agent_id: Some(config.core.identity.clone()),
         agent_name: Some(config.core.identity.clone()),
-        target: Some(agent_name.clone()),
+        target: Some(destination),
         result: Some(result_text.to_string()),
         message_id: inbox_message.message_id.clone(),
         count: conflict_count,
         message_text: Some(final_message_text.clone()),
+        sender_agent: Some(config.core.identity.clone()),
+        sender_team: Some(sender_team.clone()),
+        sender_pid,
+        recipient_agent: Some(agent_name.clone()),
+        recipient_team: Some(team_name.clone()),
+        recipient_pid,
         ..Default::default()
     });
     info!(
@@ -397,7 +449,99 @@ fn resolve_offline_action(args: &SendArgs, config: &Config) -> String {
         return action.clone();
     }
 
-    "PENDING ACTION - execute when online".to_string()
+    String::new()
+}
+
+fn is_self_send(
+    sender_identity: &str,
+    sender_team: &str,
+    recipient_agent: &str,
+    recipient_team: &str,
+) -> bool {
+    sender_identity == recipient_agent && sender_team == recipient_team
+}
+
+fn destination_target(agent_name: &str, team_name: &str) -> String {
+    format!("{agent_name}@{team_name}")
+}
+
+fn register_sender_hint(
+    team: &str,
+    sender: &str,
+    cfg: &TeamConfig,
+    sender_session_id: Option<&str>,
+) -> Result<()> {
+    let Some(member) = cfg.members.iter().find(|m| m.name == sender) else {
+        return Ok(());
+    };
+    let Some(process_id) = detect_sender_process_pid(member) else {
+        return Ok(());
+    };
+    if process_id <= 1 {
+        return Ok(());
+    }
+
+    let session_id = sender_session_id
+        .map(str::to_string)
+        // Non-hook shells (Codex/Gemini CLI) still need a stable daemon session
+        // key. Keep this stable for the life of the detected PID.
+        .unwrap_or_else(|| format!("local:{sender}:pid:{process_id}"));
+
+    let runtime = member.effective_backend_type().and_then(|bt| match bt {
+        BackendType::ClaudeCode => Some("claude"),
+        BackendType::Codex => Some("codex"),
+        BackendType::Gemini => Some("gemini"),
+        BackendType::External | BackendType::Human(_) => None,
+    });
+    let runtime_session_id = runtime.map(|_| session_id.as_str());
+
+    match agent_team_mail_core::daemon_client::register_hint(
+        team,
+        sender,
+        &session_id,
+        process_id,
+        runtime,
+        runtime_session_id,
+        None,
+        None,
+    ) {
+        Ok(RegisterHintOutcome::Registered | RegisterHintOutcome::DaemonUnavailable) => Ok(()),
+        Ok(RegisterHintOutcome::UnsupportedDaemon) => {
+            eprintln!(
+                "Warning: Connected daemon does not support 'register-hint'. \
+                 Upgrade atm-daemon to this ATM version and retry; continuing without daemon session sync."
+            );
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("Warning: Failed to register daemon session hint: {e}");
+            Ok(())
+        }
+    }
+}
+
+fn member_pid_hint(cfg: &TeamConfig, name: &str) -> Option<u32> {
+    cfg.members
+        .iter()
+        .find(|m| m.name == name)
+        .and_then(AgentMember::process_id_hint)
+}
+
+fn recipient_has_dead_session(team: &str, agent_name: &str) -> bool {
+    recipient_has_dead_session_with_query(team, agent_name, |team, agent| {
+        agent_team_mail_core::daemon_client::query_session_for_team(team, agent)
+    })
+}
+
+fn recipient_has_dead_session_with_query<F>(team: &str, agent_name: &str, query: F) -> bool
+where
+    F: Fn(&str, &str) -> anyhow::Result<Option<SessionQueryResult>>,
+{
+    match query(team, agent_name) {
+        Ok(Some(session)) => !session.alive,
+        Ok(None) => false, // Unknown session state; do not label as offline.
+        Err(_) => false,   // Best-effort: send must proceed even if daemon query fails.
+    }
 }
 
 /// Generate summary from message text (first ~100 chars)
@@ -466,53 +610,192 @@ fn set_sender_heartbeat(team_config_path: &Path, sender_name: &str) -> Result<()
     Ok(())
 }
 
-/// Detect sender identity from team context
-///
-/// Attempts to match the current process with a team member by checking:
-/// 1. ATM_IDENTITY env var (already checked by config resolution)
-/// 2. Team config members list (checks for session ID or process context)
-///
-/// Returns None if no match found (caller should default to "human")
-fn detect_sender_identity(team_name: &str, home_dir: &Path) -> Option<String> {
-    // Load team config
-    let team_config_path = home_dir
-        .join(".claude/teams")
-        .join(team_name)
-        .join("config.json");
+fn resolve_sender_session_id_with_context(
+    team: Option<&str>,
+    identity: Option<&str>,
+) -> Result<Option<String>> {
+    // 1. PID-based hook file (fastest, most precise — set by PreToolUse Bash hook).
+    if let Ok(Some(hook)) = read_hook_file() {
+        let trimmed = hook.session_id.trim();
+        if !trimmed.is_empty() {
+            return Ok(Some(trimmed.to_string()));
+        }
+    }
+    // 2. Explicit environment override.
+    if let Some(env_session) = std::env::var("CLAUDE_SESSION_ID")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Ok(Some(env_session));
+    }
+    // 3. Session file written by SessionStart hook (survives bash subshell env loss).
+    if let (Some(t), Some(id)) = (team, identity) {
+        if let Some(session_id) = read_session_file(t, id)? {
+            return Ok(Some(session_id));
+        }
+    }
+    Ok(None)
+}
 
-    if !team_config_path.exists() {
-        return None;
+fn should_warn_self_send(
+    sender_identity: &str,
+    sender_team: &str,
+    recipient_agent: &str,
+    recipient_team: &str,
+    sender_session_id: Option<&str>,
+) -> bool {
+    should_warn_self_send_with_query(
+        sender_identity,
+        sender_team,
+        recipient_agent,
+        recipient_team,
+        sender_session_id,
+        agent_team_mail_core::daemon_client::query_session_for_team,
+    )
+}
+
+fn should_warn_self_send_with_query<F>(
+    sender_identity: &str,
+    sender_team: &str,
+    recipient_agent: &str,
+    recipient_team: &str,
+    sender_session_id: Option<&str>,
+    query: F,
+) -> bool
+where
+    F: Fn(&str, &str) -> anyhow::Result<Option<SessionQueryResult>>,
+{
+    if !is_self_send(
+        sender_identity,
+        sender_team,
+        recipient_agent,
+        recipient_team,
+    ) {
+        return false;
     }
 
-    let content = std::fs::read_to_string(&team_config_path).ok()?;
-    let team_config: TeamConfig = serde_json::from_str(&content).ok()?;
+    let Some(sender_session_id) = sender_session_id else {
+        // Unknown sender session: retain warning to avoid silent misrouting.
+        return true;
+    };
 
-    // Try to match by session ID (from env)
-    if let Ok(session_id) = std::env::var("CLAUDE_SESSION_ID") {
-        for member in &team_config.members {
-            if member.agent_id.starts_with(&format!("{session_id}@")) {
-                return Some(member.name.clone());
+    match query(recipient_team, recipient_agent) {
+        Ok(Some(session)) if session.alive => session.session_id == sender_session_id,
+        Ok(Some(_)) => true,
+        Ok(None) => true,
+        Err(_) => true,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackendRule {
+    Claude,
+    Codex,
+    Gemini,
+}
+
+fn backend_expected_rule(member: &AgentMember) -> Option<BackendRule> {
+    match member.effective_backend_type() {
+        Some(BackendType::ClaudeCode) => Some(BackendRule::Claude),
+        Some(BackendType::Codex) => Some(BackendRule::Codex),
+        Some(BackendType::Gemini) => Some(BackendRule::Gemini),
+        Some(BackendType::External) | Some(BackendType::Human(_)) => None,
+        None => {
+            let agent_type = member.agent_type.to_ascii_lowercase();
+            match agent_type.as_str() {
+                "codex" => Some(BackendRule::Codex),
+                "gemini" => Some(BackendRule::Gemini),
+                "general-purpose" | "explore" | "plan" => Some(BackendRule::Claude),
+                _ if member.name == "team-lead" => Some(BackendRule::Claude),
+                _ => None,
             }
         }
     }
+}
 
-    // Try to match by CWD (if agent's cwd matches current dir)
-    if let Ok(current_dir) = std::env::current_dir() {
-        let current_path = current_dir.to_string_lossy();
-        for member in &team_config.members {
-            if member.cwd == current_path {
-                return Some(member.name.clone());
-            }
+fn process_observation(sys: &sysinfo::System, pid: sysinfo::Pid) -> Option<(String, String)> {
+    let process = sys.process(pid)?;
+    let comm = process.name().to_string_lossy().to_lowercase();
+    let args = process
+        .cmd()
+        .iter()
+        .map(|part| part.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    Some((comm, args))
+}
+
+fn process_matches_rule(rule: BackendRule, comm: &str, args: &str) -> bool {
+    let comm_basename = comm.rsplit('/').next().unwrap_or(comm);
+    match rule {
+        // sysinfo may return the full executable path; normalize to basename.
+        BackendRule::Claude => comm_basename == "claude",
+        BackendRule::Codex => comm_basename == "codex",
+        BackendRule::Gemini => comm_basename == "node" && args.contains("gemini"),
+    }
+}
+
+fn detect_sender_process_pid(member: &AgentMember) -> Option<u32> {
+    use sysinfo::{Pid, System};
+
+    // If identity is already explicit, skip process-table probing.
+    // This avoids transient sysinfo failures under concurrent Windows load.
+    // Prefer hook PID when available; otherwise return this process PID so the
+    // register-hint path still has a concrete process hint.
+    if let Ok(identity) = std::env::var("ATM_IDENTITY")
+        && !identity.trim().is_empty()
+    {
+        if let Ok(Some(hook)) = read_hook_file()
+            && hook.pid > 1
+        {
+            return Some(hook.pid);
         }
+        let pid = std::process::id();
+        return (pid > 1).then_some(pid);
     }
 
-    // No match found
+    let expected_rule = backend_expected_rule(member)?;
+
+    let sys = System::new_all();
+    if let Ok(Some(hook)) = read_hook_file()
+        && hook.pid > 1
+        && let Some((comm, args)) = process_observation(&sys, Pid::from_u32(hook.pid))
+        && process_matches_rule(expected_rule, &comm, &args)
+    {
+        return Some(hook.pid);
+    }
+
+    let mut cursor = Pid::from_u32(std::process::id());
+
+    for _ in 0..16 {
+        let Some(proc_info) = sys.process(cursor) else {
+            break;
+        };
+        let Some(parent) = proc_info.parent() else {
+            break;
+        };
+        let parent_u32 = parent.as_u32();
+        if let Some((comm, args)) = process_observation(&sys, parent)
+            && process_matches_rule(expected_rule, &comm, &args)
+        {
+            return Some(parent_u32);
+        }
+        cursor = parent;
+    }
+
     None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::anyhow;
+    use serial_test::serial;
+    use std::collections::HashMap;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tempfile::TempDir;
 
     #[test]
     fn test_generate_summary_short() {
@@ -549,14 +832,115 @@ mod tests {
         }
     }
 
+    fn make_member(name: &str, agent_type: &str, backend: Option<BackendType>) -> AgentMember {
+        AgentMember {
+            agent_id: format!("{name}@atm-dev"),
+            name: name.to_string(),
+            agent_type: agent_type.to_string(),
+            model: "unknown".to_string(),
+            prompt: None,
+            color: None,
+            plan_mode_required: None,
+            joined_at: 0,
+            tmux_pane_id: None,
+            cwd: ".".to_string(),
+            subscriptions: Vec::new(),
+            backend_type: None,
+            is_active: None,
+            last_active: None,
+            session_id: None,
+            external_backend_type: backend,
+            external_model: None,
+            unknown_fields: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_backend_expected_rule_prefers_backend_type() {
+        let codex_member = make_member("arch-ctm", "codex", Some(BackendType::Codex));
+        assert_eq!(
+            backend_expected_rule(&codex_member),
+            Some(BackendRule::Codex)
+        );
+    }
+
+    #[test]
+    fn test_backend_expected_rule_defaults_team_lead_to_claude() {
+        let lead = make_member("team-lead", "general-purpose", None);
+        assert_eq!(backend_expected_rule(&lead), Some(BackendRule::Claude));
+    }
+
+    #[test]
+    fn test_backend_expected_rule_uses_legacy_agent_type_for_codex() {
+        let codex_member = make_member("arch-ctm", "codex", None);
+        assert_eq!(
+            backend_expected_rule(&codex_member),
+            Some(BackendRule::Codex)
+        );
+    }
+
+    #[test]
+    fn test_process_matches_rule_matches_basename_for_path_commands() {
+        assert!(process_matches_rule(BackendRule::Claude, "claude", ""));
+        assert!(!process_matches_rule(BackendRule::Claude, "node", "claude"));
+        assert!(process_matches_rule(
+            BackendRule::Claude,
+            "/usr/local/bin/claude",
+            ""
+        ));
+        assert!(process_matches_rule(BackendRule::Codex, "codex", ""));
+        assert!(process_matches_rule(
+            BackendRule::Codex,
+            "/Users/randlee/.npm-global/bin/codex",
+            ""
+        ));
+        assert!(process_matches_rule(
+            BackendRule::Gemini,
+            "node",
+            "gemini --model 2.5-pro"
+        ));
+        assert!(process_matches_rule(
+            BackendRule::Gemini,
+            "/opt/homebrew/bin/node",
+            "gemini --model 2.5-pro"
+        ));
+        assert!(!process_matches_rule(
+            BackendRule::Gemini,
+            "gemini",
+            "gemini --model 2.5-pro"
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn test_detect_sender_process_pid_skips_scan_when_identity_set() {
+        let old_identity = std::env::var("ATM_IDENTITY").ok();
+        unsafe { std::env::set_var("ATM_IDENTITY", "arch-ctm") };
+
+        let member = make_member(
+            "team-lead",
+            "general-purpose",
+            Some(BackendType::ClaudeCode),
+        );
+        let detected = detect_sender_process_pid(&member);
+        assert!(
+            detected.is_some(),
+            "identity-set path should avoid process scan but still provide a PID hint"
+        );
+
+        unsafe {
+            match old_identity {
+                Some(v) => std::env::set_var("ATM_IDENTITY", v),
+                None => std::env::remove_var("ATM_IDENTITY"),
+            }
+        }
+    }
+
     #[test]
     fn test_resolve_offline_action_default() {
         let args = make_send_args(None);
         let config = Config::default();
-        assert_eq!(
-            resolve_offline_action(&args, &config),
-            "PENDING ACTION - execute when online"
-        );
+        assert_eq!(resolve_offline_action(&args, &config), "");
     }
 
     #[test]
@@ -590,39 +974,14 @@ mod tests {
     }
 
     #[test]
-    fn test_self_send_warning_prepended() {
-        // When sender identity == target agent name, the warning should be
-        // prepended to the message text.
-        let sender = "team-lead";
-        let agent_name = "team-lead"; // same as sender → self-send
-        let raw_message = "Hello self!";
-
-        // Simulate the self-send check logic (extracted for unit testing)
-        let session_id = "test-session-1234567890";
-        let session_short = &session_id[..8.min(session_id.len())];
-
-        let message_text = if sender == agent_name {
-            let warning = format!(
-                "[WARNING: Sent to self — identity={sender}, session={session_short}. Check ATM_IDENTITY.]"
-            );
-            format!("{warning}\n{raw_message}")
-        } else {
-            raw_message.to_string()
-        };
-
-        assert!(message_text.starts_with("[WARNING: Sent to self"));
-        assert!(message_text.contains("team-lead"));
-        assert!(message_text.contains("test-ses")); // first 8 chars
-        assert!(message_text.contains("Hello self!"));
-    }
-
-    #[test]
     fn test_self_send_warning_not_added_for_different_recipient() {
         let sender = "team-lead";
+        let sender_team = "atm-dev";
         let agent_name = "arch-ctm"; // different → no warning
+        let target_team = "atm-dev";
         let raw_message = "Hello other!";
 
-        let message_text = if sender == agent_name {
+        let message_text = if is_self_send(sender, sender_team, agent_name, target_team) {
             format!("[WARNING: Sent to self — identity={sender}]\n{raw_message}")
         } else {
             raw_message.to_string()
@@ -630,5 +989,360 @@ mod tests {
 
         assert_eq!(message_text, "Hello other!");
         assert!(!message_text.contains("WARNING"));
+    }
+
+    #[test]
+    fn test_self_send_warning_not_added_for_cross_team_same_name() {
+        let sender = "team-lead";
+        let sender_team = "p3-setup";
+        let agent_name = "team-lead";
+        let target_team = "atm-dev";
+        assert!(!is_self_send(sender, sender_team, agent_name, target_team));
+    }
+
+    // Issue #482: cross-team self-send false positive — same agent name on different
+    // teams must NOT trigger the self-send warning.
+
+    #[test]
+    fn test_is_self_send_same_name_different_teams_no_warning() {
+        // team-lead@schook sending to team-lead@scmux — different teams, must NOT warn.
+        assert!(!is_self_send("team-lead", "schook", "team-lead", "scmux"));
+    }
+
+    #[test]
+    fn test_is_self_send_same_name_same_team_warns() {
+        // team-lead@atm-dev sending to team-lead@atm-dev — same identity, MUST warn.
+        assert!(is_self_send("team-lead", "atm-dev", "team-lead", "atm-dev"));
+    }
+
+    #[test]
+    fn test_is_self_send_different_name_same_team_no_warning() {
+        // team-lead@atm-dev sending to arch-ctm@atm-dev — different agent, must NOT warn.
+        assert!(!is_self_send("team-lead", "atm-dev", "arch-ctm", "atm-dev"));
+    }
+
+    #[test]
+    fn test_recipient_has_dead_session_true_for_dead_session() {
+        let is_offline = recipient_has_dead_session_with_query("atm-dev", "team-lead", |_, _| {
+            Ok(Some(SessionQueryResult {
+                session_id: "s".to_string(),
+                process_id: 123,
+                alive: false,
+                runtime: None,
+                runtime_session_id: None,
+                pane_id: None,
+                runtime_home: None,
+            }))
+        });
+        assert!(is_offline);
+    }
+
+    #[test]
+    fn test_recipient_has_dead_session_false_for_alive_session() {
+        let is_offline = recipient_has_dead_session_with_query("atm-dev", "team-lead", |_, _| {
+            Ok(Some(SessionQueryResult {
+                session_id: "s".to_string(),
+                process_id: 123,
+                alive: true,
+                runtime: None,
+                runtime_session_id: None,
+                pane_id: None,
+                runtime_home: None,
+            }))
+        });
+        assert!(!is_offline);
+    }
+
+    #[test]
+    fn test_recipient_has_dead_session_false_when_session_unknown() {
+        let is_offline =
+            recipient_has_dead_session_with_query("atm-dev", "team-lead", |_, _| Ok(None));
+        assert!(!is_offline);
+    }
+
+    #[test]
+    fn test_recipient_has_dead_session_false_on_query_error() {
+        let is_offline = recipient_has_dead_session_with_query("atm-dev", "team-lead", |_, _| {
+            Err(anyhow!("daemon unavailable"))
+        });
+        assert!(!is_offline);
+    }
+
+    #[test]
+    fn test_destination_target_formats_agent_at_team() {
+        assert_eq!(
+            destination_target("team-lead", "atm-dev"),
+            "team-lead@atm-dev"
+        );
+    }
+
+    #[test]
+    fn test_set_sender_heartbeat_does_not_write_session_or_pid_hints() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("config.json");
+
+        let mut m = make_member("arch-ctm", "codex", Some(BackendType::External));
+        m.session_id = Some("existing-session".to_string());
+        m.set_process_id_hint(Some(7777));
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "lead-session".to_string(),
+            members: vec![m],
+            unknown_fields: HashMap::new(),
+        };
+        std::fs::write(&config_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        set_sender_heartbeat(&config_path, "arch-ctm").unwrap();
+
+        let updated: TeamConfig =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        let member = updated
+            .members
+            .iter()
+            .find(|m| m.name == "arch-ctm")
+            .expect("member present");
+        assert_eq!(member.session_id.as_deref(), Some("existing-session"));
+        assert_eq!(member.process_id_hint(), Some(7777));
+        assert_eq!(member.is_active, Some(true));
+        assert!(member.last_active.is_some());
+    }
+
+    fn current_ppid_hook_path() -> std::path::PathBuf {
+        let ppid = crate::util::hook_identity::get_parent_pid();
+        std::env::temp_dir().join(format!("atm-hook-{ppid}.json"))
+    }
+
+    fn write_fresh_hook_file(session_id: &str) {
+        let ppid = crate::util::hook_identity::get_parent_pid();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let data = serde_json::json!({
+            "pid": ppid,
+            "session_id": session_id,
+            "agent_name": "team-lead",
+            "created_at": now,
+        });
+        std::fs::write(
+            current_ppid_hook_path(),
+            serde_json::to_string(&data).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn write_session_file(home: &std::path::Path, team: &str, identity: &str, session_id: &str) {
+        let sessions_dir = home
+            .join(".claude")
+            .join("teams")
+            .join(team)
+            .join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let data = serde_json::json!({
+            "session_id": session_id,
+            "team": team,
+            "identity": identity,
+            "pid": 12345,
+            "created_at": now,
+            "updated_at": now,
+        });
+        std::fs::write(
+            sessions_dir.join(format!("{session_id}.json")),
+            serde_json::to_string(&data).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_sender_session_id_prefers_hook_file_over_session_and_env() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+
+        write_fresh_hook_file("sid-from-hook");
+        write_session_file(temp.path(), "atm-dev", "team-lead", "sid-from-session");
+
+        unsafe {
+            std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
+        }
+
+        let actual =
+            resolve_sender_session_id_with_context(Some("atm-dev"), Some("team-lead")).unwrap();
+
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+        let _ = std::fs::remove_file(&hook_path);
+
+        assert_eq!(actual.as_deref(), Some("sid-from-hook"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_sender_session_id_prefers_env_when_hook_missing() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+
+        write_session_file(temp.path(), "atm-dev", "team-lead", "sid-from-session");
+
+        unsafe {
+            std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
+        }
+
+        let actual =
+            resolve_sender_session_id_with_context(Some("atm-dev"), Some("team-lead")).unwrap();
+
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        assert_eq!(actual.as_deref(), Some("sid-from-env"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_sender_session_id_uses_session_file_when_hook_and_env_missing() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+
+        write_session_file(temp.path(), "atm-dev", "team-lead", "sid-from-session");
+
+        unsafe {
+            std::env::set_var("ATM_HOME", temp.path());
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        let actual =
+            resolve_sender_session_id_with_context(Some("atm-dev"), Some("team-lead")).unwrap();
+
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        assert_eq!(actual.as_deref(), Some("sid-from-session"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_sender_session_id_uses_env_when_hook_and_session_missing() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+
+        unsafe {
+            std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
+        }
+
+        let actual =
+            resolve_sender_session_id_with_context(Some("atm-dev"), Some("team-lead")).unwrap();
+
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        assert_eq!(actual.as_deref(), Some("sid-from-env"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_sender_session_id_errors_on_ambiguous_session_files_without_env() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+
+        write_session_file(temp.path(), "atm-dev", "team-lead", "sid-a");
+        write_session_file(temp.path(), "atm-dev", "team-lead", "sid-b");
+
+        unsafe {
+            std::env::set_var("ATM_HOME", temp.path());
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        let err = resolve_sender_session_id_with_context(Some("atm-dev"), Some("team-lead"))
+            .expect_err("ambiguous session files should error");
+
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        assert!(err.to_string().contains("Ambiguous:"));
+        assert!(err.to_string().contains("Export CLAUDE_SESSION_ID"));
+    }
+
+    #[test]
+    fn test_should_warn_self_send_true_when_same_session_owned() {
+        let warn = should_warn_self_send_with_query(
+            "team-lead",
+            "atm-dev",
+            "team-lead",
+            "atm-dev",
+            Some("sid-123"),
+            |_, _| {
+                Ok(Some(SessionQueryResult {
+                    session_id: "sid-123".to_string(),
+                    process_id: 100,
+                    alive: true,
+                    runtime: None,
+                    runtime_session_id: None,
+                    pane_id: None,
+                    runtime_home: None,
+                }))
+            },
+        );
+        assert!(warn);
+    }
+
+    #[test]
+    fn test_should_warn_self_send_false_when_different_active_session_owns_identity() {
+        let warn = should_warn_self_send_with_query(
+            "team-lead",
+            "atm-dev",
+            "team-lead",
+            "atm-dev",
+            Some("sid-local"),
+            |_, _| {
+                Ok(Some(SessionQueryResult {
+                    session_id: "sid-remote".to_string(),
+                    process_id: 101,
+                    alive: true,
+                    runtime: None,
+                    runtime_session_id: None,
+                    pane_id: None,
+                    runtime_home: None,
+                }))
+            },
+        );
+        assert!(!warn);
+    }
+
+    #[test]
+    fn test_should_warn_self_send_true_when_sender_session_unknown() {
+        let warn = should_warn_self_send_with_query(
+            "team-lead",
+            "atm-dev",
+            "team-lead",
+            "atm-dev",
+            None,
+            |_, _| Ok(None),
+        );
+        assert!(warn);
     }
 }

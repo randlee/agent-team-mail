@@ -1,0 +1,10 @@
+{"line":"cmd.begin run integration"}
+{"line":"tool.mcp.begin read_file"}
+{"line":"tool.mcp.end read_file"}
+{"line":"tool.web_search.begin parity gap"}
+{"line":"tool.web_search.end parity gap"}
+{"line":"session.configured session=s1"}
+{"line":"session.token_count 321"}
+{"line":"plan.update add-step"}
+{"line":"plan.delta +step-detail"}
+{"line":"unsupported.future_event"}

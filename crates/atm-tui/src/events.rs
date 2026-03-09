@@ -70,6 +70,11 @@ pub fn handle_event(event: &Event, app: &mut App) -> bool {
         code, modifiers, ..
     }) = event
     {
+        // ── Approval/Elicitation modal (highest priority) ─────────────────────
+        if app.approval_prompt.is_some() {
+            return handle_approval_modal(code, modifiers, app);
+        }
+
         // ── Interrupt confirmation dialog (higher priority) ────────────────────
         // When a confirmation is pending, only accept y/Y/Enter (confirm) or
         // n/N/Esc (cancel). All other keys are silently discarded so the user
@@ -138,6 +143,55 @@ pub fn handle_event(event: &Event, app: &mut App) -> bool {
             // Log viewer panel uses navigation keys only (handled globally above).
             FocusPanel::LogViewer => handle_log_viewer_key(code, app),
         };
+    }
+    false
+}
+
+fn handle_approval_modal(code: &KeyCode, modifiers: &KeyModifiers, app: &mut App) -> bool {
+    if let Some(prompt) = app.approval_prompt.clone() {
+        match code {
+            KeyCode::Esc => {
+                app.approval_prompt = None;
+                app.approval_input.clear();
+            }
+            KeyCode::Backspace => {
+                app.approval_input.pop();
+            }
+            KeyCode::Enter => {
+                let text = app.approval_input.trim().to_string();
+                app.pending_control = Some(PendingControl::ElicitationResponse {
+                    elicitation_id: prompt.id,
+                    decision: "approve".to_string(),
+                    text: if text.is_empty() { None } else { Some(text) },
+                });
+                app.approval_prompt = None;
+                app.approval_input.clear();
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                let text = app.approval_input.trim().to_string();
+                app.pending_control = Some(PendingControl::ElicitationResponse {
+                    elicitation_id: prompt.id,
+                    decision: "approve".to_string(),
+                    text: if text.is_empty() { None } else { Some(text) },
+                });
+                app.approval_prompt = None;
+                app.approval_input.clear();
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                let text = app.approval_input.trim().to_string();
+                app.pending_control = Some(PendingControl::ElicitationResponse {
+                    elicitation_id: prompt.id,
+                    decision: "reject".to_string(),
+                    text: if text.is_empty() { None } else { Some(text) },
+                });
+                app.approval_prompt = None;
+                app.approval_input.clear();
+            }
+            KeyCode::Char(c) if modifiers.is_empty() || *modifiers == KeyModifiers::SHIFT => {
+                app.approval_input.push(*c);
+            }
+            _ => {}
+        }
     }
     false
 }
@@ -233,9 +287,47 @@ fn handle_agent_terminal_key(code: &KeyCode, modifiers: &KeyModifiers, app: &mut
 /// The Dashboard currently has no compose workflow: character input is ignored
 /// here. Navigation keys are handled globally before this function is reached.
 fn handle_dashboard_key(code: &KeyCode, app: &mut App) -> bool {
-    if let KeyCode::Char('q') = code {
-        app.should_quit = true;
-        return true;
+    match code {
+        KeyCode::Char('q') => {
+            app.should_quit = true;
+            return true;
+        }
+        KeyCode::Char('j') => {
+            app.select_next_message();
+            return false;
+        }
+        KeyCode::Char('k') => {
+            app.select_previous_message();
+            return false;
+        }
+        KeyCode::Enter => {
+            if app.selected_message().is_some() {
+                app.inbox_detail_open = true;
+            }
+            return false;
+        }
+        KeyCode::Esc => {
+            app.inbox_detail_open = false;
+            return false;
+        }
+        KeyCode::Char('r') => {
+            if let Some((message_id, from, timestamp)) = app.selected_message().map(|msg| {
+                (
+                    msg.message_id.clone(),
+                    msg.from.clone(),
+                    msg.timestamp.clone(),
+                )
+            }) {
+                app.pending_control = Some(PendingControl::MarkInboxRead {
+                    agent: app.selected_agent().unwrap_or_default().to_string(),
+                    message_id,
+                    from,
+                    timestamp,
+                });
+            }
+            return false;
+        }
+        _ => {}
     }
     false
 }
@@ -289,6 +381,32 @@ mod tests {
                 agent: "c".into(),
                 state: "idle".into(),
                 inbox_count: 2,
+            },
+        ];
+        app
+    }
+
+    fn app_with_inbox_messages() -> App {
+        let mut app = app_with_members();
+        app.selected_index = 0;
+        app.inbox_messages = vec![
+            agent_team_mail_core::schema::InboxMessage {
+                from: "team-lead".to_string(),
+                text: "review this change".to_string(),
+                timestamp: "2026-03-01T00:00:00Z".to_string(),
+                read: false,
+                summary: Some("review".to_string()),
+                message_id: Some("m-1".to_string()),
+                unknown_fields: std::collections::HashMap::new(),
+            },
+            agent_team_mail_core::schema::InboxMessage {
+                from: "arch-atm".to_string(),
+                text: "follow-up".to_string(),
+                timestamp: "2026-03-01T00:01:00Z".to_string(),
+                read: true,
+                summary: Some("follow-up".to_string()),
+                message_id: Some("m-2".to_string()),
+                unknown_fields: std::collections::HashMap::new(),
             },
         ];
         app
@@ -376,6 +494,39 @@ mod tests {
         let quit = handle_event(&key_event(KeyCode::Char('x'), KeyModifiers::NONE), &mut app);
         assert!(!quit);
         assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn test_dashboard_message_list_detail_mark_read_flow() {
+        let mut app = app_with_inbox_messages();
+        app.focus = FocusPanel::Dashboard;
+
+        // j selects next message in the inbox list.
+        assert!(!handle_event(
+            &key_event(KeyCode::Char('j'), KeyModifiers::NONE),
+            &mut app
+        ));
+        assert_eq!(app.selected_message_index, 1);
+
+        // Enter opens detail view for selected message.
+        assert!(!handle_event(
+            &key_event(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app
+        ));
+        assert!(app.inbox_detail_open);
+
+        // r creates a mark-read pending action.
+        assert!(!handle_event(
+            &key_event(KeyCode::Char('r'), KeyModifiers::NONE),
+            &mut app
+        ));
+        assert!(
+            matches!(
+                app.pending_control,
+                Some(PendingControl::MarkInboxRead { .. })
+            ),
+            "expected mark-read pending control"
+        );
     }
 
     // ── Follow mode toggle ────────────────────────────────────────────────────
@@ -804,5 +955,45 @@ mod tests {
         let quit = handle_event(&key_event(KeyCode::Char('q'), KeyModifiers::NONE), &mut app);
         assert!(!quit, "q should not quit when control_input is non-empty");
         assert_eq!(app.control_input, "helq");
+    }
+
+    #[test]
+    fn test_approval_modal_enter_dispatches_correlated_approve() {
+        let mut app = app_with_members();
+        app.approval_prompt = Some(crate::app::ApprovalPrompt {
+            id: "req-101".to_string(),
+            kind: crate::app::ApprovalPromptKind::Exec,
+            prompt: "allow".to_string(),
+        });
+        app.approval_input = "looks good".to_string();
+        handle_event(&key_event(KeyCode::Enter, KeyModifiers::NONE), &mut app);
+        assert!(matches!(
+            app.pending_control,
+            Some(PendingControl::ElicitationResponse {
+                ref elicitation_id,
+                ref decision,
+                ref text,
+            }) if elicitation_id == "req-101" && decision == "approve" && text.as_deref() == Some("looks good")
+        ));
+        assert!(app.approval_prompt.is_none());
+    }
+
+    #[test]
+    fn test_approval_modal_n_dispatches_correlated_reject() {
+        let mut app = app_with_members();
+        app.approval_prompt = Some(crate::app::ApprovalPrompt {
+            id: "req-202".to_string(),
+            kind: crate::app::ApprovalPromptKind::Patch,
+            prompt: "patch".to_string(),
+        });
+        handle_event(&key_event(KeyCode::Char('n'), KeyModifiers::NONE), &mut app);
+        assert!(matches!(
+            app.pending_control,
+            Some(PendingControl::ElicitationResponse {
+                ref elicitation_id,
+                ref decision,
+                ref text,
+            }) if elicitation_id == "req-202" && decision == "reject" && text.is_none()
+        ));
     }
 }

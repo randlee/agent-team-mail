@@ -484,17 +484,17 @@ pub fn get_pane_pid(pane_id: &str) -> Option<u32> {
     trimmed.parse::<u32>().ok()
 }
 
+/// Non-Unix stub for pane PID lookup.
+#[cfg(not(unix))]
+pub fn get_pane_pid(_pane_id: &str) -> Option<u32> {
+    None
+}
+
 /// Check whether a PID corresponds to a running process.
 ///
-/// Uses `kill(pid, 0)` (signal 0) which checks process existence without
-/// sending a real signal. Returns `true` if the process exists and is
-/// accessible.
-#[cfg(unix)]
+/// Delegates to `atm_core::pid::is_pid_alive` for cross-platform support.
 pub fn is_pid_running(pid: u32) -> bool {
-    // SAFETY: kill(pid, 0) is a standard POSIX call that only probes
-    // process existence. It does not modify process state.
-    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    agent_team_mail_core::pid::is_pid_alive(pid)
 }
 
 /// Poll the PID for a worker to detect if it has been killed.

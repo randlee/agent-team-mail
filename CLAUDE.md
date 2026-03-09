@@ -4,7 +4,7 @@
 
 **NEVER switch the main repository branch on disk from `develop`.**
 
-- Main repo at `/Users/randlee/Documents/github/agent-team-mail/` MUST remain on `develop` at all times
+- The main repo MUST remain on `develop` at all times
 - **ALWAYS use `sc-git-worktree` skill** to create worktrees for all development work
 - **ALWAYS create worktrees FROM `develop` branch** (not from `main`)
 - Do NOT use `git checkout` or `git switch` in the main repository

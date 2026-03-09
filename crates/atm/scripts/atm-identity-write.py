@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""PreToolUse(Bash) hook: write PID-based identity file for atm commands.
+
+Only writes when the Bash tool is about to run an `atm` or `cargo run atm`
+command. All errors are fail-open (exit 0 with stderr warning).
+"""
+import json
+import os
+import platform
+import shlex
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+# Import shared utilities
+sys.path.insert(0, str(Path(__file__).parent))
+from atm_hook_lib import first_str, load_payload, read_atm_toml
+
+
+def _is_atm_invocation(command: str) -> bool:
+    """Return True if the command invokes the `atm` binary as a token.
+
+    Matches `atm`, `/path/to/atm`, or `atm.exe` as a discrete token.
+    Rejects partial matches like `atm-log.txt` or `latm`.
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+
+    return any(
+        t == "atm"
+        or t.endswith("/atm")
+        or t.endswith("\\atm")
+        or t == "atm.exe"
+        or t.endswith("/atm.exe")
+        for t in tokens
+    )
+
+
+def main() -> None:
+    payload = load_payload()
+
+    command = payload.get("tool_input", {}).get("command", "")
+    if not _is_atm_invocation(command):
+        sys.exit(0)
+
+    session_id = payload.get("session_id", "")
+
+    # Resolve routing context from repo config or env overrides.
+    toml = read_atm_toml()
+    core = toml.get("core", {}) if isinstance(toml, dict) else {}
+    team_name = first_str(os.environ.get("ATM_TEAM"), core.get("default_team"))
+    agent_name = first_str(os.environ.get("ATM_IDENTITY"), core.get("identity"))
+    if toml is None and not team_name and not agent_name:
+        sys.exit(0)
+
+    hook_file_name = f"atm-hook-{os.getpid()}.json"
+    hook_file = Path(tempfile.gettempdir()) / hook_file_name
+
+    data = {
+        "pid": os.getppid(),
+        "session_id": session_id,
+        "agent_name": agent_name,
+        "team_name": team_name,
+        "created_at": time.time(),
+    }
+
+    try:
+        hook_file.write_text(json.dumps(data))
+        if platform.system() != "Windows":
+            hook_file.chmod(0o600)
+        else:
+            sys.stderr.write("[atm-hook] Windows: skipping chmod (fail-open)\n")
+    except Exception as exc:
+        sys.stderr.write(f"[atm-hook] Failed to write identity file: {exc}\n")
+
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,31 +1,57 @@
 //! Teams command implementation
 
-use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
+use agent_team_mail_core::config::{ConfigOverrides, resolve_config, resolve_identity};
+use agent_team_mail_core::daemon_client::{
+    AgentSummary, LaunchConfig, RegisterHintOutcome, launch_agent, query_list_agents,
+    query_session_for_team, register_hint,
+};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
-use agent_team_mail_core::io::inbox::inbox_append;
+use agent_team_mail_core::io::inbox::inbox_update;
 use agent_team_mail_core::io::lock::acquire_lock;
 use agent_team_mail_core::model_registry::ModelId;
-use agent_team_mail_core::schema::{BackendType, InboxMessage, TeamConfig};
-use anyhow::Result;
+use agent_team_mail_core::schema::{BackendType, TeamConfig};
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use clap::Args;
+use sc_composer::{
+    ComposeMode, ComposePolicy, ComposeRequest, RuntimeKind as ComposeRuntimeKind,
+    UnknownVariablePolicy, compose,
+};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 use tracing::warn;
-use uuid::Uuid;
 
+use crate::commands::runtime_adapter::{RuntimeKind, SpawnSpec, adapter_for_runtime};
 use crate::util::settings::get_home_dir;
+use crate::util::state::{SeenState, get_last_seen, load_seen_state};
 
 /// Number of backups to retain per team. Older snapshots are pruned after
 /// each backup or auto-backup-on-resume. Increase if longer rollback windows
 /// are needed.
 const BACKUP_RETENTION_COUNT: usize = 5;
+const SPAWN_UNAUTHORIZED: &str = "SPAWN_UNAUTHORIZED";
+const DEFAULT_EXTERNAL_AGENT_STALE_DAYS: i64 = 7;
+const EXTERNAL_AGENT_STALE_DAYS_ENV: &str = "ATM_EXTERNAL_AGENT_STALE_DAYS";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpawnPolicy {
+    LeadersOnly,
+    AnyMember,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpawnAuthorizationDecision {
+    policy_team: String,
+    allowed: Vec<String>,
+    caller_identity: Option<String>,
+    authorized: bool,
+}
 
 /// List all teams on this machine
 #[derive(Args, Debug)]
@@ -41,6 +67,10 @@ pub struct TeamsArgs {
 
 #[derive(clap::Subcommand, Debug)]
 pub enum TeamsCommand {
+    /// Spawn a team member via daemon with runtime-specific adapter behavior
+    Spawn(SpawnArgs),
+    /// Join an existing team and print a copy-pastable resume launch command
+    Join(JoinArgs),
     /// Add a member to a team without launching an agent
     AddMember(AddMemberArgs),
     /// Update fields on an existing team member
@@ -55,8 +85,109 @@ pub enum TeamsCommand {
     Restore(RestoreArgs),
 }
 
-/// Add a member to a team (no agent spawn)
+/// Spawn a team member (runtime-aware daemon launch)
 #[derive(Args, Debug)]
+#[command(
+    after_long_help = "Environment:\n  ATM_TEAM     Effective team when --team is omitted.\n  ATM_IDENTITY Effective member identity for spawned runtime sessions.\n\nLaunch command output:\n  This command always prints the exact copy/paste launch command\n  before launch is attempted (success or failure).\n\nExamples:\n  atm teams spawn arch-ctm --runtime codex --folder /path/to/repo\n  atm teams spawn qa-gemini --runtime gemini --folder /path/to/repo --model gemini-2.5-pro\n  atm teams spawn test-member-3 --runtime claude --folder /path/to/repo --team atm-dev --color cyan --model haiku\n\nMismatch Handling:\n  If ATM_TEAM conflicts with .atm.toml default_team, pass --override-team to proceed."
+)]
+pub struct SpawnArgs {
+    /// Agent name
+    agent: String,
+
+    /// Team name (defaults to configured default team)
+    #[arg(long)]
+    team: Option<String>,
+
+    /// Runtime selector
+    #[arg(long, value_enum, default_value_t = RuntimeKind::Codex)]
+    runtime: RuntimeKind,
+
+    /// Optional model override
+    #[arg(long)]
+    model: Option<String>,
+
+    /// Optional runtime color hint (currently used by Claude launch args)
+    #[arg(long)]
+    color: Option<String>,
+
+    /// Optional sandbox mode override (`true` or `false`)
+    #[arg(long)]
+    sandbox: Option<bool>,
+
+    /// Optional approval mode override
+    #[arg(long)]
+    approval_mode: Option<String>,
+
+    /// Optional system prompt path (used by Gemini as `GEMINI_SYSTEM_MD`)
+    #[arg(long)]
+    system_prompt: Option<PathBuf>,
+
+    /// Resume previous runtime session for this agent
+    #[arg(long)]
+    resume: bool,
+
+    /// Explicit runtime session ID for resume (otherwise resolved from daemon registry)
+    #[arg(long)]
+    resume_session_id: Option<String>,
+
+    /// Readiness timeout in seconds
+    #[arg(long, default_value_t = 30)]
+    timeout: u32,
+
+    /// Additional environment variables (KEY=VALUE, repeatable)
+    #[arg(long = "env", value_name = "KEY=VALUE")]
+    env: Vec<String>,
+
+    /// Optional prompt to send after startup
+    #[arg(long)]
+    prompt: Option<String>,
+
+    /// Template variables for --system-prompt .j2 rendering (KEY=VALUE, repeatable)
+    #[arg(long = "var", value_name = "KEY=VALUE")]
+    var: Vec<String>,
+
+    /// Canonical spawn directory (`--cwd` is accepted as an alias)
+    #[arg(long, alias = "cwd")]
+    folder: Vec<PathBuf>,
+
+    /// Allow ATM_TEAM (env) to override conflicting .atm.toml default_team for this invocation
+    #[arg(long)]
+    override_team: bool,
+
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
+}
+
+/// Join an existing team and return launch guidance for the joined identity
+#[derive(Args, Debug)]
+pub struct JoinArgs {
+    /// Agent name to add/join
+    agent: String,
+
+    /// Team name (required in self-join mode; optional verification in team-lead-initiated mode)
+    #[arg(long)]
+    team: Option<String>,
+
+    /// Agent type to persist (default: codex, matching add-member behavior)
+    #[arg(long)]
+    agent_type: Option<String>,
+
+    /// Model identifier validated against the ATM model registry
+    #[arg(long)]
+    model: Option<String>,
+
+    /// Working directory used in roster entry and launch command
+    #[arg(long)]
+    folder: Option<PathBuf>,
+
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
+}
+
+/// Add a member to a team (no agent spawn)
+#[derive(Args, Debug, Clone)]
 pub struct AddMemberArgs {
     /// Team name
     team: String,
@@ -64,7 +195,7 @@ pub struct AddMemberArgs {
     /// Agent name (unique within team)
     agent: String,
 
-    /// Agent type (e.g., "codex", "human", "plugin:ci_monitor")
+    /// Agent type (e.g., "codex", "human", "plugin:gh_monitor")
     #[arg(long, default_value = "codex")]
     agent_type: String,
 
@@ -148,7 +279,7 @@ pub struct ResumeArgs {
 
     /// Explicit session ID override (e.g., from the SessionStart hook output).
     /// If omitted, the session ID is resolved from CLAUDE_SESSION_ID env var or
-    /// /tmp/atm-session-id (written by the gate hook on every tool call).
+    /// the platform temp-dir session-id file (written by the gate hook on every tool call).
     #[arg(long)]
     session_id: Option<String>,
 }
@@ -161,6 +292,10 @@ pub struct CleanupArgs {
 
     /// Specific agent to clean up (if omitted, cleans all dead members)
     agent: Option<String>,
+
+    /// Show cleanup candidates without modifying team state
+    #[arg(long)]
+    dry_run: bool,
 
     /// Remove members even when the daemon is unreachable (unsafe — use only when daemon is known to be stopped)
     #[arg(long)]
@@ -213,6 +348,8 @@ struct TeamSummary {
 pub fn execute(args: TeamsArgs) -> Result<()> {
     if let Some(command) = args.command {
         return match command {
+            TeamsCommand::Spawn(spawn_args) => spawn_member(spawn_args),
+            TeamsCommand::Join(join_args) => join_member(join_args),
             TeamsCommand::AddMember(add_args) => add_member(add_args),
             TeamsCommand::UpdateMember(update_args) => update_member(update_args),
             TeamsCommand::Resume(resume_args) => resume(resume_args),
@@ -296,7 +433,935 @@ pub fn execute(args: TeamsArgs) -> Result<()> {
     Ok(())
 }
 
+fn spawn_member(args: SpawnArgs) -> Result<()> {
+    let home_dir = get_home_dir()?;
+    let current_dir = std::env::current_dir()?;
+    let launch_dir = resolve_spawn_folder(&args.folder, &current_dir)?;
+    let env_team = env_var_nonempty("ATM_TEAM");
+    let repo_default_team = read_repo_default_team(&current_dir);
+    let team_mismatch = if args.team.is_none() {
+        match (env_team.as_deref(), repo_default_team.as_deref()) {
+            (Some(env), Some(repo)) if env != repo => Some((env.to_string(), repo.to_string())),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let config = resolve_config(
+        &ConfigOverrides {
+            team: args.team.clone(),
+            ..Default::default()
+        },
+        &current_dir,
+        &home_dir,
+    )?;
+    let team_name = args
+        .team
+        .clone()
+        .unwrap_or_else(|| config.core.default_team.clone());
+
+    let resolved_identity = resolve_identity(&config.core.identity, &config.roles, &config.aliases);
+    let authorization =
+        build_spawn_authorization_decision(&current_dir, &home_dir, &team_name, &resolved_identity);
+
+    let parsed_env = parse_env_vars(&args.env)?;
+    let parsed_prompt_vars = parse_template_vars(&args.var)?;
+
+    let resolved_resume_session_id = if args.resume_session_id.is_some() {
+        args.resume_session_id.clone()
+    } else if args.resume {
+        query_session_for_team(&team_name, &args.agent)
+            .ok()
+            .flatten()
+            .map(|info| info.runtime_session_id.unwrap_or(info.session_id))
+    } else {
+        None
+    };
+
+    let resolved_system_prompt = resolve_spawn_system_prompt(&SpawnPromptResolutionContext {
+        system_prompt: args.system_prompt.as_ref(),
+        prompt_vars: &parsed_prompt_vars,
+        team_name: &team_name,
+        agent_name: &args.agent,
+        runtime: &args.runtime,
+        model: args.model.as_deref(),
+        launch_dir: &launch_dir,
+        home_dir: &home_dir,
+    })?;
+
+    let spec = SpawnSpec {
+        team: team_name.clone(),
+        agent: args.agent.clone(),
+        color: args.color.clone(),
+        cwd: launch_dir.clone(),
+        model: args.model.clone(),
+        sandbox: args.sandbox,
+        approval_mode: args.approval_mode.clone(),
+        resume: args.resume,
+        resume_session_id: resolved_resume_session_id,
+        system_prompt: resolved_system_prompt,
+        prompt_vars: parsed_prompt_vars.clone(),
+    };
+
+    let adapter = adapter_for_runtime(&args.runtime);
+    let _prompt_vars_len = spec.prompt_vars.len();
+    let command = adapter.build_command(&spec)?;
+    let mut env_vars = adapter.build_env(&spec, &home_dir)?;
+    for (k, v) in parsed_env {
+        env_vars.insert(k, v);
+    }
+    let launch_command_preview = format_spawn_launch_command(&args.runtime, &spec, &command);
+    print_launch_command_preview(&launch_command_preview, args.json);
+
+    if let Some(decision) = authorization.as_ref()
+        && !decision.authorized
+    {
+        let error = spawn_unauthorized_error(decision);
+        if args.json {
+            let output = json!({
+                "error": error,
+                "agent": args.agent,
+                "team": team_name,
+                "runtime": runtime_name(&args.runtime),
+                "folder": launch_dir.to_string_lossy(),
+                "launch_command": launch_command_preview,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+            std::process::exit(1);
+        }
+        anyhow::bail!("{error}");
+    }
+
+    if let Some((env_team, repo_team)) = team_mismatch {
+        warn!(
+            "spawn team mismatch detected: ATM_TEAM='{}' vs .atm.toml default_team='{}'",
+            env_team, repo_team
+        );
+        eprintln!(
+            "Warning: team mismatch detected: ATM_TEAM ('{}') != .atm.toml default_team ('{}').",
+            env_team, repo_team
+        );
+        if !args.override_team {
+            anyhow::bail!(
+                "ATM_TEAM ('{}') does not match .atm.toml default_team ('{}'). \
+                 Re-run with --override-team to proceed with the env-var team for this invocation.",
+                env_team,
+                repo_team
+            );
+        }
+        warn!(
+            "spawn override-team: using ATM_TEAM='{}' instead of .atm.toml default_team='{}'",
+            env_team, repo_team
+        );
+        let mut extra_fields = serde_json::Map::new();
+        extra_fields.insert(
+            "conflicting_toml_team".to_string(),
+            serde_json::Value::String(repo_team),
+        );
+        extra_fields.insert(
+            "invoked_at".to_string(),
+            serde_json::Value::String(Utc::now().to_rfc3339()),
+        );
+        emit_event_best_effort(EventFields {
+            level: "warn",
+            source: "atm",
+            action: "spawn_team_override",
+            team: Some(env_team),
+            agent_name: Some(args.agent.clone()),
+            result: Some("override_team".to_string()),
+            extra_fields,
+            ..Default::default()
+        });
+    }
+
+    // Probe daemon before metadata writes. This path triggers daemon auto-start
+    // where enabled (same behavior as other daemon-backed commands).
+    if let Err(e) = ensure_daemon_ready_for_spawn(query_list_agents) {
+        if args.json {
+            let output = json!({
+                "error": e.to_string(),
+                "agent": args.agent,
+                "team": team_name,
+                "runtime": runtime_name(&args.runtime),
+                "folder": launch_dir.to_string_lossy(),
+                "launch_command": launch_command_preview,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        } else {
+            eprintln!("Error: {e}");
+            eprintln!("  Run the launch command above manually in a new tmux pane.");
+        }
+        std::process::exit(1);
+    }
+
+    ensure_spawn_member_metadata(
+        &team_name,
+        &args.agent,
+        &args.runtime,
+        args.model.as_deref(),
+        &launch_dir,
+    )?;
+
+    let launch_config = LaunchConfig {
+        agent: args.agent.clone(),
+        team: team_name.clone(),
+        command,
+        prompt: args.prompt.clone(),
+        timeout_secs: args.timeout,
+        env_vars,
+        runtime: Some(runtime_name(&args.runtime).to_string()),
+        resume_session_id: spec.resume_session_id.clone(),
+    };
+
+    let result = match launch_agent(&launch_config) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            if args.json {
+                let output = json!({
+                    "error": "Daemon is not running. Start it with: atm-daemon",
+                    "agent": args.agent,
+                    "team": team_name,
+                    "runtime": runtime_name(&args.runtime),
+                    "folder": launch_dir.to_string_lossy(),
+                    "launch_command": launch_command_preview,
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                eprintln!("Error: Daemon is not running. Start it with: atm-daemon");
+                eprintln!("  Run the launch command above manually in a new tmux pane.");
+            }
+            std::process::exit(1);
+        }
+        Err(e) => {
+            if args.json {
+                let output = json!({
+                    "error": e.to_string(),
+                    "agent": args.agent,
+                    "team": team_name,
+                    "runtime": runtime_name(&args.runtime),
+                    "folder": launch_dir.to_string_lossy(),
+                    "launch_command": launch_command_preview,
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                eprintln!("Error: {e}");
+                eprintln!("  Run the launch command above manually in a new tmux pane.");
+            }
+            std::process::exit(1);
+        }
+    };
+
+    if args.json {
+        let output = json!({
+            "agent": result.agent,
+            "team": team_name,
+            "runtime": runtime_name(&args.runtime),
+            "folder": launch_dir.to_string_lossy(),
+            "launch_command": launch_command_preview,
+            "pane_id": result.pane_id,
+            "state": result.state,
+            "warning": result.warning,
+            "resume_session_id": spec.resume_session_id,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("Launched agent: {}", result.agent);
+        println!("  team:    {}", team_name);
+        println!("  runtime: {}", runtime_name(&args.runtime));
+        println!("  folder:  {}", launch_dir.display());
+        println!("  pane:    {}", result.pane_id);
+        println!("  state:   {}", result.state);
+        if let Some(session_id) = spec.resume_session_id {
+            println!("  resume:  {session_id}");
+        }
+        if let Some(warning) = result.warning {
+            eprintln!("Warning: {warning}");
+        }
+    }
+
+    Ok(())
+}
+
+fn format_spawn_launch_command(runtime: &RuntimeKind, spec: &SpawnSpec, command: &str) -> String {
+    let _ = (runtime, spec);
+    command.to_string()
+}
+
+fn print_launch_command_preview(preview: &str, json_mode: bool) {
+    if json_mode {
+        eprintln!("Launch command:");
+        for line in preview.lines() {
+            eprintln!("  {line}");
+        }
+    } else {
+        println!("Launch command:");
+        for line in preview.lines() {
+            println!("  {line}");
+        }
+    }
+}
+
+fn runtime_name(runtime: &RuntimeKind) -> &'static str {
+    match runtime {
+        RuntimeKind::Claude => "claude",
+        RuntimeKind::Codex => "codex",
+        RuntimeKind::Gemini => "gemini",
+        RuntimeKind::Opencode => "opencode",
+    }
+}
+
+fn backend_type_for_runtime(runtime: &RuntimeKind) -> BackendType {
+    match runtime {
+        RuntimeKind::Claude => BackendType::ClaudeCode,
+        RuntimeKind::Codex => BackendType::Codex,
+        RuntimeKind::Gemini => BackendType::Gemini,
+        RuntimeKind::Opencode => BackendType::External,
+    }
+}
+
+fn ensure_daemon_ready_for_spawn<F>(query: F) -> Result<()>
+where
+    F: Fn() -> Result<Option<Vec<AgentSummary>>>,
+{
+    match query() {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => anyhow::bail!("Daemon is not running. Start it with: atm-daemon"),
+        Err(e) => Err(e).context("Failed to reach daemon for spawn"),
+    }
+}
+
+fn ensure_spawn_member_metadata(
+    team: &str,
+    agent: &str,
+    runtime: &RuntimeKind,
+    model_override: Option<&str>,
+    launch_dir: &Path,
+) -> Result<()> {
+    let home_dir = get_home_dir()?;
+    let team_dir = home_dir.join(".claude/teams").join(team);
+    let config_path = team_dir.join("config.json");
+    if !config_path.exists() {
+        // Spawn must remain resilient when team config does not yet exist.
+        // Metadata persistence is best-effort in this case.
+        return Ok(());
+    }
+
+    let lock_path = config_path.with_extension("lock");
+    let _lock = acquire_lock(&lock_path, 5)
+        .map_err(|e| anyhow::anyhow!("Failed to acquire lock for team config: {e}"))?;
+
+    let mut team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
+    let backend = backend_type_for_runtime(runtime);
+    let parsed_model_override = model_override.map(|model| {
+        ModelId::from_str(model).unwrap_or_else(|_| ModelId::Custom(model.to_string()))
+    });
+
+    if let Some(member) = team_config.members.iter_mut().find(|m| m.name == agent) {
+        if let Some(model) = model_override
+            && let Some(parsed_model) = parsed_model_override
+        {
+            member.model = model.to_string();
+            member.external_model = Some(parsed_model);
+        } else if member.external_model.is_none() {
+            member.external_model =
+                Some(ModelId::from_str(&member.model).unwrap_or(ModelId::Unknown));
+        }
+        member.external_backend_type = Some(backend);
+        if member.cwd.trim().is_empty() {
+            member.cwd = launch_dir.to_string_lossy().to_string();
+        }
+    } else {
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        team_config
+            .members
+            .push(agent_team_mail_core::schema::AgentMember {
+                agent_id: format!("{agent}@{team}"),
+                name: agent.to_string(),
+                agent_type: runtime_name(runtime).to_string(),
+                model: model_override.unwrap_or("unknown").to_string(),
+                prompt: None,
+                color: None,
+                plan_mode_required: None,
+                joined_at: now_ms,
+                tmux_pane_id: None,
+                cwd: launch_dir.to_string_lossy().to_string(),
+                subscriptions: Vec::new(),
+                backend_type: None,
+                is_active: Some(false),
+                last_active: None,
+                session_id: None,
+                external_backend_type: Some(backend),
+                external_model: Some(parsed_model_override.unwrap_or(ModelId::Unknown)),
+                unknown_fields: std::collections::HashMap::new(),
+            });
+    }
+
+    write_team_config(&config_path, &team_config)?;
+    ensure_member_inbox_atomic(&team_dir, team, agent)?;
+    Ok(())
+}
+
+fn canonicalize_directory(path: &Path, flag: &str) -> Result<PathBuf> {
+    if !path.exists() {
+        anyhow::bail!(
+            "{} path '{}' does not exist. Provide an existing directory.",
+            flag,
+            path.display()
+        );
+    }
+    if !path.is_dir() {
+        anyhow::bail!(
+            "{} path '{}' is not a directory. Provide a directory path.",
+            flag,
+            path.display()
+        );
+    }
+    fs::canonicalize(path)
+        .map_err(|e| anyhow::anyhow!("Failed to resolve {} path '{}': {e}.", flag, path.display()))
+}
+
+fn resolve_spawn_folder(folder_args: &[PathBuf], current_dir: &Path) -> Result<PathBuf> {
+    let current = fs::canonicalize(current_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to resolve current directory '{}': {e}.",
+            current_dir.display()
+        )
+    })?;
+
+    if folder_args.is_empty() {
+        return Ok(current);
+    }
+
+    let mut canonical_paths = Vec::with_capacity(folder_args.len());
+    for raw_path in folder_args {
+        // `folder` accepts values from both --folder and its --cwd alias.
+        canonical_paths.push(canonicalize_directory(raw_path, "--folder/--cwd")?);
+    }
+
+    let first = canonical_paths[0].clone();
+    let mismatched = canonical_paths.iter().any(|p| p != &first);
+    if mismatched {
+        anyhow::bail!(
+            "--folder/--cwd values resolve to different directories: {}. \
+             Provide a single path or matching paths.",
+            canonical_paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(first)
+}
+
+fn env_var_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn find_repo_local_atm_toml(current_dir: &Path) -> Option<PathBuf> {
+    let mut dir = current_dir;
+    loop {
+        let config_path = dir.join(".atm.toml");
+        if config_path.exists() {
+            return Some(config_path);
+        }
+        if dir.join(".git").exists() {
+            break;
+        }
+        dir = dir.parent()?;
+    }
+    None
+}
+
+fn read_repo_default_team(current_dir: &Path) -> Option<String> {
+    let config_path = find_repo_local_atm_toml(current_dir)?;
+    let contents = fs::read_to_string(config_path).ok()?;
+    let value: toml::Value = toml::from_str(&contents).ok()?;
+    value
+        .get("core")
+        .and_then(|core| core.get("default_team"))
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|team| !team.is_empty())
+        .map(ToString::to_string)
+}
+
+fn load_spawn_policy_from_toml(current_dir: &Path) -> (Option<String>, SpawnPolicy, Vec<String>) {
+    let Some(config_path) = find_repo_local_atm_toml(current_dir) else {
+        return (None, SpawnPolicy::LeadersOnly, Vec::new());
+    };
+    let Ok(contents) = fs::read_to_string(config_path) else {
+        return (None, SpawnPolicy::LeadersOnly, Vec::new());
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&contents) else {
+        return (None, SpawnPolicy::LeadersOnly, Vec::new());
+    };
+
+    let required_team = value
+        .get("core")
+        .and_then(|core| core.get("default_team"))
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|team| !team.is_empty())
+        .map(ToString::to_string);
+
+    let mut spawn_policy = SpawnPolicy::LeadersOnly;
+    let mut co_leaders: Vec<String> = Vec::new();
+
+    if let Some(team) = required_team.as_deref()
+        && let Some(team_entry) = value
+            .get("team")
+            .and_then(toml::Value::as_table)
+            .and_then(|teams| teams.get(team))
+            .and_then(toml::Value::as_table)
+    {
+        if let Some(raw_policy) = team_entry.get("spawn_policy").and_then(toml::Value::as_str) {
+            spawn_policy = if raw_policy.trim() == "any-member" {
+                SpawnPolicy::AnyMember
+            } else {
+                SpawnPolicy::LeadersOnly
+            };
+        }
+
+        if let Some(values) = team_entry.get("co_leaders").and_then(toml::Value::as_array) {
+            co_leaders = values
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::trim)
+                .filter(|identity| !identity.is_empty())
+                .map(ToString::to_string)
+                .collect();
+            co_leaders.sort();
+            co_leaders.dedup();
+        }
+    }
+
+    (required_team, spawn_policy, co_leaders)
+}
+
+fn resolve_spawn_caller_identity(
+    home_dir: &Path,
+    team_name: &str,
+    resolved_identity: &str,
+) -> Option<String> {
+    if let Some(identity) = env_var_nonempty("ATM_IDENTITY") {
+        return Some(identity);
+    }
+
+    let trimmed_identity = resolved_identity.trim();
+    if !trimmed_identity.is_empty() && trimmed_identity != "human" {
+        return Some(trimmed_identity.to_string());
+    }
+
+    let session_id = env_var_nonempty("CLAUDE_SESSION_ID")?;
+    let config_path = home_dir
+        .join(".claude/teams")
+        .join(team_name)
+        .join("config.json");
+    if !config_path.exists() {
+        return None;
+    }
+
+    let team_config = read_team_config(&config_path).ok()?;
+    if team_config.lead_session_id == session_id {
+        return Some("team-lead".to_string());
+    }
+
+    team_config
+        .members
+        .iter()
+        .find(|member| member.session_id.as_deref() == Some(session_id.as_str()))
+        .map(|member| member.name.clone())
+}
+
+fn build_spawn_authorization_decision(
+    current_dir: &Path,
+    home_dir: &Path,
+    team_name: &str,
+    resolved_identity: &str,
+) -> Option<SpawnAuthorizationDecision> {
+    let (required_team, spawn_policy, co_leaders) = load_spawn_policy_from_toml(current_dir);
+    if !matches!(spawn_policy, SpawnPolicy::LeadersOnly) {
+        return None;
+    }
+    let policy_team = required_team.unwrap_or_else(|| team_name.to_string());
+    let caller_identity = resolve_spawn_caller_identity(home_dir, &policy_team, resolved_identity);
+    let mut allowed = vec!["team-lead".to_string()];
+    for identity in co_leaders {
+        if !identity.trim().is_empty() {
+            allowed.push(identity);
+        }
+    }
+    allowed.sort();
+    allowed.dedup();
+    let authorized = caller_identity
+        .as_deref()
+        .map(|id| allowed.iter().any(|allowed_id| allowed_id == id))
+        .unwrap_or(false);
+
+    Some(SpawnAuthorizationDecision {
+        policy_team,
+        allowed,
+        caller_identity,
+        authorized,
+    })
+}
+
+fn spawn_unauthorized_error(decision: &SpawnAuthorizationDecision) -> String {
+    format!(
+        "{SPAWN_UNAUTHORIZED}: leaders-only spawn policy violation.\n\
+         \n\
+         Policy team: {}\n\
+         Allowed identities: {}\n\
+         Resolved caller: {}\n\
+         \n\
+         Action: run spawn as team-lead or add caller to [team.\"{}\"].co_leaders in .atm.toml.",
+        decision.policy_team,
+        decision.allowed.join(", "),
+        decision
+            .caller_identity
+            .clone()
+            .unwrap_or_else(|| "<unknown>".to_string()),
+        decision.policy_team
+    )
+}
+
+fn parse_env_vars(pairs: &[String]) -> Result<std::collections::HashMap<String, String>> {
+    let mut map = std::collections::HashMap::new();
+    for pair in pairs {
+        let eq_pos = pair.find('=').ok_or_else(|| {
+            anyhow::anyhow!("Invalid --env value '{pair}': expected KEY=VALUE format")
+        })?;
+        let key = &pair[..eq_pos];
+        let value = &pair[eq_pos + 1..];
+        if key.is_empty() {
+            anyhow::bail!("Invalid --env value '{pair}': key must not be empty");
+        }
+        map.insert(key.to_string(), value.to_string());
+    }
+    Ok(map)
+}
+
+fn parse_template_vars(pairs: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut map = BTreeMap::new();
+    for pair in pairs {
+        let eq_pos = pair.find('=').ok_or_else(|| {
+            anyhow::anyhow!("Invalid --var value '{pair}': expected KEY=VALUE format")
+        })?;
+        let key = &pair[..eq_pos];
+        let value = &pair[eq_pos + 1..];
+        if key.is_empty() {
+            anyhow::bail!("Invalid --var value '{pair}': key must not be empty");
+        }
+        map.insert(key.to_string(), value.to_string());
+    }
+    Ok(map)
+}
+
+fn compose_runtime_kind(runtime: &RuntimeKind) -> ComposeRuntimeKind {
+    match runtime {
+        RuntimeKind::Claude => ComposeRuntimeKind::Claude,
+        RuntimeKind::Codex => ComposeRuntimeKind::Codex,
+        RuntimeKind::Gemini => ComposeRuntimeKind::Gemini,
+        RuntimeKind::Opencode => ComposeRuntimeKind::Opencode,
+    }
+}
+
+fn is_template_path(path: &Path) -> bool {
+    path.file_name()
+        .map(|name| name.to_string_lossy().ends_with(".j2"))
+        .unwrap_or(false)
+}
+
+struct SpawnPromptResolutionContext<'a> {
+    system_prompt: Option<&'a PathBuf>,
+    prompt_vars: &'a BTreeMap<String, String>,
+    team_name: &'a str,
+    agent_name: &'a str,
+    runtime: &'a RuntimeKind,
+    model: Option<&'a str>,
+    launch_dir: &'a Path,
+    home_dir: &'a Path,
+}
+
+fn resolve_spawn_system_prompt(
+    context: &SpawnPromptResolutionContext<'_>,
+) -> Result<Option<PathBuf>> {
+    let Some(raw_path) = context.system_prompt else {
+        return Ok(None);
+    };
+    if !is_template_path(raw_path) {
+        return Ok(Some(raw_path.clone()));
+    }
+
+    let template_path = if raw_path.is_absolute() {
+        raw_path.clone()
+    } else {
+        context.launch_dir.join(raw_path)
+    };
+
+    let mut vars_input = BTreeMap::new();
+    vars_input.insert("team".to_string(), context.team_name.to_string());
+    vars_input.insert("agent".to_string(), context.agent_name.to_string());
+    vars_input.insert(
+        "runtime".to_string(),
+        runtime_name(context.runtime).to_string(),
+    );
+    vars_input.insert(
+        "cwd".to_string(),
+        context.launch_dir.to_string_lossy().to_string(),
+    );
+    if let Some(model_value) = context.model.filter(|v| !v.trim().is_empty()) {
+        vars_input.insert("model".to_string(), model_value.to_string());
+    }
+    for (key, value) in context.prompt_vars {
+        vars_input.insert(key.clone(), value.clone());
+    }
+
+    let vars_env: BTreeMap<String, String> = std::env::vars().collect();
+    let request = ComposeRequest {
+        runtime: compose_runtime_kind(context.runtime),
+        mode: ComposeMode::File,
+        kind: None,
+        root: context.launch_dir.to_path_buf(),
+        agent: None,
+        template_path: Some(template_path.clone()),
+        vars_input,
+        vars_env,
+        guidance_block: None,
+        user_prompt: None,
+        policy: ComposePolicy {
+            unknown_variable_policy: UnknownVariablePolicy::Error,
+            ..ComposePolicy::default()
+        },
+    };
+
+    let rendered = compose(&request).with_context(|| {
+        format!(
+            "Failed to compose --system-prompt template '{}'",
+            template_path.display()
+        )
+    })?;
+
+    let runtime_home = context
+        .home_dir
+        .join(".claude")
+        .join("runtime")
+        .join("compose")
+        .join(context.team_name)
+        .join(context.agent_name);
+    fs::create_dir_all(&runtime_home)
+        .with_context(|| format!("Failed to create {}", runtime_home.display()))?;
+
+    let output_path = runtime_home.join(format!("{}-system.md", runtime_name(context.runtime)));
+    let temp_path = output_path.with_extension("md.tmp");
+    fs::write(&temp_path, rendered.rendered_text.as_bytes())
+        .with_context(|| format!("Failed to write {}", temp_path.display()))?;
+    fs::rename(&temp_path, &output_path).with_context(|| {
+        format!(
+            "Failed to rename {} to {}",
+            temp_path.display(),
+            output_path.display()
+        )
+    })?;
+
+    Ok(Some(output_path))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JoinMode {
+    TeamLeadInitiated,
+    SelfJoin,
+}
+
+impl JoinMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::TeamLeadInitiated => "team_lead_initiated",
+            Self::SelfJoin => "self_join",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddMemberOutcome {
+    Added,
+    UpdatedInactive,
+    UpdatedPaneId,
+    AlreadyRegistered,
+}
+
+fn resolve_join_folder(folder: Option<PathBuf>) -> Result<PathBuf> {
+    let selected = match folder {
+        Some(path) => path,
+        None => std::env::current_dir()?,
+    };
+    canonicalize_directory(&selected, "--folder")
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r#"'"'"'"#))
+}
+
+fn resolve_caller_team_context(home_dir: &Path, current_dir: &Path) -> Result<Option<String>> {
+    let config = resolve_config(&ConfigOverrides::default(), current_dir, home_dir)?;
+    let configured_team = config.core.default_team.trim().to_string();
+    if configured_team.is_empty() {
+        return Ok(None);
+    }
+
+    let caller_identity = resolve_identity(&config.core.identity, &config.roles, &config.aliases);
+    if caller_identity.is_empty() || caller_identity == "human" {
+        return Ok(None);
+    }
+
+    let config_path = home_dir
+        .join(".claude/teams")
+        .join(&configured_team)
+        .join("config.json");
+    if !config_path.exists() {
+        return Ok(None);
+    }
+
+    let team_config = read_team_config(&config_path)?;
+    let is_member = team_config
+        .members
+        .iter()
+        .any(|m| m.name == caller_identity);
+    if is_member {
+        Ok(Some(configured_team))
+    } else {
+        Ok(None)
+    }
+}
+
+fn join_member(args: JoinArgs) -> Result<()> {
+    let home_dir = get_home_dir()?;
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let caller_team = resolve_caller_team_context(&home_dir, &current_dir)?;
+
+    let (mode, target_team) = if let Some(caller_team) = caller_team {
+        if let Some(requested_team) = args.team.as_deref()
+            && requested_team != caller_team
+        {
+            anyhow::bail!(
+                "--team '{}' does not match your current team '{}'. \
+                 Remove --team or pass --team '{}'.",
+                requested_team,
+                caller_team,
+                caller_team
+            );
+        }
+        (JoinMode::TeamLeadInitiated, caller_team)
+    } else {
+        let explicit_team = args.team.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "--team is required when caller has no current team context. \
+                 Set ATM_TEAM/ATM_IDENTITY for team-lead-initiated mode, or pass --team <team>."
+            )
+        })?;
+        (JoinMode::SelfJoin, explicit_team)
+    };
+
+    let team_dir = home_dir.join(".claude/teams").join(&target_team);
+    if !team_dir.exists() {
+        anyhow::bail!(
+            "Team '{}' not found (directory {} doesn't exist)",
+            target_team,
+            team_dir.display()
+        );
+    }
+
+    let config_path = team_dir.join("config.json");
+    if !config_path.exists() {
+        anyhow::bail!("Team config not found at {}", config_path.display());
+    }
+
+    let folder = resolve_join_folder(args.folder)?;
+    let folder_display = folder.to_string_lossy().to_string();
+    let member_outcome = add_member_internal(AddMemberArgs {
+        team: target_team.clone(),
+        agent: args.agent.clone(),
+        agent_type: args.agent_type.unwrap_or_else(|| "codex".to_string()),
+        model: args.model.unwrap_or_else(|| "unknown".to_string()),
+        cwd: Some(folder.clone()),
+        inactive: false,
+        pane_id: None,
+        session_id: None,
+        backend_type: None,
+    })?;
+
+    let roster_state = match member_outcome {
+        AddMemberOutcome::Added | AddMemberOutcome::UpdatedInactive => "added",
+        AddMemberOutcome::UpdatedPaneId | AddMemberOutcome::AlreadyRegistered => "already_present",
+    };
+
+    let launch_command = format!(
+        "cd {} && env ATM_TEAM={} ATM_IDENTITY={} claude --resume",
+        shell_quote(&folder_display),
+        shell_quote(&target_team),
+        shell_quote(&args.agent)
+    );
+
+    if args.json {
+        let output = json!({
+            "team": target_team,
+            "agent": args.agent,
+            "folder": folder_display,
+            "launch_command": launch_command,
+            "mode": mode.as_str(),
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    println!("Mode: {}", mode.as_str());
+    println!("Team: {}", target_team);
+    println!("Agent: {}", args.agent);
+    println!("Folder: {}", folder_display);
+    println!("Roster: {}", roster_state);
+    if roster_state == "already_present" {
+        println!("Requested team member is already in the roster.");
+    }
+    println!("Launch command:");
+    println!("{launch_command}");
+    println!("  # Note: adjust quoting for Windows PowerShell/cmd");
+    Ok(())
+}
+
 fn add_member(args: AddMemberArgs) -> Result<()> {
+    match add_member_internal(args.clone())? {
+        AddMemberOutcome::UpdatedPaneId => {
+            println!(
+                "Updated tmuxPaneId for '{}' in team '{}' (paneId='{}')",
+                args.agent,
+                args.team,
+                args.pane_id.as_deref().unwrap_or_default()
+            );
+        }
+        AddMemberOutcome::AlreadyRegistered => {
+            println!("Member already registered (idempotent)");
+        }
+        AddMemberOutcome::UpdatedInactive => {
+            println!(
+                "Updated inactive member '{}' in team '{}' (agentType='{}')",
+                args.agent, args.team, args.agent_type
+            );
+        }
+        AddMemberOutcome::Added => {
+            println!(
+                "Added member '{}' to team '{}' (agentType='{}')",
+                args.agent, args.team, args.agent_type
+            );
+        }
+    }
+    Ok(())
+}
+
+fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
     let home_dir = get_home_dir()?;
     let team_dir = home_dir.join(".claude/teams").join(&args.team);
     if !team_dir.exists() {
@@ -348,14 +1413,12 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
             if let Some(ref pane_id) = args.pane_id {
                 team_config.members[idx].tmux_pane_id = Some(pane_id.clone());
                 write_team_config(&config_path, &team_config)?;
-                println!(
-                    "Updated tmuxPaneId for '{}' in team '{}' (paneId='{}')",
-                    args.agent, args.team, pane_id
-                );
+                ensure_member_inbox_atomic(&team_dir, &args.team, &args.agent)?;
+                return Ok(AddMemberOutcome::UpdatedPaneId);
             } else {
-                println!("Member already registered (idempotent)");
+                ensure_member_inbox_atomic(&team_dir, &args.team, &args.agent)?;
+                return Ok(AddMemberOutcome::AlreadyRegistered);
             }
-            return Ok(());
         }
 
         // Collision guard: active member with a different agent_id → reject.
@@ -390,11 +1453,16 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
             m.tmux_pane_id = Some(pane_id.clone());
         }
         write_team_config(&config_path, &team_config)?;
-        println!(
-            "Updated inactive member '{}' in team '{}' (agentType='{}')",
-            args.agent, args.team, args.agent_type
-        );
-        return Ok(());
+        ensure_member_inbox_atomic(&team_dir, &args.team, &args.agent)?;
+        if let Some(ref session_id) = args.session_id {
+            sync_member_session_hint_from_config(
+                &config_path,
+                &args.team,
+                &args.agent,
+                session_id,
+            )?;
+        }
+        return Ok(AddMemberOutcome::UpdatedInactive);
     }
 
     // Brand-new member.
@@ -420,7 +1488,7 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
         backend_type: None,
         is_active: Some(!args.inactive),
         last_active: if !args.inactive { Some(now_ms) } else { None },
-        session_id: args.session_id,
+        session_id: args.session_id.clone(),
         external_backend_type: parsed_backend_type,
         external_model: Some(parsed_model),
         unknown_fields: std::collections::HashMap::new(),
@@ -428,13 +1496,99 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
 
     team_config.members.push(member);
     write_team_config(&config_path, &team_config)?;
+    ensure_member_inbox_atomic(&team_dir, &args.team, &args.agent)?;
+    if let Some(ref session_id) = args.session_id {
+        sync_member_session_hint_from_config(&config_path, &args.team, &args.agent, session_id)?;
+    }
+    Ok(AddMemberOutcome::Added)
+}
 
-    println!(
-        "Added member '{}' to team '{}' (agentType='{}')",
-        args.agent, args.team, args.agent_type
-    );
+fn ensure_member_inbox_atomic(team_dir: &Path, team_name: &str, agent_name: &str) -> Result<()> {
+    let inboxes_dir = team_dir.join("inboxes");
+    fs::create_dir_all(&inboxes_dir).with_context(|| {
+        format!(
+            "Failed to create inboxes directory for team '{}': {}",
+            team_name,
+            inboxes_dir.display()
+        )
+    })?;
+
+    let inbox_path = inboxes_dir.join(format!("{agent_name}.json"));
+    inbox_update(&inbox_path, team_name, agent_name, |_| {}).with_context(|| {
+        format!(
+            "Failed to create inbox '{}' for {}@{}",
+            inbox_path.display(),
+            agent_name,
+            team_name
+        )
+    })?;
 
     Ok(())
+}
+
+fn runtime_for_member(member: &agent_team_mail_core::schema::AgentMember) -> Option<&'static str> {
+    member.effective_backend_type().and_then(|bt| match bt {
+        BackendType::ClaudeCode => Some("claude"),
+        BackendType::Codex => Some("codex"),
+        BackendType::Gemini => Some("gemini"),
+        BackendType::External | BackendType::Human(_) => None,
+    })
+}
+
+fn sync_member_session_hint_from_config(
+    config_path: &Path,
+    team: &str,
+    agent: &str,
+    session_id: &str,
+) -> Result<()> {
+    let cfg: TeamConfig = serde_json::from_str(&fs::read_to_string(config_path)?)?;
+    let member = cfg.members.iter().find(|m| m.name == agent);
+    sync_member_session_hint(team, agent, session_id, member)
+}
+
+fn sync_member_session_hint(
+    team: &str,
+    agent: &str,
+    session_id: &str,
+    member: Option<&agent_team_mail_core::schema::AgentMember>,
+) -> Result<()> {
+    let mut runtime = member.and_then(runtime_for_member).map(str::to_string);
+    let process_hint = member
+        .and_then(|m| m.process_id_hint())
+        .filter(|pid| *pid > 1);
+
+    let daemon_session = query_session_for_team(team, agent).ok().flatten();
+    let process_id = process_hint.or_else(|| daemon_session.as_ref().map(|s| s.process_id));
+    if runtime.is_none() {
+        runtime = daemon_session.and_then(|s| s.runtime);
+    }
+
+    let Some(process_id) = process_id.filter(|pid| *pid > 1) else {
+        warn!("session-id for {agent}@{team} not synced to daemon: no process_id hint available");
+        return Ok(());
+    };
+    let runtime_ref = runtime.as_deref();
+    let runtime_session_id = runtime_ref.map(|_| session_id);
+
+    match register_hint(
+        team,
+        agent,
+        session_id,
+        process_id,
+        runtime_ref,
+        runtime_session_id,
+        None,
+        None,
+    ) {
+        Ok(RegisterHintOutcome::Registered | RegisterHintOutcome::DaemonUnavailable) => Ok(()),
+        Ok(RegisterHintOutcome::UnsupportedDaemon) => anyhow::bail!(
+            "Connected daemon does not support 'register-hint'. Upgrade atm-daemon to this ATM version and retry."
+        ),
+        Err(e) => {
+            warn!("daemon sync failed for {agent}@{team} session hint: {e}");
+            Ok(())
+        }
+    }
 }
 
 /// Implement `atm teams update-member <team> <agent> [flags]`
@@ -486,9 +1640,11 @@ fn update_member(args: UpdateMemberArgs) -> Result<()> {
         })?;
 
     let mut updated_fields: Vec<&str> = Vec::new();
+    let mut session_id_to_sync: Option<String> = None;
 
     if let Some(session_id) = args.session_id {
-        member.session_id = Some(session_id);
+        member.session_id = Some(session_id.clone());
+        session_id_to_sync = Some(session_id);
         updated_fields.push("session_id");
     }
 
@@ -525,6 +1681,9 @@ fn update_member(args: UpdateMemberArgs) -> Result<()> {
     }
 
     write_team_config(&config_path, &team_config)?;
+    if let Some(ref session_id) = session_id_to_sync {
+        sync_member_session_hint_from_config(&config_path, &args.team, &args.agent, session_id)?;
+    }
 
     println!(
         "Updated member '{}' in team '{}': {}",
@@ -536,43 +1695,12 @@ fn update_member(args: UpdateMemberArgs) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the current Claude Code session ID using a priority chain:
-///
-/// 1. Explicit value passed via `--session-id` flag
-/// 2. `CLAUDE_SESSION_ID` env var (available when the Rust binary is executed
-///    directly by Claude Code, but **not** exported to bash subshells)
-/// 3. `/tmp/atm-session-id` file written by the gate hook on every `Task` tool
-///    call — this acts as a persistent fallback after the first tool call fires
-///
-/// Returns `None` if no non-empty session ID can be found through any channel.
-fn resolve_session_id(explicit: Option<&str>) -> Option<String> {
-    if let Some(id) = explicit {
-        let trimmed = id.trim().to_string();
-        if !trimmed.is_empty() {
-            return Some(trimmed);
-        }
-    }
-    if let Ok(id) = std::env::var("CLAUDE_SESSION_ID") {
-        let trimmed = id.trim().to_string();
-        if !trimmed.is_empty() {
-            return Some(trimmed);
-        }
-    }
-    let session_file_path = std::env::temp_dir().join("atm-session-id");
-    if let Ok(content) = std::fs::read_to_string(&session_file_path) {
-        let trimmed = content.trim().to_string();
-        if !trimmed.is_empty() {
-            return Some(trimmed);
-        }
-    }
-    None
-}
-
 /// Implement `atm teams resume <team> [message]`
 ///
-/// Updates `leadSessionId` in the team's `config.json` so that the current
-/// Claude Code session becomes the team-lead.  Notifies all members with an
-/// optional or default message via ATM inbox delivery.
+/// Performs R.1 handoff semantics:
+/// - Refuses takeover when team-lead is actively running for the team.
+/// - For inactive/no session: creates a flat backup snapshot and removes the
+///   active team directory, prompting the caller to re-establish via TeamCreate.
 fn resume(args: ResumeArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
     let team_dir = home_dir.join(".claude/teams").join(&args.team);
@@ -600,157 +1728,72 @@ fn resume(args: ResumeArgs) -> Result<()> {
         ));
     }
 
-    // Load team config
-    let team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
-    let old_session_id = team_config.lead_session_id.clone();
+    use agent_team_mail_core::daemon_client::query_session_for_team;
 
-    // Auto-backup before making any state changes — provides a safety net for every resume.
-    // Non-fatal: a backup failure logs a warning but does not abort the resume.
-    match do_backup(&home_dir, &args.team, false) {
-        Ok(backup_path) => {
-            eprintln!("Auto-backup created: {}", backup_path.display());
-            // Also prune old backups after a successful auto-backup (non-fatal).
-            if let Err(e) = prune_old_backups(&home_dir, &args.team, BACKUP_RETENTION_COUNT) {
-                eprintln!("Warning: Auto-prune failed (proceeding anyway): {e}");
-            }
-        }
-        Err(e) => {
-            eprintln!("Warning: Auto-backup failed (proceeding anyway): {e}");
-        }
-    }
+    let requested_session_id = args
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
 
-    // Check existing session liveness if there is one.
-    // NOTE: query_session uses a bare agent name ("team-lead") without team qualification.
-    // The daemon session registry is currently scoped by process/name only, not by team.
-    // If a user runs multiple teams that each have a "team-lead" member, liveness queries
-    // may collide across teams. This is an accepted limitation; team-scoped session queries
-    // require a daemon API change that is tracked separately.
-    if !old_session_id.is_empty() {
-        use agent_team_mail_core::daemon_client::query_session;
-
-        let session_result = query_session("team-lead");
-
-        match session_result {
-            Ok(Some(ref info)) => {
-                // Daemon responded — check if old session is the same as ours
-                let current_session_id =
-                    resolve_session_id(args.session_id.as_deref()).unwrap_or_default();
-
-                if info.session_id == current_session_id && !current_session_id.is_empty() {
-                    // Re-read config for description
-                    let existing_config: TeamConfig =
-                        serde_json::from_str(&fs::read_to_string(&config_path)?)?;
-                    let description = existing_config
-                        .description
-                        .clone()
-                        .unwrap_or_else(|| format!("{} team", args.team));
-                    println!(
-                        "Already active session, no-op.\n\nTo re-establish as team-lead, call:\n  TeamCreate(team_name=\"{}\", description=\"{}\")",
-                        args.team, description
-                    );
-                    return Ok(());
-                }
-
-                if info.alive && !args.force {
-                    let short = &info.session_id[..8.min(info.session_id.len())];
+    match query_session_for_team(&args.team, "team-lead") {
+        Ok(Some(info)) => {
+            // --session-id must match daemon's tracked lead session when provided.
+            if let Some(ref sid) = requested_session_id {
+                if &info.session_id != sid {
                     return Err(anyhow::anyhow!(
-                        "team-lead is already active in session {}... (use --force to override)",
-                        short
+                        "--session-id '{}' does not match daemon active record '{}'",
+                        sid,
+                        info.session_id
                     ));
                 }
+            }
 
-                if info.alive && args.kill {
-                    kill_process(info.process_id);
-                }
+            if info.alive {
+                return Err(anyhow::anyhow!(
+                    "team-lead already active in PID {}, cannot steal identity",
+                    info.process_id
+                ));
             }
-            Ok(None) => {
-                // Daemon not running or agent not found — proceed
-                warn!("daemon not running, assuming old session is dead");
+
+            // Stale/dead record path: require explicit force to proceed.
+            if args.kill {
+                kill_process(info.process_id);
             }
-            Err(_) => {
-                warn!("daemon not running, assuming old session is dead");
+            if !args.force {
+                return Err(anyhow::anyhow!(
+                    "stale team-lead session detected (PID {}). Use --force to proceed.",
+                    info.process_id
+                ));
             }
+        }
+        Ok(None) => {
+            // No daemon record for this team scope — proceed.
+        }
+        Err(e) => {
+            warn!("daemon session-query-team failed: {e}");
         }
     }
 
-    // Determine new session ID using a priority chain:
-    // 1. --session-id flag  2. CLAUDE_SESSION_ID env  3. /tmp/atm-session-id file
-    let new_session_id = resolve_session_id(args.session_id.as_deref()).ok_or_else(|| {
-        anyhow::anyhow!(
-            "Could not determine current session ID.\n\
-             Try one of:\n\
-             1. Pass --session-id <uuid> explicitly (find it in the SessionStart hook output)\n\
-             2. Make any tool call first (gate hook writes the ID to /tmp/atm-session-id)\n\
-             3. Ensure CLAUDE_SESSION_ID is set in your environment"
-        )
-    })?;
+    // Snapshot first; abort if backup fails.
+    let backup_path = do_backup(&home_dir, &args.team, false)?;
+    prune_old_backups(&home_dir, &args.team, BACKUP_RETENTION_COUNT)?;
 
-    // Atomically write updated config.json
-    {
-        let lock_path = config_path.with_extension("lock");
-        let _lock = acquire_lock(&lock_path, 5)
-            .map_err(|e| anyhow::anyhow!("Failed to acquire lock for team config: {e}"))?;
+    // Remove active team directory so TeamCreate can re-establish the team lead context.
+    fs::remove_dir_all(&team_dir)?;
 
-        // Re-read under lock (could have changed)
-        let mut config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
-        config.lead_session_id = new_session_id.clone();
-        // Mark all non-team-lead members as inactive to clear stale active status.
-        for member in config.members.iter_mut() {
-            if member.name != "team-lead" {
-                member.is_active = Some(false);
-            }
-        }
-        write_team_config(&config_path, &config)?;
-    }
-
-    // Reload config for member iteration
-    let team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
-
-    // Send notification to all members except self
-    let notify_text = args.message.clone().unwrap_or_else(|| {
-        "Team-lead has rejoined the session. Context may have been reset. Please provide a brief status update.".to_string()
-    });
-
-    let mut notified = 0usize;
-    let inboxes_dir = team_dir.join("inboxes");
-    if !inboxes_dir.exists() {
-        fs::create_dir_all(&inboxes_dir)?;
-    }
-
-    for member in &team_config.members {
-        if member.name == "team-lead" {
-            continue; // Don't send to self
-        }
-
-        let inbox_path = inboxes_dir.join(format!("{}.json", member.name));
-        let msg = InboxMessage {
-            from: "team-lead".to_string(),
-            text: notify_text.clone(),
-            timestamp: Utc::now().to_rfc3339(),
-            read: false,
-            summary: Some("Team lead session resumed".to_string()),
-            message_id: Some(Uuid::new_v4().to_string()),
-            unknown_fields: HashMap::new(),
-        };
-
-        match inbox_append(&inbox_path, &msg, &args.team, &member.name) {
-            Ok(_) => {
-                notified += 1;
-            }
-            Err(e) => {
-                warn!("Failed to notify {}: {e}", member.name);
-            }
-        }
-    }
-
-    let description = team_config
-        .description
-        .clone()
-        .unwrap_or_else(|| format!("{} team", args.team));
-
+    let maybe_msg = args
+        .message
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("team archived for re-establishment");
     println!(
-        "{} resumed. leadSessionId updated. {} members notified.\n\nTo re-establish as team-lead, call:\n  TeamCreate(team_name=\"{}\", description=\"{}\")",
-        args.team, notified, args.team, description
+        "{}.\nBackup: {}\nCall TeamCreate({}) to re-establish as team-lead",
+        maybe_msg,
+        backup_path.display(),
+        args.team
     );
 
     Ok(())
@@ -779,6 +1822,158 @@ fn kill_process(pid: u32) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum CleanupActionKind {
+    RosterRemove,
+    MailboxDelete,
+    SessionPrune,
+    Skip,
+}
+
+impl CleanupActionKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::RosterRemove => "roster-remove",
+            Self::MailboxDelete => "mailbox-delete",
+            Self::SessionPrune => "session-prune",
+            Self::Skip => "skip",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CleanupPreviewRow {
+    agent: String,
+    action: CleanupActionKind,
+    reason: String,
+}
+
+fn print_cleanup_preview(team: &str, rows: &[CleanupPreviewRow]) {
+    print!("{}", cleanup_preview_output(team, rows));
+}
+
+fn cleanup_preview_output(team: &str, rows: &[CleanupPreviewRow]) -> String {
+    if rows.is_empty() {
+        return format!("Nothing to clean up for team {team}.\n");
+    }
+
+    let action_width = rows
+        .iter()
+        .map(|row| row.action.as_str().len())
+        .max()
+        .unwrap_or(6)
+        .max("Action".len());
+    let agent_width = rows
+        .iter()
+        .map(|row| row.agent.len())
+        .max()
+        .unwrap_or(5)
+        .max("Agent".len());
+    let mut output = String::new();
+
+    output.push_str(&format!("Cleanup preview for team {team}:\n"));
+    output.push_str(&format!(
+        "{:<agent_width$}  {:<action_width$}  Reason",
+        "Agent",
+        "Action",
+        agent_width = agent_width,
+        action_width = action_width
+    ));
+    output.push('\n');
+    output.push_str(&format!(
+        "{:-<agent_width$}  {:-<action_width$}  {:-<6}",
+        "",
+        "",
+        "",
+        agent_width = agent_width,
+        action_width = action_width
+    ));
+    output.push('\n');
+    for row in rows {
+        output.push_str(&format!(
+            "{:<agent_width$}  {:<action_width$}  {}",
+            row.agent,
+            row.action.as_str(),
+            row.reason,
+            agent_width = agent_width,
+            action_width = action_width
+        ));
+        output.push('\n');
+    }
+
+    let roster_remove = rows
+        .iter()
+        .filter(|row| row.action == CleanupActionKind::RosterRemove)
+        .count();
+    let mailbox_delete = rows
+        .iter()
+        .filter(|row| row.action == CleanupActionKind::MailboxDelete)
+        .count();
+    let session_prune = rows
+        .iter()
+        .filter(|row| row.action == CleanupActionKind::SessionPrune)
+        .count();
+    let skipped = rows
+        .iter()
+        .filter(|row| row.action == CleanupActionKind::Skip)
+        .count();
+    output.push('\n');
+    output.push_str("Totals:\n");
+    output.push_str(&format!("  roster-remove: {roster_remove}\n"));
+    output.push_str(&format!("  mailbox-delete: {mailbox_delete}\n"));
+    output.push_str(&format!("  session-prune: {session_prune}\n"));
+    output.push_str(&format!("  skip: {skipped}\n"));
+    output
+}
+
+fn parse_positive_days(raw: &str) -> Option<i64> {
+    raw.trim().parse::<i64>().ok().filter(|days| *days > 0)
+}
+
+fn external_agent_stale_days(team: &str, home_dir: &Path) -> i64 {
+    if let Some(days) = std::env::var(EXTERNAL_AGENT_STALE_DAYS_ENV)
+        .ok()
+        .and_then(|v| parse_positive_days(&v))
+    {
+        return days;
+    }
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        let overrides = ConfigOverrides {
+            team: Some(team.to_string()),
+            ..Default::default()
+        };
+        if let Ok(config) = resolve_config(&overrides, &current_dir, home_dir)
+            && let Some(plugin) = config.plugin_config("cleanup")
+        {
+            for key in ["external_staleness_days", "external_agent_stale_days"] {
+                if let Some(days) = plugin
+                    .get(key)
+                    .and_then(|value| value.as_integer())
+                    .filter(|days| *days > 0)
+                {
+                    return days;
+                }
+            }
+        }
+    }
+
+    DEFAULT_EXTERNAL_AGENT_STALE_DAYS
+}
+
+fn external_agent_missing_state_is_stale(
+    seen_state: &SeenState,
+    team: &str,
+    agent: &str,
+    now: DateTime<Utc>,
+    stale_after: chrono::Duration,
+) -> bool {
+    match get_last_seen(seen_state, team, agent) {
+        None => true,
+        Some(last_seen) => now.signed_duration_since(last_seen) >= stale_after,
+    }
+}
+
 /// Implement `atm teams cleanup <team> [agent]`
 ///
 /// Removes members whose daemon session record indicates the process is dead
@@ -799,8 +1994,9 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
 
     let mut team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
 
-    let inboxes_dir = team_dir.join("inboxes");
     let mut removed_names: Vec<String> = Vec::new();
+    let mut removed_orphan_mailboxes: Vec<String> = Vec::new();
+    let mut dry_run_rows: Vec<CleanupPreviewRow> = Vec::new();
 
     let members_to_check: Vec<_> = if let Some(ref agent_name) = args.agent {
         team_config
@@ -814,16 +2010,23 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
     };
 
     // Check daemon reachability once before iterating members.
-    // NOTE: query_session uses bare agent names without team qualification because
-    // the current daemon session registry is process/name scoped, not team scoped.
-    // If two teams have a member with the same name, liveness queries may collide.
-    // This is an accepted limitation; team-scoped queries require a daemon API change.
     let daemon_running = agent_team_mail_core::daemon_client::daemon_is_running();
+    let seen_state = load_seen_state().unwrap_or_default();
+    let external_stale_days = external_agent_stale_days(&args.team, &home_dir);
+    let external_stale_after = chrono::Duration::days(external_stale_days);
+    let now = Utc::now();
     let mut skipped_names: Vec<String> = Vec::new();
 
     for member in &members_to_check {
         // Safety rule: never remove team-lead via cleanup.
         if member.name == "team-lead" {
+            if args.dry_run {
+                dry_run_rows.push(CleanupPreviewRow {
+                    agent: member.name.clone(),
+                    action: CleanupActionKind::Skip,
+                    reason: "team-lead-protected".to_string(),
+                });
+            }
             if args.agent.is_some() {
                 println!("Warning: team-lead is protected and cannot be removed by cleanup");
             }
@@ -843,75 +2046,140 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         //   2. The daemon explicitly confirms that session is dead (`alive == false`).
         // Any other outcome (no session_id, daemon unreachable, no daemon record)
         // is treated as "unknown liveness" → the external agent is kept.
-        let is_external = member.external_backend_type.is_some();
+        // Legacy compatibility: older rosters may only encode external runtime
+        // in `agentType` (e.g. "codex"/"gemini") without externalBackendType.
+        // Treat those as external for cleanup safety semantics.
+        let is_external = member.external_backend_type.is_some()
+            || matches!(
+                member.agent_type.trim().to_ascii_lowercase().as_str(),
+                "codex" | "gemini" | "external"
+            );
 
-        let is_dead = if is_external {
-            // External agent: use session_id for the liveness query if available.
-            let query_key = match &member.session_id {
-                Some(sid) => sid.clone(),
+        let (is_dead, dead_reason): (bool, Option<String>) = if args.force {
+            // Force mode intentionally bypasses daemon liveness checks.
+            (true, Some("forced-cleanup".to_string()))
+        } else if is_external {
+            let stale_without_daemon_state = external_agent_missing_state_is_stale(
+                &seen_state,
+                &args.team,
+                &member.name,
+                now,
+                external_stale_after,
+            );
+
+            // External agent: use session_id for daemon liveness query when available.
+            // If daemon has no record, fall back to state.json last_seen staleness:
+            // absent or stale heartbeat is cleanup-eligible; recent heartbeat is retained.
+            match member.session_id.as_deref() {
+                Some(query_key) => {
+                    match agent_team_mail_core::daemon_client::query_session(query_key) {
+                        Ok(Some(ref info)) if !info.alive => {
+                            (true, Some("daemon-session-dead".to_string()))
+                        }
+                        Ok(Some(_)) => (false, None),
+                        Ok(None) => {
+                            if stale_without_daemon_state {
+                                (true, Some("daemon-no-session-record".to_string()))
+                            } else {
+                                if args.dry_run {
+                                    dry_run_rows.push(CleanupPreviewRow {
+                                        agent: member.name.clone(),
+                                        action: CleanupActionKind::Skip,
+                                        reason: "external-agent-no-state".to_string(),
+                                    });
+                                }
+                                warn!(
+                                    "Warning: external agent '{}' has no daemon state record and recent heartbeat (<{}d), skipping",
+                                    member.name, external_stale_days
+                                );
+                                skipped_names.push(member.name.clone());
+                                continue;
+                            }
+                        }
+                        Err(_) => {
+                            if args.dry_run {
+                                dry_run_rows.push(CleanupPreviewRow {
+                                    agent: member.name.clone(),
+                                    action: CleanupActionKind::Skip,
+                                    reason: "external-agent-daemon-query-error".to_string(),
+                                });
+                            }
+                            warn!(
+                                "Warning: daemon query error for external agent '{}', skipping",
+                                member.name
+                            );
+                            skipped_names.push(member.name.clone());
+                            continue;
+                        }
+                    }
+                }
                 None => {
-                    // No session_id → cannot confirm liveness; keep the member.
-                    warn!(
-                        "Warning: external agent '{}' has no session_id, skipping (unknown liveness)",
-                        member.name
-                    );
-                    skipped_names.push(member.name.clone());
-                    continue;
-                }
-            };
-
-            match agent_team_mail_core::daemon_client::query_session(&query_key) {
-                Ok(Some(ref info)) if !info.alive => {
-                    // Daemon explicitly reports the session as dead → safe to remove.
-                    true
-                }
-                Ok(_) => {
-                    // Daemon unreachable, session alive, or no record → keep the agent.
-                    warn!(
-                        "Warning: external agent '{}' liveness unknown, skipping — use --force to override",
-                        member.name
-                    );
-                    skipped_names.push(member.name.clone());
-                    continue;
-                }
-                Err(_) => {
-                    // I/O error → keep the agent to be safe.
-                    warn!(
-                        "Warning: daemon query error for external agent '{}', skipping",
-                        member.name
-                    );
-                    skipped_names.push(member.name.clone());
-                    continue;
-                }
-            }
-        } else {
-            // Standard Claude Code member: existing liveness logic unchanged.
-            match agent_team_mail_core::daemon_client::query_session(&member.name) {
-                Ok(Some(ref info)) => {
-                    // Daemon responded with an explicit record — trust it.
-                    !info.alive
-                }
-                Ok(None) if daemon_running => {
-                    // Daemon is running but has no record for this member — session is gone.
-                    true
-                }
-                Ok(None) => {
-                    // Daemon is not running: we cannot confirm liveness.
-                    // Skip unless --force.
-                    if args.force {
-                        true
+                    if stale_without_daemon_state {
+                        (true, Some("daemon-no-session-record".to_string()))
                     } else {
+                        if args.dry_run {
+                            dry_run_rows.push(CleanupPreviewRow {
+                                agent: member.name.clone(),
+                                action: CleanupActionKind::Skip,
+                                reason: "external-agent-liveness-unknown".to_string(),
+                            });
+                        }
                         warn!(
-                            "Warning: daemon unreachable, skipping {} — use --force to override",
-                            member.name
+                            "Warning: external agent '{}' has no session_id and recent heartbeat (<{}d), skipping",
+                            member.name, external_stale_days
                         );
                         skipped_names.push(member.name.clone());
                         continue;
                     }
                 }
+            }
+        } else {
+            // Standard Claude Code member: existing liveness logic unchanged.
+            match agent_team_mail_core::daemon_client::query_session_for_team(
+                &args.team,
+                &member.name,
+            ) {
+                Ok(Some(ref info)) => {
+                    // Daemon responded with an explicit record — trust it.
+                    (
+                        !info.alive,
+                        if !info.alive {
+                            Some("daemon-session-dead".to_string())
+                        } else {
+                            None
+                        },
+                    )
+                }
+                Ok(None) if daemon_running => {
+                    // Daemon is running but has no record for this member — session is gone.
+                    (true, Some("daemon-no-session-record".to_string()))
+                }
+                Ok(None) => {
+                    // Daemon is not running: we cannot confirm liveness.
+                    if args.dry_run {
+                        dry_run_rows.push(CleanupPreviewRow {
+                            agent: member.name.clone(),
+                            action: CleanupActionKind::Skip,
+                            reason: "daemon-unreachable".to_string(),
+                        });
+                    }
+                    warn!(
+                        "Warning: daemon unreachable, skipping {} — use --force to override",
+                        member.name
+                    );
+                    skipped_names.push(member.name.clone());
+                    continue;
+                }
                 Err(e) => {
                     // Unexpected I/O error after connection was established — cannot
                     // determine liveness; skip the member to avoid unsafe removal.
+                    if args.dry_run {
+                        dry_run_rows.push(CleanupPreviewRow {
+                            agent: member.name.clone(),
+                            action: CleanupActionKind::Skip,
+                            reason: "daemon-query-error".to_string(),
+                        });
+                    }
                     warn!(
                         "Warning: daemon query error for {}, skipping: {e}",
                         member.name
@@ -923,14 +2191,32 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         };
 
         if is_dead {
-            // Remove inbox file(s) for this member
-            let inbox_path = inboxes_dir.join(format!("{}.json", member.name));
-            if inbox_path.exists() {
-                if let Err(e) = fs::remove_file(&inbox_path) {
-                    warn!("Failed to remove inbox for {}: {e}", member.name);
+            let reason = dead_reason.unwrap_or_else(|| "candidate-cleanup".to_string());
+            if args.dry_run {
+                dry_run_rows.push(CleanupPreviewRow {
+                    agent: member.name.clone(),
+                    action: CleanupActionKind::RosterRemove,
+                    reason: reason.clone(),
+                });
+                dry_run_rows.push(CleanupPreviewRow {
+                    agent: member.name.clone(),
+                    action: CleanupActionKind::MailboxDelete,
+                    reason: reason.clone(),
+                });
+                // Only preview session-prune when session metadata actually exists.
+                if member.session_id.as_deref().is_some() {
+                    dry_run_rows.push(CleanupPreviewRow {
+                        agent: member.name.clone(),
+                        action: CleanupActionKind::SessionPrune,
+                        reason: "stale-session-metadata".to_string(),
+                    });
                 }
+            } else {
+                // Coupled teardown: when a roster member is removed, remove all
+                // associated mailbox artifacts (inbox json/lock + mailbox dir).
+                remove_member_mailbox_artifacts(&team_dir, &member.name);
+                removed_names.push(member.name.clone());
             }
-            removed_names.push(member.name.clone());
         } else {
             // Only print a warning when cleaning up a specific named agent.
             // In full-team-cleanup mode, alive members are silently skipped.
@@ -941,20 +2227,52 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
     }
 
     // Remove dead members from config
-    if !removed_names.is_empty() {
+    if !args.dry_run && !removed_names.is_empty() {
         team_config
             .members
             .retain(|m| !removed_names.contains(&m.name));
         write_team_config(&config_path, &team_config)?;
     }
 
-    if removed_names.is_empty() && skipped_names.is_empty() {
-        println!("No stale members found.");
+    // Full-team cleanup mode: purge orphan mailbox artifacts that no longer
+    // match any roster member.
+    if args.agent.is_none() {
+        let roster: HashSet<String> = team_config.members.iter().map(|m| m.name.clone()).collect();
+        if args.dry_run {
+            for orphan in collect_orphan_mailboxes(&team_dir, &roster) {
+                dry_run_rows.push(CleanupPreviewRow {
+                    agent: orphan,
+                    action: CleanupActionKind::MailboxDelete,
+                    reason: "orphan-mailbox".to_string(),
+                });
+            }
+        } else {
+            removed_orphan_mailboxes = purge_orphan_mailboxes(&team_dir, &roster);
+        }
+    }
+
+    if args.dry_run {
+        print_cleanup_preview(&args.team, &dry_run_rows);
+        if !skipped_names.is_empty() {
+            let names = skipped_names.join(", ");
+            let count = skipped_names.len();
+            println!("Skipped {count} member(s): {names}");
+        }
+        return Ok(());
+    }
+
+    if removed_names.is_empty() && removed_orphan_mailboxes.is_empty() && skipped_names.is_empty() {
+        println!("Nothing to clean up for team {}.", args.team);
     } else {
         if !removed_names.is_empty() {
             let names = removed_names.join(", ");
             let count = removed_names.len();
             println!("Removed {count} stale member(s): {names}");
+        }
+        if !removed_orphan_mailboxes.is_empty() {
+            let names = removed_orphan_mailboxes.join(", ");
+            let count = removed_orphan_mailboxes.len();
+            println!("Removed {count} orphan mailbox(es): {names}");
         }
         if !skipped_names.is_empty() {
             let names = skipped_names.join(", ");
@@ -975,7 +2293,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
             agent_id: std::env::var("ATM_IDENTITY").ok(),
             agent_name: std::env::var("ATM_IDENTITY").ok(),
             result: Some("incomplete".to_string()),
-            count: Some(removed_names.len() as u64),
+            count: Some((removed_names.len() + removed_orphan_mailboxes.len()) as u64),
             error: Some(format!(
                 "skipped={} daemon_unreachable",
                 skipped_names.len()
@@ -998,11 +2316,131 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         agent_id: std::env::var("ATM_IDENTITY").ok(),
         agent_name: std::env::var("ATM_IDENTITY").ok(),
         result: Some("ok".to_string()),
-        count: Some(removed_names.len() as u64),
+        count: Some((removed_names.len() + removed_orphan_mailboxes.len()) as u64),
         ..Default::default()
     });
 
     Ok(())
+}
+
+fn remove_member_mailbox_artifacts(team_dir: &Path, member_name: &str) {
+    let inboxes_dir = team_dir.join("inboxes");
+    for ext in ["json", "lock"] {
+        let path = inboxes_dir.join(format!("{member_name}.{ext}"));
+        if path.exists()
+            && let Err(e) = fs::remove_file(&path)
+        {
+            warn!("Failed to remove inbox artifact for {member_name}: {e}");
+        }
+    }
+
+    let mailbox_dir = team_dir.join("mailboxes").join(member_name);
+    if mailbox_dir.exists()
+        && let Err(e) = fs::remove_dir_all(&mailbox_dir)
+    {
+        warn!("Failed to remove mailbox dir for {member_name}: {e}");
+    }
+}
+
+fn collect_orphan_mailboxes(team_dir: &Path, roster: &HashSet<String>) -> Vec<String> {
+    let mut found: HashSet<String> = HashSet::new();
+
+    let inboxes_dir = team_dir.join("inboxes");
+    if let Ok(entries) = fs::read_dir(&inboxes_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ext = path.extension().and_then(|s| s.to_str());
+            if !matches!(ext, Some("json") | Some("lock")) {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !roster.contains(stem) {
+                found.insert(stem.to_string());
+            }
+        }
+    }
+
+    let mailboxes_root = team_dir.join("mailboxes");
+    if let Ok(entries) = fs::read_dir(&mailboxes_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !roster.contains(name) {
+                found.insert(name.to_string());
+            }
+        }
+    }
+
+    let mut list: Vec<String> = found.into_iter().collect();
+    list.sort();
+    list
+}
+
+fn purge_orphan_mailboxes(team_dir: &Path, roster: &HashSet<String>) -> Vec<String> {
+    let mut removed: HashSet<String> = HashSet::new();
+    let orphans = collect_orphan_mailboxes(team_dir, roster);
+
+    let inboxes_dir = team_dir.join("inboxes");
+    for orphan in &orphans {
+        for ext in ["json", "lock"] {
+            let path = inboxes_dir.join(format!("{orphan}.{ext}"));
+            if !path.exists() {
+                continue;
+            }
+            if let Err(e) = fs::remove_file(&path) {
+                warn!(
+                    "Failed to remove orphan inbox artifact '{}': {e}",
+                    path.display()
+                );
+            } else {
+                removed.insert(orphan.clone());
+            }
+        }
+    }
+
+    let mailboxes_root = team_dir.join("mailboxes");
+    for orphan in &orphans {
+        let path = mailboxes_root.join(orphan);
+        if !path.exists() {
+            continue;
+        }
+        if let Err(e) = fs::remove_dir_all(&path) {
+            warn!("Failed to remove orphan mailbox dir '{}': {e}", orphan);
+        } else {
+            removed.insert(orphan.clone());
+        }
+    }
+
+    let mut removed_list: Vec<String> = removed.into_iter().collect();
+    removed_list.sort();
+    removed_list
+}
+
+/// Entry point for `atm cleanup --agent` compatibility.
+pub(crate) fn cleanup_single_agent(team: String, agent: String, force: bool) -> Result<()> {
+    cleanup(CleanupArgs {
+        team,
+        agent: Some(agent),
+        dry_run: false,
+        force,
+    })
+}
+
+/// Dry-run entry point for `atm cleanup --agent` compatibility.
+pub(crate) fn cleanup_single_agent_dry_run(team: String, agent: String, force: bool) -> Result<()> {
+    cleanup(CleanupArgs {
+        team,
+        agent: Some(agent),
+        dry_run: true,
+        force,
+    })
 }
 
 /// Core backup logic: creates a timestamped snapshot directory and returns its path.
@@ -1286,7 +2724,13 @@ fn restore(args: RestoreArgs) -> Result<()> {
         // NEVER overwrite leadSessionId
         for member in restore_members {
             if !config.members.iter().any(|m| m.name == member.name) {
-                config.members.push(member.clone());
+                let mut restored = member.clone();
+                // Restored members have no active runtime session until they
+                // explicitly re-register with the daemon.
+                restored.is_active = Some(false);
+                restored.last_active = None;
+                restored.session_id = None;
+                config.members.push(restored);
             }
         }
 
@@ -1417,7 +2861,27 @@ fn format_age(timestamp_ms: u64) -> String {
 mod tests {
     use super::*;
     use serial_test::serial;
+    use std::collections::HashMap;
     use tempfile::TempDir;
+
+    fn set_autostart_disabled_for_test() -> Option<String> {
+        let original = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+        // SAFETY: test-only env mutation, callers use #[serial].
+        unsafe {
+            std::env::set_var("ATM_DAEMON_AUTOSTART", "0");
+        }
+        original
+    }
+
+    fn restore_autostart_env(original: Option<String>) {
+        // SAFETY: test-only env mutation, callers use #[serial].
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+            }
+        }
+    }
 
     fn create_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
         let team_dir = temp_dir.path().join(".claude/teams").join(team_name);
@@ -1460,6 +2924,95 @@ mod tests {
         team_dir
     }
 
+    fn write_last_seen(temp_dir: &TempDir, team: &str, agent: &str, timestamp: DateTime<Utc>) {
+        let state_dir = temp_dir.path().join(".config/atm");
+        fs::create_dir_all(&state_dir).unwrap();
+        let state_path = state_dir.join("state.json");
+        let payload = serde_json::json!({
+            "last_seen": {
+                team: {
+                    agent: timestamp.to_rfc3339(),
+                }
+            }
+        });
+        fs::write(state_path, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn spawn_mock_session_query_team_server(
+        home: &std::path::Path,
+        expected_team: &str,
+        expected_name: &str,
+        alive: bool,
+    ) -> std::thread::JoinHandle<()> {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let daemon_dir = home.join(".claude/daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = daemon_dir.join("atm-daemon.sock");
+        if socket_path.exists() {
+            let _ = fs::remove_file(&socket_path);
+        }
+
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let expected_team = expected_team.to_string();
+        let expected_name = expected_name.to_string();
+
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let stream_clone = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(stream_clone);
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+
+            let request_json: serde_json::Value =
+                serde_json::from_str(request_line.trim()).unwrap();
+            let command = request_json["command"].as_str().unwrap_or_default();
+            match command {
+                "session-query-team" => {
+                    assert_eq!(
+                        request_json["payload"]["team"].as_str(),
+                        Some(expected_team.as_str())
+                    );
+                    assert_eq!(
+                        request_json["payload"]["name"].as_str(),
+                        Some(expected_name.as_str())
+                    );
+                }
+                "session-query" => {
+                    assert_eq!(
+                        request_json["payload"]["name"].as_str(),
+                        Some(expected_name.as_str())
+                    );
+                }
+                other => panic!("unexpected daemon command in mock server: {other}"),
+            }
+
+            let response = serde_json::json!({
+                "version": 1,
+                "request_id": request_json["request_id"].as_str().unwrap_or("req-test"),
+                "status": "ok",
+                "payload": {
+                    "session_id": format!("{expected_name}-session"),
+                    "process_id": 12345,
+                    "alive": alive
+                },
+                "error": serde_json::Value::Null
+            });
+
+            let mut writer = std::io::BufWriter::new(&stream);
+            writer
+                .write_all(serde_json::to_string(&response).unwrap().as_bytes())
+                .unwrap();
+            writer.write_all(b"\n").unwrap();
+            writer.flush().unwrap();
+
+            drop(writer);
+            let _ = fs::remove_file(&socket_path);
+        })
+    }
+
     #[test]
     fn test_format_age() {
         // Test with a timestamp from 1 day ago
@@ -1469,6 +3022,48 @@ mod tests {
 
         let age = format_age(timestamp);
         assert!(age.contains("day"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_add_member_creates_valid_inbox_json() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+
+        let original_home = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let result = add_member_internal(AddMemberArgs {
+            team: "atm-dev".to_string(),
+            agent: "arch-ctm".to_string(),
+            agent_type: "codex".to_string(),
+            model: "unknown".to_string(),
+            cwd: None,
+            inactive: false,
+            pane_id: None,
+            session_id: None,
+            backend_type: None,
+        });
+        assert!(matches!(result, Ok(AddMemberOutcome::Added)));
+
+        let inbox_path = team_dir.join("inboxes/arch-ctm.json");
+        assert!(inbox_path.exists(), "inbox should exist after add-member");
+
+        let content = fs::read_to_string(&inbox_path).expect("read inbox");
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("valid json");
+        assert!(parsed.is_array(), "inbox json must be an array");
+
+        // SAFETY: test-only cleanup.
+        unsafe {
+            match original_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
     }
 
     #[test]
@@ -1579,6 +3174,7 @@ mod tests {
         let args = CleanupArgs {
             team: "nonexistent".to_string(),
             agent: None,
+            dry_run: false,
             force: false,
         };
 
@@ -1609,6 +3205,7 @@ mod tests {
         fs::write(&inbox, "[]").unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
@@ -1617,6 +3214,7 @@ mod tests {
         let args = CleanupArgs {
             team: "atm-dev".to_string(),
             agent: Some("publisher".to_string()),
+            dry_run: false,
             force: true,
         };
 
@@ -1631,6 +3229,50 @@ mod tests {
         let config: TeamConfig =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
         assert!(!config.members.iter().any(|m| m.name == "publisher"));
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+        restore_autostart_env(original_autostart);
+    }
+
+    #[test]
+    #[serial]
+    fn test_cleanup_single_agent_removes_member_mailbox_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+
+        let inbox = team_dir.join("inboxes/publisher.json");
+        fs::write(&inbox, "[]").unwrap();
+        let mailbox_dir = team_dir.join("mailboxes/publisher");
+        fs::create_dir_all(&mailbox_dir).unwrap();
+        fs::write(mailbox_dir.join("meta.json"), "{}").unwrap();
+
+        let original = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-only env mutation
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let args = CleanupArgs {
+            team: "atm-dev".to_string(),
+            agent: Some("publisher".to_string()),
+            dry_run: false,
+            force: true,
+        };
+
+        let result = cleanup(args);
+        assert!(result.is_ok(), "cleanup should succeed: {result:?}");
+        assert!(!inbox.exists(), "publisher inbox should be removed");
+        assert!(
+            !mailbox_dir.exists(),
+            "publisher mailbox dir should be removed during coupled teardown"
+        );
 
         // SAFETY: test-only cleanup
         unsafe {
@@ -1654,6 +3296,7 @@ mod tests {
         fs::write(&inbox, "[]").unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
@@ -1662,6 +3305,7 @@ mod tests {
         let args = CleanupArgs {
             team: "atm-dev".to_string(),
             agent: Some("publisher".to_string()),
+            dry_run: false,
             force: false,
         };
 
@@ -1690,17 +3334,225 @@ mod tests {
                 None => std::env::remove_var("ATM_HOME"),
             }
         }
+        restore_autostart_env(original_autostart);
     }
 
     #[test]
     #[serial]
-    fn test_resume_no_session_id_returns_helpful_error() {
-        // When no session ID is available from any source (no --session-id flag,
-        // CLAUDE_SESSION_ID env absent/empty, /tmp/atm-session-id absent/empty),
-        // resume() must return an Err with a helpful message.
+    fn test_cleanup_removes_external_agent_without_state_when_last_seen_missing() {
+        // External member has no daemon state and no heartbeat in state.json:
+        // this is stale by default policy (7d) and cleanup-eligible.
         let temp_dir = TempDir::new().unwrap();
         let home_env = temp_dir.path().to_str().unwrap().to_string();
-        create_test_team(&temp_dir, "atm-dev");
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+
+        let inbox = team_dir.join("inboxes/publisher.json");
+        fs::write(&inbox, "[]").unwrap();
+
+        let config_path = team_dir.join("config.json");
+        let mut config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        let publisher = config
+            .members
+            .iter_mut()
+            .find(|m| m.name == "publisher")
+            .expect("publisher exists");
+        publisher.external_backend_type = Some(BackendType::Codex);
+        publisher.session_id = None;
+        fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
+        // SAFETY: test-only env mutation
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let args = CleanupArgs {
+            team: "atm-dev".to_string(),
+            agent: Some("publisher".to_string()),
+            dry_run: false,
+            force: false,
+        };
+
+        let result = cleanup(args);
+        assert!(result.is_ok(), "cleanup should succeed: {result:?}");
+        assert!(!inbox.exists(), "external agent inbox should be removed");
+        let reloaded: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(
+            !reloaded.members.iter().any(|m| m.name == "publisher"),
+            "external stale member must be removed from roster"
+        );
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+        restore_autostart_env(original_autostart);
+    }
+
+    #[test]
+    #[serial]
+    fn test_cleanup_keeps_external_agent_without_state_when_last_seen_recent() {
+        // External member has no daemon state but a recent heartbeat in state.json:
+        // keep member and report incomplete cleanup (unknown liveness).
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        write_last_seen(&temp_dir, "atm-dev", "publisher", Utc::now());
+
+        let inbox = team_dir.join("inboxes/publisher.json");
+        fs::write(&inbox, "[]").unwrap();
+
+        let config_path = team_dir.join("config.json");
+        let mut config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        let publisher = config
+            .members
+            .iter_mut()
+            .find(|m| m.name == "publisher")
+            .expect("publisher exists");
+        publisher.external_backend_type = Some(BackendType::Codex);
+        publisher.session_id = None;
+        fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
+        // SAFETY: test-only env mutation
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let args = CleanupArgs {
+            team: "atm-dev".to_string(),
+            agent: Some("publisher".to_string()),
+            dry_run: false,
+            force: false,
+        };
+        let result = cleanup(args);
+        assert!(result.is_err(), "cleanup should report incomplete state");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Cleanup incomplete"),
+            "error should indicate incomplete cleanup: {err}"
+        );
+
+        assert!(inbox.exists(), "recent external agent inbox should remain");
+        let reloaded: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(
+            reloaded.members.iter().any(|m| m.name == "publisher"),
+            "recent external member must remain in roster"
+        );
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+        restore_autostart_env(original_autostart);
+    }
+
+    #[test]
+    fn test_cleanup_preview_output_includes_external_agent_no_state_reason() {
+        let rows = vec![CleanupPreviewRow {
+            agent: "publisher".to_string(),
+            action: CleanupActionKind::Skip,
+            reason: "external-agent-no-state".to_string(),
+        }];
+        let output = cleanup_preview_output("atm-dev", &rows);
+        assert!(output.contains("Cleanup preview for team atm-dev:"));
+        assert!(output.contains("publisher"));
+        assert!(output.contains("skip"));
+        assert!(output.contains("external-agent-no-state"));
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn test_cleanup_removes_member_when_daemon_reports_dead() {
+        // If daemon explicitly reports alive=false, cleanup removes the member
+        // without requiring --force.
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        let inbox = team_dir.join("inboxes/publisher.json");
+        fs::write(&inbox, "[]").unwrap();
+
+        // Ensure this test exercises the external-agent branch.
+        let config_path = team_dir.join("config.json");
+        let mut config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        let publisher = config
+            .members
+            .iter_mut()
+            .find(|m| m.name == "publisher")
+            .expect("publisher exists");
+        publisher.external_backend_type = Some(BackendType::Codex);
+        publisher.session_id = Some("publisher-session".to_string());
+        fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
+        // SAFETY: test-only env mutation
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let server = spawn_mock_session_query_team_server(
+            temp_dir.path(),
+            "atm-dev",
+            "publisher-session",
+            false,
+        );
+
+        let args = CleanupArgs {
+            team: "atm-dev".to_string(),
+            agent: Some("publisher".to_string()),
+            dry_run: false,
+            force: false,
+        };
+        let result = cleanup(args);
+        let server_result = server.join();
+        assert!(
+            server_result.is_ok(),
+            "mock daemon server thread failed: {server_result:?}"
+        );
+        assert!(result.is_ok(), "cleanup should succeed: {result:?}");
+
+        assert!(!inbox.exists(), "dead member inbox should be removed");
+        let config_path = team_dir.join("config.json");
+        let config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(
+            !config.members.iter().any(|m| m.name == "publisher"),
+            "dead member should be removed from roster"
+        );
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+        restore_autostart_env(original_autostart);
+    }
+
+    #[test]
+    #[serial]
+    fn test_resume_no_session_id_archives_team_when_daemon_unreachable() {
+        // R.1 contract: if no active team-lead record is found, resume archives
+        // the team for re-establishment, independent of CLAUDE_SESSION_ID.
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
 
         let original_home = std::env::var("ATM_HOME").ok();
         let original_id = std::env::var("ATM_IDENTITY").ok();
@@ -1710,20 +3562,7 @@ mod tests {
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
             std::env::set_var("ATM_IDENTITY", "team-lead");
-            std::env::remove_var("CLAUDE_SESSION_ID"); // no env var
-        }
-
-        // Ensure the session-id file is absent or empty for this test
-        let session_file = std::env::temp_dir().join("atm-session-id");
-        let session_file_existed = session_file.exists();
-        let session_file_backup: Option<String> = if session_file_existed {
-            std::fs::read_to_string(&session_file).ok()
-        } else {
-            None
-        };
-        // Remove the file so the fallback chain has nothing to read
-        if session_file_existed {
-            let _ = std::fs::remove_file(&session_file);
+            std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
         let args = ResumeArgs {
@@ -1731,26 +3570,17 @@ mod tests {
             message: None,
             force: false,
             kill: false,
-            session_id: None, // no explicit flag
+            session_id: None,
         };
 
         let result = resume(args);
+        assert!(result.is_ok(), "resume should succeed: {result:?}");
         assert!(
-            result.is_err(),
-            "resume without any session ID source should fail"
+            !team_dir.exists(),
+            "team directory should be removed after archive handoff"
         );
-        let msg = format!("{}", result.unwrap_err());
-        assert!(
-            msg.contains("Could not determine")
-                || msg.contains("session ID")
-                || msg.contains("session-id"),
-            "error should explain how to fix it: {msg}"
-        );
-
-        // Restore the session file if it was there before
-        if let Some(ref content) = session_file_backup {
-            let _ = std::fs::write(&session_file, content);
-        }
+        let backups_root = temp_dir.path().join(".claude/teams/.backups/atm-dev");
+        assert!(backups_root.exists(), "backup root should exist");
 
         // SAFETY: test-only cleanup
         unsafe {
@@ -1967,6 +3797,16 @@ mod tests {
         assert!(
             config.members.iter().any(|m| m.name == "publisher"),
             "publisher should be restored to config"
+        );
+        let publisher = config
+            .members
+            .iter()
+            .find(|m| m.name == "publisher")
+            .expect("publisher restored");
+        assert_eq!(
+            publisher.is_active,
+            Some(false),
+            "restored members should not remain active without a live session"
         );
 
         // Verify inbox is restored
@@ -2312,6 +4152,7 @@ mod tests {
         let team_dir = create_test_team_multi_dead(&temp_dir, "atm-dev");
 
         let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
@@ -2320,6 +4161,7 @@ mod tests {
         let args = CleanupArgs {
             team: "atm-dev".to_string(),
             agent: None, // full-team cleanup
+            dry_run: false,
             force: true,
         };
 
@@ -2353,6 +4195,75 @@ mod tests {
                 None => std::env::remove_var("ATM_HOME"),
             }
         }
+        restore_autostart_env(original_autostart);
+    }
+
+    #[test]
+    #[serial]
+    fn test_cleanup_full_team_purges_orphan_mailbox_artifacts() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team_multi_dead(&temp_dir, "atm-dev");
+
+        // Create orphan inbox artifacts and mailbox dirs.
+        fs::write(team_dir.join("inboxes/orphan-agent.json"), "[]").unwrap();
+        fs::write(team_dir.join("inboxes/orphan-agent.lock"), "").unwrap();
+        let orphan_mailbox = team_dir.join("mailboxes/orphan-agent");
+        fs::create_dir_all(&orphan_mailbox).unwrap();
+        fs::write(orphan_mailbox.join("state.json"), "{}").unwrap();
+
+        // Create mailbox dirs for a live roster member and for removable members.
+        let lead_mailbox = team_dir.join("mailboxes/team-lead");
+        fs::create_dir_all(&lead_mailbox).unwrap();
+        fs::write(lead_mailbox.join("state.json"), "{}").unwrap();
+        let removable_mailbox = team_dir.join("mailboxes/agent-a");
+        fs::create_dir_all(&removable_mailbox).unwrap();
+        fs::write(removable_mailbox.join("state.json"), "{}").unwrap();
+
+        let original = std::env::var("ATM_HOME").ok();
+        // SAFETY: test-only env mutation
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let args = CleanupArgs {
+            team: "atm-dev".to_string(),
+            agent: None,
+            dry_run: false,
+            force: true,
+        };
+
+        let result = cleanup(args);
+        assert!(result.is_ok(), "cleanup should succeed: {result:?}");
+
+        assert!(
+            !team_dir.join("inboxes/orphan-agent.json").exists(),
+            "orphan inbox json should be purged"
+        );
+        assert!(
+            !team_dir.join("inboxes/orphan-agent.lock").exists(),
+            "orphan inbox lock should be purged"
+        );
+        assert!(
+            !orphan_mailbox.exists(),
+            "orphan mailbox dir should be purged"
+        );
+        assert!(
+            !removable_mailbox.exists(),
+            "removed member mailbox dir should be removed"
+        );
+        assert!(
+            lead_mailbox.exists(),
+            "mailbox for remaining roster member should be preserved"
+        );
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
     }
 
     #[test]
@@ -2371,6 +4282,7 @@ mod tests {
         fs::write(&inbox, "[]").unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
@@ -2380,6 +4292,7 @@ mod tests {
         let args = CleanupArgs {
             team: "atm-dev".to_string(),
             agent: Some("publisher".to_string()),
+            dry_run: false,
             force: true,
         };
 
@@ -2394,13 +4307,13 @@ mod tests {
                 None => std::env::remove_var("ATM_HOME"),
             }
         }
+        restore_autostart_env(original_autostart);
     }
 
     #[test]
     #[serial]
-    fn test_resume_sets_non_team_lead_members_inactive() {
-        // After a successful resume, members other than team-lead should have
-        // is_active set to Some(false).
+    fn test_resume_removes_team_directory_instead_of_mutating_members() {
+        // R.1 changed resume semantics: config is no longer mutated in-place.
         let temp_dir = TempDir::new().unwrap();
         let home_env = temp_dir.path().to_str().unwrap().to_string();
         let team_dir = create_test_team(&temp_dir, "atm-dev");
@@ -2426,33 +4339,9 @@ mod tests {
 
         let result = resume(args);
         assert!(result.is_ok(), "resume should succeed: {result:?}");
-
-        // Read config back and verify publisher member has is_active = false
-        let config_path = team_dir.join("config.json");
-        let config: TeamConfig =
-            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
-
-        let publisher = config
-            .members
-            .iter()
-            .find(|m| m.name == "publisher")
-            .expect("publisher should still be a member");
-        assert_eq!(
-            publisher.is_active,
-            Some(false),
-            "publisher.isActive should be false after resume"
-        );
-
-        // team-lead should not be touched (is_active not forced to false)
-        let lead = config
-            .members
-            .iter()
-            .find(|m| m.name == "team-lead")
-            .expect("team-lead should be a member");
-        // team-lead had no is_active field in test fixture, so should still be None
         assert!(
-            lead.is_active.is_none() || lead.is_active == Some(true),
-            "team-lead.isActive should not be forced to false"
+            !team_dir.exists(),
+            "team directory should be removed after resume archive handoff"
         );
 
         // SAFETY: test-only cleanup
@@ -2524,9 +4413,9 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_resume_explicit_session_id() {
-        // When --session-id is passed, resume uses that ID directly without
-        // reading env or file.
+    fn test_resume_explicit_session_id_succeeds_without_config_mutation() {
+        // R.1 keeps --session-id for daemon consistency checks, but successful
+        // path archives/removes team directory.
         let temp_dir = TempDir::new().unwrap();
         let home_env = temp_dir.path().to_str().unwrap().to_string();
         let team_dir = create_test_team(&temp_dir, "atm-dev");
@@ -2556,12 +4445,10 @@ mod tests {
             result.is_ok(),
             "resume with explicit session_id should succeed: {result:?}"
         );
-
-        // Verify the config was updated with the explicit session ID
-        let config_path = team_dir.join("config.json");
-        let config: TeamConfig =
-            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
-        assert_eq!(config.lead_session_id, explicit_id);
+        assert!(
+            !team_dir.exists(),
+            "team directory should be removed after resume archive handoff"
+        );
 
         // SAFETY: test-only cleanup
         unsafe {
@@ -2582,17 +4469,11 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_resume_session_id_from_file_fallback() {
-        // When CLAUDE_SESSION_ID env var is absent but /tmp/atm-session-id exists,
-        // resume should use the file's content.
+    fn test_resume_without_explicit_session_id_succeeds_when_daemon_unreachable() {
+        // With no daemon session record available, resume should still archive.
         let temp_dir = TempDir::new().unwrap();
         let home_env = temp_dir.path().to_str().unwrap().to_string();
         let team_dir = create_test_team(&temp_dir, "atm-dev");
-
-        // Write a test session ID to the file
-        let session_file = std::env::temp_dir().join("atm-session-id");
-        let file_session_id = "file-session-id-67890";
-        std::fs::write(&session_file, file_session_id).unwrap();
 
         let original_home = std::env::var("ATM_HOME").ok();
         let original_id = std::env::var("ATM_IDENTITY").ok();
@@ -2616,14 +4497,12 @@ mod tests {
         let result = resume(args);
         assert!(
             result.is_ok(),
-            "resume with file fallback should succeed: {result:?}"
+            "resume without explicit session_id should succeed: {result:?}"
         );
-
-        // Verify the config was updated with the file's session ID
-        let config_path = team_dir.join("config.json");
-        let config: TeamConfig =
-            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
-        assert_eq!(config.lead_session_id, file_session_id);
+        assert!(
+            !team_dir.exists(),
+            "team directory should be removed after resume archive handoff"
+        );
 
         // SAFETY: test-only cleanup
         unsafe {
@@ -2893,5 +4772,647 @@ mod tests {
             result.is_ok(),
             "prune on nonexistent dir should be Ok: {result:?}"
         );
+    }
+
+    #[test]
+    fn test_parse_env_vars_valid_pair() {
+        let parsed = parse_env_vars(&["FOO=bar".to_string()]).expect("valid env should parse");
+        assert_eq!(parsed.get("FOO").map(String::as_str), Some("bar"));
+    }
+
+    #[test]
+    fn test_parse_env_vars_value_with_equals() {
+        let parsed = parse_env_vars(&["URL=https://x.test?a=1&b=2".to_string()])
+            .expect("value with equals should parse");
+        assert_eq!(
+            parsed.get("URL").map(String::as_str),
+            Some("https://x.test?a=1&b=2")
+        );
+    }
+
+    #[test]
+    fn test_parse_env_vars_missing_delimiter_errors() {
+        let err = parse_env_vars(&["NO_DELIM".to_string()]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_parse_env_vars_empty_key_errors() {
+        let err = parse_env_vars(&["=value".to_string()]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_parse_template_vars_valid_pair() {
+        let parsed =
+            parse_template_vars(&["team=atm-dev".to_string()]).expect("valid --var should parse");
+        assert_eq!(parsed.get("team").map(String::as_str), Some("atm-dev"));
+    }
+
+    #[test]
+    fn test_parse_template_vars_value_with_equals() {
+        let parsed = parse_template_vars(&["url=https://x.test?a=1&b=2".to_string()])
+            .expect("value with equals should parse");
+        assert_eq!(
+            parsed.get("url").map(String::as_str),
+            Some("https://x.test?a=1&b=2")
+        );
+    }
+
+    #[test]
+    fn test_parse_template_vars_missing_delimiter_errors() {
+        let err = parse_template_vars(&["NO_DELIM".to_string()]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_parse_template_vars_empty_key_errors() {
+        let err = parse_template_vars(&["=value".to_string()]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_load_spawn_policy_defaults_to_leaders_only_when_toml_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let (required_team, spawn_policy, co_leaders) =
+            load_spawn_policy_from_toml(temp_dir.path());
+        assert!(required_team.is_none());
+        assert_eq!(spawn_policy, SpawnPolicy::LeadersOnly);
+        assert!(co_leaders.is_empty());
+    }
+
+    fn write_spawn_policy_toml(workdir: &Path, body: &str) {
+        fs::write(workdir.join(".atm.toml"), body).unwrap();
+    }
+
+    fn restore_env_var(name: &str, original: Option<String>) {
+        // SAFETY: test-only env cleanup.
+        unsafe {
+            match original {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+
+    #[test]
+    fn test_load_spawn_policy_reads_any_member_config() {
+        let temp_dir = TempDir::new().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+        write_spawn_policy_toml(
+            &workdir,
+            r#"
+[core]
+default_team = "atm-dev"
+
+[team."atm-dev"]
+spawn_policy = "any-member"
+co_leaders = ["arch-atm", "arch-atm", " lead-2 "]
+"#
+            .trim_start(),
+        );
+        let (required_team, spawn_policy, co_leaders) = load_spawn_policy_from_toml(&workdir);
+        assert_eq!(required_team.as_deref(), Some("atm-dev"));
+        assert_eq!(spawn_policy, SpawnPolicy::AnyMember);
+        assert_eq!(
+            co_leaders,
+            vec!["arch-atm".to_string(), "lead-2".to_string()]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_spawn_caller_identity_prefers_atm_identity_env() {
+        let temp_dir = TempDir::new().unwrap();
+        let original_identity = std::env::var("ATM_IDENTITY").ok();
+        let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_IDENTITY", "env-caller");
+            std::env::set_var("CLAUDE_SESSION_ID", "session-ignored");
+        }
+
+        let resolved = resolve_spawn_caller_identity(temp_dir.path(), "atm-dev", "human");
+        assert_eq!(resolved.as_deref(), Some("env-caller"));
+
+        restore_env_var("ATM_IDENTITY", original_identity);
+        restore_env_var("CLAUDE_SESSION_ID", original_session);
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_spawn_caller_identity_uses_resolved_identity_when_not_human() {
+        let temp_dir = TempDir::new().unwrap();
+        let original_identity = std::env::var("ATM_IDENTITY").ok();
+        let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+            std::env::set_var("CLAUDE_SESSION_ID", "session-ignored");
+        }
+
+        let resolved =
+            resolve_spawn_caller_identity(temp_dir.path(), "atm-dev", "resolved-from-config");
+        assert_eq!(resolved.as_deref(), Some("resolved-from-config"));
+
+        restore_env_var("ATM_IDENTITY", original_identity);
+        restore_env_var("CLAUDE_SESSION_ID", original_session);
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_spawn_caller_identity_uses_claude_session_id_for_team_lead() {
+        let temp_dir = TempDir::new().unwrap();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        let config_path = team_dir.join("config.json");
+        let mut cfg: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        cfg.lead_session_id = "lead-session-123".to_string();
+        fs::write(&config_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let original_identity = std::env::var("ATM_IDENTITY").ok();
+        let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+            std::env::set_var("CLAUDE_SESSION_ID", "lead-session-123");
+        }
+
+        let resolved = resolve_spawn_caller_identity(temp_dir.path(), "atm-dev", "human");
+        assert_eq!(resolved.as_deref(), Some("team-lead"));
+
+        restore_env_var("ATM_IDENTITY", original_identity);
+        restore_env_var("CLAUDE_SESSION_ID", original_session);
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_spawn_caller_identity_uses_claude_session_id_for_member() {
+        let temp_dir = TempDir::new().unwrap();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        let config_path = team_dir.join("config.json");
+        let mut cfg: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        let publisher = cfg
+            .members
+            .iter_mut()
+            .find(|member| member.name == "publisher")
+            .expect("publisher member should exist");
+        publisher.session_id = Some("publisher-session-777".to_string());
+        fs::write(&config_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let original_identity = std::env::var("ATM_IDENTITY").ok();
+        let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+            std::env::set_var("CLAUDE_SESSION_ID", "publisher-session-777");
+        }
+
+        let resolved = resolve_spawn_caller_identity(temp_dir.path(), "atm-dev", "human");
+        assert_eq!(resolved.as_deref(), Some("publisher"));
+
+        restore_env_var("ATM_IDENTITY", original_identity);
+        restore_env_var("CLAUDE_SESSION_ID", original_session);
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_spawn_authorization_decision_team_lead_allowed() {
+        let temp_dir = TempDir::new().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+        write_spawn_policy_toml(
+            &workdir,
+            r#"
+[core]
+default_team = "atm-dev"
+
+[team."atm-dev"]
+spawn_policy = "leaders-only"
+co_leaders = ["arch-atm"]
+"#
+            .trim_start(),
+        );
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_IDENTITY", "team-lead");
+        }
+        let decision =
+            build_spawn_authorization_decision(&workdir, temp_dir.path(), "atm-dev", "human")
+                .expect("leaders-only policy should produce an auth decision");
+        assert!(decision.authorized);
+        assert_eq!(decision.caller_identity.as_deref(), Some("team-lead"));
+        // SAFETY: test-only cleanup.
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_spawn_authorization_decision_co_leader_allowed() {
+        let temp_dir = TempDir::new().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+        write_spawn_policy_toml(
+            &workdir,
+            r#"
+[core]
+default_team = "atm-dev"
+
+[team."atm-dev"]
+spawn_policy = "leaders-only"
+co_leaders = ["arch-atm"]
+"#
+            .trim_start(),
+        );
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_IDENTITY", "arch-atm");
+        }
+        let decision =
+            build_spawn_authorization_decision(&workdir, temp_dir.path(), "atm-dev", "human")
+                .expect("leaders-only policy should produce an auth decision");
+        assert!(decision.authorized);
+        assert_eq!(decision.caller_identity.as_deref(), Some("arch-atm"));
+        // SAFETY: test-only cleanup.
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_spawn_authorization_decision_member_blocked() {
+        let temp_dir = TempDir::new().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+        write_spawn_policy_toml(
+            &workdir,
+            r#"
+[core]
+default_team = "atm-dev"
+
+[team."atm-dev"]
+spawn_policy = "leaders-only"
+co_leaders = ["arch-atm"]
+"#
+            .trim_start(),
+        );
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_IDENTITY", "dev-1");
+        }
+        let decision =
+            build_spawn_authorization_decision(&workdir, temp_dir.path(), "atm-dev", "human")
+                .expect("leaders-only policy should produce an auth decision");
+        assert!(!decision.authorized);
+        assert_eq!(decision.caller_identity.as_deref(), Some("dev-1"));
+        // SAFETY: test-only cleanup.
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_spawn_authorization_decision_unknown_blocked() {
+        let temp_dir = TempDir::new().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+        write_spawn_policy_toml(
+            &workdir,
+            r#"
+[core]
+default_team = "atm-dev"
+
+[team."atm-dev"]
+spawn_policy = "leaders-only"
+co_leaders = ["arch-atm"]
+"#
+            .trim_start(),
+        );
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+        let decision =
+            build_spawn_authorization_decision(&workdir, temp_dir.path(), "atm-dev", "human")
+                .expect("leaders-only policy should produce an auth decision");
+        assert!(!decision.authorized);
+        assert!(decision.caller_identity.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_spawn_authorization_decision_absent_toml_defaults_to_leaders_only() {
+        let temp_dir = TempDir::new().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+
+        // Without .atm.toml, team-lead is allowed.
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_IDENTITY", "team-lead");
+        }
+        let lead =
+            build_spawn_authorization_decision(&workdir, temp_dir.path(), "atm-dev", "human")
+                .expect("default leaders-only policy should produce an auth decision");
+        assert!(lead.authorized);
+        assert_eq!(lead.allowed, vec!["team-lead".to_string()]);
+
+        // Non-lead remains blocked under default leaders-only.
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_IDENTITY", "dev-1");
+        }
+        let member =
+            build_spawn_authorization_decision(&workdir, temp_dir.path(), "atm-dev", "human")
+                .expect("default leaders-only policy should produce an auth decision");
+        assert!(!member.authorized);
+
+        // SAFETY: test-only cleanup.
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+        }
+    }
+
+    #[test]
+    fn test_spawn_unauthorized_error_includes_context() {
+        let decision = SpawnAuthorizationDecision {
+            policy_team: "atm-dev".to_string(),
+            allowed: vec!["arch-atm".to_string(), "team-lead".to_string()],
+            caller_identity: Some("dev-1".to_string()),
+            authorized: false,
+        };
+        let msg = spawn_unauthorized_error(&decision);
+        assert!(msg.contains("SPAWN_UNAUTHORIZED"));
+        assert!(msg.contains("Policy team: atm-dev"));
+        assert!(msg.contains("Allowed identities: arch-atm, team-lead"));
+        assert!(msg.contains("Resolved caller: dev-1"));
+        assert!(msg.contains("co_leaders"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_spawn_authorization_decision_any_member_policy_bypasses_gate() {
+        let temp_dir = TempDir::new().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+        write_spawn_policy_toml(
+            &workdir,
+            r#"
+[core]
+default_team = "atm-dev"
+
+[team."atm-dev"]
+spawn_policy = "any-member"
+"#
+            .trim_start(),
+        );
+        // SAFETY: test-only env mutation; serialized via #[serial].
+        unsafe {
+            std::env::set_var("ATM_IDENTITY", "dev-1");
+        }
+        let decision =
+            build_spawn_authorization_decision(&workdir, temp_dir.path(), "atm-dev", "human");
+        assert!(
+            decision.is_none(),
+            "any-member should bypass leaders-only authorization gate"
+        );
+        // SAFETY: test-only cleanup.
+        unsafe {
+            std::env::remove_var("ATM_IDENTITY");
+        }
+    }
+
+    #[test]
+    fn test_resolve_spawn_folder_defaults_to_current_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        let current = temp_dir.path().join("repo");
+        fs::create_dir_all(&current).unwrap();
+        let resolved = resolve_spawn_folder(&[], &current).unwrap();
+        assert_eq!(resolved, fs::canonicalize(&current).unwrap());
+    }
+
+    #[test]
+    fn test_resolve_spawn_folder_rejects_mismatched_folder_and_cwd() {
+        let temp_dir = TempDir::new().unwrap();
+        let folder_a = temp_dir.path().join("a");
+        let folder_b = temp_dir.path().join("b");
+        fs::create_dir_all(&folder_a).unwrap();
+        fs::create_dir_all(&folder_b).unwrap();
+        let err = resolve_spawn_folder(&[folder_a, folder_b], temp_dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("resolve to different directories"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_spawn_folder_accepts_matching_folder_and_cwd() {
+        let temp_dir = TempDir::new().unwrap();
+        let folder = temp_dir.path().join("same");
+        fs::create_dir_all(&folder).unwrap();
+        let via_folder = temp_dir.path().join("same");
+        let via_cwd = temp_dir.path().join("same/.");
+        let resolved = resolve_spawn_folder(&[via_folder, via_cwd], temp_dir.path()).unwrap();
+        assert_eq!(resolved, fs::canonicalize(&folder).unwrap());
+    }
+
+    #[test]
+    fn test_resolve_spawn_folder_rejects_nonexistent_folder() {
+        let temp_dir = TempDir::new().unwrap();
+        let missing = temp_dir.path().join("does-not-exist");
+        let err = resolve_spawn_folder(&[missing], temp_dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("does not exist"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_canonicalize_directory_rejects_file_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("not-a-dir.txt");
+        fs::write(&file_path, "data").unwrap();
+        let err = canonicalize_directory(&file_path, "--folder").unwrap_err();
+        assert!(
+            err.to_string().contains("is not a directory"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_runtime_name_all_variants() {
+        assert_eq!(runtime_name(&RuntimeKind::Claude), "claude");
+        assert_eq!(runtime_name(&RuntimeKind::Codex), "codex");
+        assert_eq!(runtime_name(&RuntimeKind::Gemini), "gemini");
+        assert_eq!(runtime_name(&RuntimeKind::Opencode), "opencode");
+    }
+
+    #[test]
+    fn test_format_spawn_launch_command_claude_includes_required_flags() {
+        let test_cwd = std::env::temp_dir().join("repo");
+        let spec = SpawnSpec {
+            team: "atm-dev".to_string(),
+            agent: "arch-ctm".to_string(),
+            color: Some("cyan".to_string()),
+            cwd: test_cwd.clone(),
+            model: None,
+            sandbox: None,
+            approval_mode: None,
+            resume: false,
+            resume_session_id: None,
+            system_prompt: None,
+            prompt_vars: BTreeMap::new(),
+        };
+        let command = format!(
+            "cd '{}' && env CLAUDECODE=1 ATM_TEAM='atm-dev' ATM_IDENTITY='arch-ctm' CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --agent-id 'arch-ctm@atm-dev' --agent-name 'arch-ctm' --team-name 'atm-dev' --agent-color 'cyan' --dangerously-skip-permissions",
+            test_cwd.to_string_lossy()
+        );
+        let rendered = format_spawn_launch_command(&RuntimeKind::Claude, &spec, &command);
+        assert_eq!(rendered, command);
+    }
+
+    #[test]
+    fn test_format_spawn_launch_command_non_claude_passthrough() {
+        let test_cwd = std::env::temp_dir().join("repo");
+        let spec = SpawnSpec {
+            team: "atm-dev".to_string(),
+            agent: "arch-ctm".to_string(),
+            color: None,
+            cwd: test_cwd.clone(),
+            model: None,
+            sandbox: None,
+            approval_mode: None,
+            resume: false,
+            resume_session_id: None,
+            system_prompt: None,
+            prompt_vars: BTreeMap::new(),
+        };
+        let command = format!("cd '{}' && codex --yolo", test_cwd.to_string_lossy());
+        let rendered = format_spawn_launch_command(&RuntimeKind::Codex, &spec, &command);
+        assert_eq!(rendered, command);
+    }
+
+    #[test]
+    fn test_ensure_daemon_ready_for_spawn_accepts_available_daemon() {
+        let result = ensure_daemon_ready_for_spawn(|| Ok(Some(Vec::new())));
+        assert!(result.is_ok(), "daemon availability should pass readiness");
+    }
+
+    #[test]
+    fn test_ensure_daemon_ready_for_spawn_reports_unavailable_daemon() {
+        let err = ensure_daemon_ready_for_spawn(|| Ok(None)).expect_err("daemon unavailable");
+        assert!(
+            err.to_string()
+                .contains("Daemon is not running. Start it with: atm-daemon"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_ensure_daemon_ready_for_spawn_wraps_query_errors() {
+        let err = ensure_daemon_ready_for_spawn(|| {
+            Err(anyhow::anyhow!(
+                "daemon auto-start attempted but socket unavailable"
+            ))
+        })
+        .expect_err("query error should be surfaced");
+        let text = format!("{err:#}");
+        assert!(text.contains("Failed to reach daemon for spawn"));
+        assert!(text.contains("socket unavailable"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_ensure_spawn_member_metadata_creates_missing_member() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        let original = std::env::var("ATM_HOME").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let launch_dir = temp_dir.path().join("repo");
+        fs::create_dir_all(&launch_dir).unwrap();
+        ensure_spawn_member_metadata(
+            "atm-dev",
+            "arch-ctm",
+            &RuntimeKind::Codex,
+            Some("gpt5.3-codex"),
+            &launch_dir,
+        )
+        .unwrap();
+
+        let config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(team_dir.join("config.json")).unwrap())
+                .unwrap();
+        let member = config
+            .members
+            .iter()
+            .find(|m| m.name == "arch-ctm")
+            .expect("member must be created");
+        assert_eq!(member.model, "gpt5.3-codex");
+        assert_eq!(member.external_backend_type, Some(BackendType::Codex));
+        assert_eq!(
+            member.external_model,
+            Some(ModelId::from_str("gpt5.3-codex").unwrap())
+        );
+
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_ensure_spawn_member_metadata_updates_existing_member_backend_and_model() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        let original = std::env::var("ATM_HOME").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        ensure_spawn_member_metadata(
+            "atm-dev",
+            "publisher",
+            &RuntimeKind::Gemini,
+            Some("gemini-2.5-pro"),
+            temp_dir.path(),
+        )
+        .unwrap();
+
+        let config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(team_dir.join("config.json")).unwrap())
+                .unwrap();
+        let member = config
+            .members
+            .iter()
+            .find(|m| m.name == "publisher")
+            .expect("publisher exists");
+        assert_eq!(member.model, "gemini-2.5-pro");
+        assert_eq!(member.external_backend_type, Some(BackendType::Gemini));
+        assert_eq!(
+            member.external_model,
+            Some(ModelId::from_str("gemini-2.5-pro").unwrap())
+        );
+
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
     }
 }

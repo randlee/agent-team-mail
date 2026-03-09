@@ -13,6 +13,7 @@
 //! Windows CI compatibility (see `docs/cross-platform-guidelines.md`).
 
 use assert_cmd::cargo;
+use chrono::Utc;
 use serial_test::serial;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,7 +28,11 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     let workdir = temp_dir.path().join("workdir");
     std::fs::create_dir_all(&workdir).ok();
     cmd.env("ATM_HOME", temp_dir.path())
+        .env("ATM_DAEMON_AUTOSTART", "0")
+        .env_remove("ATM_TEAM")
         .env_remove("ATM_IDENTITY")
+        .env_remove("ATM_CONFIG")
+        .env_remove("CLAUDE_SESSION_ID")
         .current_dir(&workdir);
 }
 
@@ -75,6 +80,20 @@ fn member_names(team_dir: &Path) -> Vec<String> {
         .iter()
         .map(|m| m["name"].as_str().unwrap().to_string())
         .collect()
+}
+
+fn write_recent_last_seen(temp_dir: &TempDir, team: &str, agent: &str) {
+    let state_dir = temp_dir.path().join(".config/atm");
+    fs::create_dir_all(&state_dir).unwrap();
+    let state_path = state_dir.join("state.json");
+    let state = serde_json::json!({
+        "last_seen": {
+            team: {
+                agent: Utc::now().to_rfc3339()
+            }
+        }
+    });
+    fs::write(state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
 }
 
 /// Read the team config and find a member by name. Returns the member JSON.
@@ -145,10 +164,12 @@ fn test_send_empty_message_rejected() {
             "subscriptions": []
         }));
     fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+    write_recent_last_seen(&temp_dir, "cleanup-ext-team", "arch-ctm");
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "send-test")
+        .env("ATM_IDENTITY", "team-lead")
         .arg("send")
         .arg("target")
         .arg("   ") // whitespace-only message
@@ -359,39 +380,26 @@ fn test_add_member_active_name_collision_rejected() {
     let temp_dir = TempDir::new().unwrap();
     let team_dir = setup_test_team(&temp_dir, "ext-team");
 
-    // First add — active
-    {
-        let mut cmd = cargo::cargo_bin_cmd!("atm");
-        set_home_env(&mut cmd, &temp_dir);
-        cmd.arg("teams")
-            .arg("add-member")
-            .arg("ext-team")
-            .arg("my-agent")
-            .arg("--session-id")
-            .arg("session-a")
-            .assert()
-            .success();
-    }
-
-    // The first add creates member with agentId "my-agent@ext-team" and is_active=true.
-    // Second add with a different effective agent_id (same name but active) → collision.
-    // We simulate this by modifying the config to use a different agentId but keep is_active=true,
-    // then attempt add-member again which creates a new agentId.
-    // However, since the same team/name combo produces the same agent_id format,
-    // the idempotent path fires. To test collision, we manually alter the stored agentId.
+    // Seed config with an already-active member that has the same name but a
+    // different agentId than add-member would compute (my-agent@ext-team).
+    // This avoids side-effects from a previous add-member invocation.
     let config_path = team_dir.join("config.json");
     let mut config: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
-    // Change agent_id to something different to force collision detection
-    for m in config["members"].as_array_mut().unwrap() {
-        if m["name"].as_str() == Some("my-agent") {
-            m["agentId"] = serde_json::json!("my-agent-old@ext-team");
-            m["isActive"] = serde_json::json!(true);
-        }
-    }
+    let members = config["members"].as_array_mut().unwrap();
+    members.push(serde_json::json!({
+        "agentId": "my-agent-old@ext-team",
+        "name": "my-agent",
+        "agentType": "codex",
+        "model": "unknown",
+        "joinedAt": 1739284800000i64,
+        "cwd": temp_dir.path().to_str().unwrap(),
+        "subscriptions": [],
+        "isActive": true
+    }));
     fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
 
-    // Now add-member again — same name, active, different agentId → collision
+    // Same name + active + different agentId => collision must be rejected.
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
     cmd.arg("teams")
@@ -667,6 +675,7 @@ fn test_cleanup_skips_external_agent_without_session_confirmation() {
             "isActive": true
         }));
     fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+    write_recent_last_seen(&temp_dir, "cleanup-ext-team", "arch-ctm");
 
     // Ensure no ATM_HOME socket or daemon process is reachable.
     // The daemon socket path depends on ATM_HOME, which is set to temp_dir.

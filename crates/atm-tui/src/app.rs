@@ -4,6 +4,7 @@
 //! from it; the refresh loop writes to it. No I/O is performed in this module.
 
 use agent_team_mail_core::daemon_client::AgentSummary;
+use agent_team_mail_core::schema::InboxMessage;
 use std::path::PathBuf;
 
 use crate::config::TuiConfig;
@@ -41,6 +42,34 @@ pub enum PendingControl {
     Stdin(String),
     /// Send an interrupt signal to the selected agent.
     Interrupt,
+    /// Send an elicitation/approval decision via correlated proxy routing.
+    ElicitationResponse {
+        elicitation_id: String,
+        decision: String,
+        text: Option<String>,
+    },
+    /// Mark an inbox message as read for the selected agent.
+    MarkInboxRead {
+        agent: String,
+        message_id: Option<String>,
+        from: String,
+        timestamp: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalPromptKind {
+    Exec,
+    Patch,
+    UserInput,
+    Review,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApprovalPrompt {
+    pub id: String,
+    pub kind: ApprovalPromptKind,
+    pub prompt: String,
 }
 
 /// Top-level application state.
@@ -54,6 +83,12 @@ pub struct App {
     pub members: Vec<MemberRow>,
     /// Recent inbox message previews for the selected agent.
     pub inbox_preview: Vec<String>,
+    /// Recent inbox messages for the selected agent (newest first).
+    pub inbox_messages: Vec<InboxMessage>,
+    /// Index into [`inbox_messages`](Self::inbox_messages).
+    pub selected_message_index: usize,
+    /// Whether the inbox detail view is open for the selected message.
+    pub inbox_detail_open: bool,
     /// Index into [`members`](Self::members) of the currently selected agent.
     pub selected_index: usize,
     /// Raw agent list returned by the daemon `list-agents` command.
@@ -76,10 +111,7 @@ pub struct App {
     ///
     /// Reserved for future use — the D.2 implementation does not yet differentiate
     /// between panel focus and explicit input activation within the Agent Terminal.
-    #[expect(
-        dead_code,
-        reason = "Reserved for D.3 input-activation UX; not yet wired to render"
-    )]
+    #[allow(dead_code)]
     pub control_input_active: bool,
     /// Message shown in the status bar (replaced on the next control result).
     pub status_message: Option<String>,
@@ -156,6 +188,10 @@ pub struct App {
     pub watch_dropped: u64,
     /// Latest unknown-event counter value from stream telemetry.
     pub watch_unknown: u64,
+    /// Active approval/elicitation prompt detected from stream events.
+    pub approval_prompt: Option<ApprovalPrompt>,
+    /// Optional user-entered text for approval/elicitation response.
+    pub approval_input: String,
 }
 
 impl App {
@@ -168,6 +204,9 @@ impl App {
             team,
             members: Vec::new(),
             inbox_preview: Vec::new(),
+            inbox_messages: Vec::new(),
+            selected_message_index: 0,
+            inbox_detail_open: false,
             selected_index: 0,
             agent_list: Vec::new(),
             stream_lines: Vec::new(),
@@ -199,6 +238,8 @@ impl App {
             watch_turn_failed: 0,
             watch_dropped: 0,
             watch_unknown: 0,
+            approval_prompt: None,
+            approval_input: String::new(),
             log_viewer_visible: false,
             log_events: Vec::new(),
             log_scroll_offset: 0,
@@ -214,6 +255,11 @@ impl App {
         self.members
             .get(self.selected_index)
             .map(|r| r.agent.as_str())
+    }
+
+    /// Return the currently selected inbox message, if any.
+    pub fn selected_message(&self) -> Option<&InboxMessage> {
+        self.inbox_messages.get(self.selected_message_index)
     }
 
     /// Move selection up one row (wraps).
@@ -234,6 +280,26 @@ impl App {
             return;
         }
         self.selected_index = (self.selected_index + 1) % self.members.len();
+    }
+
+    /// Move selected inbox message down one row (wraps).
+    pub fn select_next_message(&mut self) {
+        if self.inbox_messages.is_empty() {
+            return;
+        }
+        self.selected_message_index = (self.selected_message_index + 1) % self.inbox_messages.len();
+    }
+
+    /// Move selected inbox message up one row (wraps).
+    pub fn select_previous_message(&mut self) {
+        if self.inbox_messages.is_empty() {
+            return;
+        }
+        if self.selected_message_index == 0 {
+            self.selected_message_index = self.inbox_messages.len() - 1;
+        } else {
+            self.selected_message_index -= 1;
+        }
     }
 
     /// Cycle focus: Dashboard → AgentTerminal → LogViewer → Dashboard.
@@ -296,6 +362,7 @@ impl App {
             .pointer("/params/type")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
+        self.maybe_track_approval_prompt(event, kind);
         if let Some(transport) = first_string(event, &["/params/transport"]) {
             self.watch_transport = Some(transport);
         }
@@ -459,6 +526,76 @@ impl App {
                 .and_then(|s| s.thread_id.as_deref())
         })
     }
+
+    fn maybe_track_approval_prompt(&mut self, event: &serde_json::Value, kind: &str) {
+        let id = first_string(
+            event,
+            &[
+                "/params/request_id",
+                "/params/requestId",
+                "/params/item_id",
+                "/params/itemId",
+                "/params/id",
+            ],
+        );
+        let text = first_string(
+            event,
+            &[
+                "/params/prompt",
+                "/params/message",
+                "/params/text",
+                "/params/output",
+                "/params/delta",
+            ],
+        )
+        .unwrap_or_default();
+        match kind {
+            "exec_approval_request" | "approval_request" | "approval_prompt" => {
+                if let Some(id) = id {
+                    self.approval_prompt = Some(ApprovalPrompt {
+                        id,
+                        kind: ApprovalPromptKind::Exec,
+                        prompt: text,
+                    });
+                }
+            }
+            "apply_patch_approval_request" => {
+                if let Some(id) = id {
+                    self.approval_prompt = Some(ApprovalPrompt {
+                        id,
+                        kind: ApprovalPromptKind::Patch,
+                        prompt: text,
+                    });
+                }
+            }
+            "request_user_input" | "elicitation_request" => {
+                if let Some(id) = id {
+                    self.approval_prompt = Some(ApprovalPrompt {
+                        id,
+                        kind: ApprovalPromptKind::UserInput,
+                        prompt: text,
+                    });
+                }
+            }
+            "entered_review_mode" | "item/enteredReviewMode" => {
+                if let Some(id) = id {
+                    self.approval_prompt = Some(ApprovalPrompt {
+                        id,
+                        kind: ApprovalPromptKind::Review,
+                        prompt: text,
+                    });
+                }
+            }
+            "approval_rejected"
+            | "approval_approved"
+            | "exited_review_mode"
+            | "item/exitedReviewMode" => {
+                self.approval_prompt = None;
+                self.approval_input.clear();
+            }
+            _ => {}
+        }
+    }
 }
 
 fn first_string(value: &serde_json::Value, paths: &[&str]) -> Option<String> {
@@ -473,7 +610,9 @@ fn first_string(value: &serde_json::Value, paths: &[&str]) -> Option<String> {
 }
 
 fn first_f64(value: &serde_json::Value, paths: &[&str]) -> Option<f64> {
-    paths.iter().find_map(|path| value.pointer(path).and_then(|v| v.as_f64()))
+    paths
+        .iter()
+        .find_map(|path| value.pointer(path).and_then(|v| v.as_f64()))
 }
 
 #[cfg(test)]
@@ -1075,5 +1214,43 @@ mod tests {
             FocusPanel::Dashboard,
             "must wrap back to Dashboard"
         );
+    }
+
+    #[test]
+    fn test_apply_watch_frame_tracks_exec_approval_prompt() {
+        let mut app = new_app("atm-dev");
+        let frame = serde_json::json!({
+            "event": {
+                "params": {
+                    "type": "exec_approval_request",
+                    "request_id": "req-42",
+                    "message": "allow command?"
+                }
+            }
+        });
+        app.apply_watch_frame(&frame);
+        let prompt = app.approval_prompt.expect("prompt should be captured");
+        assert_eq!(prompt.id, "req-42");
+        assert_eq!(prompt.kind, ApprovalPromptKind::Exec);
+        assert_eq!(prompt.prompt, "allow command?");
+    }
+
+    #[test]
+    fn test_apply_watch_frame_clears_prompt_on_resolution() {
+        let mut app = new_app("atm-dev");
+        app.approval_prompt = Some(ApprovalPrompt {
+            id: "req-9".to_string(),
+            kind: ApprovalPromptKind::Review,
+            prompt: "review".to_string(),
+        });
+        app.approval_input = "notes".to_string();
+        let frame = serde_json::json!({
+            "event": {
+                "params": { "type": "approval_approved" }
+            }
+        });
+        app.apply_watch_frame(&frame);
+        assert!(app.approval_prompt.is_none());
+        assert!(app.approval_input.is_empty());
     }
 }

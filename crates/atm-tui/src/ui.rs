@@ -27,8 +27,8 @@ use ratatui::{
 };
 
 use crate::agent_terminal::expand_keys;
-use crate::app::{App, FocusPanel};
-use crate::codex_watch::render_stream_line;
+use crate::app::{App, ApprovalPromptKind, FocusPanel};
+use crate::codex_watch::render_stream_lines_with_width;
 
 /// Render the full TUI frame from current [`App`] state.
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -46,6 +46,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     draw_header(frame, outer[0], app);
     draw_body(frame, outer[1], app);
+    draw_approval_modal(frame, outer[1], app);
     draw_status_bar(frame, outer[2], app);
 }
 
@@ -167,24 +168,57 @@ fn draw_dashboard(frame: &mut Frame, area: Rect, app: &App) {
         .border_type(BorderType::Rounded)
         .border_style(border_style);
 
-    if app.inbox_preview.is_empty() {
+    if app.inbox_messages.is_empty() {
         frame.render_widget(
             Paragraph::new("No messages")
                 .block(inbox_block)
                 .style(Style::default().fg(Color::DarkGray)),
             left_rows[1],
         );
+    } else if app.inbox_detail_open {
+        if let Some(msg) = app.selected_message() {
+            let status = if msg.read { "read" } else { "unread" };
+            let detail = vec![
+                Line::from(Span::styled(
+                    format!("From: {}  [{status}]", msg.from),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    format!("At: {}", msg.timestamp),
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(Span::raw("")),
+                Line::from(Span::raw(msg.text.clone())),
+            ];
+            frame.render_widget(
+                Paragraph::new(detail)
+                    .block(inbox_block)
+                    .wrap(Wrap { trim: false }),
+                left_rows[1],
+            );
+        }
     } else {
-        let lines: Vec<Line> = app
-            .inbox_preview
+        let items: Vec<ListItem> = app
+            .inbox_messages
             .iter()
-            .map(|s| Line::from(Span::raw(s.clone())))
+            .map(|m| {
+                let marker = if m.read { " " } else { "●" };
+                let summary = m.summary.as_deref().unwrap_or(m.text.as_str());
+                ListItem::new(Line::from(Span::raw(format!(
+                    "{marker} {}: {}",
+                    m.from, summary
+                ))))
+            })
             .collect();
-        frame.render_widget(
-            Paragraph::new(lines)
-                .block(inbox_block)
-                .wrap(Wrap { trim: false }),
+        let mut msg_state = ListState::default();
+        msg_state.select(Some(
+            app.selected_message_index
+                .min(items.len().saturating_sub(1)),
+        ));
+        frame.render_stateful_widget(
+            List::new(items).block(inbox_block),
             left_rows[1],
+            &mut msg_state,
         );
     }
 }
@@ -364,11 +398,12 @@ fn draw_stream_pane(frame: &mut Frame, area: Rect, app: &App, border_style: Styl
     // When follow mode is off, the offset is the user's chosen scroll position.
     let bottom = app.stream_scroll_offset.min(app.stream_lines.len());
     let start = bottom.saturating_sub(inner_height.max(1));
+    let render_width = sections[2].width.saturating_sub(1) as usize;
     let mut visible: Vec<Line> = app.stream_lines[start..bottom]
         .iter()
-        .map(|line| {
+        .flat_map(|line| {
             let expanded = expand_keys(line);
-            render_stream_line(&expanded)
+            render_stream_lines_with_width(&expanded, render_width)
         })
         .collect();
 
@@ -559,7 +594,17 @@ fn draw_log_viewer(frame: &mut Frame, area: Rect, app: &App) {
 // ── Status bar ────────────────────────────────────────────────────────────────
 
 fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
-    let text = if app.confirm_interrupt_pending {
+    let text = if app.approval_prompt.is_some() {
+        Line::from(vec![
+            Span::styled(
+                " Approval pending ",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("[Enter/Y approve, N reject, Esc close]"),
+        ])
+    } else if app.confirm_interrupt_pending {
         // Interrupt confirmation dialog takes highest priority in the status bar.
         Line::from(vec![
             Span::styled(
@@ -657,6 +702,56 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(prompt) = app.approval_prompt.as_ref() else {
+        return;
+    };
+    let width = area.width.min(72);
+    let height = 7u16.min(area.height.saturating_sub(2)).max(3);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let modal = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    let title = match prompt.kind {
+        ApprovalPromptKind::Exec => " Exec Approval ",
+        ApprovalPromptKind::Patch => " Patch Approval ",
+        ApprovalPromptKind::UserInput => " Input Request ",
+        ApprovalPromptKind::Review => " Review Decision ",
+    };
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Magenta));
+    let input_hint = if app.approval_input.is_empty() {
+        "<optional message>".to_string()
+    } else {
+        app.approval_input.clone()
+    };
+    let content = vec![
+        Line::from(vec![
+            Span::styled("id: ", Style::default().fg(Color::Blue)),
+            Span::raw(prompt.id.as_str()),
+        ]),
+        Line::from(prompt.prompt.as_str()),
+        Line::from(vec![
+            Span::styled("reply: ", Style::default().fg(Color::Blue)),
+            Span::raw(input_hint),
+        ]),
+        Line::from("Enter/Y approve | N reject | Esc close"),
+    ];
+    frame.render_widget(
+        Paragraph::new(content)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        modal,
+    );
+}
+
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
 /// Truncate a string to `max_chars` characters, appending `…` when truncated.
@@ -667,5 +762,112 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
     } else {
         let end = max_chars.saturating_sub(1);
         format!("{}…", chars[..end].iter().collect::<String>())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{App, MemberRow};
+    use crate::config::TuiConfig;
+    use agent_team_mail_core::schema::InboxMessage;
+    use ratatui::{Terminal, backend::TestBackend};
+    use std::collections::HashMap;
+
+    fn render_text(app: &App) -> String {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|f| draw(f, app)).expect("draw");
+        let buf = terminal.backend().buffer().clone();
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn test_header_includes_non_empty_version_token() {
+        let app = App::new("atm-dev".to_string(), TuiConfig::default());
+        let rendered = render_text(&app);
+        assert!(rendered.contains("ATM TUI"));
+        assert!(rendered.contains(&format!("v{}", env!("CARGO_PKG_VERSION"))));
+    }
+
+    #[test]
+    fn test_panel_state_parity_uses_shared_snapshot() {
+        let mut app = App::new("atm-dev".to_string(), TuiConfig::default());
+        app.members = vec![MemberRow {
+            agent: "arch-ctm".to_string(),
+            state: "busy".to_string(),
+            inbox_count: 1,
+        }];
+        app.selected_index = 0;
+        app.streaming_agent = Some("arch-ctm".to_string());
+        app.daemon_turn_state = Some(agent_team_mail_core::daemon_stream::AgentStreamState {
+            turn_id: Some("turn-1".to_string()),
+            thread_id: Some("thr-1".to_string()),
+            transport: Some("cli".to_string()),
+            turn_status: agent_team_mail_core::daemon_stream::StreamTurnStatus::Busy,
+        });
+        let rendered = render_text(&app);
+        assert!(rendered.contains("arch-ctm"));
+        assert!(rendered.contains("busy"));
+        assert!(rendered.contains("[LIVE]"));
+    }
+
+    #[test]
+    fn test_inbox_list_detail_and_read_state_render_flow() {
+        let mut app = App::new("atm-dev".to_string(), TuiConfig::default());
+        app.members = vec![MemberRow {
+            agent: "arch-ctm".to_string(),
+            state: "idle".to_string(),
+            inbox_count: 2,
+        }];
+        app.selected_index = 0;
+        app.inbox_messages = vec![
+            InboxMessage {
+                from: "team-lead".to_string(),
+                text: "Please investigate the CI failure.".to_string(),
+                timestamp: "2026-03-02T00:00:00Z".to_string(),
+                read: false,
+                summary: Some("CI failure investigation".to_string()),
+                message_id: Some("msg-1".to_string()),
+                unknown_fields: HashMap::new(),
+            },
+            InboxMessage {
+                from: "quality-mgr".to_string(),
+                text: "Smoke tests passed.".to_string(),
+                timestamp: "2026-03-02T00:01:00Z".to_string(),
+                read: true,
+                summary: Some("Smoke tests passed".to_string()),
+                message_id: Some("msg-2".to_string()),
+                unknown_fields: HashMap::new(),
+            },
+        ];
+
+        // Step 1: list view shows unread marker.
+        let list_rendered = render_text(&app);
+        assert!(list_rendered.contains("team-lead"));
+        assert!(list_rendered.contains("quality-mgr"));
+
+        // Step 2: detail view exposes unread status and full text.
+        app.inbox_detail_open = true;
+        app.selected_message_index = 0;
+        let detail_rendered = render_text(&app);
+        assert!(detail_rendered.contains("From: team-lead  [unread]"));
+        assert!(detail_rendered.contains("At: 2026-03-02T00:00:00Z"));
+
+        // Step 3: simulate mark-read and verify rendered state updates.
+        app.inbox_messages[0].read = true;
+        let detail_after_read = render_text(&app);
+        assert!(detail_after_read.contains("From: team-lead  [read]"));
+
+        app.inbox_detail_open = false;
+        let list_after_read = render_text(&app);
+        assert!(list_after_read.contains("team-lead"));
     }
 }

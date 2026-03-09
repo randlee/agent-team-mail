@@ -97,7 +97,7 @@ TeamCreate:
 ```json
 {
   "team_name": "backend-ci-team",
-  "team_file_path": "/Users/randlee/.claude/teams/backend-ci-team/config.json",
+  "team_file_path": "~/.claude/teams/backend-ci-team/config.json",
   "lead_agent_id": "team-lead@backend-ci-team"
 }
 ```
@@ -293,7 +293,7 @@ Adds to team config at `~/.claude/teams/{team_name}/config.json`:
   "planModeRequired": false,
   "joinedAt": 1770772206905,
   "tmuxPaneId": "%14",
-  "cwd": "/Users/randlee/work",
+  "cwd": "/home/user/work",
   "subscriptions": [],
   "backendType": "tmux",
   "isActive": true
@@ -310,14 +310,86 @@ Adds to team config at `~/.claude/teams/{team_name}/config.json`:
 
 ## Agent Lifecycle & Message Delivery
 
+### PID and Session Registration Semantics
+
+Daemon liveness/state uses backend-aware PID registration. The canonical status
+surface (`atm members`, `atm status`, `atm doctor`) is daemon-derived.
+
+The PID shown in `atm doctor` output and stored in the daemon session registry is the
+**agent session process PID** — the long-lived process running the agent (for example,
+the `claude` or `codex` process itself). It is NOT the PID of the `atm` subprocess
+that ran the registration command. For Claude Code agents this is obtained via
+`os.getppid()` from hook scripts (the hook's parent is the stable agent process). For
+external agents (Codex, Gemini) it is the process's own PID (`os.getpid()`) written
+at self-registration time.
+
+**Registration sources by backend type**:
+
+| Backend | Registration mechanism | PID source |
+|---------|----------------------|------------|
+| Claude Code | `session_start` hook event | `os.getppid()` from hook script |
+| Codex | Self-registration on `atm send` or explicit `atm register` | `os.getpid()` of codex process |
+| Gemini | Self-registration on `atm send` or explicit `atm register` | `os.getpid()` of gemini process |
+
+Codex and Gemini do not have a Claude Code hook system. They write their PID and
+session ID directly to their roster entry in `config.json` when sending messages,
+or via the explicit `atm register <team> <name>` command.
+
+**Validation chain**:
+1. **Register**: a candidate PID/session is provided by hook or sender self-registration.
+2. **Registration-time backend validation**: daemon inspects process name for that PID and compares to expected backend tokens:
+
+   | Backend | Expected `comm` / process name |
+   |---------|-------------------------------|
+   | Claude Code | `claude` |
+   | Codex | `codex` (native binary — NOT `node`) |
+   | Gemini | `node` AND full args contain `gemini` |
+
+3. **Liveness check**: daemon validates process existence (`kill -0` / platform equivalent),
+   then re-verifies process name against backend token (cross-validate). Detects PID reuse
+   by unrelated processes that happened to acquire the same PID after the agent exited.
+4. **Cross-validation at read time**: daemon re-checks process-name/backend alignment during
+   status queries to detect PID reuse by unrelated processes.
+
+**Mismatch behavior** (`WARN` finding in `atm doctor`):
+- If PID is alive but process name does not match declared backend, daemon rejects/marks
+  registration as invalid, emits a WARN log, and surfaces a WARN diagnostic in `atm doctor`.
+- WARN details include: agent name, backend type, expected process name token(s), actual
+  process name, and PID.
+
+**Cross-validate WARN finding schema** (in `atm doctor --json` `findings[]` array):
+
+```json
+{
+  "severity": "warn",
+  "check": "pid_cross_validate",
+  "code": "PID_PROCESS_MISMATCH",
+  "message": "agent '<name>' PID <pid> is alive but process name '<actual>' does not match expected '<expected>' for backend '<backend>'"
+}
+```
+
+**`ACTIVE_WITHOUT_SESSION` finding**: When an activity hint is present for a member but no
+daemon state record exists (for example after an `atm send` self-registration was
+interrupted before creating the daemon record), the daemon creates the missing daemon state
+record alongside PID registration and emits an `ACTIVE_WITHOUT_SESSION` WARN finding in
+`atm doctor` to surface the anomaly for operator awareness.
+
+Notes:
+- `isActive` remains an activity hint (`busy` vs `idle`) and is not treated as liveness truth.
+- Team-scoped daemon state is authoritative; config fields are advisory inputs for reconciliation/registration.
+
 ### Shutdown Behavior
 
-When an agent receives a `shutdown_request` and approves it:
-- The agent process terminates (tmux pane destroyed)
-- The agent **may or may not** be removed from `config.json` members array (behavior is inconsistent)
-- If removed: the member entry is deleted entirely
-- If retained: `isActive` is set to `false`, `tmuxPaneId` becomes stale (points to dead pane)
-- **Inbox files persist** on disk — both the agent's own inbox (`{name}.json`) and messages it sent to others
+Daemon-managed shutdown uses a shutdown-first flow:
+- Daemon sends a `shutdown_request` message to the target mailbox.
+- Daemon waits for graceful shutdown up to configured timeout while monitoring PID/session liveness.
+- If the agent does not exit by timeout, daemon force-terminates the process.
+
+After termination is confirmed (already-dead or timeout+kill), daemon teardown cleanup is coupled:
+- Remove member entry from `config.json`.
+- Delete the agent inbox file (`inboxes/{name}.json`).
+
+Mailbox deletion is not a shutdown signal and must not be used to terminate an active agent.
 
 ### Respawn Behavior
 
@@ -327,6 +399,7 @@ Spawning a new agent with the same `name` into the same team:
 - The member entry in `config.json` is updated (not duplicated)
 - `joinedAt` and `prompt` are updated to reflect the new spawn
 - The agent starts with **fresh context** — no memory of previous sessions
+- When daemon teardown has completed, mailbox history for the terminated instance is removed
 - The **spawn prompt** is the primary driver of initial behavior
 
 ### Routing Architecture
@@ -351,29 +424,46 @@ The `agentId` is an internal bookkeeping field. It does not appear in inbox file
 
 ### Queued Message Processing on Respawn
 
-When an agent is respawned (same name), it inherits the full inbox history:
-- All prior messages (from all previous lifetimes) are visible in the agent's conversation context
-- Messages are marked `read: true` by the system
-- **The agent may or may not act on queued messages** — behavior depends on:
-  - **Inbox noise**: With few messages, plain instructions are acted on. With many old messages (prior prompts, shutdowns, old requests), plain instructions blend into history and are ignored.
-  - **Spawn prompt**: The spawn prompt takes priority. If it gives a specific task, queued messages may be ignored even if noticed.
-  - **Call-to-action tags**: Prefixing queued messages with a tag like `[PENDING ACTION]` or `[OFFLINE MESSAGE - Acknowledge and respond]` reliably causes agents to act on them, even in noisy inboxes.
+When an agent is respawned (same name), behavior depends on teardown state:
+- If prior instance teardown completed, the new agent starts with an empty mailbox.
+- If prior teardown has not completed yet, stale messages may remain until daemon reconciliation finishes.
 
-### Reliable Offline Queuing Pattern
+### Offline Queuing Pattern (opt-in)
 
-To ensure queued messages are acted on after respawn, use a call-to-action prefix:
+By default, `atm send` delivers messages without any prefix — no call-to-action tag is added.
 
-```
-[PENDING ACTION - execute when online] <instruction here>
+To add a call-to-action prefix for messages to offline agents, use `--offline-action`:
+
+```bash
+atm send <agent> "message" --offline-action "[PENDING ACTION - execute when online]"
 ```
 
-or:
+or configure a default in `.atm.toml`:
 
-```
-[OFFLINE MESSAGE - Acknowledge and respond] <instruction here>
+```toml
+[send]
+offline_action = "[PENDING ACTION - execute when online]"
 ```
 
-Without a tag, success depends on inbox history depth. With a tag, the pattern has been 100% reliable in testing.
+With a tag, the pattern has been 100% reliable in testing. Without one, the message is still delivered; the tag is purely a hint to the recipient.
+
+### `atm doctor --json` Output Contract
+
+`atm doctor --json` returns a stable top-level report object with:
+- `summary`
+- `findings`
+- `recommendations`
+- `log_window`
+- `env_overrides`
+
+`env_overrides` fields (present only when the env var is set to a non-empty value):
+- `atm_home`: `{ "source": "env", "value": "<ATM_HOME>" }`
+- `atm_team`: `{ "source": "env", "value": "<ATM_TEAM>" }`
+- `atm_identity`: `{ "source": "env", "value": "<ATM_IDENTITY>" }`
+
+Change-control note:
+- Changed in Phase Y: `env_overrides` was added as a first-class top-level JSON
+  field for diagnostics triage.
 
 ---
 
@@ -870,7 +960,7 @@ Approve or reject agent's implementation plan.
 | `cwd` | string | Yes | Current working directory of agent |
 | `subscriptions` | array | No | Notification subscriptions (usually empty) |
 | `backendType` | string | No | Backend type (e.g., "tmux", empty if not running) |
-| `isActive` | boolean | No | Whether agent is currently running |
+| `isActive` | boolean | No | Activity/busy hint (recent work signal), not a liveness indicator |
 
 **Complete Example** (from test-team):
 
@@ -889,7 +979,7 @@ Approve or reject agent's implementation plan.
       "model": "claude-haiku-4-5-20251001",
       "joinedAt": 1770765919076,
       "tmuxPaneId": "",
-      "cwd": "/Users/randlee/Documents/github/agent-teams-test/test-workspace",
+      "cwd": "/tmp/atm-test/workspace",
       "subscriptions": []
     },
     {
@@ -902,7 +992,7 @@ Approve or reject agent's implementation plan.
       "planModeRequired": false,
       "joinedAt": 1770772206905,
       "tmuxPaneId": "%14",
-      "cwd": "/Users/randlee/Documents/github/agent-teams-test/test-workspace",
+      "cwd": "/tmp/atm-test/workspace",
       "subscriptions": [],
       "backendType": "tmux",
       "isActive": false
@@ -917,7 +1007,7 @@ Approve or reject agent's implementation plan.
       "planModeRequired": false,
       "joinedAt": 1770772207583,
       "tmuxPaneId": "%15",
-      "cwd": "/Users/randlee/Documents/github/agent-teams-test/test-workspace",
+      "cwd": "/tmp/atm-test/workspace",
       "subscriptions": [],
       "backendType": "tmux",
       "isActive": true
@@ -932,7 +1022,7 @@ Approve or reject agent's implementation plan.
       "planModeRequired": false,
       "joinedAt": 1770772208362,
       "tmuxPaneId": "%16",
-      "cwd": "/Users/randlee/Documents/github/agent-teams-test/test-workspace",
+      "cwd": "/tmp/atm-test/workspace",
       "subscriptions": [],
       "backendType": "tmux",
       "isActive": true
@@ -962,7 +1052,7 @@ Approve or reject agent's implementation plan.
 - **Team Lead Member**: First member has empty/null `prompt`, `color`, `tmuxPaneId`, and no `backendType`
 - **Spawned Agents**: Have `prompt`, `color`, `tmuxPaneId`, and `backendType` populated
 - **`model`**: Different agents can use different models (e.g., team-lead uses haiku, agents use opus)
-- **`isActive`**: true if agent is currently running; false if idle/disconnected
+- **`isActive`**: activity signal only (true=busy/sending, false=idle); NOT a liveness indicator — use daemon session state for liveness
 - **`prompt`**: Where specialized instructions are stored (can be long multi-line text)
 - **`color`**: UI color for team dashboard (optional but recommended)
 
@@ -1019,13 +1109,15 @@ Approve or reject agent's implementation plan.
 
 ### Claude Code Settings (`settings.json`)
 
-Claude Code uses a layered settings system. The `settings.json` file is the official mechanism for configuration across user, project, and local scopes, with managed policies and CLI overrides taking precedence. citeturn1view0
+Claude Code uses a layered settings system. The `settings.json` file is the official mechanism for configuration across user, project, and local scopes, with managed policies and CLI overrides taking precedence.
+
+Reference: https://docs.anthropic.com/en/docs/claude-code/hooks (redirects to https://code.claude.com/docs/en/hooks)
 
 **Settings file locations (by scope)**:
-- User: `~/.claude/settings.json` citeturn1view0
-- Project (shared): `.claude/settings.json` citeturn1view0
-- Local (personal, gitignored): `.claude/settings.local.json` citeturn1view0
-- Managed (enterprise policy): `managed-settings.json` in system locations (macOS `/Library/Application Support/ClaudeCode/`, Linux/WSL `/etc/claude-code/`, Windows `C:\Program Files\ClaudeCode\`) citeturn1view0
+- User: `~/.claude/settings.json` 
+- Project (shared): `.claude/settings.json` 
+- Local (personal, gitignored): `.claude/settings.local.json` 
+- Managed (enterprise policy): `managed-settings.json` in system locations (macOS `/Library/Application Support/ClaudeCode/`, Linux/WSL `/etc/claude-code/`, Windows `C:\Program Files\ClaudeCode\`) 
 
 **Settings precedence (highest → lowest)**:
 1. Managed (cannot be overridden)
@@ -1033,7 +1125,7 @@ Claude Code uses a layered settings system. The `settings.json` file is the offi
 3. Local (`.claude/settings.local.json`)
 4. Project (`.claude/settings.json`)
 5. User (`~/.claude/settings.json`)
-citeturn1view0
+
 
 **Schema reference**:
 ```json
@@ -1041,7 +1133,7 @@ Claude Code uses a layered settings system. The `settings.json` file is the offi
   "$schema": "https://json.schemastore.org/claude-code-settings.json"
 }
 ```
-citeturn1view0
+
 
 **Example settings.json**:
 ```json
@@ -1056,18 +1148,18 @@ Claude Code uses a layered settings system. The `settings.json` file is the offi
   }
 }
 ```
-citeturn1view0
+
 
 **Core settings fields (non-exhaustive)**:
 - `permissions`: rule lists (e.g., `allow`, `deny`, `ask`) controlling tool access and file reads.
 - `env`: environment variables applied to sessions.
 - Additional keys exist (hooks, model, status line, plugin settings, etc.) and are defined by the official JSON schema.
-citeturn1view0
+
 
 **Implementation guidance**:
 - Consumers must accept and preserve unknown settings fields.
 - The official JSON schema is the source of truth for the full settings surface.
-citeturn1view0
+
 
 ## Error Handling
 
@@ -1193,7 +1285,7 @@ SendMessage:
   recipient: "sprint-1-dev"
   content: "Sprint complete, shutting you down"
 # Wait for shutdown_response
-# Team, tasks, inboxes all preserved — spawn new agents as needed
+# Team and tasks are preserved; the terminated agent's mailbox is cleaned up by daemon teardown
 
 # ✅ Shut down ENTIRE team (all data removed)
 # First: shutdown all remaining agents
@@ -1280,7 +1372,7 @@ Recommended convention for easy discovery:
 
 ```bash
 # When in repo directory
-cd /Users/randlee/backend
+cd ~/backend
 
 # Team name matches repo name
 TeamCreate: team_name="backend"

@@ -262,9 +262,9 @@ fn stdout_is_tty() -> bool {
 ///
 /// Output format:
 /// ```text
-/// 2026-02-23T10:30:00Z  INFO  [atm/team-lead] send_message (ok)
-/// 2026-02-23T10:30:01Z  WARN  [atm-daemon] queue_full: dropped 5 events
-/// 2026-02-23T10:30:02Z ERROR  [atm/arch-ctm] dispatch_error: connection refused
+/// 2026-02-23T10:30:00Z  INFO  [atm/team-lead pid=12345] send_message (ok)
+/// 2026-02-23T10:30:01Z  WARN  [atm-daemon pid=12345] queue_full: dropped 5 events
+/// 2026-02-23T10:30:02Z ERROR  [atm/arch-ctm pid=12345] dispatch_error: connection refused
 /// ```
 ///
 /// When stdout is a TTY, level names are colorized:
@@ -306,10 +306,94 @@ pub fn format_event_human(event: &LogEventV1) -> String {
         String::new()
     };
 
+    let action_text = if event.action == "send" {
+        format_send_action(event)
+    } else {
+        let ppid_suffix = event
+            .fields
+            .get("ppid")
+            .and_then(|v| v.as_u64())
+            .map(|ppid| format!("/ppid={ppid}"))
+            .unwrap_or_default();
+        let target_suffix = if event.target.is_empty() {
+            String::new()
+        } else {
+            format!(" -> {}", event.target)
+        };
+        let action_text = format!("{}{}{}", event.action, msg_suffix, target_suffix);
+        return format!(
+            "{}  {}  [{}{} pid={}{}] {}",
+            event.ts,
+            colored_level,
+            event.source_binary,
+            agent_suffix,
+            event.pid,
+            ppid_suffix,
+            action_text,
+        );
+    };
+
+    // For send events, avoid duplicate/competing PID semantics in the prefix.
+    // The send body already renders canonical sender/recipient PIDs.
     format!(
-        "{}  {}  [{}{}] {}{}",
-        event.ts, colored_level, event.source_binary, agent_suffix, event.action, msg_suffix,
+        "{}  {}  [{}{}] {}",
+        event.ts, colored_level, event.source_binary, agent_suffix, action_text
     )
+}
+
+fn format_send_action(event: &LogEventV1) -> String {
+    let sender_agent = field_string(event, "sender_agent")
+        .or_else(|| event.agent.clone())
+        .unwrap_or_else(|| "-".to_string());
+    let sender_team = field_string(event, "sender_team")
+        .or_else(|| event.team.clone())
+        .unwrap_or_else(|| "-".to_string());
+    let sender_pid = field_u64(event, "sender_pid")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "-".to_string());
+
+    let (fallback_recipient_agent, fallback_recipient_team) = event
+        .target
+        .split_once('@')
+        .map(|(a, t)| (Some(a.to_string()), Some(t.to_string())))
+        .unwrap_or((None, None));
+    let recipient_agent = field_string(event, "recipient_agent")
+        .or(fallback_recipient_agent)
+        .unwrap_or_else(|| "-".to_string());
+    let recipient_team = field_string(event, "recipient_team")
+        .or(fallback_recipient_team)
+        .unwrap_or_else(|| "-".to_string());
+    let recipient_pid = field_u64(event, "recipient_pid")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "-".to_string());
+
+    let mut line = format!(
+        "send {}@{} [{}] -> {}@{} [{}]",
+        sender_agent, sender_team, sender_pid, recipient_agent, recipient_team, recipient_pid
+    );
+
+    if let Some(preview) = field_string(event, "message_preview")
+        && !preview.is_empty()
+    {
+        line.push(' ');
+        line.push('"');
+        line.push_str(&preview);
+        line.push('"');
+    }
+
+    line
+}
+
+fn field_string(event: &LogEventV1, key: &str) -> Option<String> {
+    event
+        .fields
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+fn field_u64(event: &LogEventV1, key: &str) -> Option<u64> {
+    event.fields.get(key).and_then(|v| v.as_u64())
 }
 
 /// Parse a human-readable duration string into a [`Duration`].
@@ -349,7 +433,6 @@ mod tests {
     use super::*;
     use crate::logging_event::{LogEventV1, new_log_event};
     use chrono::{Duration as ChronoDuration, Utc};
-    use serial_test::serial;
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
 
@@ -552,6 +635,10 @@ mod tests {
         );
         assert!(formatted.contains("INFO"), "must contain level");
         assert!(formatted.contains("send_message"), "must contain action");
+        assert!(
+            formatted.contains("pid="),
+            "must include pid in human-rendered output"
+        );
     }
 
     #[test]
@@ -583,15 +670,107 @@ mod tests {
         let ev = new_log_event("atm-daemon", "daemon_start", "atm_daemon::main", "info");
         let formatted = format_event_human(&ev);
         assert!(
-            formatted.contains("[atm-daemon]"),
+            formatted.contains("[atm-daemon pid="),
             "no agent suffix when agent is None; got: {formatted}"
+        );
+    }
+
+    #[test]
+    fn test_format_human_includes_target_suffix() {
+        let ev = new_log_event("atm", "send_message", "atm::send", "info");
+        let formatted = format_event_human(&ev);
+        assert!(
+            formatted.contains("-> atm::send"),
+            "formatted event should include target suffix"
+        );
+    }
+
+    #[test]
+    fn test_format_human_includes_ppid_when_present() {
+        let mut ev = new_log_event("atm", "send_message", "atm::send", "info");
+        ev.fields
+            .insert("ppid".to_string(), serde_json::Value::Number(123u64.into()));
+        let formatted = format_event_human(&ev);
+        assert!(
+            formatted.contains("ppid=123"),
+            "formatted event should include ppid when available"
+        );
+    }
+
+    #[test]
+    fn test_format_human_send_uses_normalized_sender_recipient_layout() {
+        let mut ev = new_log_event("atm", "send", "atm::send", "info");
+        ev.fields.insert(
+            "sender_agent".to_string(),
+            serde_json::Value::String("team-lead".to_string()),
+        );
+        ev.fields.insert(
+            "sender_team".to_string(),
+            serde_json::Value::String("atm-dev".to_string()),
+        );
+        ev.fields.insert(
+            "sender_pid".to_string(),
+            serde_json::Value::Number(44201u64.into()),
+        );
+        ev.fields.insert(
+            "recipient_agent".to_string(),
+            serde_json::Value::String("arch-ctm".to_string()),
+        );
+        ev.fields.insert(
+            "recipient_team".to_string(),
+            serde_json::Value::String("atm-dev".to_string()),
+        );
+        ev.fields.insert(
+            "recipient_pid".to_string(),
+            serde_json::Value::Number(8009u64.into()),
+        );
+        ev.fields.insert(
+            "message_preview".to_string(),
+            serde_json::Value::String("test message...".to_string()),
+        );
+        let rendered = format_event_human(&ev);
+        assert!(rendered.contains(
+            "send team-lead@atm-dev [44201] -> arch-ctm@atm-dev [8009] \"test message...\""
+        ));
+    }
+
+    #[test]
+    fn test_format_human_send_uses_dash_for_missing_pids() {
+        let mut ev = new_log_event("atm", "send", "atm::send", "info");
+        ev.agent = Some("arch-ctm".to_string());
+        ev.fields
+            .insert("ppid".to_string(), serde_json::Value::Number(123u64.into()));
+        ev.fields.insert(
+            "sender_agent".to_string(),
+            serde_json::Value::String("team-lead".to_string()),
+        );
+        ev.fields.insert(
+            "sender_team".to_string(),
+            serde_json::Value::String("atm-dev".to_string()),
+        );
+        ev.fields.insert(
+            "recipient_agent".to_string(),
+            serde_json::Value::String("arch-ctm".to_string()),
+        );
+        ev.fields.insert(
+            "recipient_team".to_string(),
+            serde_json::Value::String("atm-dev".to_string()),
+        );
+        let rendered = format_event_human(&ev);
+        assert!(rendered.contains("send team-lead@atm-dev [-] -> arch-ctm@atm-dev [-]"));
+        assert!(
+            !rendered.contains("pid="),
+            "send lines should only show sender/recipient PID slots"
+        );
+        assert!(
+            !rendered.contains("ppid="),
+            "send lines should not include emitter ppid in prefix"
         );
     }
 
     // ── test_nonexistent_file_returns_empty ───────────────────────────────────
 
     #[test]
-    #[serial]
     fn test_nonexistent_file_returns_empty() {
         let tmp = TempDir::new().expect("temp dir");
         let path = tmp.path().join("no-such-file.jsonl");
@@ -610,6 +789,8 @@ mod tests {
     #[test]
     fn test_follow_mode() {
         use std::io::Write;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
         use std::sync::{Arc, Mutex};
 
         // Create an initial log file with 2 events.
@@ -630,23 +811,34 @@ mod tests {
         let collected: Arc<Mutex<Vec<LogEventV1>>> = Arc::new(Mutex::new(Vec::new()));
         let collected_clone = collected.clone();
         let log_path_clone = log_path.clone();
+        let stop_writer = Arc::new(AtomicBool::new(false));
+        let stop_writer_clone = Arc::clone(&stop_writer);
 
-        // Spawn a thread that appends 3 events after a short delay.
+        // Spawn a writer that keeps appending events until follow reports that
+        // it has consumed enough. This avoids CI timing races where the follow
+        // thread starts late and misses a short fixed burst.
         let writer_thread = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(600));
+            std::thread::sleep(Duration::from_millis(700));
             let mut file = std::fs::OpenOptions::new()
                 .append(true)
                 .open(&log_path_clone)
                 .expect("open for appending");
-            for i in 0..3u32 {
+            for i in 0..200u32 {
+                if stop_writer_clone.load(Ordering::Relaxed) {
+                    break;
+                }
                 let mut ev =
                     new_log_event("atm", &format!("follow_event_{i}"), "atm::test", "info");
                 ev.action = format!("follow_event_{i}");
                 writeln!(file, "{}", serde_json::to_string(&ev).unwrap()).unwrap();
                 file.flush().unwrap();
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(50));
             }
         });
+
+        // Use a channel so the test can detect a stuck follow thread and fail
+        // with a clear diagnostic message instead of hanging forever.
+        let (done_tx, done_rx) = mpsc::channel::<()>();
 
         // Run follow on a reader thread, stopping after 3 events.
         let filter = LogFilter::default();
@@ -658,13 +850,28 @@ mod tests {
                     let mut guard = collected_clone.lock().unwrap();
                     guard.push(event.clone());
                     // Stop after 3 new events.
-                    guard.len() < 3
+                    if guard.len() >= 3 {
+                        stop_writer.store(true, Ordering::Relaxed);
+                        false
+                    } else {
+                        true
+                    }
                 })
                 .expect("follow should succeed");
+            // Signal the main thread that follow completed.
+            let _ = done_tx.send(());
         });
 
-        writer_thread.join().expect("writer thread joined");
+        // Wait for the follow thread to finish with a generous timeout.
+        // 10 seconds is far more than needed (writer starts after 700ms and
+        // emits every 50ms) but still prevents an infinite hang on
+        // pathological CI runners.
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("follow thread did not finish within 10s — possible deadlock");
+
         follow_thread.join().expect("follow thread joined");
+        writer_thread.join().expect("writer thread joined");
 
         let guard = collected.lock().unwrap();
         assert_eq!(

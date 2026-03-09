@@ -6,7 +6,27 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/scripts/gate-agent-spawns.py"
+            "command": "bash -c 'if test -f \"$CLAUDE_PROJECT_DIR/.claude/scripts/gate-agent-spawns.py\"; then python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/gate-agent-spawns.py\"; else exit 0; fi'"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'test -f \"$CLAUDE_PROJECT_DIR/.claude/scripts/atm-identity-write.py\" && python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/atm-identity-write.py\" || true'"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'test -f \"$CLAUDE_PROJECT_DIR/.claude/scripts/atm-identity-cleanup.py\" && python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/atm-identity-cleanup.py\" || true'"
           }
         ]
       }
@@ -16,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/scripts/teammate-idle-relay.py"
+            "command": "bash -c 'test -f \"$CLAUDE_PROJECT_DIR/.claude/scripts/teammate-idle-relay.py\" && python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/teammate-idle-relay.py\" || true'"
           }
         ]
       }

@@ -6,6 +6,15 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tracing::warn;
 
+/// Location metadata for a plugin configuration section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginConfigLocation {
+    /// Config source label (`repo` or `global`).
+    pub source: String,
+    /// Absolute path to the config file that declares the plugin section.
+    pub path: PathBuf,
+}
+
 /// Configuration error
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -55,6 +64,7 @@ pub fn resolve_config(
     home_dir: &Path,
 ) -> Result<Config, ConfigError> {
     let mut config = Config::default();
+    let config_path_override = resolve_config_path_override(overrides);
 
     // 4. Try global config
     let global_config_path = home_dir.join(".config/atm/config.toml");
@@ -75,6 +85,14 @@ pub fn resolve_config(
         }
     }
 
+    // 2.5 Optional config file override from CLI/env.
+    // Explicit path override is strict (no silent fallback): parse/load failures
+    // must surface as errors so operators can correct the path immediately.
+    if let Some(path) = config_path_override {
+        let file_config = load_config_file(&path)?;
+        merge_config(&mut config, file_config);
+    }
+
     // 2. Apply environment variables
     apply_env_overrides(&mut config);
 
@@ -82,6 +100,41 @@ pub fn resolve_config(
     apply_cli_overrides(&mut config, overrides);
 
     Ok(config)
+}
+
+/// Resolve where a plugin section is declared, using the same repo→global
+/// precedence as [`resolve_config`].
+///
+/// Returns the file location for the first matching plugin section:
+/// 1. repo-local `.atm.toml` (nearest match walking up to git root)
+/// 2. global `~/.config/atm/config.toml`
+pub fn resolve_plugin_config_location(
+    plugin_name: &str,
+    current_dir: &Path,
+    home_dir: &Path,
+) -> Option<PluginConfigLocation> {
+    if plugin_name.trim().is_empty() {
+        return None;
+    }
+
+    if let Some(repo_config_path) = find_repo_local_config(current_dir)
+        && config_file_declares_plugin(&repo_config_path, plugin_name)
+    {
+        return Some(PluginConfigLocation {
+            source: "repo".to_string(),
+            path: repo_config_path,
+        });
+    }
+
+    let global_config_path = home_dir.join(".config/atm/config.toml");
+    if config_file_declares_plugin(&global_config_path, plugin_name) {
+        return Some(PluginConfigLocation {
+            source: "global".to_string(),
+            path: global_config_path,
+        });
+    }
+
+    None
 }
 
 /// Find repo-local config file
@@ -113,6 +166,20 @@ fn load_config_file(path: &Path) -> Result<Config, ConfigError> {
     let contents = std::fs::read_to_string(path)?;
     let config: Config = toml::from_str(&contents)?;
     Ok(config)
+}
+
+fn config_file_declares_plugin(path: &Path, plugin_name: &str) -> bool {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&contents) else {
+        return false;
+    };
+
+    value
+        .get("plugins")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|plugins| plugins.contains_key(plugin_name))
 }
 
 /// Merge file config into base config
@@ -152,17 +219,31 @@ fn merge_config(base: &mut Config, file: Config) {
 
 /// Apply environment variable overrides
 fn apply_env_overrides(config: &mut Config) {
-    if let Ok(team) = std::env::var("ATM_TEAM") {
+    if let Some(team) = env_var_nonempty("ATM_TEAM") {
         config.core.default_team = team;
     }
 
-    if let Ok(identity) = std::env::var("ATM_IDENTITY") {
+    if let Some(identity) = env_var_nonempty("ATM_IDENTITY") {
         config.core.identity = identity;
     }
 
     if std::env::var("ATM_NO_COLOR").is_ok() {
         config.display.color = false;
     }
+}
+
+fn resolve_config_path_override(overrides: &ConfigOverrides) -> Option<PathBuf> {
+    overrides
+        .config_path
+        .clone()
+        .or_else(|| env_var_nonempty("ATM_CONFIG").map(PathBuf::from))
+}
+
+fn env_var_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 /// Apply command-line overrides
@@ -291,15 +372,42 @@ mod tests {
     use serial_test::serial;
     use std::env;
 
+    struct EnvGuard {
+        vars: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn isolate(keys: &'static [&'static str]) -> Self {
+            let mut vars = Vec::with_capacity(keys.len());
+            unsafe {
+                for key in keys {
+                    vars.push((*key, env::var(key).ok()));
+                    env::remove_var(key);
+                }
+            }
+            Self { vars }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                for (key, original) in &self.vars {
+                    match original {
+                        Some(v) => env::set_var(key, v),
+                        None => env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
+    const RESOLVE_ENV_KEYS: &[&str] = &["ATM_TEAM", "ATM_IDENTITY", "ATM_NO_COLOR", "ATM_CONFIG"];
+
     #[test]
     #[serial]
     fn test_config_defaults() {
-        // Clean up environment variables from other tests
-        unsafe {
-            env::remove_var("ATM_TEAM");
-            env::remove_var("ATM_IDENTITY");
-            env::remove_var("ATM_NO_COLOR");
-        }
+        let _env_guard = EnvGuard::isolate(RESOLVE_ENV_KEYS);
 
         let temp_dir = std::env::temp_dir();
         let overrides = ConfigOverrides::default();
@@ -315,6 +423,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_env_overrides() {
+        let _env_guard = EnvGuard::isolate(RESOLVE_ENV_KEYS);
         let temp_dir = std::env::temp_dir();
         let overrides = ConfigOverrides::default();
 
@@ -327,15 +436,36 @@ mod tests {
 
         assert_eq!(config.core.default_team, "test-team");
         assert_eq!(config.core.identity, "test-user");
-
-        unsafe {
-            env::remove_var("ATM_TEAM");
-            env::remove_var("ATM_IDENTITY");
-        }
     }
 
     #[test]
+    #[serial]
+    fn test_empty_env_values_do_not_override_config() {
+        use tempfile::TempDir;
+
+        let _env_guard = EnvGuard::isolate(RESOLVE_ENV_KEYS);
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(
+            temp_dir.path().join(".atm.toml"),
+            "[core]\ndefault_team = \"repo-team\"\nidentity = \"repo-user\"\n",
+        )
+        .unwrap();
+
+        unsafe {
+            env::set_var("ATM_TEAM", "   ");
+            env::set_var("ATM_IDENTITY", "");
+        }
+
+        let overrides = ConfigOverrides::default();
+        let config = resolve_config(&overrides, temp_dir.path(), temp_dir.path()).unwrap();
+        assert_eq!(config.core.default_team, "repo-team");
+        assert_eq!(config.core.identity, "repo-user");
+    }
+
+    #[test]
+    #[serial]
     fn test_cli_overrides() {
+        let _env_guard = EnvGuard::isolate(RESOLVE_ENV_KEYS);
         let temp_dir = std::env::temp_dir();
         let overrides = ConfigOverrides {
             team: Some("cli-team".to_string()),
@@ -356,6 +486,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_no_color_env() {
+        let _env_guard = EnvGuard::isolate(RESOLVE_ENV_KEYS);
         let temp_dir = std::env::temp_dir();
         let overrides = ConfigOverrides::default();
 
@@ -365,10 +496,6 @@ mod tests {
 
         let config = resolve_config(&overrides, &temp_dir, &temp_dir).unwrap();
         assert!(!config.display.color);
-
-        unsafe {
-            env::remove_var("ATM_NO_COLOR");
-        }
     }
 
     #[test]
@@ -494,8 +621,10 @@ timestamps = "iso8601"
     }
 
     #[test]
+    #[serial]
     fn test_plugin_config_merge_via_resolve() {
         use tempfile::TempDir;
+        let _env_guard = EnvGuard::isolate(RESOLVE_ENV_KEYS);
 
         // Create temp directory with config file containing plugin sections
         let temp_dir = TempDir::new().unwrap();
@@ -533,8 +662,10 @@ enabled = false
     }
 
     #[test]
+    #[serial]
     fn test_aliases_merge_via_resolve_with_repo_override() {
         use tempfile::TempDir;
+        let _env_guard = EnvGuard::isolate(RESOLVE_ENV_KEYS);
 
         // Global config defines an alias value, repo config overrides it.
         let temp_dir = TempDir::new().unwrap();
@@ -567,8 +698,10 @@ enabled = false
     }
 
     #[test]
+    #[serial]
     fn test_roles_merge_via_resolve_with_repo_override() {
         use tempfile::TempDir;
+        let _env_guard = EnvGuard::isolate(RESOLVE_ENV_KEYS);
 
         // Global config defines role values, repo config overrides one role.
         let temp_dir = TempDir::new().unwrap();
@@ -601,5 +734,142 @@ enabled = false
             config.roles.get("reviewer").map(String::as_str),
             Some("qa-bot")
         );
+    }
+
+    #[test]
+    #[serial]
+    fn test_config_path_override_merges_last() {
+        use tempfile::TempDir;
+        let _env_guard = EnvGuard::isolate(RESOLVE_ENV_KEYS);
+
+        let temp_dir = TempDir::new().unwrap();
+        let home_dir = temp_dir.path();
+        let repo_dir = temp_dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+
+        let global_cfg_dir = home_dir.join(".config/atm");
+        std::fs::create_dir_all(&global_cfg_dir).unwrap();
+        std::fs::write(
+            global_cfg_dir.join("config.toml"),
+            "[core]\ndefault_team = \"global-team\"\nidentity = \"global-user\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo_dir.join(".atm.toml"),
+            "[core]\ndefault_team = \"repo-team\"\nidentity = \"repo-user\"\n",
+        )
+        .unwrap();
+        let override_path = temp_dir.path().join("override.toml");
+        std::fs::write(
+            &override_path,
+            "[core]\ndefault_team = \"override-team\"\nidentity = \"override-user\"\n",
+        )
+        .unwrap();
+
+        let overrides = ConfigOverrides {
+            config_path: Some(override_path),
+            ..Default::default()
+        };
+        let config = resolve_config(&overrides, &repo_dir, home_dir).unwrap();
+        assert_eq!(config.core.default_team, "override-team");
+        assert_eq!(config.core.identity, "override-user");
+    }
+
+    #[test]
+    #[serial]
+    fn test_atm_config_env_override_merges_last() {
+        use tempfile::TempDir;
+        let _env_guard = EnvGuard::isolate(RESOLVE_ENV_KEYS);
+
+        let temp_dir = TempDir::new().unwrap();
+        let home_dir = temp_dir.path();
+        let repo_dir = temp_dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+
+        std::fs::write(
+            repo_dir.join(".atm.toml"),
+            "[core]\ndefault_team = \"repo-team\"\nidentity = \"repo-user\"\n",
+        )
+        .unwrap();
+        let override_path = temp_dir.path().join("env-override.toml");
+        std::fs::write(
+            &override_path,
+            "[core]\ndefault_team = \"env-team\"\nidentity = \"env-user\"\n",
+        )
+        .unwrap();
+
+        unsafe { env::set_var("ATM_CONFIG", &override_path) };
+        let config = resolve_config(&ConfigOverrides::default(), &repo_dir, home_dir).unwrap();
+        assert_eq!(config.core.default_team, "env-team");
+        assert_eq!(config.core.identity, "env-user");
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_plugin_config_location_prefers_repo_over_global() {
+        use tempfile::TempDir;
+        let _env_guard = EnvGuard::isolate(RESOLVE_ENV_KEYS);
+
+        let temp_dir = TempDir::new().unwrap();
+        let home_dir = temp_dir.path();
+        let repo_dir = temp_dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+
+        let global_cfg_dir = home_dir.join(".config/atm");
+        std::fs::create_dir_all(&global_cfg_dir).unwrap();
+        std::fs::write(
+            global_cfg_dir.join("config.toml"),
+            "[plugins.gh_monitor]\nenabled = false\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo_dir.join(".atm.toml"),
+            "[plugins.gh_monitor]\nenabled = true\n",
+        )
+        .unwrap();
+
+        let location =
+            resolve_plugin_config_location("gh_monitor", &repo_dir, home_dir).expect("location");
+        assert_eq!(location.source, "repo");
+        assert_eq!(location.path, repo_dir.join(".atm.toml"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_plugin_config_location_falls_back_to_global() {
+        use tempfile::TempDir;
+        let _env_guard = EnvGuard::isolate(RESOLVE_ENV_KEYS);
+
+        let temp_dir = TempDir::new().unwrap();
+        let home_dir = temp_dir.path();
+        let repo_dir = temp_dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+
+        let global_cfg_dir = home_dir.join(".config/atm");
+        std::fs::create_dir_all(&global_cfg_dir).unwrap();
+        std::fs::write(
+            global_cfg_dir.join("config.toml"),
+            "[plugins.gh_monitor]\nenabled = true\n",
+        )
+        .unwrap();
+
+        let location =
+            resolve_plugin_config_location("gh_monitor", &repo_dir, home_dir).expect("location");
+        assert_eq!(location.source, "global");
+        assert_eq!(location.path, global_cfg_dir.join("config.toml"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_plugin_config_location_none_when_not_declared() {
+        use tempfile::TempDir;
+        let _env_guard = EnvGuard::isolate(RESOLVE_ENV_KEYS);
+
+        let temp_dir = TempDir::new().unwrap();
+        let home_dir = temp_dir.path();
+        let repo_dir = temp_dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+
+        assert!(resolve_plugin_config_location("gh_monitor", &repo_dir, home_dir).is_none());
     }
 }

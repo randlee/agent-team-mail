@@ -32,7 +32,6 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::process::Child;
 use tokio::sync::Mutex;
 
-
 use crate::config::AgentMcpConfig;
 use crate::turn_control::TurnControl as _;
 
