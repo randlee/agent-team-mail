@@ -7043,8 +7043,11 @@ exit 1
 "#,
         );
 
-        let req_json = r#"{"version":1,"request_id":"r-gh-preflight-dirty","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"pr","target":"123","start_timeout_secs":30}}"#;
-        let resp = handle_gh_monitor_command(req_json, temp.path()).await;
+        let req_json = format!(
+            r#"{{"version":1,"request_id":"r-gh-preflight-dirty","command":"gh-monitor","payload":{{"team":"atm-dev","target_kind":"pr","target":"123","start_timeout_secs":30,"config_cwd":"{}"}}}}"#,
+            temp.path().display()
+        );
+        let resp = handle_gh_monitor_command(&req_json, temp.path()).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
         assert_eq!(payload["state"].as_str(), Some("merge_conflict"));
@@ -7166,7 +7169,7 @@ exit 1
             target: "123".to_string(),
             reference: None,
             start_timeout_secs: Some(120),
-            config_cwd: None,
+            config_cwd: Some(temp.path().to_path_buf()),
         };
 
         monitor_gh_run(temp.path(), &status_seed, &gh_request, "o/r", 42)
