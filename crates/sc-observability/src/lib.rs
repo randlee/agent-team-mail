@@ -139,6 +139,26 @@ impl Logger {
         Ok(())
     }
 
+    /// Convenience helper for tools that only need action/outcome + fields.
+    ///
+    /// This builds a [`LogEventV1`] with the configured log level and emits it
+    /// through the same validation/redaction/path pipeline as [`Self::emit`].
+    pub fn emit_action(
+        &self,
+        source_binary: &str,
+        target: &str,
+        action: &str,
+        outcome: Option<&str>,
+        fields: serde_json::Value,
+    ) -> Result<(), LoggerError> {
+        let mut event = LogEventV1::builder(source_binary, action, target)
+            .level(self.config.level.as_str())
+            .build();
+        event.outcome = outcome.map(ToOwned::to_owned);
+        event.fields = value_to_map(fields);
+        self.emit(&event)
+    }
+
     pub fn write_to_spool(
         &self,
         event: &LogEventV1,
@@ -297,6 +317,17 @@ fn rotation_path(base: &Path, n: u32) -> PathBuf {
     PathBuf::from(os)
 }
 
+fn value_to_map(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    match value {
+        serde_json::Value::Object(map) => map,
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("value".to_string(), other);
+            map
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +477,43 @@ mod tests {
         assert_eq!(SOCKET_ERROR_VERSION_MISMATCH, "VERSION_MISMATCH");
         assert_eq!(SOCKET_ERROR_INVALID_PAYLOAD, "INVALID_PAYLOAD");
         assert_eq!(SOCKET_ERROR_INTERNAL_ERROR, "INTERNAL_ERROR");
+    }
+
+    #[test]
+    fn emit_action_writes_schema_compatible_event() {
+        let tmp = TempDir::new().expect("temp dir");
+        let cfg = LogConfig {
+            log_path: tmp.path().join("atm.log.jsonl"),
+            spool_dir: tmp.path().join("log-spool"),
+            level: LogLevel::Info,
+            message_preview_enabled: false,
+            max_bytes: DEFAULT_MAX_BYTES,
+            max_files: DEFAULT_MAX_FILES,
+            queue_capacity: DEFAULT_QUEUE_CAPACITY,
+            max_event_bytes: DEFAULT_MAX_EVENT_BYTES,
+        };
+        let logger = Logger::new(cfg.clone());
+
+        logger
+            .emit_action(
+                "sc-compose",
+                "sc_compose::cli",
+                "command_end",
+                Some("success"),
+                serde_json::json!({"code": 0}),
+            )
+            .expect("emit action");
+
+        let lines: Vec<_> = fs::read_to_string(&cfg.log_path)
+            .expect("read log")
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(lines.len(), 1);
+        let parsed: LogEventV1 = serde_json::from_str(&lines[0]).expect("parse event");
+        assert_eq!(parsed.source_binary, "sc-compose");
+        assert_eq!(parsed.action, "command_end");
+        assert_eq!(parsed.outcome.as_deref(), Some("success"));
+        assert_eq!(parsed.fields.get("code").and_then(|v| v.as_u64()), Some(0));
     }
 }
