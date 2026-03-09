@@ -3,7 +3,8 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::{ComposerError, Diagnostic};
+use crate::ComposerError;
+use crate::diagnostics::Diagnostic;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Frontmatter {
@@ -92,6 +93,9 @@ pub fn frontmatter_missing_warning(path: &Path) -> Diagnostic {
             path.display()
         ),
         path: Some(path.to_path_buf()),
+        line: None,
+        column: None,
+        include_chain: Vec::new(),
     }
 }
 

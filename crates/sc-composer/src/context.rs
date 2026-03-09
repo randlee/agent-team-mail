@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::{Diagnostic, UnknownVariablePolicy, VariableSource};
+use crate::diagnostics::Diagnostic;
+use crate::{UnknownVariablePolicy, VariableSource};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextMergeReport {
@@ -46,6 +47,9 @@ pub fn merge_context(
                 code: "MISSING_VAR".to_string(),
                 message: format!("Required variable '{required}' is missing"),
                 path: Some(template_path.to_path_buf()),
+                line: None,
+                column: None,
+                include_chain: Vec::new(),
             });
         }
     }
@@ -60,6 +64,9 @@ pub fn merge_context(
                 code: "UNKNOWN_VAR".to_string(),
                 message: format!("Input variable '{key}' is not declared by template/frontmatter"),
                 path: Some(template_path.to_path_buf()),
+                line: None,
+                column: None,
+                include_chain: Vec::new(),
             };
 
             match unknown_policy {
