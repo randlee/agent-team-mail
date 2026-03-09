@@ -77,13 +77,20 @@ Templates (next to skill):
 
 Render and post with streaming pipeline (avoid extra context handling):
 - Findings update:
+  - `sc-compose render .claude/skills/quality-management-gh/findings-report.md.j2 --var-file <vars.json> | gh pr review <PR> --request-changes --body-file -`
+- In-flight status update (non-terminal):
   - `sc-compose render .claude/skills/quality-management-gh/findings-report.md.j2 --var-file <vars.json> | gh pr comment <PR> --body-file -`
 - Final quality report:
-  - `sc-compose render .claude/skills/quality-management-gh/quality-report.md.j2 --var-file <vars.json> | gh pr comment <PR> --body-file -`
+  - `sc-compose render .claude/skills/quality-management-gh/quality-report.md.j2 --var-file <vars.json> | gh pr review <PR> --approve --body-file -`
 
 `<vars.json>` must be a flat JSON object of string keys and string values.
 
 Use findings template for `FAIL`/`IN-FLIGHT`, and quality-report template for final `PASS` closeout.
+
+Blocking policy:
+- If blocking findings exist, quality-mgr must post a `--request-changes` review.
+- Do not post PASS approval until blocking findings are resolved.
+- After successful re-review, post `--approve` with the final quality report so merge can proceed.
 
 ## Communication Protocol
 

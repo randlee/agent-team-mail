@@ -84,7 +84,7 @@ Use:
 
 Use report JSON to populate findings/final template fields (checks summary, review decision, merge readiness signals).
 
-## Findings Report to PR
+## Findings Report to PR (Blocking)
 
 Template:
 - `.claude/skills/quality-management-gh/findings-report.md.j2`
@@ -94,8 +94,8 @@ Recommended flow:
 2. Render markdown from template with required variables.
 3. Post to PR as comment/update.
 
-Suggested command (stream render directly into PR comment):
-- `sc-compose render .claude/skills/quality-management-gh/findings-report.md.j2 --var-file <vars.json> | gh pr comment <PR> --body-file -`
+Suggested command (stream render and block merge via review decision):
+- `sc-compose render .claude/skills/quality-management-gh/findings-report.md.j2 --var-file <vars.json> | gh pr review <PR> --request-changes --body-file -`
 
 `<vars.json>` must be a flat JSON map (`string -> string`) for `sc-compose`:
 
@@ -122,9 +122,11 @@ Suggested command (stream render directly into PR comment):
 }
 ```
 
-Use findings template for `FAIL` and `IN-FLIGHT` updates.
+Use findings template for `FAIL` updates.
+For `IN-FLIGHT` updates, use comment updates (do not oscillate review states):
+- `sc-compose render .claude/skills/quality-management-gh/findings-report.md.j2 --var-file <vars.json> | gh pr comment <PR> --body-file -`
 
-## Final Quality Report to PR
+## Final Quality Report to PR (Closeout)
 
 Template:
 - `.claude/skills/quality-management-gh/quality-report.md.j2`
@@ -134,16 +136,17 @@ Recommended flow:
 2. Render markdown from template with required variables.
 3. Post as final closeout comment/review.
 
-Suggested command (stream render directly into PR comment):
-- `sc-compose render .claude/skills/quality-management-gh/quality-report.md.j2 --var-file <vars.json> | gh pr comment <PR> --body-file -`
+Suggested command (stream render and clear blocking review with approval):
+- `sc-compose render .claude/skills/quality-management-gh/quality-report.md.j2 --var-file <vars.json> | gh pr review <PR> --approve --body-file -`
 
 Use final template only for `PASS` closeout.
 
 ## PR Update Conventions
 
-- First QA pass posts detailed findings with `FAIL`.
+- First QA pass posts detailed findings with `FAIL` and must use `--request-changes`.
 - Fix-pass updates revise status and open findings.
-- Final pass posts `PASS` closeout with residual risk + readiness.
+- Final pass posts `PASS` closeout with residual risk + readiness and must use `--approve`.
+- This creates the default lifecycle: blocking review on findings, then approval on successful re-review so the PR can complete.
 
 Never overwrite history silently; each update should be clearly timestamped and tied to a pass number.
 Rendered reports must include a fenced JSON block (` ```json ... ``` `) for machine parsing.
