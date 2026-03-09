@@ -11,6 +11,11 @@ identity behavior.
 - Target version: `v0.44.x` (planning-level; final tag decided at release)
 - Integration branch: `integrate/phase-AJ`
 
+## Prerequisites
+
+- Phase AH baseline complete (`sc-observability` shared contracts and logging
+  baseline in place).
+
 ## Inputs
 
 - #593 — `atm send` requires manual `CLAUDE_SESSION_ID` in ambiguous paths

@@ -16,10 +16,15 @@ local structured logging always-on, canonical, and fail-open.
   - `docs/observability/requirements.md`
   - `docs/observability/architecture.md`
 - QA findings from first observability planning review:
-  - ATM-QA-002 (path contract mismatch)
-  - ATM-QA-003 (OTel correlation fields missing in schema)
-  - ATM-QA-008 (`spans` semantics undefined)
-  - ATM-QA-010 (doctor/status JSON keys not defined)
+  - ATM-QA-004 (path contract mismatch)
+  - ATM-QA-008 (OTel correlation fields missing in schema)
+  - ATM-QA-007 (`spans` semantics undefined)
+  - ATM-QA-009 (doctor/status JSON keys not defined)
+
+## Prerequisites
+
+- Phase AH baseline complete.
+- Phase AJ complete (`session_id` canonicalization and resolver SSoT delivered).
 
 ## Locked Contract
 

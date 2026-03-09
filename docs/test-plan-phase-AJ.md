@@ -28,7 +28,8 @@ and `atm doctor`.
   - unresolved path -> `CALLER_UNRESOLVED`
   - runtime aliases (`thread-id`, runtime-native session fields) normalize to
     canonical `session_id`
-  - `agent_id` never accepted as a substitute for `session_id`
+  - runtime aliases (`agent-id`, `thread-id`) must normalize to canonical
+    `session_id`; no separate `agent_id` field is accepted in canonical schema
 - Regression guard:
   - assert no synthetic `local:` session IDs are emitted in resolver outputs.
 

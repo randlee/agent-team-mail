@@ -103,6 +103,10 @@ Schema, redaction, truncation, and envelope rules remain consistent across tools
 
 ### AH-OBS-5: OpenTelemetry (optional)
 
+> NOTE: AH-OBS-5 optional/default-off OTel language is historical. It is
+> superseded by Phase AK mandatory OTel rollout. See
+> `docs/phase-ak-planning.md` and `docs/observability/requirements.md` §9.
+
 - OTel support is required as an optional capability in `sc-observability`.
 - OTel must be feature-gated (default off) to avoid mandatory dependency overhead.
 - `atm` and `scmux` are first adopters for OTel emission once AH integration lands.
@@ -197,8 +201,7 @@ OTel rollout in AH is intentionally scoped to a short baseline set:
   - `doctor --json` and `status --json` logging-health payload presence and schema consistency
   - runtime env control behavior: `ATM_LOG`, `ATM_LOG_MSG`, `ATM_LOG_FILE`
 - SCMUX integration tests:
-  - shared schema parity checks for status/message operations
-  - sub-agent trace correlation (`subagent_id`) propagation checks
+  - deferred beyond AH; moved to AJ/AK scope for mandatory OTel + producer rollout
 - CI gates:
   - `cargo fmt --check --all`
   - `cargo clippy --workspace -- -D warnings`

@@ -18,7 +18,8 @@ behavior across ATM tools and companion tooling.
 - Logging must be fail-open; logging failures must not block core command flows.
 - Tool outputs are namespaced under per-tool log directories beneath a common root.
 - Schema and health-state semantics are shared across tools; no per-tool drift.
-- OpenTelemetry export is required for in-scope tools in this document (non-optional rollout).
+- OpenTelemetry export is required for in-scope tools in this document;
+  non-optional enforcement is effective in Phase AK rollout.
 
 ## 3. Canonical Logging Architecture Contract
 
