@@ -278,6 +278,41 @@ mod tests {
     }
 
     #[test]
+    fn compose_missing_required_var_from_include_reports_include_chain() {
+        let tmp = TempDir::new().expect("tempdir");
+        write_file(
+            &tmp,
+            "base.md.j2",
+            "---\nrequired_variables: []\n---\n@<partials/need_name.md.j2>\n",
+        );
+        write_file(
+            &tmp,
+            "partials/need_name.md.j2",
+            "---\nrequired_variables:\n  - name\n---\nhello {{ name }}",
+        );
+
+        let err = compose(&request(&tmp, "base.md.j2")).expect_err("missing var must fail");
+        match err {
+            ComposerError::ValidationFailed { errors, .. } => {
+                let missing = errors
+                    .iter()
+                    .find(|d| d.code == "MISSING_VAR")
+                    .expect("expected MISSING_VAR");
+                assert_eq!(
+                    missing.path.as_ref(),
+                    Some(&tmp.path().join("base.md.j2")),
+                    "diagnostic path should point to resolved root template"
+                );
+                assert!(
+                    missing.include_chain.len() >= 2,
+                    "include chain should include root + include path: {missing:?}"
+                );
+            }
+            other => panic!("unexpected error type: {other}"),
+        }
+    }
+
+    #[test]
     fn compose_unknown_var_policy_error_warn_ignore() {
         let tmp = TempDir::new().expect("tempdir");
         write_file(

@@ -12,8 +12,13 @@ pub struct ContextMergeReport {
     pub errors: Vec<Diagnostic>,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "context merge needs explicit policy/config inputs for deterministic diagnostics"
+)]
 pub fn merge_context(
     template_path: &Path,
+    include_chain: &[std::path::PathBuf],
     required_variables: &[String],
     declared_variables: &BTreeSet<String>,
     defaults: &BTreeMap<String, String>,
@@ -49,7 +54,7 @@ pub fn merge_context(
                 path: Some(template_path.to_path_buf()),
                 line: None,
                 column: None,
-                include_chain: Vec::new(),
+                include_chain: include_chain.to_vec(),
             });
         }
     }
@@ -66,7 +71,7 @@ pub fn merge_context(
                 path: Some(template_path.to_path_buf()),
                 line: None,
                 column: None,
-                include_chain: Vec::new(),
+                include_chain: include_chain.to_vec(),
             };
 
             match unknown_policy {
@@ -103,6 +108,7 @@ mod tests {
 
         let report = merge_context(
             path,
+            &[],
             &required,
             &declared,
             &defaults,

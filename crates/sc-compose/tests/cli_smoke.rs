@@ -38,6 +38,106 @@ fn render_round_trip() {
 }
 
 #[test]
+fn render_write_derives_output_path_for_common_j2_suffixes() {
+    let tmp = TempDir::new().expect("tempdir");
+    let template_md = tmp.path().join("template.md.j2");
+    let template_xml = tmp.path().join("layout.xml.j2");
+    let template_plain = tmp.path().join("note.j2");
+    fs::write(&template_md, "hello {{ name }}").expect("write md");
+    fs::write(&template_xml, "<r>{{ name }}</r>").expect("write xml");
+    fs::write(&template_plain, "{{ name }}").expect("write plain");
+
+    run_sc_compose()
+        .arg("--root")
+        .arg(tmp.path())
+        .arg("--var")
+        .arg("name=Kai")
+        .arg("render")
+        .arg(&template_md)
+        .arg("--write")
+        .assert()
+        .success();
+    run_sc_compose()
+        .arg("--root")
+        .arg(tmp.path())
+        .arg("--var")
+        .arg("name=Kai")
+        .arg("render")
+        .arg(&template_xml)
+        .arg("--write")
+        .assert()
+        .success();
+    run_sc_compose()
+        .arg("--root")
+        .arg(tmp.path())
+        .arg("--var")
+        .arg("name=Kai")
+        .arg("render")
+        .arg(&template_plain)
+        .arg("--write")
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(tmp.path().join("template.md")).expect("read md output"),
+        "hello Kai"
+    );
+    assert_eq!(
+        fs::read_to_string(tmp.path().join("layout.xml")).expect("read xml output"),
+        "<r>Kai</r>"
+    );
+    assert_eq!(
+        fs::read_to_string(tmp.path().join("note")).expect("read plain output"),
+        "Kai"
+    );
+}
+
+#[test]
+fn render_write_profile_derives_prompts_output() {
+    let tmp = TempDir::new().expect("tempdir");
+    let profile = tmp.path().join(".codex/agents/rust-dev.md.j2");
+    fs::create_dir_all(profile.parent().expect("profile parent")).expect("mkdir");
+    fs::write(&profile, "role={{ role }}").expect("write profile");
+
+    run_sc_compose()
+        .arg("--mode")
+        .arg("profile")
+        .arg("--kind")
+        .arg("agent")
+        .arg("--agent-type")
+        .arg("rust-dev")
+        .arg("--runtime")
+        .arg("codex")
+        .arg("--root")
+        .arg(tmp.path())
+        .arg("--var")
+        .arg("role=coder")
+        .arg("render")
+        .arg("--write")
+        .assert()
+        .success();
+
+    let prompts_dir = tmp.path().join(".prompts");
+    let files: Vec<_> = fs::read_dir(&prompts_dir)
+        .expect("read prompts dir")
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .collect();
+    assert_eq!(files.len(), 1, "expected one derived profile output");
+    let file_name = files[0]
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("utf8 filename");
+    assert!(
+        file_name.starts_with("rust-dev-") && file_name.ends_with(".md"),
+        "unexpected prompts filename: {file_name}"
+    );
+    assert_eq!(
+        fs::read_to_string(&files[0]).expect("read prompts output"),
+        "role=coder"
+    );
+}
+
+#[test]
 fn missing_var_exits_two() {
     let tmp = TempDir::new().expect("tempdir");
     let template = tmp.path().join("template.md.j2");
@@ -78,6 +178,52 @@ fn json_error_payload_is_valid_json() {
     let stderr = String::from_utf8(out.stderr).expect("utf8");
     let payload: Value = serde_json::from_str(stderr.trim()).expect("json stderr");
     assert_eq!(payload["errorCode"], "VALIDATION_FAILED");
+}
+
+#[test]
+fn json_missing_var_diagnostic_includes_path_and_include_chain() {
+    let tmp = TempDir::new().expect("tempdir");
+    let include = tmp.path().join("partials/need_name.md.j2");
+    fs::create_dir_all(include.parent().expect("include parent")).expect("mkdir");
+    fs::write(
+        tmp.path().join("base.md.j2"),
+        "---\nrequired_variables: []\n---\n@<partials/need_name.md.j2>\n",
+    )
+    .expect("write base");
+    fs::write(
+        &include,
+        "---\nrequired_variables:\n  - name\n---\nhello {{ name }}",
+    )
+    .expect("write include");
+
+    let out = run_sc_compose()
+        .arg("--json")
+        .arg("--root")
+        .arg(tmp.path())
+        .arg("validate")
+        .arg(tmp.path().join("base.md.j2"))
+        .output()
+        .expect("run");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8(out.stderr).expect("utf8");
+    let payload: Value = serde_json::from_str(stderr.trim()).expect("json stderr");
+    let errors = payload["errors"].as_array().expect("errors array");
+    let missing = errors
+        .iter()
+        .find(|diag| diag["code"] == "MISSING_VAR")
+        .expect("MISSING_VAR diagnostic");
+
+    assert!(
+        missing["path"].is_string(),
+        "diagnostic path missing: {missing:?}"
+    );
+    let include_chain = missing["include_chain"]
+        .as_array()
+        .expect("include_chain array");
+    assert!(
+        include_chain.len() >= 2,
+        "include_chain should include root and include files: {missing:?}"
+    );
 }
 
 #[test]

@@ -96,6 +96,7 @@ pub fn evaluate_context(
 ) -> ContextMergeReport {
     merge_context(
         &prepared.template_path,
+        &prepared.resolved_files,
         &prepared.required_variables,
         &prepared.declared_variables,
         &prepared.defaults,
