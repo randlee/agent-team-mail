@@ -296,6 +296,8 @@ fn sc_compose_config_prefers_atm_home_for_default_log_path() {
         .env("ATM_HOME", &atm_home)
         .env("HOME", &fake_home)
         .env("USERPROFILE", &fake_userprofile)
+        .env("APPDATA", "")
+        .env("XDG_CONFIG_HOME", "")
         .arg("--root")
         .arg(tmp.path())
         .arg("--var")
