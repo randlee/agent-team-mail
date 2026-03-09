@@ -425,9 +425,6 @@ pub fn write_daemon_lock_metadata(home: &std::path::Path, version: &str) -> anyh
     let json = serde_json::to_vec_pretty(&metadata)?;
     let tmp = metadata_path.with_extension("json.tmp");
     std::fs::write(&tmp, json)?;
-    if metadata_path.exists() {
-        let _ = std::fs::remove_file(&metadata_path);
-    }
     std::fs::rename(tmp, metadata_path)?;
     Ok(())
 }
@@ -1454,8 +1451,10 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     use std::time::{Duration, Instant};
 
     let home = crate::home::get_home_dir()?;
-    if daemon_is_running() || daemon_socket_connectable(&home) {
-        if let Some(reason) = detect_daemon_identity_mismatch(&home) {
+    let daemon_running = daemon_is_running();
+    let socket_connectable = daemon_socket_connectable(&home);
+    if daemon_running || socket_connectable {
+        if let Some(reason) = detect_daemon_identity_mismatch(&home, socket_connectable) {
             restart_mismatched_daemon(&home, &reason)?;
         } else {
             return Ok(());
@@ -1497,8 +1496,10 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         ),
     };
 
-    if daemon_is_running() || daemon_socket_connectable(&home) {
-        if let Some(reason) = detect_daemon_identity_mismatch(&home) {
+    let daemon_running = daemon_is_running();
+    let socket_connectable = daemon_socket_connectable(&home);
+    if daemon_running || socket_connectable {
+        if let Some(reason) = detect_daemon_identity_mismatch(&home, socket_connectable) {
             restart_mismatched_daemon(&home, &reason)?;
         } else {
             return Ok(());
@@ -1687,7 +1688,10 @@ fn read_daemon_pid_state(pid_path: &std::path::Path) -> PidState {
 }
 
 #[cfg(unix)]
-fn detect_daemon_identity_mismatch(home: &std::path::Path) -> Option<String> {
+fn detect_daemon_identity_mismatch(
+    home: &std::path::Path,
+    socket_connectable: bool,
+) -> Option<String> {
     let pid_path = home.join(".claude/daemon/atm-daemon.pid");
     let status_path = home.join(".claude/daemon/status.json");
     let metadata_path = home.join(".config/atm/daemon.lock.meta.json");
@@ -1706,9 +1710,30 @@ fn detect_daemon_identity_mismatch(home: &std::path::Path) -> Option<String> {
         .as_ref()
         .and_then(|json| json.get("version").and_then(serde_json::Value::as_str))
         .map(std::string::ToString::to_string);
-    let metadata = std::fs::read_to_string(&metadata_path)
+    let mut metadata = std::fs::read_to_string(&metadata_path)
         .ok()
         .and_then(|s| serde_json::from_str::<DaemonLockMetadata>(&s).ok());
+
+    if metadata.is_none() && !socket_connectable {
+        return None;
+    }
+
+    if metadata.is_none()
+        && let Some(candidate_pid) = pid_from_file.or(pid_from_status)
+        && pid_alive(candidate_pid as i32)
+    {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        metadata = std::fs::read_to_string(&metadata_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<DaemonLockMetadata>(&s).ok());
+    }
+
+    if metadata.is_none() {
+        return Some(
+            "daemon identity mismatch: lock metadata missing (soft mismatch, restart required)"
+                .to_string(),
+        );
+    }
 
     let pid = metadata
         .as_ref()
@@ -1857,6 +1882,17 @@ fn restart_mismatched_daemon(home: &std::path::Path, reason: &str) -> anyhow::Re
             });
         }
     }
+
+    let lock_path = home.join(".config/atm/daemon.lock");
+    if let Some(parent) = lock_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _lock_guard = crate::io::lock::acquire_lock(&lock_path, 5).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to acquire daemon lock at {} before runtime cleanup: {e}",
+            lock_path.display()
+        )
+    })?;
 
     // Replace runtime files aggressively for identity-mismatch recovery. This is
     // scope-local and avoids broad process sweeps while allowing a fresh daemon

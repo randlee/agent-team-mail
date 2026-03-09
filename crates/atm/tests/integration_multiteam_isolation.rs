@@ -8,11 +8,12 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
 use tempfile::TempDir;
+#[path = "support/daemon_process_guard.rs"]
+mod daemon_process_guard;
 #[path = "support/daemon_test_registry.rs"]
 mod daemon_test_registry;
+use daemon_process_guard::DaemonProcessGuard;
 
 /// Helper to set home directory for cross-platform test compatibility.
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
@@ -105,92 +106,6 @@ impl Drop for EnvVarGuard {
                 None => std::env::remove_var(self.key),
             }
         }
-    }
-}
-
-/// Explicit daemon process lifecycle guard for integration tests.
-struct DaemonProcessGuard {
-    child: Child,
-    pid: u32,
-}
-
-impl DaemonProcessGuard {
-    fn spawn(home: &TempDir, team: &str) -> Self {
-        let daemon_bin = {
-            let mut candidate = PathBuf::from(cargo::cargo_bin!("atm"));
-            #[cfg(windows)]
-            candidate.set_file_name("atm-daemon.exe");
-            #[cfg(not(windows))]
-            candidate.set_file_name("atm-daemon");
-            candidate
-        };
-        assert!(
-            daemon_bin.exists(),
-            "atm-daemon binary not found at {}",
-            daemon_bin.display()
-        );
-        daemon_test_registry::sweep_stale_test_daemons();
-        let mut cmd = Command::new(daemon_bin);
-        cmd.env("ATM_HOME", home.path())
-            .env("ATM_DAEMON_AUTOSTART", "0")
-            .env_remove("ATM_CONFIG")
-            .env_remove("CLAUDE_SESSION_ID")
-            .arg("--team")
-            .arg(team)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-
-        let child = cmd.spawn().expect("failed to spawn atm-daemon");
-        let pid = child.id();
-        assert!(pid > 1, "spawned daemon PID must be > 1, got {pid}");
-        let daemon_bin_for_registry = {
-            let mut candidate = PathBuf::from(cargo::cargo_bin!("atm"));
-            #[cfg(windows)]
-            candidate.set_file_name("atm-daemon.exe");
-            #[cfg(not(windows))]
-            candidate.set_file_name("atm-daemon");
-            candidate
-        };
-        daemon_test_registry::register_test_daemon(pid, &daemon_bin_for_registry);
-        Self { child, pid }
-    }
-
-    fn wait_ready(&mut self, home: &TempDir) {
-        let daemon_dir = home.path().join(".claude").join("daemon");
-        let status_path = daemon_dir.join("status.json");
-        #[cfg(windows)]
-        let timeout_secs = 30;
-        #[cfg(not(windows))]
-        let timeout_secs = 4;
-        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-        while Instant::now() < deadline {
-            if let Ok(Some(status)) = self.child.try_wait() {
-                panic!("daemon exited before readiness (status={status})");
-            }
-            let status_pid = fs::read_to_string(&status_path)
-                .ok()
-                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-                .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
-                .map(|pid| pid as u32);
-            if status_pid == Some(self.pid) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        panic!(
-            "daemon readiness timeout waiting for {}",
-            status_path.display()
-        );
-    }
-}
-
-impl Drop for DaemonProcessGuard {
-    fn drop(&mut self) {
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-        daemon_test_registry::unregister_test_daemon(self.pid);
     }
 }
 

@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -112,7 +114,6 @@ pub fn sweep_stale_test_daemons() {
             }
         }
         save_entries(&retained);
-        return;
     }
 
     #[cfg(not(unix))]

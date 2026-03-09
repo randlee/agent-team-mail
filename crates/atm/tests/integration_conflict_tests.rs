@@ -7,11 +7,13 @@
 use assert_cmd::cargo;
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+#[path = "support/daemon_process_guard.rs"]
+mod daemon_process_guard;
 #[path = "support/daemon_test_registry.rs"]
 mod daemon_test_registry;
+use daemon_process_guard::DaemonProcessGuard;
 
 /// Helper to set home directory for cross-platform test compatibility.
 /// Uses `ATM_HOME` which is checked first by `get_home_dir()`, avoiding
@@ -90,142 +92,88 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
     team_dir
 }
 
-/// Explicit daemon process lifecycle guard for integration tests.
-///
-/// Spawns `atm-daemon` with a known PID and guarantees teardown via kill+wait.
-struct DaemonProcessGuard {
-    child: Child,
-    pid: u32,
+#[cfg(unix)]
+fn daemon_pid_path(temp_dir: &TempDir) -> PathBuf {
+    temp_dir.path().join(".claude/daemon/atm-daemon.pid")
 }
 
-impl DaemonProcessGuard {
-    fn spawn(home: &TempDir, team: &str) -> Self {
-        let daemon_bin = {
-            let mut candidate = PathBuf::from(cargo::cargo_bin!("atm"));
-            #[cfg(windows)]
-            candidate.set_file_name("atm-daemon.exe");
-            #[cfg(not(windows))]
-            candidate.set_file_name("atm-daemon");
-            candidate
-        };
-        assert!(
-            daemon_bin.exists(),
-            "atm-daemon binary not found at {}",
-            daemon_bin.display()
-        );
-        daemon_test_registry::sweep_stale_test_daemons();
-        let mut cmd = Command::new(daemon_bin);
-        cmd.env("ATM_HOME", home.path())
-            .env("ATM_DAEMON_AUTOSTART", "0")
-            .env_remove("ATM_CONFIG")
-            .env_remove("CLAUDE_SESSION_ID")
-            .arg("--team")
-            .arg(team)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-
-        let child = cmd.spawn().expect("failed to spawn atm-daemon");
-        let pid = child.id();
-        assert!(pid > 1, "spawned daemon PID must be > 1, got {pid}");
-        let daemon_bin_for_registry = {
-            let mut candidate = PathBuf::from(cargo::cargo_bin!("atm"));
-            #[cfg(windows)]
-            candidate.set_file_name("atm-daemon.exe");
-            #[cfg(not(windows))]
-            candidate.set_file_name("atm-daemon");
-            candidate
-        };
-        daemon_test_registry::register_test_daemon(pid, &daemon_bin_for_registry);
-        Self { child, pid }
-    }
-
-    fn pid(&self) -> u32 {
-        self.pid
-    }
-
-    fn wait_ready(&mut self, home: &TempDir) {
-        let daemon_dir = home.path().join(".claude").join("daemon");
-        let pid_path = daemon_dir.join("atm-daemon.pid");
-        let status_path = daemon_dir.join("status.json");
-        #[cfg(windows)]
-        let timeout_secs = 30;
-        #[cfg(not(windows))]
-        let timeout_secs = 3;
-        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-        while Instant::now() < deadline {
-            if let Ok(Some(status)) = self.child.try_wait() {
-                panic!(
-                    "daemon exited before readiness (status={status}); expected pid {} at {}",
-                    self.pid,
-                    status_path.display()
-                );
-            }
-            let status_pid = fs::read_to_string(&status_path)
-                .ok()
-                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-                .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
-                .map(|pid| pid as u32);
-            if status_pid == Some(self.pid) {
-                return;
-            }
-            if let Ok(content) = fs::read_to_string(&pid_path)
-                && let Ok(pid) = content.trim().parse::<u32>()
-                && pid == self.pid
-            {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-
-        let child_state = match self.child.try_wait() {
-            Ok(Some(status)) => format!("exited ({status})"),
-            Ok(None) => "running".to_string(),
-            Err(e) => format!("unknown ({e})"),
-        };
-        let daemon_entries = match fs::read_dir(&daemon_dir) {
-            Ok(entries) => {
-                let mut names: Vec<String> = entries
-                    .filter_map(|entry| entry.ok())
-                    .map(|entry| entry.file_name().to_string_lossy().to_string())
-                    .collect();
-                names.sort();
-                names.join(", ")
-            }
-            Err(_) => "<missing>".to_string(),
-        };
-        let pid_contents = fs::read_to_string(&pid_path)
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| "<missing>".to_string());
-        let status_contents = fs::read_to_string(&status_path)
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| "<missing>".to_string());
-        let status_pid = serde_json::from_str::<serde_json::Value>(&status_contents)
-            .ok()
-            .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
-            .map(|pid| pid.to_string())
-            .unwrap_or_else(|| "<missing>".to_string());
-        panic!(
-            "daemon readiness timeout: expected pid {} at {} (child={}, daemon_dir={}, pid_contents={}, status_pid={}, status_contents={}, daemon_entries=[{}])",
-            self.pid,
-            status_path.display(),
-            child_state,
-            daemon_dir.display(),
-            pid_contents,
-            status_pid,
-            status_contents,
-            daemon_entries
-        );
-    }
+#[cfg(unix)]
+fn read_daemon_pid(temp_dir: &TempDir) -> Option<u32> {
+    let pid_path = daemon_pid_path(temp_dir);
+    let raw = fs::read_to_string(pid_path).ok()?;
+    raw.trim().parse::<u32>().ok()
 }
 
-impl Drop for DaemonProcessGuard {
-    fn drop(&mut self) {
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+#[cfg(unix)]
+fn wait_for_daemon_pid_change(temp_dir: &TempDir, previous_pid: u32, timeout: Duration) -> u32 {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Some(pid) = read_daemon_pid(temp_dir)
+            && pid != previous_pid
+            && pid_alive(pid as i32)
+        {
+            return pid;
         }
-        daemon_test_registry::unregister_test_daemon(self.pid);
+        std::thread::sleep(Duration::from_millis(50));
     }
+    panic!("daemon pid did not change from {previous_pid} within {timeout:?}");
+}
+
+#[cfg(unix)]
+fn daemon_binary_path() -> PathBuf {
+    let mut candidate = PathBuf::from(cargo::cargo_bin!("atm"));
+    candidate.set_file_name("atm-daemon");
+    candidate
+}
+
+#[cfg(unix)]
+fn write_lock_metadata(temp_dir: &TempDir, pid: u32, home_scope: String, executable_path: String) {
+    let metadata_path = temp_dir.path().join(".config/atm/daemon.lock.meta.json");
+    if let Some(parent) = metadata_path.parent() {
+        fs::create_dir_all(parent).expect("create metadata dir");
+    }
+    let payload = serde_json::json!({
+        "pid": pid,
+        "home_scope": home_scope,
+        "executable_path": executable_path,
+        "version": env!("CARGO_PKG_VERSION"),
+        "written_at": "2026-01-01T00:00:00Z",
+    });
+    fs::write(
+        metadata_path,
+        serde_json::to_string_pretty(&payload).expect("serialize metadata"),
+    )
+    .expect("write metadata");
+}
+
+#[cfg(unix)]
+fn cleanup_pid(pid: u32) {
+    send_signal(pid as i32, 15);
+    for _ in 0..20 {
+        if !pid_alive(pid as i32) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    send_signal(pid as i32, 9);
+}
+
+#[cfg(unix)]
+fn pid_alive(pid: i32) -> bool {
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    // SAFETY: signal 0 checks process existence.
+    unsafe { kill(pid, 0) == 0 }
+}
+
+#[cfg(unix)]
+fn send_signal(pid: i32, sig: i32) {
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    // SAFETY: best-effort test cleanup path.
+    let _ = unsafe { kill(pid, sig) };
 }
 
 // ============================================================================
@@ -1309,4 +1257,113 @@ fn test_doctor_status_members_consistent_unknown_when_daemon_unreachable() {
         doctor_stdout.contains("atm-daemon"),
         "doctor output should include actionable daemon-start recommendation"
     );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn test_dead_pid_stale_lock_starts_daemon_cleanly() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let dead_pid = 999_991_u32;
+    assert!(!pid_alive(dead_pid as i32), "fixture pid should be dead");
+
+    let daemon_dir = temp_dir.path().join(".claude/daemon");
+    fs::create_dir_all(&daemon_dir).unwrap();
+    fs::write(daemon_dir.join("atm-daemon.pid"), format!("{dead_pid}\n")).unwrap();
+    fs::write(
+        daemon_dir.join("status.json"),
+        serde_json::json!({
+            "pid": dead_pid,
+            "version": env!("CARGO_PKG_VERSION"),
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let home_scope = fs::canonicalize(temp_dir.path())
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    write_lock_metadata(
+        &temp_dir,
+        dead_pid,
+        home_scope,
+        daemon_binary_path().to_string_lossy().to_string(),
+    );
+    let lock_path = temp_dir.path().join(".config/atm/daemon.lock");
+    fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    fs::write(&lock_path, "stale").unwrap();
+
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    cmd.env("ATM_HOME", temp_dir.path())
+        .env("ATM_DAEMON_AUTOSTART", "1")
+        .env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "team-lead")
+        .env_remove("ATM_CONFIG")
+        .env_remove("CLAUDE_SESSION_ID")
+        .current_dir(&workdir);
+    cmd.arg("send")
+        .arg("agent-a")
+        .arg("stale-lock-recovery-check")
+        .assert()
+        .success();
+
+    let new_pid = wait_for_daemon_pid_change(&temp_dir, dead_pid, Duration::from_secs(5));
+    assert!(new_pid > 1);
+    daemon_test_registry::register_test_daemon(new_pid, &daemon_binary_path());
+    cleanup_pid(new_pid);
+    daemon_test_registry::unregister_test_daemon(new_pid);
+}
+
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn test_identity_mismatch_socket_is_detected_and_restarted() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+
+    let mut daemon_guard = DaemonProcessGuard::spawn(&temp_dir, "test-team");
+    daemon_guard.wait_ready(&temp_dir);
+    let old_pid = daemon_guard.pid();
+
+    write_lock_metadata(
+        &temp_dir,
+        old_pid,
+        "/tmp/atm-mismatch-home".to_string(),
+        daemon_binary_path().to_string_lossy().to_string(),
+    );
+
+    let old_home = std::env::var("ATM_HOME").ok();
+    let old_daemon_bin = std::env::var("ATM_DAEMON_BIN").ok();
+    let old_autostart = std::env::var("ATM_DAEMON_AUTOSTART").ok();
+    unsafe {
+        std::env::set_var("ATM_HOME", temp_dir.path());
+        std::env::set_var("ATM_DAEMON_BIN", daemon_binary_path());
+        std::env::set_var("ATM_DAEMON_AUTOSTART", "1");
+    }
+    let ensure_result = agent_team_mail_core::daemon_client::ensure_daemon_running();
+    unsafe {
+        match old_home {
+            Some(v) => std::env::set_var("ATM_HOME", v),
+            None => std::env::remove_var("ATM_HOME"),
+        }
+        match old_daemon_bin {
+            Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
+            None => std::env::remove_var("ATM_DAEMON_BIN"),
+        }
+        match old_autostart {
+            Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
+            None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
+        }
+    }
+    ensure_result.expect("ensure_daemon_running should restart on identity mismatch");
+
+    let new_pid = wait_for_daemon_pid_change(&temp_dir, old_pid, Duration::from_secs(8));
+    assert!(new_pid > 1);
+    daemon_test_registry::register_test_daemon(new_pid, &daemon_binary_path());
+    cleanup_pid(new_pid);
+    daemon_test_registry::unregister_test_daemon(new_pid);
 }
