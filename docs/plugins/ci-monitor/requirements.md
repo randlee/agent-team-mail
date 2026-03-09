@@ -364,13 +364,13 @@ Test:
   - `atm gh status <target>` fails with actionable init guidance
   - `atm gh init` remains available and succeeds/fails deterministically
 - `status` output coherence during active and terminal runs
-- `monitor report` CI semantics:
+- `pr report` CI semantics:
   - pass + skip (no fail/pending) yields aggregate `pass`
   - skip count is emitted in report details
-- `monitor report` review semantics:
+- `pr report` review semantics:
   - no-review case emits `review_decision = none`
   - unknown review metadata does not hard-block by default
-- `monitor report` merge semantics:
+- `pr report` merge semantics:
   - unknown mergeability retried then surfaced as transient/indeterminate
   - hard blockers and advisory reasons are emitted in separate fields/sections
 
