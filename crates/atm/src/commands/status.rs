@@ -450,15 +450,18 @@ mod tests {
         let tmp = tempfile::tempdir().expect("temp dir");
         let daemon_dir = tmp.path().join(".claude/daemon");
         std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let sys_tmp = std::env::temp_dir();
+        let spool_path = sys_tmp.join("spool").to_string_lossy().into_owned();
+        let log_path = sys_tmp.join("atm.log.jsonl").to_string_lossy().into_owned();
         std::fs::write(
             daemon_dir.join("status.json"),
             serde_json::json!({
                 "logging": {
                     "state": "degraded_spooling",
                     "dropped_counter": 2,
-                    "spool_path": "/tmp/spool",
+                    "spool_path": spool_path,
                     "last_error": "spool backlog",
-                    "canonical_log_path": "/tmp/atm.log.jsonl",
+                    "canonical_log_path": log_path,
                     "spool_count": 3,
                     "oldest_spool_age": 17
                 }
@@ -472,7 +475,7 @@ mod tests {
         assert_eq!(logging.dropped_counter, 2);
         assert_eq!(logging.spool_count, 3);
         assert_eq!(logging.oldest_spool_age, Some(17));
-        assert_eq!(logging.canonical_log_path, "/tmp/atm.log.jsonl");
+        assert_eq!(logging.canonical_log_path, log_path);
     }
 
     #[test]

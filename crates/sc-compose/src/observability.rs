@@ -26,7 +26,7 @@ impl Logger {
             "timestamp": Utc::now().to_rfc3339(),
             "source": "sc-compose",
             "action": action,
-            "result": result,
+            "outcome": result,
             "fields": truncate_fields(fields),
         });
         let line = event.to_string();

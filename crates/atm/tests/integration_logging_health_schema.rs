@@ -36,6 +36,9 @@ fn setup_team(home: &Path, team: &str) {
 fn setup_daemon_status(home: &Path) {
     let daemon_dir = home.join(".claude/daemon");
     fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+    let tmp = std::env::temp_dir();
+    let spool_path = tmp.join("log-spool").to_string_lossy().into_owned();
+    let log_path = tmp.join("atm.log.jsonl").to_string_lossy().into_owned();
     fs::write(
         daemon_dir.join("status.json"),
         serde_json::json!({
@@ -48,9 +51,9 @@ fn setup_daemon_status(home: &Path) {
             "logging": {
                 "state": "degraded_spooling",
                 "dropped_counter": 2,
-                "spool_path": "/tmp/log-spool",
+                "spool_path": spool_path,
                 "last_error": "spool backlog",
-                "canonical_log_path": "/tmp/atm.log.jsonl",
+                "canonical_log_path": log_path,
                 "spool_count": 3,
                 "oldest_spool_age": 15
             }
