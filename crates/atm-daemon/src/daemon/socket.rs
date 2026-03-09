@@ -2141,6 +2141,7 @@ fn count_in_flight_monitors(home: &std::path::Path, team: &str) -> u64 {
 fn emit_gh_monitor_health_transition(
     home: &std::path::Path,
     team: &str,
+    config_cwd: Option<&str>,
     old_state: &str,
     new_state: &str,
     reason: &str,
@@ -2164,7 +2165,7 @@ fn emit_gh_monitor_health_transition(
         ..Default::default()
     });
 
-    let (from_agent, targets) = resolve_ci_alert_routing(home, team, None, None);
+    let (from_agent, targets) = resolve_ci_alert_routing(home, team, config_cwd, None);
     let text = format!(
         "[gh_monitor] availability transition {} -> {}\nreason: {}",
         old_state, new_state, reason
@@ -2200,35 +2201,42 @@ fn emit_gh_monitor_health_transition(
 }
 
 #[cfg(unix)]
+#[derive(Debug, Clone, Default)]
+struct GhMonitorHealthUpdate<'a> {
+    lifecycle_state: Option<&'a str>,
+    availability_state: Option<&'a str>,
+    in_flight: Option<u64>,
+    message: Option<String>,
+    config_state: Option<&'a GhMonitorConfigState>,
+    config_cwd: Option<&'a str>,
+}
+
+#[cfg(unix)]
 fn set_gh_monitor_health_state(
     home: &std::path::Path,
     team: &str,
-    lifecycle_state: Option<&str>,
-    availability_state: Option<&str>,
-    in_flight: Option<u64>,
-    message: Option<String>,
-    config_state: Option<&GhMonitorConfigState>,
+    update: GhMonitorHealthUpdate<'_>,
 ) -> Result<GhMonitorHealth> {
     let mut current = read_gh_monitor_health(home, team)?;
     let old_availability = current.availability_state.clone();
 
-    if let Some(lifecycle_state) = lifecycle_state {
+    if let Some(lifecycle_state) = update.lifecycle_state {
         current.lifecycle_state = lifecycle_state.to_string();
     }
-    if let Some(availability_state) = availability_state {
+    if let Some(availability_state) = update.availability_state {
         current.availability_state = availability_state.to_string();
     }
-    if let Some(in_flight) = in_flight {
+    if let Some(in_flight) = update.in_flight {
         current.in_flight = in_flight;
     }
-    if let Some(config_state) = config_state {
+    if let Some(config_state) = update.config_state {
         current.configured = config_state.configured;
         current.enabled = config_state.enabled;
         current.config_source = config_state.config_source.clone();
         current.config_path = config_state.config_path.clone();
     }
     current.updated_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    current.message = message;
+    current.message = update.message;
 
     if old_availability != current.availability_state {
         let reason = current
@@ -2238,6 +2246,7 @@ fn set_gh_monitor_health_state(
         emit_gh_monitor_health_transition(
             home,
             team,
+            update.config_cwd,
             &old_availability,
             &current.availability_state,
             &reason,
@@ -2255,6 +2264,8 @@ struct GhMonitorConfigState {
     enabled: bool,
     config_source: Option<String>,
     config_path: Option<String>,
+    configured_team: Option<String>,
+    owner_repo: Option<String>,
     error: Option<String>,
 }
 
@@ -2290,6 +2301,8 @@ fn evaluate_gh_monitor_config(
         config_path: location
             .as_ref()
             .map(|loc| loc.path.to_string_lossy().to_string()),
+        configured_team: None,
+        owner_repo: None,
         error: None,
     };
 
@@ -2315,6 +2328,8 @@ fn evaluate_gh_monitor_config(
         }
     };
     state.enabled = parsed.enabled;
+    state.configured_team = Some(parsed.team.clone());
+    state.owner_repo = normalize_repo_scope(parsed.owner.as_deref(), parsed.repo.as_deref());
 
     if !parsed.enabled {
         state.error = Some("gh_monitor plugin disabled in configuration".to_string());
@@ -2525,16 +2540,44 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
         let _ = set_gh_monitor_health_state(
             home,
             &gh_request.team,
-            None,
-            Some("disabled_config_error"),
-            Some(0),
-            Some(reason.clone()),
-            Some(&config_state),
+            GhMonitorHealthUpdate {
+                availability_state: Some("disabled_config_error"),
+                in_flight: Some(0),
+                message: Some(reason.clone()),
+                config_state: Some(&config_state),
+                config_cwd: gh_request.config_cwd.as_deref(),
+                ..Default::default()
+            },
         );
         return make_error_response(
             &request.request_id,
             "CONFIG_ERROR",
             &format!("gh_monitor unavailable: {reason}"),
+        );
+    }
+
+    if config_state
+        .configured_team
+        .as_deref()
+        .is_some_and(|configured_team| configured_team != gh_request.team)
+    {
+        return make_error_response(
+            &request.request_id,
+            "CONFIG_ERROR",
+            &format!(
+                "gh_monitor team mismatch: configured '{}' but request was '{}'",
+                config_state.configured_team.as_deref().unwrap_or_default(),
+                gh_request.team
+            ),
+        );
+    }
+
+    let owner_repo = config_state.owner_repo.as_deref().unwrap_or_default();
+    if owner_repo.is_empty() {
+        return make_error_response(
+            &request.request_id,
+            "CONFIG_ERROR",
+            "gh_monitor unavailable: unable to resolve owner/repo for GitHub provider",
         );
     }
 
@@ -2576,7 +2619,7 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
         }
         GhMonitorTargetKind::Workflow => {
             if let Some(reference) = gh_request.reference.as_deref() {
-                match try_find_workflow_run_id(&gh_request.target, reference).await {
+                match try_find_workflow_run_id(owner_repo, &gh_request.target, reference).await {
                     Ok(Some(run_id)) => status.run_id = Some(run_id),
                     Ok(None) => {}
                     Err(e) => {
@@ -2600,7 +2643,7 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
                 }
             };
             let mut preflight_blocked = false;
-            match fetch_pr_merge_state(pr_number).await {
+            match fetch_pr_merge_state(owner_repo, pr_number).await {
                 Ok(Some(pr_view)) => {
                     if let Some(merge_state_status) = pr_view.merge_state_status.as_deref()
                         && is_pr_merge_state_dirty(merge_state_status)
@@ -2637,7 +2680,7 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
                     status.message =
                         Some("No workflow run observed before start-timeout (0s).".to_string());
                 } else {
-                    match wait_for_pr_run_start(pr_number, timeout_secs).await {
+                    match wait_for_pr_run_start(owner_repo, pr_number, timeout_secs).await {
                         Ok(Some(run_id)) => {
                             status.run_id = Some(run_id);
                         }
@@ -2664,11 +2707,13 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
         let _ = set_gh_monitor_health_state(
             home,
             &gh_request.team,
-            None,
-            Some("degraded"),
-            None,
-            Some(format!("failed to persist monitor status: {e}")),
-            Some(&config_state),
+            GhMonitorHealthUpdate {
+                availability_state: Some("degraded"),
+                message: Some(format!("failed to persist monitor status: {e}")),
+                config_state: Some(&config_state),
+                config_cwd: gh_request.config_cwd.as_deref(),
+                ..Default::default()
+            },
         );
         return make_error_response(
             &request.request_id,
@@ -2683,8 +2728,16 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
         let home = home.to_path_buf();
         let status_seed = status.clone();
         let gh_request = gh_request.clone();
+        let owner_repo = owner_repo.to_string();
         tokio::spawn(async move {
-            if let Err(e) = monitor_gh_run(home.as_path(), &status_seed, &gh_request, run_id).await
+            if let Err(e) = monitor_gh_run(
+                home.as_path(),
+                &status_seed,
+                &gh_request,
+                &owner_repo,
+                run_id,
+            )
+            .await
             {
                 warn!(
                     team = %status_seed.team,
@@ -2700,21 +2753,27 @@ async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) ->
         let _ = set_gh_monitor_health_state(
             home,
             &gh_request.team,
-            None,
-            Some("degraded"),
-            Some(count_in_flight_monitors(home, &gh_request.team)),
-            Some(format!("transient provider/gh failure: {reason}")),
-            Some(&config_state),
+            GhMonitorHealthUpdate {
+                availability_state: Some("degraded"),
+                in_flight: Some(count_in_flight_monitors(home, &gh_request.team)),
+                message: Some(format!("transient provider/gh failure: {reason}")),
+                config_state: Some(&config_state),
+                config_cwd: gh_request.config_cwd.as_deref(),
+                ..Default::default()
+            },
         );
     } else {
         let _ = set_gh_monitor_health_state(
             home,
             &gh_request.team,
-            Some("running"),
-            Some("healthy"),
-            Some(count_in_flight_monitors(home, &gh_request.team)),
-            Some("monitor request succeeded".to_string()),
-            Some(&config_state),
+            GhMonitorHealthUpdate {
+                lifecycle_state: Some("running"),
+                availability_state: Some("healthy"),
+                in_flight: Some(count_in_flight_monitors(home, &gh_request.team)),
+                message: Some("monitor request succeeded".to_string()),
+                config_state: Some(&config_state),
+                config_cwd: gh_request.config_cwd.as_deref(),
+            },
         );
     }
 
@@ -2776,11 +2835,14 @@ async fn handle_gh_monitor_control_command(
         GhMonitorLifecycleAction::Start => match set_gh_monitor_health_state(
             home,
             &control.team,
-            Some("running"),
-            None,
-            Some(count_in_flight_monitors(home, &control.team)),
-            Some("gh monitor lifecycle started".to_string()),
-            Some(&config_state),
+            GhMonitorHealthUpdate {
+                lifecycle_state: Some("running"),
+                in_flight: Some(count_in_flight_monitors(home, &control.team)),
+                message: Some("gh monitor lifecycle started".to_string()),
+                config_state: Some(&config_state),
+                config_cwd: control.config_cwd.as_deref(),
+                ..Default::default()
+            },
         ) {
             Ok(health) => health,
             Err(e) => {
@@ -2796,14 +2858,17 @@ async fn handle_gh_monitor_control_command(
             let _ = set_gh_monitor_health_state(
                 home,
                 &control.team,
-                Some("draining"),
-                None,
-                Some(count_in_flight_monitors(home, &control.team)),
-                Some(format!(
-                    "draining in-flight monitors (timeout={}s)",
-                    drain_timeout_secs
-                )),
-                Some(&config_state),
+                GhMonitorHealthUpdate {
+                    lifecycle_state: Some("draining"),
+                    in_flight: Some(count_in_flight_monitors(home, &control.team)),
+                    message: Some(format!(
+                        "draining in-flight monitors (timeout={}s)",
+                        drain_timeout_secs
+                    )),
+                    config_state: Some(&config_state),
+                    config_cwd: control.config_cwd.as_deref(),
+                    ..Default::default()
+                },
             );
 
             let deadline = std::time::Instant::now()
@@ -2825,11 +2890,14 @@ async fn handle_gh_monitor_control_command(
             match set_gh_monitor_health_state(
                 home,
                 &control.team,
-                Some("stopped"),
-                None,
-                Some(in_flight),
-                Some(message),
-                Some(&config_state),
+                GhMonitorHealthUpdate {
+                    lifecycle_state: Some("stopped"),
+                    in_flight: Some(in_flight),
+                    message: Some(message),
+                    config_state: Some(&config_state),
+                    config_cwd: control.config_cwd.as_deref(),
+                    ..Default::default()
+                },
             ) {
                 Ok(health) => health,
                 Err(e) => {
@@ -2846,14 +2914,17 @@ async fn handle_gh_monitor_control_command(
             let _ = set_gh_monitor_health_state(
                 home,
                 &control.team,
-                Some("draining"),
-                None,
-                Some(count_in_flight_monitors(home, &control.team)),
-                Some(format!(
-                    "draining in-flight monitors before restart (timeout={}s)",
-                    drain_timeout_secs
-                )),
-                Some(&config_state),
+                GhMonitorHealthUpdate {
+                    lifecycle_state: Some("draining"),
+                    in_flight: Some(count_in_flight_monitors(home, &control.team)),
+                    message: Some(format!(
+                        "draining in-flight monitors before restart (timeout={}s)",
+                        drain_timeout_secs
+                    )),
+                    config_state: Some(&config_state),
+                    config_cwd: control.config_cwd.as_deref(),
+                    ..Default::default()
+                },
             );
 
             let deadline = std::time::Instant::now()
@@ -2873,11 +2944,14 @@ async fn handle_gh_monitor_control_command(
                 let _ = set_gh_monitor_health_state(
                     home,
                     &control.team,
-                    Some("stopped"),
-                    Some("disabled_config_error"),
-                    Some(in_flight),
-                    Some(message),
-                    Some(&reloaded_config),
+                    GhMonitorHealthUpdate {
+                        lifecycle_state: Some("stopped"),
+                        availability_state: Some("disabled_config_error"),
+                        in_flight: Some(in_flight),
+                        message: Some(message),
+                        config_state: Some(&reloaded_config),
+                        config_cwd: control.config_cwd.as_deref(),
+                    },
                 );
                 return make_error_response(
                     &request.request_id,
@@ -2889,18 +2963,21 @@ async fn handle_gh_monitor_control_command(
             match set_gh_monitor_health_state(
                 home,
                 &control.team,
-                Some("running"),
-                Some("healthy"),
-                Some(in_flight),
-                Some(if in_flight == 0 {
-                    "gh monitor lifecycle restarted after in-flight drain".to_string()
-                } else {
-                    format!(
-                        "gh monitor lifecycle restarted after drain timeout; {} in-flight monitor(s) remain",
-                        in_flight
-                    )
-                }),
-                Some(&reloaded_config),
+                GhMonitorHealthUpdate {
+                    lifecycle_state: Some("running"),
+                    availability_state: Some("healthy"),
+                    in_flight: Some(in_flight),
+                    message: Some(if in_flight == 0 {
+                        "gh monitor lifecycle restarted after in-flight drain".to_string()
+                    } else {
+                        format!(
+                            "gh monitor lifecycle restarted after drain timeout; {} in-flight monitor(s) remain",
+                            in_flight
+                        )
+                    }),
+                    config_state: Some(&reloaded_config),
+                    config_cwd: control.config_cwd.as_deref(),
+                },
             ) {
                 Ok(health) => health,
                 Err(e) => {
@@ -3178,10 +3255,14 @@ async fn handle_gh_status_command(request_str: &str, _home: &std::path::Path) ->
 }
 
 #[cfg(unix)]
-async fn wait_for_pr_run_start(pr_number: u64, timeout_secs: u64) -> Result<Option<u64>> {
+async fn wait_for_pr_run_start(
+    owner_repo: &str,
+    pr_number: u64,
+    timeout_secs: u64,
+) -> Result<Option<u64>> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
-        if let Some(run_id) = try_find_pr_run_id(pr_number).await? {
+        if let Some(run_id) = try_find_pr_run_id(owner_repo, pr_number).await? {
             return Ok(Some(run_id));
         }
 
@@ -3196,14 +3277,17 @@ async fn wait_for_pr_run_start(pr_number: u64, timeout_secs: u64) -> Result<Opti
 }
 
 #[cfg(unix)]
-async fn try_find_pr_run_id(pr_number: u64) -> Result<Option<u64>> {
-    let output = run_gh_command(&[
-        "pr",
-        "view",
-        &pr_number.to_string(),
-        "--json",
-        "headRefName,headRefOid,createdAt",
-    ])
+async fn try_find_pr_run_id(owner_repo: &str, pr_number: u64) -> Result<Option<u64>> {
+    let output = run_gh_command_for_repo(
+        owner_repo,
+        &[
+            "pr",
+            "view",
+            &pr_number.to_string(),
+            "--json",
+            "headRefName,headRefOid,createdAt",
+        ],
+    )
     .await?;
     let pr_view = serde_json::from_str::<GhPrLookupView>(&output)?;
     let branch = pr_view
@@ -3229,16 +3313,19 @@ async fn try_find_pr_run_id(pr_number: u64) -> Result<Option<u64>> {
         return Ok(None);
     };
 
-    let output = run_gh_command(&[
-        "run",
-        "list",
-        "--branch",
-        &branch,
-        "--limit",
-        "20",
-        "--json",
-        "databaseId,headSha,createdAt",
-    ])
+    let output = run_gh_command_for_repo(
+        owner_repo,
+        &[
+            "run",
+            "list",
+            "--branch",
+            &branch,
+            "--limit",
+            "20",
+            "--json",
+            "databaseId,headSha,createdAt",
+        ],
+    )
     .await?;
     let runs = serde_json::from_str::<Vec<GhRunListEntry>>(&output)?;
     for run in runs {
@@ -3288,14 +3375,17 @@ fn run_passes_pr_recency_gate(run_created_at: Option<&str>, pr_created_at: Optio
 }
 
 #[cfg(unix)]
-async fn fetch_pr_merge_state(pr_number: u64) -> Result<Option<GhPrView>> {
-    let output = run_gh_command(&[
-        "pr",
-        "view",
-        &pr_number.to_string(),
-        "--json",
-        "mergeStateStatus,url",
-    ])
+async fn fetch_pr_merge_state(owner_repo: &str, pr_number: u64) -> Result<Option<GhPrView>> {
+    let output = run_gh_command_for_repo(
+        owner_repo,
+        &[
+            "pr",
+            "view",
+            &pr_number.to_string(),
+            "--json",
+            "mergeStateStatus,url",
+        ],
+    )
     .await?;
     let pr = serde_json::from_str::<GhPrView>(&output)?;
     if pr
@@ -3316,17 +3406,24 @@ fn is_pr_merge_state_dirty(merge_state_status: &str) -> bool {
 }
 
 #[cfg(unix)]
-async fn try_find_workflow_run_id(workflow: &str, reference: &str) -> Result<Option<u64>> {
-    let output = run_gh_command(&[
-        "run",
-        "list",
-        "--workflow",
-        workflow,
-        "--limit",
-        "20",
-        "--json",
-        "databaseId,headBranch,headSha",
-    ])
+async fn try_find_workflow_run_id(
+    owner_repo: &str,
+    workflow: &str,
+    reference: &str,
+) -> Result<Option<u64>> {
+    let output = run_gh_command_for_repo(
+        owner_repo,
+        &[
+            "run",
+            "list",
+            "--workflow",
+            workflow,
+            "--limit",
+            "20",
+            "--json",
+            "databaseId,headBranch,headSha",
+        ],
+    )
     .await?;
     let runs = serde_json::from_str::<Vec<serde_json::Value>>(&output)?;
 
@@ -3357,10 +3454,25 @@ async fn run_gh_command(args: &[&str]) -> Result<String> {
 }
 
 #[cfg(unix)]
+async fn run_gh_command_for_repo(owner_repo: &str, args: &[&str]) -> Result<String> {
+    let owner_repo = owner_repo.trim();
+    if owner_repo.is_empty() {
+        anyhow::bail!("missing owner/repo scope for gh command");
+    }
+
+    let mut command_args: Vec<&str> = Vec::with_capacity(args.len() + 2);
+    command_args.push("-R");
+    command_args.push(owner_repo);
+    command_args.extend_from_slice(args);
+    run_gh_command(&command_args).await
+}
+
+#[cfg(unix)]
 async fn monitor_gh_run(
     home: &std::path::Path,
     status_seed: &GhMonitorStatus,
     gh_request: &GhMonitorRequest,
+    owner_repo: &str,
     run_id: u64,
 ) -> Result<()> {
     let mut seen_completed: std::collections::HashSet<u64> = std::collections::HashSet::new();
@@ -3369,7 +3481,7 @@ async fn monitor_gh_run(
     let mut first_poll = true;
 
     loop {
-        let run = fetch_run_view(run_id).await?;
+        let run = fetch_run_view(owner_repo, run_id).await?;
         let expected_repo = extract_repo_slug_from_url(&run.url);
         let (from_agent, targets) = resolve_ci_alert_routing(
             home,
@@ -3450,7 +3562,8 @@ async fn monitor_gh_run(
         if terminal != GhRunTerminalState::Success {
             let correlation_id = format!("ci-failure-{}-{}", run.database_id, uuid::Uuid::new_v4());
             let failure_payload =
-                build_failure_payload(&run, status_seed, gh_request, &correlation_id).await;
+                build_failure_payload(&run, status_seed, gh_request, owner_repo, &correlation_id)
+                    .await;
             message.push_str("\nFailure details:\n");
             message.push_str(&failure_payload);
         }
@@ -3490,7 +3603,7 @@ async fn monitor_gh_run(
         if matches!(gh_request.target_kind, GhMonitorTargetKind::Pr)
             && let Ok(pr_number) = status_seed.target.trim().parse::<u64>()
         {
-            match fetch_pr_merge_state(pr_number).await {
+            match fetch_pr_merge_state(owner_repo, pr_number).await {
                 Ok(Some(pr_view)) => {
                     if let Some(merge_state_status) = pr_view.merge_state_status.as_deref()
                         && is_pr_merge_state_dirty(merge_state_status)
@@ -3520,14 +3633,17 @@ async fn monitor_gh_run(
 }
 
 #[cfg(unix)]
-async fn fetch_run_view(run_id: u64) -> Result<GhRunView> {
-    let output = run_gh_command(&[
-        "run",
-        "view",
-        &run_id.to_string(),
-        "--json",
-        "databaseId,name,status,conclusion,headBranch,headSha,url,jobs,attempt,pullRequests",
-    ])
+async fn fetch_run_view(owner_repo: &str, run_id: u64) -> Result<GhRunView> {
+    let output = run_gh_command_for_repo(
+        owner_repo,
+        &[
+            "run",
+            "view",
+            &run_id.to_string(),
+            "--json",
+            "databaseId,name,status,conclusion,headBranch,headSha,url,jobs,attempt,pullRequests",
+        ],
+    )
     .await?;
     let run = serde_json::from_str::<GhRunView>(&output)?;
     Ok(run)
@@ -3710,6 +3826,7 @@ async fn build_failure_payload(
     run: &GhRunView,
     status_seed: &GhMonitorStatus,
     gh_request: &GhMonitorRequest,
+    owner_repo: &str,
     correlation_id: &str,
 ) -> String {
     let failed_jobs: Vec<&GhRunJob> = run
@@ -3748,7 +3865,7 @@ async fn build_failure_payload(
         .map(|step| step.name.clone())
         .unwrap_or_else(|| "unknown".to_string());
     let failed_log_excerpt = if let Some(first_job) = failed_jobs.first() {
-        fetch_failed_log_excerpt(first_job.database_id)
+        fetch_failed_log_excerpt(owner_repo, first_job.database_id)
             .await
             .unwrap_or_else(|_| "(log excerpt unavailable)".to_string())
     } else {
@@ -3797,8 +3914,12 @@ async fn build_failure_payload(
 }
 
 #[cfg(unix)]
-async fn fetch_failed_log_excerpt(job_id: u64) -> Result<String> {
-    let output = run_gh_command(&["run", "view", "--job", &job_id.to_string(), "--log"]).await?;
+async fn fetch_failed_log_excerpt(owner_repo: &str, job_id: u64) -> Result<String> {
+    let output = run_gh_command_for_repo(
+        owner_repo,
+        &["run", "view", "--job", &job_id.to_string(), "--log"],
+    )
+    .await?;
     let excerpt = output
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -6047,7 +6168,21 @@ poll_interval_secs = 1
         use std::os::unix::fs::PermissionsExt;
 
         let script_path = temp.path().join("gh");
-        std::fs::write(&script_path, script_body).expect("write fake gh script");
+        let body = script_body
+            .strip_prefix("#!/bin/sh\n")
+            .unwrap_or(script_body);
+        let wrapped = format!(
+            r#"#!/bin/sh
+if [ "$1" = "-R" ]; then
+  shift
+  if [ -n "$1" ]; then
+    shift
+  fi
+fi
+{body}
+"#
+        );
+        std::fs::write(&script_path, wrapped).expect("write fake gh script");
         let mut perms = std::fs::metadata(&script_path)
             .expect("stat fake gh script")
             .permissions();
@@ -7034,7 +7169,7 @@ exit 1
             config_cwd: None,
         };
 
-        monitor_gh_run(temp.path(), &status_seed, &gh_request, 42)
+        monitor_gh_run(temp.path(), &status_seed, &gh_request, "o/r", 42)
             .await
             .expect("monitor_gh_run should complete");
 
@@ -7098,7 +7233,7 @@ exit 1
             config_cwd: None,
         };
 
-        monitor_gh_run(temp.path(), &status_seed, &gh_request, 42)
+        monitor_gh_run(temp.path(), &status_seed, &gh_request, "o/r", 42)
             .await
             .expect("monitor_gh_run should complete");
 
@@ -7170,7 +7305,7 @@ exit 1
         };
 
         let started = std::time::Instant::now();
-        monitor_gh_run(temp.path(), &status_seed, &gh_request, 42)
+        monitor_gh_run(temp.path(), &status_seed, &gh_request, "o/r", 42)
             .await
             .expect("monitor_gh_run should complete");
         let elapsed = started.elapsed();
@@ -7294,8 +7429,66 @@ echo "unexpected gh args: $*" >&2
 exit 1
 "#,
         );
-        let run_id = wait_for_pr_run_start(123, 1).await.unwrap();
+        let run_id = wait_for_pr_run_start("o/r", 123, 1).await.unwrap();
         assert_eq!(run_id, Some(222222));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_run_gh_command_for_repo_injects_repo_scope_flag() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join("gh");
+        std::fs::write(
+            &script_path,
+            r#"#!/bin/sh
+if [ "$1" = "-R" ] && [ "$2" = "o/r" ] && [ "$3" = "run" ] && [ "$4" = "list" ]; then
+  echo "ok"
+  exit 0
+fi
+echo "missing -R scope: $*" >&2
+exit 1
+"#,
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script_path, perms).unwrap();
+
+        let prior_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = if prior_path.is_empty() {
+            temp.path().display().to_string()
+        } else {
+            format!("{}:{prior_path}", temp.path().display())
+        };
+        let _path_guard = EnvGuard::set("PATH", &new_path);
+
+        let output = run_gh_command_for_repo("o/r", &["run", "list"])
+            .await
+            .unwrap();
+        assert_eq!(output, "ok");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_handle_gh_monitor_command_rejects_config_team_mismatch() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_gh_monitor_config(temp.path(), "other-team");
+
+        let req_json = r#"{"version":1,"request_id":"r-gh-team-mismatch","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"run","target":"42"}}"#;
+        let resp = handle_gh_monitor_command(req_json, temp.path()).await;
+        assert_eq!(resp.status, "error");
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, "CONFIG_ERROR");
+        assert!(
+            err.message.contains("team mismatch"),
+            "expected team mismatch error, got: {}",
+            err.message
+        );
     }
 
     #[tokio::test]
@@ -7335,7 +7528,7 @@ exit 1
             start_timeout_secs: Some(120),
             config_cwd: None,
         };
-        let payload = build_failure_payload(&run, &status_seed, &request, "corr-1").await;
+        let payload = build_failure_payload(&run, &status_seed, &request, "o/r", "corr-1").await;
         for required in [
             "run_url:",
             "failed_job_urls:",
@@ -7702,11 +7895,13 @@ exit 1
         let _ = set_gh_monitor_health_state(
             temp.path(),
             "atm-dev",
-            Some("stopped"),
-            Some("healthy"),
-            Some(0),
-            Some("manually stopped for test".to_string()),
-            None,
+            GhMonitorHealthUpdate {
+                lifecycle_state: Some("stopped"),
+                availability_state: Some("healthy"),
+                in_flight: Some(0),
+                message: Some("manually stopped for test".to_string()),
+                ..Default::default()
+            },
         );
 
         let req_json = r#"{"version":1,"request_id":"r-gh-stopped","command":"gh-monitor","payload":{"team":"atm-dev","target_kind":"run","target":"42"}}"#;
