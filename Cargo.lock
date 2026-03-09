@@ -67,6 +67,7 @@ dependencies = [
  "libloading",
  "notify",
  "rand",
+ "sc-observability",
  "serde",
  "serde_json",
  "serial_test",
@@ -1552,6 +1553,18 @@ dependencies = [
  "minijinja",
  "serde",
  "serde_yaml",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "sc-observability"
+version = "0.42.0"
+dependencies = [
+ "agent-team-mail-core",
+ "anyhow",
+ "serde_json",
+ "serial_test",
  "tempfile",
  "thiserror 2.0.18",
 ]

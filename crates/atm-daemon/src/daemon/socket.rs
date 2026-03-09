@@ -830,13 +830,14 @@ async fn handle_log_event_command(
     log_event_queue: &LogEventQueue,
 ) -> SocketResponse {
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+    use sc_observability::{SOCKET_ERROR_INVALID_PAYLOAD, SOCKET_ERROR_VERSION_MISMATCH};
 
     let request: SocketRequest = match serde_json::from_str(request_str) {
         Ok(r) => r,
         Err(e) => {
             return make_error_response(
                 "unknown",
-                "INVALID_PAYLOAD",
+                SOCKET_ERROR_INVALID_PAYLOAD,
                 &format!("Failed to parse log-event request: {e}"),
             );
         }
@@ -845,7 +846,7 @@ async fn handle_log_event_command(
     if request.version != PROTOCOL_VERSION {
         return make_error_response(
             &request.request_id,
-            "VERSION_MISMATCH",
+            SOCKET_ERROR_VERSION_MISMATCH,
             &format!(
                 "Unsupported protocol version {}; server supports {}",
                 request.version, PROTOCOL_VERSION
@@ -858,7 +859,7 @@ async fn handle_log_event_command(
         Err(e) => {
             return make_error_response(
                 &request.request_id,
-                "INVALID_PAYLOAD",
+                SOCKET_ERROR_INVALID_PAYLOAD,
                 &format!("Failed to parse LogEventV1: {e}"),
             );
         }
@@ -867,7 +868,7 @@ async fn handle_log_event_command(
     if event.v != 1 {
         return make_error_response(
             &request.request_id,
-            "VERSION_MISMATCH",
+            SOCKET_ERROR_VERSION_MISMATCH,
             &format!(
                 "Unsupported log event schema version {}; expected 1",
                 event.v
@@ -878,7 +879,7 @@ async fn handle_log_event_command(
     if let Err(e) = event.validate() {
         return make_error_response(
             &request.request_id,
-            "INVALID_PAYLOAD",
+            SOCKET_ERROR_INVALID_PAYLOAD,
             &format!("Log event validation failed: {e}"),
         );
     }
