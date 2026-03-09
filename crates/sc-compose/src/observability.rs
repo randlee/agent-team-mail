@@ -1,57 +1,44 @@
-use sc_observability::{LogConfig as SharedLogConfig, Logger as SharedLogger};
-use serde_json::Value;
-use std::path::{Path, PathBuf};
+use chrono::Utc;
+use serde_json::json;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct Logger {
-    inner: SharedLogger,
+    path: Option<PathBuf>,
 }
 
 impl Logger {
     pub fn new() -> Self {
-        let cfg = sc_compose_config();
         Self {
-            inner: SharedLogger::new(cfg),
+            path: default_log_path(),
         }
     }
 
-    pub fn emit(&self, action: &str, result: &str, fields: Value) {
-        // Logging is fail-open by contract.
-        let _ = self.inner.emit_action(
-            "sc-compose",
-            "sc_compose::cli",
-            action,
-            Some(result),
-            fields,
-        );
-    }
-}
+    pub fn emit(&self, action: &str, result: &str, fields: serde_json::Value) {
+        let Some(path) = &self.path else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
 
-fn sc_compose_config() -> SharedLogConfig {
-    let home_dir = resolve_home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let mut cfg = SharedLogConfig::from_home(&home_dir);
-    cfg.log_path = default_log_path().unwrap_or_else(|| {
-        home_dir
-            .join(".config")
-            .join("sc-compose")
-            .join("logs")
-            .join("sc-compose.log")
-    });
-    cfg.spool_dir = default_spool_dir(&cfg.log_path);
-    cfg
-}
+        let event = json!({
+            "timestamp": Utc::now().to_rfc3339(),
+            "source": "sc-compose",
+            "action": action,
+            "result": result,
+            "fields": truncate_fields(fields),
+        });
+        let line = event.to_string();
 
-fn resolve_home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var("USERPROFILE")
-            .ok()
-            .map(PathBuf::from)
-            .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::var("HOME").ok().map(PathBuf::from)
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            use std::io::Write;
+            let _ = writeln!(file, "{line}");
+        }
     }
 }
 
@@ -63,9 +50,7 @@ fn default_log_path() -> Option<PathBuf> {
     }
     #[cfg(windows)]
     {
-        if let Ok(app_data) = std::env::var("APPDATA")
-            && !app_data.trim().is_empty()
-        {
+        if let Ok(app_data) = std::env::var("APPDATA") {
             return Some(PathBuf::from(app_data).join("sc-compose/logs/sc-compose.log"));
         }
     }
@@ -74,22 +59,36 @@ fn default_log_path() -> Option<PathBuf> {
     {
         return Some(PathBuf::from(xdg).join("sc-compose/logs/sc-compose.log"));
     }
-    resolve_home_dir().map(|home| home.join(".config/sc-compose/logs/sc-compose.log"))
+    #[cfg(not(windows))]
+    {
+        std::env::var("HOME")
+            .ok()
+            .map(|home| PathBuf::from(home).join(".config/sc-compose/logs/sc-compose.log"))
+    }
+    #[cfg(windows)]
+    {
+        None
+    }
 }
 
-fn default_spool_dir(log_path: &Path) -> PathBuf {
-    let parent = log_path.parent().unwrap_or_else(|| Path::new("."));
-    if parent
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(|s| s.eq_ignore_ascii_case("logs"))
-        .unwrap_or(false)
-    {
-        parent
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("log-spool")
-    } else {
-        parent.join("log-spool")
+fn truncate_fields(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(s) => {
+            let max = 512;
+            if s.len() > max {
+                serde_json::Value::String(format!("{}…", &s[..max]))
+            } else {
+                serde_json::Value::String(s)
+            }
+        }
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(truncate_fields).collect())
+        }
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter()
+                .map(|(k, v)| (k, truncate_fields(v)))
+                .collect(),
+        ),
+        other => other,
     }
 }
