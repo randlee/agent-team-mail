@@ -66,6 +66,17 @@ preflight_check = "locked"
 wait_after_publish_seconds = 0
 verify_install = false
 
+[[crates]]
+artifact = "sc-compose"
+package = "sc-compose"
+cargo_toml = "crates/sc-compose/Cargo.toml"
+required = true
+publish = true
+publish_order = 70
+preflight_check = "locked"
+wait_after_publish_seconds = 0
+verify_install = false
+
 [[release_binaries]]
 name = "atm"
 
@@ -77,3 +88,6 @@ name = "atm-agent-mcp"
 
 [[release_binaries]]
 name = "atm-tui"
+
+[[release_binaries]]
+name = "sc-compose"
