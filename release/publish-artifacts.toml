@@ -18,7 +18,7 @@ cargo_toml = "crates/sc-observability/Cargo.toml"
 required = true
 publish = true
 publish_order = 15
-preflight_check = "full"
+preflight_check = "locked"
 wait_after_publish_seconds = 60
 verify_install = false
 
