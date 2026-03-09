@@ -154,7 +154,7 @@ fn command_end_is_logged_on_success() {
     assert!(
         events
             .iter()
-            .any(|event| event["action"] == "command_end" && event["result"] == "success"),
+            .any(|event| event["action"] == "command_end" && event["outcome"] == "success"),
         "command_end success event missing: {events:?}"
     );
 }
@@ -193,13 +193,13 @@ fn include_expansion_events_are_logged_for_success_and_failure() {
     assert!(
         events
             .iter()
-            .any(|event| event["action"] == "include_expansion" && event["result"] == "success"),
+            .any(|event| event["action"] == "include_expansion" && event["outcome"] == "success"),
         "include_expansion success event missing: {events:?}"
     );
     assert!(
         events
             .iter()
-            .any(|event| event["action"] == "include_expansion" && event["result"] == "error"),
+            .any(|event| event["action"] == "include_expansion" && event["outcome"] == "error"),
         "include_expansion error event missing: {events:?}"
     );
 }
