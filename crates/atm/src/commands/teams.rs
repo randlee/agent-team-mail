@@ -14,8 +14,12 @@ use agent_team_mail_core::schema::{BackendType, TeamConfig};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use clap::Args;
+use sc_composer::{
+    ComposeMode, ComposePolicy, ComposeRequest, RuntimeKind as ComposeRuntimeKind,
+    UnknownVariablePolicy, compose,
+};
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -137,6 +141,10 @@ pub struct SpawnArgs {
     /// Optional prompt to send after startup
     #[arg(long)]
     prompt: Option<String>,
+
+    /// Template variables for --system-prompt .j2 rendering (KEY=VALUE, repeatable)
+    #[arg(long = "var", value_name = "KEY=VALUE")]
+    var: Vec<String>,
 
     /// Canonical spawn directory (`--cwd` is accepted as an alias)
     #[arg(long, alias = "cwd")]
@@ -457,6 +465,7 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         build_spawn_authorization_decision(&current_dir, &home_dir, &team_name, &resolved_identity);
 
     let parsed_env = parse_env_vars(&args.env)?;
+    let parsed_prompt_vars = parse_template_vars(&args.var)?;
 
     let resolved_resume_session_id = if args.resume_session_id.is_some() {
         args.resume_session_id.clone()
@@ -469,6 +478,17 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         None
     };
 
+    let resolved_system_prompt = resolve_spawn_system_prompt(&SpawnPromptResolutionContext {
+        system_prompt: args.system_prompt.as_ref(),
+        prompt_vars: &parsed_prompt_vars,
+        team_name: &team_name,
+        agent_name: &args.agent,
+        runtime: &args.runtime,
+        model: args.model.as_deref(),
+        launch_dir: &launch_dir,
+        home_dir: &home_dir,
+    })?;
+
     let spec = SpawnSpec {
         team: team_name.clone(),
         agent: args.agent.clone(),
@@ -479,10 +499,12 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         approval_mode: args.approval_mode.clone(),
         resume: args.resume,
         resume_session_id: resolved_resume_session_id,
-        system_prompt: args.system_prompt.clone(),
+        system_prompt: resolved_system_prompt,
+        prompt_vars: parsed_prompt_vars.clone(),
     };
 
     let adapter = adapter_for_runtime(&args.runtime);
+    let _prompt_vars_len = spec.prompt_vars.len();
     let command = adapter.build_command(&spec)?;
     let mut env_vars = adapter.build_env(&spec, &home_dir)?;
     for (k, v) in parsed_env {
@@ -1021,6 +1043,132 @@ fn parse_env_vars(pairs: &[String]) -> Result<std::collections::HashMap<String, 
         map.insert(key.to_string(), value.to_string());
     }
     Ok(map)
+}
+
+fn parse_template_vars(pairs: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut map = BTreeMap::new();
+    for pair in pairs {
+        let eq_pos = pair.find('=').ok_or_else(|| {
+            anyhow::anyhow!("Invalid --var value '{pair}': expected KEY=VALUE format")
+        })?;
+        let key = &pair[..eq_pos];
+        let value = &pair[eq_pos + 1..];
+        if key.is_empty() {
+            anyhow::bail!("Invalid --var value '{pair}': key must not be empty");
+        }
+        map.insert(key.to_string(), value.to_string());
+    }
+    Ok(map)
+}
+
+fn compose_runtime_kind(runtime: &RuntimeKind) -> ComposeRuntimeKind {
+    match runtime {
+        RuntimeKind::Claude => ComposeRuntimeKind::Claude,
+        RuntimeKind::Codex => ComposeRuntimeKind::Codex,
+        RuntimeKind::Gemini => ComposeRuntimeKind::Gemini,
+        RuntimeKind::Opencode => ComposeRuntimeKind::Opencode,
+    }
+}
+
+fn is_template_path(path: &Path) -> bool {
+    path.file_name()
+        .map(|name| name.to_string_lossy().ends_with(".j2"))
+        .unwrap_or(false)
+}
+
+struct SpawnPromptResolutionContext<'a> {
+    system_prompt: Option<&'a PathBuf>,
+    prompt_vars: &'a BTreeMap<String, String>,
+    team_name: &'a str,
+    agent_name: &'a str,
+    runtime: &'a RuntimeKind,
+    model: Option<&'a str>,
+    launch_dir: &'a Path,
+    home_dir: &'a Path,
+}
+
+fn resolve_spawn_system_prompt(
+    context: &SpawnPromptResolutionContext<'_>,
+) -> Result<Option<PathBuf>> {
+    let Some(raw_path) = context.system_prompt else {
+        return Ok(None);
+    };
+    if !is_template_path(raw_path) {
+        return Ok(Some(raw_path.clone()));
+    }
+
+    let template_path = if raw_path.is_absolute() {
+        raw_path.clone()
+    } else {
+        context.launch_dir.join(raw_path)
+    };
+
+    let mut vars_input = BTreeMap::new();
+    vars_input.insert("team".to_string(), context.team_name.to_string());
+    vars_input.insert("agent".to_string(), context.agent_name.to_string());
+    vars_input.insert(
+        "runtime".to_string(),
+        runtime_name(context.runtime).to_string(),
+    );
+    vars_input.insert(
+        "cwd".to_string(),
+        context.launch_dir.to_string_lossy().to_string(),
+    );
+    if let Some(model_value) = context.model.filter(|v| !v.trim().is_empty()) {
+        vars_input.insert("model".to_string(), model_value.to_string());
+    }
+    for (key, value) in context.prompt_vars {
+        vars_input.insert(key.clone(), value.clone());
+    }
+
+    let vars_env: BTreeMap<String, String> = std::env::vars().collect();
+    let request = ComposeRequest {
+        runtime: compose_runtime_kind(context.runtime),
+        mode: ComposeMode::File,
+        kind: None,
+        root: context.launch_dir.to_path_buf(),
+        agent: None,
+        template_path: Some(template_path.clone()),
+        vars_input,
+        vars_env,
+        guidance_block: None,
+        user_prompt: None,
+        policy: ComposePolicy {
+            unknown_variable_policy: UnknownVariablePolicy::Error,
+            ..ComposePolicy::default()
+        },
+    };
+
+    let rendered = compose(&request).with_context(|| {
+        format!(
+            "Failed to compose --system-prompt template '{}'",
+            template_path.display()
+        )
+    })?;
+
+    let runtime_home = context
+        .home_dir
+        .join(".claude")
+        .join("runtime")
+        .join("compose")
+        .join(context.team_name)
+        .join(context.agent_name);
+    fs::create_dir_all(&runtime_home)
+        .with_context(|| format!("Failed to create {}", runtime_home.display()))?;
+
+    let output_path = runtime_home.join(format!("{}-system.md", runtime_name(context.runtime)));
+    let temp_path = output_path.with_extension("md.tmp");
+    fs::write(&temp_path, rendered.rendered_text.as_bytes())
+        .with_context(|| format!("Failed to write {}", temp_path.display()))?;
+    fs::rename(&temp_path, &output_path).with_context(|| {
+        format!(
+            "Failed to rename {} to {}",
+            temp_path.display(),
+            output_path.display()
+        )
+    })?;
+
+    Ok(Some(output_path))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4655,6 +4803,35 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_template_vars_valid_pair() {
+        let parsed =
+            parse_template_vars(&["team=atm-dev".to_string()]).expect("valid --var should parse");
+        assert_eq!(parsed.get("team").map(String::as_str), Some("atm-dev"));
+    }
+
+    #[test]
+    fn test_parse_template_vars_value_with_equals() {
+        let parsed = parse_template_vars(&["url=https://x.test?a=1&b=2".to_string()])
+            .expect("value with equals should parse");
+        assert_eq!(
+            parsed.get("url").map(String::as_str),
+            Some("https://x.test?a=1&b=2")
+        );
+    }
+
+    #[test]
+    fn test_parse_template_vars_missing_delimiter_errors() {
+        let err = parse_template_vars(&["NO_DELIM".to_string()]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_parse_template_vars_empty_key_errors() {
+        let err = parse_template_vars(&["=value".to_string()]);
+        assert!(err.is_err());
+    }
+
+    #[test]
     fn test_load_spawn_policy_defaults_to_leaders_only_when_toml_missing() {
         let temp_dir = TempDir::new().unwrap();
         let (required_team, spawn_policy, co_leaders) =
@@ -5091,6 +5268,7 @@ spawn_policy = "any-member"
             resume: false,
             resume_session_id: None,
             system_prompt: None,
+            prompt_vars: BTreeMap::new(),
         };
         let command = format!(
             "cd '{}' && env CLAUDECODE=1 ATM_TEAM='atm-dev' ATM_IDENTITY='arch-ctm' CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --agent-id 'arch-ctm@atm-dev' --agent-name 'arch-ctm' --team-name 'atm-dev' --agent-color 'cyan' --dangerously-skip-permissions",
@@ -5114,6 +5292,7 @@ spawn_policy = "any-member"
             resume: false,
             resume_session_id: None,
             system_prompt: None,
+            prompt_vars: BTreeMap::new(),
         };
         let command = format!("cd '{}' && codex --yolo", test_cwd.to_string_lossy());
         let rendered = format_spawn_launch_command(&RuntimeKind::Codex, &spec, &command);

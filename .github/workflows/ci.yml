@@ -191,6 +191,12 @@ jobs:
       - name: Validate CLI publish dry-run
         run: cargo publish -p agent-team-mail --dry-run --locked --no-verify
 
+      - name: Validate sc-compose package
+        run: cargo package -p sc-compose --locked --no-verify
+
+      - name: Validate sc-compose publish dry-run
+        run: cargo publish -p sc-compose --dry-run --locked --no-verify
+
       - name: Simulate publish failure (must be non-zero)
         shell: bash
         run: |

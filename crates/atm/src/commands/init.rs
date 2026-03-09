@@ -252,6 +252,7 @@ pub fn execute(args: InitArgs) -> Result<()> {
         // Materialize hook scripts to disk before writing settings
         materialize_scripts(&scripts_dir)?;
         write_settings_atomic(&settings_path, &settings)?;
+        ensure_compose_bootstrap(&current_dir)?;
         let runtime_reports = vec![
             claude_runtime,
             configure_codex_runtime(&home_dir, &scripts_dir),
@@ -727,6 +728,35 @@ fn ensure_atm_toml(path: &Path, team: &str, identity: &str) -> Result<AtmTomlSta
     );
     write_text_atomic(path, &content)?;
     Ok(AtmTomlStatus::Created)
+}
+
+fn ensure_compose_bootstrap(repo_root: &Path) -> Result<()> {
+    let prompts_dir = repo_root.join(".prompts");
+    std::fs::create_dir_all(&prompts_dir)
+        .with_context(|| format!("Failed to create {}", prompts_dir.display()))?;
+
+    ensure_gitignore_entry(&repo_root.join(".gitignore"), ".prompts/")?;
+    Ok(())
+}
+
+fn ensure_gitignore_entry(path: &Path, entry: &str) -> Result<()> {
+    let mut content = if path.exists() {
+        std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?
+    } else {
+        String::new()
+    };
+
+    if content.lines().any(|line| line.trim() == entry) {
+        return Ok(());
+    }
+
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(entry);
+    content.push('\n');
+    write_text_atomic(path, &content)
 }
 
 fn ensure_team_config(home_dir: &Path, team: &str, cwd: &Path) -> Result<TeamStatus> {
