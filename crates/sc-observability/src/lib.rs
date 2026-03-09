@@ -655,6 +655,7 @@ mod tests {
             max_files: DEFAULT_MAX_FILES,
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             max_event_bytes: DEFAULT_MAX_EVENT_BYTES,
+            retention_days: DEFAULT_RETENTION_DAYS,
         };
         let logger = Logger::new(cfg.clone());
 
