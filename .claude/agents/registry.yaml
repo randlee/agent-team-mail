@@ -26,6 +26,9 @@ agents:
   atm-doctor:
     version: 1.0.0
     path: .claude/agents/atm-doctor.md
+  quality-mgr:
+    version: 1.0.0
+    path: .claude/agents/quality-mgr.md
 
 skills:
   rust-development:
@@ -38,3 +41,7 @@ skills:
   atm-doctor:
     depends_on:
       atm-doctor: "1.x"
+  quality-management-gh:
+    depends_on:
+      rust-qa-agent: "1.x"
+      atm-qa-agent: "1.x"
