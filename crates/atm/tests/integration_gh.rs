@@ -474,6 +474,63 @@ if "pr" in args and "list" in args:
     print(json.dumps(payload))
     sys.exit(0)
 
+if "pr" in args and "view" in args:
+    if "-R" not in args:
+        print("missing -R", file=sys.stderr)
+        sys.exit(2)
+    repo = args[args.index("-R") + 1]
+    if repo != "{expected_repo}":
+        print(f"unexpected repo scope: {{repo}}", file=sys.stderr)
+        sys.exit(2)
+
+    pr_number = None
+    if "view" in args:
+        view_idx = args.index("view")
+        if view_idx + 1 < len(args):
+            pr_number = args[view_idx + 1]
+    if pr_number != "101":
+        print(f"unexpected PR: {{pr_number}}", file=sys.stderr)
+        sys.exit(2)
+
+    payload = {{
+        "number": 101,
+        "title": "Add monitor dashboard",
+        "url": "https://github.com/{expected_repo}/pull/101",
+        "isDraft": False,
+        "reviewDecision": "APPROVED",
+        "mergeStateStatus": "CLEAN",
+        "mergeable": "UNKNOWN",
+        "statusCheckRollup": [
+            {{
+                "name": "clippy",
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "startedAt": "2026-03-09T01:00:00Z",
+                "completedAt": "2026-03-09T01:02:00Z",
+                "detailsUrl": "https://github.com/{expected_repo}/actions/runs/1"
+            }},
+            {{
+                "context": "required-review",
+                "state": "PENDING",
+                "targetUrl": "https://github.com/{expected_repo}/checks/2"
+            }}
+        ],
+        "reviews": [
+            {{
+                "author": {{"login": "alice"}},
+                "state": "APPROVED",
+                "submittedAt": "2026-03-09T02:00:00Z"
+            }},
+            {{
+                "author": {{"login": "bob"}},
+                "state": "COMMENTED",
+                "submittedAt": "2026-03-09T02:30:00Z"
+            }}
+        ]
+    }}
+    print(json.dumps(payload))
+    sys.exit(0)
+
 print("unsupported gh invocation: " + " ".join(args), file=sys.stderr)
 sys.exit(1)
 "#
@@ -1210,4 +1267,93 @@ fn test_gh_monitor_list_human_output_has_one_line_rollups() {
     assert!(text.contains("GitHub Monitor List: atm gh monitor list"));
     assert!(text.contains("#101 [ready] [ci:PENDING 1/2] [merge:clean] [review:approved]"));
     assert!(text.contains("#102 [draft] [ci:FAIL 0/1] [merge:dirty] [review:changes_requested]"));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_report_json_includes_checks_reviews_and_merge_fields() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "acme", "agent-team-mail");
+    let gh_bin = write_fake_gh_cli_script(temp_dir.path(), "acme/agent-team-mail");
+    let path = format!(
+        "{}:{}",
+        gh_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
+        .env("PATH", path)
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .arg("monitor")
+        .arg("report")
+        .arg("101")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["team"].as_str(), Some("test-team"));
+    assert_eq!(json["repo"].as_str(), Some("acme/agent-team-mail"));
+    assert_eq!(json["pr"]["number"].as_u64(), Some(101));
+    assert_eq!(json["pr"]["ci"]["state"].as_str(), Some("pending"));
+    assert_eq!(json["pr"]["merge"]["mergeable"].as_str(), Some("unknown"));
+    assert_eq!(json["pr"]["merge"]["status"].as_str(), Some("pending"));
+    assert!(json["pr"]["checks"].is_array());
+    assert_eq!(json["pr"]["checks"].as_array().unwrap().len(), 2);
+    assert!(json["pr"]["reviews"].is_array());
+    assert_eq!(json["pr"]["reviews"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_monitor_report_human_output_is_detailed() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "acme", "agent-team-mail");
+    let gh_bin = write_fake_gh_cli_script(temp_dir.path(), "acme/agent-team-mail");
+    let path = format!(
+        "{}:{}",
+        gh_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
+        .env("PATH", path)
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("monitor")
+        .arg("report")
+        .arg("101")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("GitHub Monitor Report: atm gh monitor report"));
+    assert!(text.contains("PR:                #101"));
+    assert!(text.contains("Merge:             status=pending"));
+    assert!(text.contains("Blocking Reasons:"));
+    assert!(text.contains("mergeability is UNKNOWN (pending)"));
+    assert!(text.contains("Reviews (2):"));
+    assert!(text.contains("Checks (2):"));
+    assert!(text.contains("clippy | status=completed"));
 }

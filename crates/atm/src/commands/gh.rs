@@ -80,6 +80,8 @@ enum MonitorTarget {
     Status(MonitorHealthArgs),
     /// List open PRs with CI/merge/review rollups (one-shot; no daemon required)
     List(MonitorListArgs),
+    /// Show detailed check/review/merge report for a single PR (one-shot; no daemon required)
+    Report(MonitorReportArgs),
 }
 
 #[derive(Args, Debug)]
@@ -137,6 +139,12 @@ struct MonitorListArgs {
     /// Maximum number of open PRs to display (default 20)
     #[arg(long, default_value_t = 20)]
     limit: u32,
+}
+
+#[derive(Args, Debug)]
+struct MonitorReportArgs {
+    /// Pull request number to report
+    pr_number: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -221,6 +229,25 @@ struct GhPrListRow {
     status_check_rollup: Vec<serde_json::Value>,
 }
 
+#[derive(Debug, Deserialize)]
+struct GhPrReportRow {
+    number: u64,
+    title: String,
+    url: String,
+    #[serde(rename = "isDraft", default)]
+    is_draft: bool,
+    #[serde(rename = "reviewDecision", default)]
+    review_decision: Option<String>,
+    #[serde(rename = "mergeStateStatus", default)]
+    merge_state_status: Option<String>,
+    #[serde(default)]
+    mergeable: Option<String>,
+    #[serde(rename = "statusCheckRollup", default)]
+    status_check_rollup: Vec<serde_json::Value>,
+    #[serde(default)]
+    reviews: Vec<serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct GhMonitorListSummary {
     team: String,
@@ -249,6 +276,57 @@ struct GhCiRollup {
     fail: u64,
     pending: u64,
     neutral: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GhMonitorReportSummary {
+    team: String,
+    repo: String,
+    generated_at: String,
+    pr: GhMonitorReportPr,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GhMonitorReportPr {
+    number: u64,
+    title: String,
+    url: String,
+    draft: bool,
+    ci: GhCiRollup,
+    review_decision: String,
+    merge: GhMergeReport,
+    checks: Vec<GhMonitorCheckReport>,
+    reviews: Vec<GhMonitorReviewReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GhMergeReport {
+    mergeable: String,
+    merge_state_status: String,
+    status: String,
+    blocking_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GhMonitorCheckReport {
+    name: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conclusion: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GhMonitorReviewReport {
+    reviewer: String,
+    state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    submitted_at: Option<String>,
 }
 
 pub fn execute(args: GhArgs) -> Result<()> {
@@ -310,6 +388,17 @@ pub fn execute(args: GhArgs) -> Result<()> {
                     &current_dir,
                     &home_dir,
                     list_args.limit,
+                    args.json,
+                );
+            }
+            if let MonitorTarget::Report(report_args) = &monitor.target {
+                enforce_plugin_ready(&plugin_state, args.json)?;
+                return execute_monitor_report(
+                    team,
+                    &config,
+                    &current_dir,
+                    &home_dir,
+                    report_args.pr_number,
                     args.json,
                 );
             }
@@ -400,6 +489,7 @@ pub fn execute(args: GhArgs) -> Result<()> {
                 }
                 MonitorTarget::Status(_status) => unreachable!("handled above"),
                 MonitorTarget::List(_list) => unreachable!("handled above"),
+                MonitorTarget::Report(_report) => unreachable!("handled above"),
             };
 
             match output {
@@ -470,6 +560,73 @@ fn execute_monitor_list(
     }
 
     print_monitor_list_summary(&summary);
+    Ok(())
+}
+
+fn execute_monitor_report(
+    team: &str,
+    config: &Config,
+    current_dir: &Path,
+    home_dir: &Path,
+    pr_number: u64,
+    json: bool,
+) -> Result<()> {
+    let repo = resolve_monitor_repo_scope(config, current_dir, home_dir, team)?;
+    let gh_json_fields = "number,title,url,isDraft,reviewDecision,mergeStateStatus,mergeable,statusCheckRollup,reviews";
+
+    let output = Command::new("gh")
+        .args(["-R", &repo, "pr", "view", &pr_number.to_string()])
+        .args(["--json", gh_json_fields])
+        .output()
+        .with_context(|| format!("failed to invoke `gh pr view` for repository {repo}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "failed to query PR #{} for {} via gh CLI: {}",
+            pr_number,
+            repo,
+            stderr.trim()
+        );
+    }
+
+    let row: GhPrReportRow = serde_json::from_slice(&output.stdout)
+        .with_context(|| "failed to parse `gh pr view` JSON output")?;
+    let checks = extract_check_reports(&row.status_check_rollup);
+    let reviews = extract_review_reports(&row.reviews);
+    let ci = summarize_ci_rollup(&row.status_check_rollup);
+    let review_decision = normalize_review_status(row.review_decision.as_deref());
+    let merge = build_merge_report(
+        row.mergeable.as_deref(),
+        row.merge_state_status.as_deref(),
+        row.is_draft,
+        &ci,
+        &review_decision,
+    );
+
+    let report = GhMonitorReportSummary {
+        team: team.to_string(),
+        repo,
+        generated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        pr: GhMonitorReportPr {
+            number: row.number,
+            title: row.title,
+            url: row.url,
+            draft: row.is_draft,
+            ci,
+            review_decision,
+            merge,
+            checks,
+            reviews,
+        },
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    print_monitor_report_summary(&report);
     Ok(())
 }
 
@@ -561,6 +718,205 @@ fn print_monitor_list_summary(summary: &GhMonitorListSummary) {
             "#{} [{}] [ci:{}] [merge:{}] [review:{}] {}",
             item.number, draft, ci_label, item.merge, item.review, item.title
         );
+    }
+}
+
+fn print_monitor_report_summary(report: &GhMonitorReportSummary) {
+    println!("GitHub Monitor Report: atm gh monitor report");
+    println!("Team:              {}", report.team);
+    println!("Repository:        {}", report.repo);
+    println!("Generated At:      {}", report.generated_at);
+    println!("PR:                #{}", report.pr.number);
+    println!("Title:             {}", report.pr.title);
+    println!("URL:               {}", report.pr.url);
+    println!(
+        "Draft:             {}",
+        if report.pr.draft { "yes" } else { "no" }
+    );
+    println!();
+    println!(
+        "CI:                {} (pass={} fail={} pending={} total={})",
+        report.pr.ci.state,
+        report.pr.ci.pass,
+        report.pr.ci.fail,
+        report.pr.ci.pending,
+        report.pr.ci.total
+    );
+    println!("Review Decision:   {}", report.pr.review_decision);
+    println!(
+        "Merge:             status={} mergeable={} mergeStateStatus={}",
+        report.pr.merge.status, report.pr.merge.mergeable, report.pr.merge.merge_state_status
+    );
+    if !report.pr.merge.blocking_reasons.is_empty() {
+        println!("Blocking Reasons:");
+        for reason in &report.pr.merge.blocking_reasons {
+            println!("  - {reason}");
+        }
+    }
+
+    println!();
+    println!("Reviews ({}):", report.pr.reviews.len());
+    if report.pr.reviews.is_empty() {
+        println!("  - none");
+    } else {
+        for review in &report.pr.reviews {
+            let submitted = review.submitted_at.as_deref().unwrap_or("-");
+            println!(
+                "  - {} [{}] submitted_at={}",
+                review.reviewer, review.state, submitted
+            );
+        }
+    }
+
+    println!();
+    println!("Checks ({}):", report.pr.checks.len());
+    if report.pr.checks.is_empty() {
+        println!("  - none");
+    } else {
+        for check in &report.pr.checks {
+            println!(
+                "  - {} | status={} | conclusion={} | started_at={} | completed_at={} | run_url={}",
+                check.name,
+                check.status,
+                check.conclusion.as_deref().unwrap_or("-"),
+                check.started_at.as_deref().unwrap_or("-"),
+                check.completed_at.as_deref().unwrap_or("-"),
+                check.run_url.as_deref().unwrap_or("-")
+            );
+        }
+    }
+}
+
+fn extract_check_reports(entries: &[serde_json::Value]) -> Vec<GhMonitorCheckReport> {
+    let mut checks: Vec<GhMonitorCheckReport> = entries
+        .iter()
+        .map(|entry| GhMonitorCheckReport {
+            name: extract_check_name(entry),
+            status: extract_check_status(entry),
+            conclusion: extract_string_field(entry, &["conclusion"]),
+            started_at: extract_string_field(entry, &["startedAt", "started_at"]),
+            completed_at: extract_string_field(entry, &["completedAt", "completed_at"]),
+            run_url: extract_string_field(entry, &["detailsUrl", "targetUrl", "url", "htmlUrl"]),
+        })
+        .collect();
+    checks.sort_by(|a, b| a.name.cmp(&b.name));
+    checks
+}
+
+fn extract_review_reports(entries: &[serde_json::Value]) -> Vec<GhMonitorReviewReport> {
+    let mut reviews: Vec<GhMonitorReviewReport> = entries
+        .iter()
+        .map(|entry| {
+            let reviewer = entry
+                .get("author")
+                .and_then(|author| author.get("login"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .or_else(|| {
+                    entry
+                        .get("authorLogin")
+                        .and_then(|value| value.as_str())
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                })
+                .unwrap_or("unknown-reviewer")
+                .to_string();
+            let state = extract_string_field(entry, &["state"])
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_else(|| "unknown".to_string());
+            GhMonitorReviewReport {
+                reviewer,
+                state,
+                submitted_at: extract_string_field(entry, &["submittedAt", "submitted_at"]),
+            }
+        })
+        .collect();
+    reviews.sort_by(|a, b| a.reviewer.cmp(&b.reviewer));
+    reviews
+}
+
+fn extract_check_name(entry: &serde_json::Value) -> String {
+    extract_string_field(entry, &["name", "context"])
+        .or_else(|| extract_string_field(entry, &["displayTitle"]))
+        .unwrap_or_else(|| "unknown-check".to_string())
+}
+
+fn extract_check_status(entry: &serde_json::Value) -> String {
+    extract_string_field(entry, &["status", "state"])
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_else(|| {
+            if extract_string_field(entry, &["conclusion"]).is_some() {
+                "completed".to_string()
+            } else {
+                "unknown".to_string()
+            }
+        })
+}
+
+fn extract_string_field(entry: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        entry
+            .get(*key)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn build_merge_report(
+    mergeable: Option<&str>,
+    merge_state_status: Option<&str>,
+    draft: bool,
+    ci: &GhCiRollup,
+    review_decision: &str,
+) -> GhMergeReport {
+    let mergeable_normalized = normalize_mergeable(mergeable);
+    let merge_state_status_normalized = normalize_merge_status(merge_state_status);
+    let mut blocking_reasons: Vec<String> = Vec::new();
+
+    if draft {
+        blocking_reasons.push("PR is draft".to_string());
+    }
+    if mergeable_normalized == "unknown" {
+        blocking_reasons.push("mergeability is UNKNOWN (pending)".to_string());
+    } else if mergeable_normalized == "conflicting" {
+        blocking_reasons.push("mergeability is CONFLICTING".to_string());
+    }
+    if matches!(
+        merge_state_status_normalized.as_str(),
+        "dirty" | "blocked" | "behind"
+    ) {
+        blocking_reasons.push(format!(
+            "mergeStateStatus={}",
+            merge_state_status_normalized.to_ascii_uppercase()
+        ));
+    }
+    if ci.fail > 0 {
+        blocking_reasons.push("CI has failing checks".to_string());
+    } else if ci.pending > 0 {
+        blocking_reasons.push("CI checks still pending".to_string());
+    }
+    if review_decision == "changes_requested" {
+        blocking_reasons.push("review decision is CHANGES_REQUESTED".to_string());
+    } else if matches!(review_decision, "review_required" | "unknown") {
+        blocking_reasons.push("review approval still required".to_string());
+    }
+
+    let status = if mergeable_normalized == "unknown" {
+        "pending"
+    } else if blocking_reasons.is_empty() {
+        "ready"
+    } else {
+        "blocked"
+    };
+
+    GhMergeReport {
+        mergeable: mergeable_normalized,
+        merge_state_status: merge_state_status_normalized,
+        status: status.to_string(),
+        blocking_reasons,
     }
 }
 
@@ -658,6 +1014,18 @@ fn normalize_review_status(value: Option<&str>) -> String {
             "APPROVED" => "approved".to_string(),
             "CHANGES_REQUESTED" => "changes_requested".to_string(),
             "REVIEW_REQUIRED" => "review_required".to_string(),
+            _ => raw.to_ascii_lowercase(),
+        },
+        None => "unknown".to_string(),
+    }
+}
+
+fn normalize_mergeable(value: Option<&str>) -> String {
+    match value.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(raw) => match raw.to_ascii_uppercase().as_str() {
+            "MERGEABLE" => "mergeable".to_string(),
+            "CONFLICTING" => "conflicting".to_string(),
+            "UNKNOWN" => "unknown".to_string(),
             _ => raw.to_ascii_lowercase(),
         },
         None => "unknown".to_string(),
@@ -961,6 +1329,7 @@ fn namespace_actions(enabled: bool) -> Vec<&'static str> {
             "atm gh monitor workflow <name> --ref <ref>",
             "atm gh monitor run <run-id>",
             "atm gh monitor list",
+            "atm gh monitor report <pr-number>",
             "atm gh monitor start|stop|restart|status",
             "atm gh init",
         ]
@@ -1050,6 +1419,7 @@ fn execute_init(
             "atm gh status".to_string(),
             "atm gh monitor pr <number>".to_string(),
             "atm gh monitor list".to_string(),
+            "atm gh monitor report <pr-number>".to_string(),
         ],
     };
 
@@ -1324,6 +1694,82 @@ mod tests {
         assert_eq!(rollup.pass, 2);
         assert_eq!(rollup.fail, 0);
         assert_eq!(rollup.pending, 0);
+    }
+
+    #[test]
+    fn build_merge_report_unknown_mergeability_is_pending() {
+        let ci = GhCiRollup {
+            state: "pass".to_string(),
+            total: 2,
+            pass: 2,
+            fail: 0,
+            pending: 0,
+            neutral: 0,
+        };
+        let merge = build_merge_report(Some("UNKNOWN"), Some("CLEAN"), false, &ci, "approved");
+        assert_eq!(merge.status, "pending");
+        assert_eq!(merge.mergeable, "unknown");
+        assert!(
+            merge
+                .blocking_reasons
+                .iter()
+                .any(|reason| reason.contains("UNKNOWN"))
+        );
+    }
+
+    #[test]
+    fn extract_check_reports_maps_check_run_and_context_fields() {
+        let entries = vec![
+            serde_json::json!({
+                "name":"clippy",
+                "status":"COMPLETED",
+                "conclusion":"SUCCESS",
+                "startedAt":"2026-03-09T01:00:00Z",
+                "completedAt":"2026-03-09T01:02:00Z",
+                "detailsUrl":"https://example.test/run/1"
+            }),
+            serde_json::json!({
+                "context":"required-review",
+                "state":"PENDING",
+                "targetUrl":"https://example.test/check/2"
+            }),
+        ];
+        let checks = extract_check_reports(&entries);
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0].name, "clippy");
+        assert_eq!(checks[0].status, "completed");
+        assert_eq!(checks[0].conclusion.as_deref(), Some("SUCCESS"));
+        assert_eq!(checks[1].name, "required-review");
+        assert_eq!(checks[1].status, "pending");
+        assert_eq!(
+            checks[1].run_url.as_deref(),
+            Some("https://example.test/check/2")
+        );
+    }
+
+    #[test]
+    fn extract_review_reports_maps_reviewer_state_and_timestamp() {
+        let entries = vec![
+            serde_json::json!({
+                "author":{"login":"alice"},
+                "state":"APPROVED",
+                "submittedAt":"2026-03-09T01:00:00Z"
+            }),
+            serde_json::json!({
+                "author":{"login":"bob"},
+                "state":"CHANGES_REQUESTED"
+            }),
+        ];
+        let reviews = extract_review_reports(&entries);
+        assert_eq!(reviews.len(), 2);
+        assert_eq!(reviews[0].reviewer, "alice");
+        assert_eq!(reviews[0].state, "approved");
+        assert_eq!(
+            reviews[0].submitted_at.as_deref(),
+            Some("2026-03-09T01:00:00Z")
+        );
+        assert_eq!(reviews[1].reviewer, "bob");
+        assert_eq!(reviews[1].state, "changes_requested");
     }
 
     #[test]
