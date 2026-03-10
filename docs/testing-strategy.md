@@ -184,8 +184,8 @@ Every ignored test should have:
 Required PR validation should center on:
 
 - `cargo test`
-- `cargo test -- --test-threads=8` for env-sensitive or parallel-stability
-  coverage
+- `cargo test -- --test-threads=8` — all env-sensitive integration tests MUST
+  use this flag
 - targeted parity/golden tests
 - `cargo clippy -- -D warnings`
 - `cargo fmt --check`
