@@ -4262,7 +4262,6 @@ fn resolve_ci_alert_routing(
         .map(str::trim)
         .filter(|cwd| !cwd.is_empty())
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| home.to_path_buf());
     let config = match agent_team_mail_core::config::resolve_config(
         &agent_team_mail_core::config::ConfigOverrides {

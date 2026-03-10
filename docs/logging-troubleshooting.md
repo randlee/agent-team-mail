@@ -147,6 +147,68 @@ atm logs --level warn
 atm logs --level error
 ```
 
+## Required AH.5 Troubleshooting Cases
+
+### Logging disabled
+
+ATM producers can be hard-disabled with:
+
+```bash
+ATM_LOG=0 atm status --json
+```
+
+Expected:
+- `logging.state` reports `unavailable` or a degraded state with explicit finding.
+
+Remediation:
+1. Remove disable flag (`unset ATM_LOG` or set `ATM_LOG=info`).
+2. Restart daemon (`atm daemon restart`) if needed.
+3. Re-run `atm doctor --json` and confirm health recovery.
+
+### Queue full / dropped events
+
+Symptoms:
+- `logging.dropped_counter` increases over time.
+- doctor/status show `degraded_dropping`.
+
+Remediation:
+1. Confirm daemon is reachable (`atm daemon status`).
+2. Confirm canonical log path is writable.
+3. Reduce burst source or increase queue headroom in implementation/config.
+4. Verify dropped counter stops increasing under normal load.
+
+### Spool path override mismatch
+
+ATM path override:
+
+```bash
+ATM_LOG_FILE=/tmp/atm-custom.jsonl atm status --json
+```
+
+Expected:
+- `logging.spool_path` resolves relative to active log path parent.
+
+`sc-compose` override:
+
+```bash
+SC_COMPOSE_LOG_FILE=/tmp/sc-compose.log sc-compose --help >/dev/null
+```
+
+Expected:
+- `sc-compose` writes log to `/tmp/sc-compose.log`.
+- spool uses sibling `/tmp/log-spool` unless otherwise configured.
+
+### Level filtering
+
+ATM:
+- `ATM_LOG=warn` suppresses info/debug event lines from stderr output.
+
+`sc-compose`:
+- `SC_COMPOSE_LOG_LEVEL=warn` suppresses debug/info events such as
+  resolver-decision traces.
+- `SC_COMPOSE_LOG_FORMAT=human` switches on-disk lines from JSONL to
+  human-readable format for manual triage.
+
 ## Escalation Criteria
 
 Escalate when any are true:

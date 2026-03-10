@@ -158,6 +158,51 @@ impl Logger {
         Ok(())
     }
 
+    /// Convenience helper for tools that only need action/outcome + fields.
+    ///
+    /// This builds a [`LogEventV1`] with the configured log level and emits it
+    /// through the same validation/redaction/path pipeline as [`Self::emit`].
+    pub fn emit_action(
+        &self,
+        source_binary: &str,
+        target: &str,
+        action: &str,
+        outcome: Option<&str>,
+        fields: serde_json::Value,
+    ) -> Result<(), LoggerError> {
+        let mut event = LogEventV1::builder(source_binary, action, target)
+            .level(self.config.level.as_str())
+            .build();
+        event.outcome = outcome.map(ToOwned::to_owned);
+        event.fields = value_to_map(fields);
+        self.emit(&event)
+    }
+    /// Write a human-readable log line to the canonical log path.
+    ///
+    /// Produces `<timestamp> level=<level> action=<action> outcome=<outcome> fields=<json>`
+    /// format, sharing the same file-path and directory-creation logic as
+    /// [`Self::emit`]. This routes Human-mode output through SharedLogger rather
+    /// than a parallel per-tool implementation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when directory creation or file appending fails.
+    pub fn emit_human(
+        &self,
+        level: &str,
+        action: &str,
+        outcome: &str,
+        fields: &serde_json::Value,
+    ) -> Result<(), LoggerError> {
+        use chrono::{SecondsFormat, Utc};
+        let ts = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let fields_json = serde_json::to_string(fields).unwrap_or_else(|_| "{}".to_string());
+        let line =
+            format!("{ts} level={level} action={action} outcome={outcome} fields={fields_json}");
+        self.append_line_to_canonical(&line)?;
+        Ok(())
+    }
+
     /// Write one event to a per-source spool file for deferred fan-in merge.
     ///
     /// # Errors
@@ -358,6 +403,17 @@ fn rotation_path(base: &Path, n: u32) -> PathBuf {
     let mut os = base.as_os_str().to_os_string();
     os.push(format!(".{n}"));
     PathBuf::from(os)
+}
+
+fn value_to_map(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    match value {
+        serde_json::Value::Object(map) => map,
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("value".to_string(), other);
+            map
+        }
+    }
 }
 
 #[cfg(test)]
@@ -611,5 +667,44 @@ mod tests {
         assert_eq!(SOCKET_ERROR_VERSION_MISMATCH, "VERSION_MISMATCH");
         assert_eq!(SOCKET_ERROR_INVALID_PAYLOAD, "INVALID_PAYLOAD");
         assert_eq!(SOCKET_ERROR_INTERNAL_ERROR, "INTERNAL_ERROR");
+    }
+
+    #[test]
+    fn emit_action_writes_schema_compatible_event() {
+        let tmp = TempDir::new().expect("temp dir");
+        let cfg = LogConfig {
+            log_path: tmp.path().join("atm.log.jsonl"),
+            spool_dir: tmp.path().join("log-spool"),
+            level: LogLevel::Info,
+            message_preview_enabled: false,
+            max_bytes: DEFAULT_MAX_BYTES,
+            max_files: DEFAULT_MAX_FILES,
+            queue_capacity: DEFAULT_QUEUE_CAPACITY,
+            max_event_bytes: DEFAULT_MAX_EVENT_BYTES,
+            retention_days: DEFAULT_RETENTION_DAYS,
+        };
+        let logger = Logger::new(cfg.clone());
+
+        logger
+            .emit_action(
+                "sc-compose",
+                "sc_compose::cli",
+                "command_end",
+                Some("success"),
+                serde_json::json!({"code": 0}),
+            )
+            .expect("emit action");
+
+        let lines: Vec<_> = fs::read_to_string(&cfg.log_path)
+            .expect("read log")
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(lines.len(), 1);
+        let parsed: LogEventV1 = serde_json::from_str(&lines[0]).expect("parse event");
+        assert_eq!(parsed.source_binary, "sc-compose");
+        assert_eq!(parsed.action, "command_end");
+        assert_eq!(parsed.outcome.as_deref(), Some("success"));
+        assert_eq!(parsed.fields.get("code").and_then(|v| v.as_u64()), Some(0));
     }
 }

@@ -1,7 +1,7 @@
 //! Main daemon event loop
 
 use crate::daemon::pid_backend_validation::{roster_process_id, validate_pid_backend};
-use crate::daemon::status::{PluginStatus, PluginStatusKind, StatusWriter};
+use crate::daemon::status::{LoggingHealth, PluginStatus, PluginStatusKind, StatusWriter};
 use crate::daemon::{
     InboxEvent, InboxEventKind, LogEventQueue, SharedDedupeStore, SharedPubSubStore,
     SharedSessionRegistry, SharedStateStore, SharedStreamEventSender, graceful_shutdown,
@@ -14,7 +14,7 @@ use agent_team_mail_core::io::{atomic::atomic_swap, lock::acquire_lock};
 use agent_team_mail_core::schema::TeamConfig;
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
@@ -173,7 +173,7 @@ pub async fn run(
         dedup_store,
         stream_state_store,
         stream_event_sender,
-        log_event_queue,
+        log_event_queue.clone(),
         &daemon_lock,
         socket_cancel,
     )
@@ -388,12 +388,14 @@ pub async fn run(
     let status_plugins = plugins.clone();
     let status_failed_plugins = init_failed_plugins.clone();
     let status_ctx = ctx.clone();
+    let status_log_event_queue = log_event_queue.clone();
     let status_task = tokio::spawn(async move {
         status_writer_loop(
             status_writer_clone,
             status_plugins,
             status_failed_plugins,
             status_ctx,
+            status_log_event_queue,
             status_cancel,
         )
         .await;
@@ -1328,6 +1330,7 @@ async fn status_writer_loop(
     plugins: Vec<(crate::plugin::PluginMetadata, crate::plugin::SharedPlugin)>,
     init_failed_plugins: Vec<FailedPluginInit>,
     ctx: PluginContext,
+    log_event_queue: LogEventQueue,
     cancel: CancellationToken,
 ) {
     info!("Status writer loop started (interval: 30s)");
@@ -1335,7 +1338,8 @@ async fn status_writer_loop(
     // Write initial status at startup
     let plugin_statuses = build_plugin_statuses(&plugins, &init_failed_plugins, &ctx).await;
     let teams = get_active_teams(&ctx).await;
-    if let Err(e) = status_writer.write_status(plugin_statuses.clone(), teams.clone()) {
+    let logging = build_logging_health(&ctx, &log_event_queue).await;
+    if let Err(e) = status_writer.write_status(plugin_statuses.clone(), teams.clone(), logging) {
         error!("Failed to write initial daemon status: {}", e);
     }
 
@@ -1354,8 +1358,9 @@ async fn status_writer_loop(
                 let plugin_statuses =
                     build_plugin_statuses(&plugins, &init_failed_plugins, &ctx).await;
                 let teams = get_active_teams(&ctx).await;
+                let logging = build_logging_health(&ctx, &log_event_queue).await;
 
-                if let Err(e) = status_writer.write_status(plugin_statuses, teams) {
+                if let Err(e) = status_writer.write_status(plugin_statuses, teams, logging) {
                     error!("Failed to write daemon status: {}", e);
                 }
             }
@@ -1363,6 +1368,133 @@ async fn status_writer_loop(
     }
 
     info!("Status writer loop stopped");
+}
+
+async fn build_logging_health(
+    ctx: &PluginContext,
+    log_event_queue: &LogEventQueue,
+) -> LoggingHealth {
+    let queue = log_event_queue.lock().await;
+    let dropped_counter = queue.dropped();
+    drop(queue);
+
+    let home_dir = ctx
+        .system
+        .claude_root
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    build_logging_health_snapshot(&home_dir, dropped_counter, logging_disabled_by_env())
+}
+
+fn logging_disabled_by_env() -> bool {
+    matches!(
+        std::env::var("ATM_LOG")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase()),
+        Some(ref v) if v == "0" || v == "false" || v == "off" || v == "disabled" || v == "no"
+    )
+}
+
+fn build_logging_health_snapshot(
+    home_dir: &Path,
+    dropped_counter: u64,
+    logging_disabled: bool,
+) -> LoggingHealth {
+    let canonical_log_path = agent_team_mail_core::logging_event::configured_log_path(home_dir);
+    let spool_path = agent_team_mail_core::logging_event::configured_spool_dir(home_dir);
+    let (spool_count, oldest_spool_age, spool_error) = match spool_metrics(&spool_path) {
+        Ok((count, oldest)) => (count, oldest, None),
+        Err(err) => (0, None, Some(err.to_string())),
+    };
+
+    let (state, last_error) = derive_logging_state(
+        logging_disabled,
+        dropped_counter,
+        spool_count,
+        spool_error.as_deref(),
+    );
+
+    LoggingHealth {
+        state: state.to_string(),
+        dropped_counter,
+        spool_path: spool_path.display().to_string(),
+        last_error,
+        canonical_log_path: canonical_log_path.display().to_string(),
+        spool_count,
+        oldest_spool_age,
+    }
+}
+
+fn derive_logging_state(
+    logging_disabled: bool,
+    dropped_counter: u64,
+    spool_count: u64,
+    spool_error: Option<&str>,
+) -> (&'static str, Option<String>) {
+    if logging_disabled {
+        return (
+            "unavailable",
+            Some("logging disabled by ATM_LOG".to_string()),
+        );
+    }
+    if let Some(err) = spool_error {
+        return (
+            "unavailable",
+            Some(format!("failed to inspect spool path: {err}")),
+        );
+    }
+    if dropped_counter > 0 {
+        return (
+            "degraded_dropping",
+            Some("queue full; events are being dropped".to_string()),
+        );
+    }
+    if spool_count > 0 {
+        return (
+            "degraded_spooling",
+            Some("events are queued in spool awaiting merge".to_string()),
+        );
+    }
+    ("healthy", None)
+}
+
+fn spool_metrics(spool_path: &Path) -> std::io::Result<(u64, Option<u64>)> {
+    if !spool_path.exists() {
+        return Ok((0, None));
+    }
+
+    let mut spool_count = 0_u64;
+    let mut oldest_age_secs: Option<u64> = None;
+    let now = SystemTime::now();
+
+    for entry in std::fs::read_dir(spool_path)? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+
+        spool_count += 1;
+
+        let age_secs = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().or_else(|_| m.created()).ok())
+            .and_then(|t| now.duration_since(t).ok())
+            .map(|d| d.as_secs());
+
+        if let Some(age) = age_secs {
+            oldest_age_secs = Some(oldest_age_secs.map_or(age, |current| current.max(age)));
+        }
+    }
+
+    Ok((spool_count, oldest_age_secs))
 }
 
 /// Build plugin status list from running plugins
@@ -1492,7 +1624,7 @@ fn format_timestamp(time: SystemTime) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{InboxCursor, read_new_inbox_messages};
+    use super::{InboxCursor, build_logging_health_snapshot, read_new_inbox_messages};
     use crate::daemon::session_registry::new_session_registry;
     use crate::daemon::socket::new_state_store;
     use crate::plugins::worker_adapter::AgentState;
@@ -1505,6 +1637,66 @@ mod tests {
     async fn write_inbox(path: &std::path::Path, msgs: &[InboxMessage]) {
         let content = serde_json::to_string_pretty(msgs).unwrap();
         fs::write(path, content).await.unwrap();
+    }
+
+    #[test]
+    fn test_build_logging_health_snapshot_healthy() {
+        let tmp = TempDir::new().expect("temp dir");
+        let snapshot = build_logging_health_snapshot(tmp.path(), 0, false);
+        assert_eq!(snapshot.state, "healthy");
+        assert_eq!(snapshot.dropped_counter, 0);
+        assert_eq!(snapshot.spool_count, 0);
+        assert_eq!(snapshot.oldest_spool_age, None);
+        assert!(snapshot.last_error.is_none());
+        assert!(
+            snapshot.canonical_log_path.ends_with("atm.log.jsonl"),
+            "unexpected canonical_log_path: {}",
+            snapshot.canonical_log_path
+        );
+    }
+
+    #[test]
+    fn test_build_logging_health_snapshot_degraded_spooling() {
+        let tmp = TempDir::new().expect("temp dir");
+        let spool_dir = agent_team_mail_core::logging_event::configured_spool_dir(tmp.path());
+        stdfs::create_dir_all(&spool_dir).expect("mkdir spool");
+        stdfs::write(spool_dir.join("atm-1-1.jsonl"), "{\"v\":1}\n").expect("write spool file");
+
+        let snapshot = build_logging_health_snapshot(tmp.path(), 0, false);
+        assert_eq!(snapshot.state, "degraded_spooling");
+        assert!(snapshot.spool_count >= 1);
+        assert!(snapshot.oldest_spool_age.is_some());
+    }
+
+    #[test]
+    fn test_build_logging_health_snapshot_degraded_dropping() {
+        let tmp = TempDir::new().expect("temp dir");
+        let snapshot = build_logging_health_snapshot(tmp.path(), 3, false);
+        assert_eq!(snapshot.state, "degraded_dropping");
+        assert_eq!(snapshot.dropped_counter, 3);
+        assert!(
+            snapshot
+                .last_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("dropped"),
+            "expected dropping hint in last_error"
+        );
+    }
+
+    #[test]
+    fn test_build_logging_health_snapshot_unavailable_when_disabled() {
+        let tmp = TempDir::new().expect("temp dir");
+        let snapshot = build_logging_health_snapshot(tmp.path(), 0, true);
+        assert_eq!(snapshot.state, "unavailable");
+        assert!(
+            snapshot
+                .last_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("disabled"),
+            "expected disabled reason in last_error"
+        );
     }
 
     #[tokio::test]
