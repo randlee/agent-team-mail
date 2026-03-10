@@ -8169,8 +8169,48 @@ exit 1
     #[test]
     #[serial]
     fn test_handle_register_hint_recovers_mismatch_offline_baseline_to_active() {
-        let fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
-        set_member_backend(fixture._temp.path(), "atm-dev", "arch-ctm", "external");
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        let team_dir = temp.path().join(".claude/teams/atm-dev");
+        std::fs::create_dir_all(&team_dir).unwrap();
+        let config = serde_json::json!({
+            "name": "atm-dev",
+            "description": "test",
+            "createdAt": 1739284800000u64,
+            "leadAgentId": "team-lead@atm-dev",
+            "leadSessionId": "lead-sess",
+            "members": [
+                {
+                    "agentId": "team-lead@atm-dev",
+                    "name": "team-lead",
+                    "agentType": "general-purpose",
+                    "model": "claude-sonnet-4-6",
+                    "joinedAt": 1739284800000u64,
+                    "cwd": temp.path().to_string_lossy().to_string(),
+                    "subscriptions": []
+                },
+                {
+                    "agentId": "arch-ctm@atm-dev",
+                    "name": "arch-ctm",
+                    "agentType": "codex",
+                    "model": "custom:codex-5.3-high",
+                    "joinedAt": 1739284800000u64,
+                    "cwd": temp.path().to_string_lossy().to_string(),
+                    "subscriptions": [],
+                    "externalBackendType": "external"
+                }
+            ]
+        });
+        {
+            use std::io::Write;
+            let content = serde_json::to_string_pretty(&config).unwrap();
+            let path = team_dir.join("config.json");
+            let file = std::fs::File::create(&path).unwrap();
+            let mut writer = std::io::BufWriter::new(&file);
+            writer.write_all(content.as_bytes()).unwrap();
+            writer.flush().unwrap();
+            file.sync_all().unwrap();
+        }
         let store = make_store();
         let sr = make_sr();
         // Must be >1 to satisfy register-hint payload validation.
