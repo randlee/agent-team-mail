@@ -73,6 +73,7 @@ pub fn execute(args: StatusArgs) -> Result<()> {
 
     let member_rows = build_status_member_rows(&team_config, &daemon_states);
     let logging = read_daemon_logging_health(&home_dir);
+    let logging_health = build_logging_health_contract(&logging);
 
     // Count unread messages for each member
     let inbox_counts = count_inbox_messages(&team_dir, &member_rows)?;
@@ -119,6 +120,12 @@ pub fn execute(args: StatusArgs) -> Result<()> {
                 "spool_count": logging.spool_count,
                 "oldest_spool_age": logging.oldest_spool_age,
             }),
+            "logging_health": json!({
+                "status": logging_health.status,
+                "otel_exporter": logging_health.otel_exporter,
+                "local_structured": logging_health.local_structured,
+                "last_export_error": logging_health.last_export_error,
+            }),
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
@@ -164,6 +171,10 @@ pub fn execute(args: StatusArgs) -> Result<()> {
         }
         if let Some(last_error) = &logging.last_error {
             println!("  last_error:      {last_error}");
+        }
+        println!("  otel_status:     {}", logging_health.otel_exporter);
+        if let Some(last_export_error) = &logging_health.last_export_error {
+            println!("  otel_last_error: {last_export_error}");
         }
         if let Some(remediation) = logging_remediation(&logging.state) {
             println!("  remediation:     {remediation}");
@@ -310,6 +321,66 @@ impl Default for LoggingHealth {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LoggingHealthContract {
+    status: String,
+    otel_exporter: String,
+    local_structured: bool,
+    last_export_error: Option<String>,
+}
+
+impl Default for LoggingHealthContract {
+    fn default() -> Self {
+        Self {
+            status: "unavailable".to_string(),
+            otel_exporter: "unavailable".to_string(),
+            local_structured: true,
+            last_export_error: None,
+        }
+    }
+}
+
+fn logging_status_bucket(state: &str) -> &'static str {
+    match state {
+        "healthy" => "ok",
+        "unavailable" => "unavailable",
+        _ => "degraded",
+    }
+}
+
+fn otel_enabled_from_env() -> bool {
+    !matches!(
+        std::env::var("ATM_OTEL_ENABLED")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase()),
+        Some(ref v) if v == "0" || v == "false" || v == "off" || v == "disabled" || v == "no"
+    )
+}
+
+fn build_logging_health_contract(logging: &LoggingHealth) -> LoggingHealthContract {
+    let status = logging_status_bucket(&logging.state).to_string();
+    let mut otel_exporter = status.clone();
+    let mut last_export_error = if otel_exporter == "ok" {
+        None
+    } else {
+        logging.last_error.clone()
+    };
+
+    if !otel_enabled_from_env() {
+        otel_exporter = "unavailable".to_string();
+        if last_export_error.is_none() {
+            last_export_error = Some("otel exporter disabled by ATM_OTEL_ENABLED".to_string());
+        }
+    }
+
+    LoggingHealthContract {
+        status,
+        otel_exporter,
+        local_structured: true,
+        last_export_error,
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 struct DaemonStatusSnapshot {
     #[serde(default)]
@@ -389,6 +460,7 @@ fn format_age(timestamp_ms: u64) -> String {
 mod tests {
     use super::*;
     use agent_team_mail_core::schema::{AgentMember, TeamConfig};
+    use serial_test::serial;
 
     fn member(name: &str) -> AgentMember {
         AgentMember {
@@ -484,5 +556,47 @@ mod tests {
         assert!(logging_remediation("degraded_spooling").is_some());
         assert!(logging_remediation("degraded_dropping").is_some());
         assert!(logging_remediation("unavailable").is_some());
+    }
+
+    #[test]
+    #[serial]
+    fn logging_health_contract_contains_required_json_keys() {
+        // SAFETY: test-scoped env mutation.
+        unsafe {
+            std::env::remove_var("ATM_OTEL_ENABLED");
+        }
+        let contract = build_logging_health_contract(&LoggingHealth {
+            state: "degraded_spooling".to_string(),
+            dropped_counter: 1,
+            spool_path: "/tmp/spool".to_string(),
+            last_error: Some("events are queued in spool awaiting merge".to_string()),
+            canonical_log_path: "/tmp/atm.log.jsonl".to_string(),
+            spool_count: 2,
+            oldest_spool_age: Some(10),
+        });
+        let value = serde_json::to_value(contract).expect("serialize logging_health");
+        assert_eq!(value["status"], "degraded");
+        assert_eq!(value["otel_exporter"], "degraded");
+        assert_eq!(value["local_structured"], true);
+        assert!(value["last_export_error"].is_string());
+
+        // SAFETY: test-scoped env mutation.
+        unsafe {
+            std::env::set_var("ATM_OTEL_ENABLED", "false");
+        }
+        let disabled = build_logging_health_contract(&LoggingHealth {
+            state: "healthy".to_string(),
+            ..LoggingHealth::default()
+        });
+        assert_eq!(disabled.status, "ok");
+        assert_eq!(disabled.otel_exporter, "unavailable");
+        assert_eq!(
+            disabled.last_export_error.as_deref(),
+            Some("otel exporter disabled by ATM_OTEL_ENABLED")
+        );
+        // SAFETY: cleanup after test.
+        unsafe {
+            std::env::remove_var("ATM_OTEL_ENABLED");
+        }
     }
 }

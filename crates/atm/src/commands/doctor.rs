@@ -115,6 +115,8 @@ struct DoctorReport {
     env_overrides: EnvOverrides,
     #[serde(default)]
     logging: LoggingHealthSnapshot,
+    #[serde(default)]
+    logging_health: LoggingHealthContract,
     #[serde(skip_serializing, skip_deserializing, default)]
     member_snapshot: Vec<MemberSnapshot>,
 }
@@ -167,6 +169,66 @@ impl Default for LoggingHealthSnapshot {
             spool_count: 0,
             oldest_spool_age: None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LoggingHealthContract {
+    status: String,
+    otel_exporter: String,
+    local_structured: bool,
+    last_export_error: Option<String>,
+}
+
+impl Default for LoggingHealthContract {
+    fn default() -> Self {
+        Self {
+            status: "unavailable".to_string(),
+            otel_exporter: "unavailable".to_string(),
+            local_structured: true,
+            last_export_error: None,
+        }
+    }
+}
+
+fn logging_status_bucket(state: &str) -> &'static str {
+    match state {
+        "healthy" => "ok",
+        "unavailable" => "unavailable",
+        _ => "degraded",
+    }
+}
+
+fn otel_enabled_from_env() -> bool {
+    !matches!(
+        std::env::var("ATM_OTEL_ENABLED")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase()),
+        Some(ref v) if v == "0" || v == "false" || v == "off" || v == "disabled" || v == "no"
+    )
+}
+
+fn build_logging_health_contract(logging: &LoggingHealthSnapshot) -> LoggingHealthContract {
+    let status = logging_status_bucket(&logging.state).to_string();
+    let mut otel_exporter = status.clone();
+    let mut last_export_error = if otel_exporter == "ok" {
+        None
+    } else {
+        logging.last_error.clone()
+    };
+
+    if !otel_enabled_from_env() {
+        otel_exporter = "unavailable".to_string();
+        if last_export_error.is_none() {
+            last_export_error = Some("otel exporter disabled by ATM_OTEL_ENABLED".to_string());
+        }
+    }
+
+    LoggingHealthContract {
+        status,
+        otel_exporter,
+        local_structured: true,
+        last_export_error,
     }
 }
 
@@ -326,6 +388,9 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
         has_critical: counts.critical > 0,
         counts,
     };
+    let daemon_status = read_daemon_status(home_dir);
+    let logging = daemon_status.logging;
+    let logging_health = build_logging_health_contract(&logging);
 
     Ok(DoctorReport {
         summary,
@@ -341,7 +406,8 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
                 .max(0) as u64,
         },
         env_overrides: active_env_overrides(),
-        logging: read_daemon_status(home_dir).logging,
+        logging,
+        logging_health,
         member_snapshot: build_member_snapshot(team_config.as_ref(), &daemon_states_by_agent),
     })
 }
@@ -1222,6 +1288,12 @@ fn render_human(report: &DoctorReport) -> String {
     }
     if let Some(remediation) = logging_remediation(&report.logging.state) {
         out.push_str(&format!("  remediation: {remediation}\n"));
+    }
+    out.push_str("  otel_status: ");
+    out.push_str(&report.logging_health.otel_exporter);
+    out.push('\n');
+    if let Some(last_export_error) = &report.logging_health.last_export_error {
+        out.push_str(&format!("  otel_last_error: {last_export_error}\n"));
     }
     out.push('\n');
 
@@ -2127,6 +2199,49 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn logging_health_contract_maps_status_and_otel_state() {
+        // SAFETY: test-scoped env mutation.
+        unsafe {
+            std::env::remove_var("ATM_OTEL_ENABLED");
+        }
+        let degraded = build_logging_health_contract(&LoggingHealthSnapshot {
+            state: "degraded_spooling".to_string(),
+            dropped_counter: 0,
+            spool_path: "/tmp/spool".to_string(),
+            last_error: Some("events are queued in spool awaiting merge".to_string()),
+            canonical_log_path: "/tmp/atm.log.jsonl".to_string(),
+            spool_count: 1,
+            oldest_spool_age: Some(5),
+        });
+        assert_eq!(degraded.status, "degraded");
+        assert_eq!(degraded.otel_exporter, "degraded");
+        assert_eq!(
+            degraded.last_export_error.as_deref(),
+            Some("events are queued in spool awaiting merge")
+        );
+
+        // SAFETY: test-scoped env mutation.
+        unsafe {
+            std::env::set_var("ATM_OTEL_ENABLED", "false");
+        }
+        let disabled = build_logging_health_contract(&LoggingHealthSnapshot {
+            state: "healthy".to_string(),
+            ..LoggingHealthSnapshot::default()
+        });
+        assert_eq!(disabled.status, "ok");
+        assert_eq!(disabled.otel_exporter, "unavailable");
+        assert_eq!(
+            disabled.last_export_error.as_deref(),
+            Some("otel exporter disabled by ATM_OTEL_ENABLED")
+        );
+        // SAFETY: cleanup after test.
+        unsafe {
+            std::env::remove_var("ATM_OTEL_ENABLED");
+        }
+    }
+
+    #[test]
     fn render_human_places_member_snapshot_before_findings() {
         let report = DoctorReport {
             summary: Summary {
@@ -2154,6 +2269,7 @@ mod tests {
             },
             env_overrides: EnvOverrides::default(),
             logging: LoggingHealthSnapshot::default(),
+            logging_health: LoggingHealthContract::default(),
             member_snapshot: vec![MemberSnapshot {
                 name: "team-lead".to_string(),
                 agent_type: "team-lead".to_string(),
@@ -2245,6 +2361,7 @@ mod tests {
                 }),
             },
             logging: LoggingHealthSnapshot::default(),
+            logging_health: LoggingHealthContract::default(),
             member_snapshot: vec![MemberSnapshot::default()],
         };
         let value = serde_json::to_value(report).unwrap();
@@ -2276,6 +2393,19 @@ mod tests {
         assert!(value["logging"]["canonical_log_path"].is_string());
         assert!(value["logging"]["spool_count"].is_u64());
         assert!(value["logging"]["oldest_spool_age"].is_null());
+        assert_eq!(
+            value["logging_health"]["status"],
+            serde_json::Value::String("unavailable".to_string())
+        );
+        assert_eq!(
+            value["logging_health"]["otel_exporter"],
+            serde_json::Value::String("unavailable".to_string())
+        );
+        assert_eq!(
+            value["logging_health"]["local_structured"],
+            serde_json::Value::Bool(true)
+        );
+        assert!(value["logging_health"]["last_export_error"].is_null());
     }
 
     #[test]
@@ -2341,6 +2471,7 @@ mod tests {
                 }),
             },
             logging: LoggingHealthSnapshot::default(),
+            logging_health: LoggingHealthContract::default(),
             member_snapshot: vec![],
         };
 

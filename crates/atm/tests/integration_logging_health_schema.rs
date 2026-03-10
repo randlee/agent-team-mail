@@ -91,6 +91,11 @@ fn status_json_includes_extended_logging_fields() {
     assert!(logging["canonical_log_path"].is_string());
     assert!(logging["spool_count"].is_u64());
     assert!(logging["oldest_spool_age"].is_u64());
+    let logging_health = &value["logging_health"];
+    assert_eq!(logging_health["status"], "degraded");
+    assert_eq!(logging_health["otel_exporter"], "degraded");
+    assert_eq!(logging_health["local_structured"], true);
+    assert!(logging_health["last_export_error"].is_string());
 }
 
 #[test]
@@ -122,4 +127,11 @@ fn doctor_json_includes_extended_logging_fields() {
     assert!(logging["canonical_log_path"].is_string());
     assert!(logging["spool_count"].is_u64());
     assert!(logging["oldest_spool_age"].is_number() || logging["oldest_spool_age"].is_null());
+    let logging_health = &value["logging_health"];
+    assert!(logging_health["status"].is_string());
+    assert!(logging_health["otel_exporter"].is_string());
+    assert_eq!(logging_health["local_structured"], true);
+    assert!(
+        logging_health["last_export_error"].is_string() || logging_health["last_export_error"].is_null()
+    );
 }
