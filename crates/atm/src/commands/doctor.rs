@@ -1159,32 +1159,7 @@ fn format_session_short(session_id: Option<&str>) -> String {
     let Some(session) = session_id.map(str::trim).filter(|s| !s.is_empty()) else {
         return "-".to_string();
     };
-
-    if looks_like_uuid(session) {
-        return session.chars().take(8).collect();
-    }
-
-    if let Some(rest) = session.strip_prefix("local:")
-        && let Some(name) = rest.split(':').next()
-        && !name.is_empty()
-    {
-        return format!("local:{name}");
-    }
-
-    session.to_string()
-}
-
-fn looks_like_uuid(value: &str) -> bool {
-    let mut parts = value.split('-');
-    for expected_len in [8usize, 4, 4, 4, 12] {
-        let Some(part) = parts.next() else {
-            return false;
-        };
-        if part.len() != expected_len || !part.chars().all(|c| c.is_ascii_hexdigit()) {
-            return false;
-        }
-    }
-    parts.next().is_none()
+    session.chars().take(8).collect()
 }
 
 fn render_human(report: &DoctorReport) -> String {
@@ -1440,15 +1415,16 @@ mod tests {
     }
 
     #[test]
-    fn format_session_short_formats_uuid_and_local_ids() {
+    fn format_session_short_always_uses_8_char_prefix() {
         assert_eq!(
             format_session_short(Some("123e4567-e89b-12d3-a456-426614174000")),
             "123e4567"
         );
         assert_eq!(
             format_session_short(Some("local:team-lead:1772608955543:20111")),
-            "local:team-lead"
+            "local:te"
         );
+        assert_eq!(format_session_short(Some("sess-123456789")), "sess-123");
         assert_eq!(format_session_short(Some("sess-1")), "sess-1");
         assert_eq!(format_session_short(None), "-");
         assert_eq!(format_session_short(Some("   ")), "-");
@@ -2347,5 +2323,48 @@ mod tests {
         assert!(rendered.contains(&format!("ATM_HOME={home} (source=env)")));
         assert!(rendered.contains("ATM_TEAM=atm-dev"));
         assert!(rendered.contains("ATM_IDENTITY=arch-ctm"));
+    }
+
+    #[test]
+    fn render_human_members_use_short_session_ids_while_snapshot_keeps_full() {
+        let full_session = "123e4567-e89b-12d3-a456-426614174000";
+        let report = DoctorReport {
+            summary: Summary {
+                team: "atm-dev".to_string(),
+                generated_at: "2026-03-02T00:00:00Z".to_string(),
+                has_critical: false,
+                counts: FindingCounts {
+                    critical: 0,
+                    warn: 0,
+                    info: 0,
+                },
+            },
+            findings: vec![],
+            recommendations: vec![],
+            log_window: LogWindow {
+                mode: "default_incremental".to_string(),
+                start: "2026-03-02T00:00:00Z".to_string(),
+                end: "2026-03-02T00:01:00Z".to_string(),
+                elapsed_secs: 60,
+            },
+            env_overrides: EnvOverrides::default(),
+            logging: LoggingHealthSnapshot::default(),
+            member_snapshot: vec![MemberSnapshot {
+                name: "arch-ctm".to_string(),
+                agent_type: "codex".to_string(),
+                model: "custom:codex".to_string(),
+                status: "Online".to_string(),
+                activity: "Busy".to_string(),
+                session_id: Some(full_session.to_string()),
+                process_id: Some(1234),
+            }],
+        };
+
+        let rendered = render_human(&report);
+        assert!(rendered.contains("123e4567"));
+        assert!(!rendered.contains(full_session));
+
+        let json_value = serde_json::to_value(report).unwrap();
+        assert!(json_value.get("member_snapshot").is_none());
     }
 }
