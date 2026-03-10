@@ -17,6 +17,7 @@ use std::path::PathBuf;
 
 use pipeline::compose_blocks;
 use render::render_template;
+use sc_observability::{LogConfig as SharedLogConfig, Logger as SharedLogger};
 use validate::{evaluate_context, prepare_template, validate_request};
 
 pub use diagnostics::Diagnostic;
@@ -146,49 +147,143 @@ pub enum ComposerError {
     },
 }
 
+fn emit_observability(action: &str, outcome: &str, fields: serde_json::Value) {
+    let Some(home_dir) = dirs::home_dir() else {
+        return;
+    };
+    let mut cfg = SharedLogConfig::from_home(&home_dir);
+    cfg.log_path = home_dir
+        .join(".config")
+        .join("sc-composer")
+        .join("logs")
+        .join("sc-composer.log.jsonl");
+    cfg.spool_dir = home_dir
+        .join(".config")
+        .join("sc-composer")
+        .join("logs")
+        .join("spool");
+    let logger = SharedLogger::new(cfg);
+    let _ = logger.emit_action(
+        "sc-composer",
+        "sc_composer::lib",
+        action,
+        Some(outcome),
+        fields,
+    );
+}
+
 /// Compose a final prompt output.
 pub fn compose(request: &ComposeRequest) -> Result<ComposeResult, ComposerError> {
-    let prepared = prepare_template(request)?;
-    let merge = evaluate_context(request, &prepared);
+    let result = (|| {
+        let prepared = prepare_template(request)?;
+        let merge = evaluate_context(request, &prepared);
 
-    let mut warnings = prepared.warnings;
-    warnings.extend(merge.warnings);
-    if !merge.errors.is_empty() {
-        return Err(ComposerError::ValidationFailed {
-            error_count: merge.errors.len(),
-            errors: Box::new(merge.errors),
-            warnings: Box::new(warnings),
-        });
+        let mut warnings = prepared.warnings;
+        warnings.extend(merge.warnings);
+        if !merge.errors.is_empty() {
+            return Err(ComposerError::ValidationFailed {
+                error_count: merge.errors.len(),
+                errors: Box::new(merge.errors),
+                warnings: Box::new(warnings),
+            });
+        }
+
+        let profile_body = if frontmatter::is_template_file(&prepared.template_path) {
+            render_template(&prepared.template_path, &prepared.body, &merge.context)?
+        } else {
+            prepared.body
+        };
+        let rendered_text = compose_blocks(
+            &profile_body,
+            request.guidance_block.as_deref(),
+            request.user_prompt.as_deref(),
+        );
+
+        Ok(ComposeResult {
+            rendered_text,
+            resolved_files: prepared.resolved_files,
+            search_trace: prepared.search_trace,
+            variable_sources: merge.variable_sources,
+            warnings,
+        })
+    })();
+
+    match &result {
+        Ok(composed) => emit_observability(
+            "compose",
+            "ok",
+            serde_json::json!({
+                "mode": format!("{:?}", request.mode),
+                "runtime": format!("{:?}", request.runtime),
+                "resolved_files": composed.resolved_files.len(),
+                "warnings": composed.warnings.len(),
+            }),
+        ),
+        Err(err) => emit_observability(
+            "compose",
+            "err",
+            serde_json::json!({
+                "mode": format!("{:?}", request.mode),
+                "runtime": format!("{:?}", request.runtime),
+                "error": err.to_string(),
+            }),
+        ),
     }
 
-    let profile_body = if frontmatter::is_template_file(&prepared.template_path) {
-        render_template(&prepared.template_path, &prepared.body, &merge.context)?
-    } else {
-        prepared.body
-    };
-    let rendered_text = compose_blocks(
-        &profile_body,
-        request.guidance_block.as_deref(),
-        request.user_prompt.as_deref(),
-    );
-
-    Ok(ComposeResult {
-        rendered_text,
-        resolved_files: prepared.resolved_files,
-        search_trace: prepared.search_trace,
-        variable_sources: merge.variable_sources,
-        warnings,
-    })
+    result
 }
 
 /// Validate a compose request without producing output.
 pub fn validate(request: &ComposeRequest) -> Result<ValidationReport, ComposerError> {
-    validate_request(request)
+    let result = validate_request(request);
+    match &result {
+        Ok(report) => emit_observability(
+            "validate",
+            "ok",
+            serde_json::json!({
+                "mode": format!("{:?}", request.mode),
+                "runtime": format!("{:?}", request.runtime),
+                "errors": report.errors.len(),
+                "warnings": report.warnings.len(),
+            }),
+        ),
+        Err(err) => emit_observability(
+            "validate",
+            "err",
+            serde_json::json!({
+                "mode": format!("{:?}", request.mode),
+                "runtime": format!("{:?}", request.runtime),
+                "error": err.to_string(),
+            }),
+        ),
+    }
+    result
 }
 
 /// Resolve the input template/profile path and return full probe trace.
 pub fn resolve(request: &ComposeRequest) -> Result<ResolveResult, ComposerError> {
-    resolver::resolve_input_path(request)
+    let result = resolver::resolve_input_path(request);
+    match &result {
+        Ok(resolved) => emit_observability(
+            "resolve",
+            "ok",
+            serde_json::json!({
+                "mode": format!("{:?}", request.mode),
+                "runtime": format!("{:?}", request.runtime),
+                "attempted_paths": resolved.attempted_paths.len(),
+            }),
+        ),
+        Err(err) => emit_observability(
+            "resolve",
+            "err",
+            serde_json::json!({
+                "mode": format!("{:?}", request.mode),
+                "runtime": format!("{:?}", request.runtime),
+                "error": err.to_string(),
+            }),
+        ),
+    }
+    result
 }
 
 /// Discover template variables in Jinja content.

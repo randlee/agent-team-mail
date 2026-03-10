@@ -1604,8 +1604,11 @@ dependencies = [
 name = "sc-composer"
 version = "0.43.4"
 dependencies = [
+ "dirs",
  "minijinja",
+ "sc-observability",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tempfile",
  "thiserror 2.0.18",

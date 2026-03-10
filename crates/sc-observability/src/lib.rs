@@ -637,6 +637,15 @@ impl Logger {
     }
 }
 
+/// Export a single event to OTel using default pipeline settings (fail-open).
+///
+/// This helper is intended for producers that already own canonical JSONL
+/// writing and only need shared OTel export semantics.
+pub fn export_otel_best_effort(log_path: &Path, event: &LogEventV1) {
+    let pipeline = OtelPipeline::new_default(log_path);
+    let _ = pipeline.export_event(event);
+}
+
 pub fn spool_file_name(source_binary: &str, pid: u32, unix_millis: u128) -> String {
     let sanitized = sanitize_source_binary(source_binary);
     format!("{}-{}-{}.jsonl", sanitized, pid, unix_millis)
