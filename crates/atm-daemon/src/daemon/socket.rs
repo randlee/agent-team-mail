@@ -5609,12 +5609,11 @@ fn bootstrap_session_from_member_hint(
         return;
     }
 
-    let now_ms = chrono::Utc::now().timestamp_millis() as u64;
-    let session_id = member
-        .session_id
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| format!("local:{}:{now_ms}:{pid}", member.name));
+    let Some(session_id) = member.session_id.clone().filter(|s| !s.trim().is_empty()) else {
+        // Do not fabricate synthetic IDs here; daemon bootstrap must only seed
+        // canonical session IDs supplied by lifecycle hooks/register-hint.
+        return;
+    };
     let runtime = runtime_for_member(member);
     let runtime_session_id = runtime.as_ref().map(|_| session_id.clone());
 
@@ -6776,6 +6775,37 @@ notify_target = "team-lead"
             .expect("session registry upserted");
         assert_eq!(session.session_id, "hint-session-1");
         assert_eq!(session.process_id, std::process::id());
+    }
+
+    #[test]
+    #[serial]
+    fn test_list_agents_bootstrap_skips_member_without_session_id_hint() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let home = std::env::var("ATM_HOME").expect("ATM_HOME set by fixture");
+        let config_path = std::path::Path::new(&home).join(".claude/teams/atm-dev/config.json");
+        let mut cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        let members = cfg["members"].as_array_mut().unwrap();
+        let target = members
+            .iter_mut()
+            .find(|m| m["name"].as_str() == Some("arch-ctm"))
+            .expect("arch-ctm in config");
+        target["processId"] = serde_json::json!(std::process::id());
+        target.as_object_mut().unwrap().remove("sessionId");
+        target["externalBackendType"] = serde_json::json!("external");
+        std::fs::write(&config_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let store = make_store();
+        let sr = make_sr();
+        let req = make_request("list-agents", serde_json::json!({"team": "atm-dev"}));
+        let resp = handle_list_agents(&req, &store, &sr);
+        assert_eq!(resp.status, "ok");
+
+        let reg = sr.lock().unwrap();
+        assert!(
+            reg.query_for_team("atm-dev", "arch-ctm").is_none(),
+            "bootstrap must not fabricate synthetic session IDs when sessionId hint is missing"
+        );
     }
 
     #[test]
