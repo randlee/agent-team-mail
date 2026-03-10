@@ -246,7 +246,11 @@ fn resolve_unknown_runtime_session(
 }
 
 fn resolve_gemini_session_from_cli() -> Result<Option<String>> {
-    if cfg!(test) {
+    if let Ok(stdout_override) = std::env::var("ATM_TEST_GEMINI_LIST_SESSIONS_STDOUT") {
+        return Ok(parse_gemini_list_sessions_output(&stdout_override));
+    }
+
+    if running_test_harness() && env_var_nonempty("ATM_TEST_ENABLE_GEMINI_CLI").is_none() {
         return Ok(None);
     }
 
@@ -677,6 +681,35 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn codex_runtime_without_thread_id_returns_none() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+
+        unsafe {
+            std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("ATM_TEST_HOME", temp.path());
+            std::env::set_var("ATM_RUNTIME", "codex");
+            std::env::remove_var("CODEX_THREAD_ID");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        let resolved =
+            resolve_caller_session_id_optional(Some("atm-dev"), Some("arch-ctm")).expect("resolve");
+
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("ATM_TEST_HOME");
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("CODEX_THREAD_ID");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        assert!(resolved.is_none());
+    }
+
+    #[test]
     fn parse_gemini_list_sessions_extracts_uuid_first() {
         let output = r#"
 Index Summary Last Active Session ID
@@ -684,6 +717,88 @@ Index Summary Last Active Session ID
 2 Older item 3h ago 93cbf813-b25a-4c3e-a3e0-1597417f7222
 "#;
         let resolved = parse_gemini_list_sessions_output(output).expect("uuid expected");
+        assert_eq!(resolved, "d98410cc-6d6a-41ac-ac39-a2ce39b9e503");
+    }
+
+    #[test]
+    fn parse_gemini_list_sessions_empty_or_malformed_returns_none() {
+        assert!(parse_gemini_list_sessions_output("").is_none());
+        assert!(parse_gemini_list_sessions_output("no sessions available").is_none());
+        assert!(parse_gemini_list_sessions_output("session-id: ???").is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn gemini_runtime_uses_hook_session_payload_when_present() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = current_ppid_hook_path();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let hook = serde_json::json!({
+            "pid": crate::util::hook_identity::get_parent_pid(),
+            "session_id": "gemini-hook-session-123",
+            "agent_name": "arch-gtm",
+            "created_at": now
+        });
+        std::fs::write(&hook_path, serde_json::to_string(&hook).unwrap()).unwrap();
+
+        unsafe {
+            std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("ATM_TEST_HOME", temp.path());
+            std::env::set_var("ATM_RUNTIME", "gemini");
+            std::env::set_var("ATM_TEST_ENABLE_HOOK_RESOLUTION", "1");
+            std::env::remove_var("ATM_TEST_GEMINI_LIST_SESSIONS_STDOUT");
+            std::env::remove_var("ATM_GEMINI_TMP_DIR");
+            std::env::remove_var("ATM_PROJECT_DIR");
+        }
+
+        let resolved = resolve_caller_session_id_optional(Some("atm-dev"), Some("arch-gtm"))
+            .expect("resolve")
+            .expect("session id");
+
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("ATM_TEST_HOME");
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("ATM_TEST_ENABLE_HOOK_RESOLUTION");
+            std::env::remove_var("ATM_TEST_GEMINI_LIST_SESSIONS_STDOUT");
+            std::env::remove_var("ATM_GEMINI_TMP_DIR");
+            std::env::remove_var("ATM_PROJECT_DIR");
+        }
+        let _ = std::fs::remove_file(&hook_path);
+
+        assert_eq!(resolved, "gemini-hook-session-123");
+    }
+
+    #[test]
+    #[serial]
+    fn gemini_cli_resolution_uses_test_stdout_override() {
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+        let output = "1 Fix auth bug 2m ago d98410cc-6d6a-41ac-ac39-a2ce39b9e503";
+
+        unsafe {
+            std::env::set_var("ATM_RUNTIME", "gemini");
+            std::env::set_var("ATM_TEST_GEMINI_LIST_SESSIONS_STDOUT", output);
+            std::env::remove_var("ATM_TEST_ENABLE_HOOK_RESOLUTION");
+            std::env::remove_var("ATM_GEMINI_TMP_DIR");
+            std::env::remove_var("ATM_PROJECT_DIR");
+        }
+
+        let resolved = resolve_caller_session_id_optional(Some("atm-dev"), Some("arch-gtm"))
+            .expect("resolve")
+            .expect("session id");
+
+        unsafe {
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("ATM_TEST_GEMINI_LIST_SESSIONS_STDOUT");
+            std::env::remove_var("ATM_TEST_ENABLE_HOOK_RESOLUTION");
+            std::env::remove_var("ATM_GEMINI_TMP_DIR");
+            std::env::remove_var("ATM_PROJECT_DIR");
+        }
+
         assert_eq!(resolved, "d98410cc-6d6a-41ac-ac39-a2ce39b9e503");
     }
 
@@ -709,7 +824,7 @@ Index Summary Last Active Session ID
         unsafe {
             std::env::set_var("ATM_RUNTIME", "gemini");
             std::env::set_var("ATM_GEMINI_TMP_DIR", temp.path());
-            std::env::set_var("ATM_PROJECT_DIR", "/tmp/agent-team-mail");
+            std::env::set_var("ATM_PROJECT_DIR", temp.path().join("agent-team-mail"));
         }
 
         let resolved = resolve_caller_session_id_optional(Some("atm-dev"), Some("arch-gtm"))

@@ -21,7 +21,7 @@ use agent_team_mail_core::text::{
 };
 
 use crate::util::addressing::parse_address;
-use crate::util::caller_identity::resolve_caller_session_id_required;
+use crate::util::caller_identity::resolve_caller_session_id_optional;
 use crate::util::file_policy::check_file_reference;
 use crate::util::hook_identity::{read_hook_file, read_hook_file_identity};
 use crate::util::settings::get_home_dir;
@@ -613,7 +613,7 @@ fn resolve_sender_session_id_with_context(
     team: Option<&str>,
     identity: Option<&str>,
 ) -> Result<Option<String>> {
-    resolve_caller_session_id_required(team, identity).map(Some)
+    resolve_caller_session_id_optional(team, identity)
 }
 
 fn should_warn_self_send(
