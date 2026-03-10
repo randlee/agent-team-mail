@@ -13,7 +13,9 @@ use std::process::Command;
 use crate::util::hook_identity::{read_hook_file, read_session_file};
 use crate::util::settings::get_home_dir;
 
+/// Error code emitted when multiple active sessions are found for the same identity.
 pub const CALLER_AMBIGUOUS: &str = "CALLER_AMBIGUOUS";
+/// Error code emitted when no usable session id can be resolved for the caller.
 pub const CALLER_UNRESOLVED: &str = "CALLER_UNRESOLVED";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
