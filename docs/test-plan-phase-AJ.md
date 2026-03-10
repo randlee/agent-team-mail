@@ -14,7 +14,7 @@ and `atm doctor`.
 | #595 | AJ.1 | no dependence on `CLAUDE_SESSION_ID` in non-Claude runtime paths | command tests where Claude env var is absent but runtime session is resolvable |
 | #597 | AJ.2 | Codex/Gemini runtime session resolution | unit tests for Codex/Gemini resolution adapters; Gemini list-sessions parse tests; fallback tests |
 | #594 | AJ.3 | stale-session cleanup lifecycle | daemon/session-registry tests for last_seen + safe cleanup eligibility |
-| #596 | AJ.4 | doctor session-id display format | snapshot tests for 8-char short format in doctor/members surfaces |
+| #596 | AJ.4 | doctor session-id display format | focused unit assertion tests for 8-char short format in doctor/members surfaces |
 | #593/#597 | AJ.5 | spawn env + resume/continue contract | spawn tests for env injection and resume/continue behavior |
 
 ## Planned Test Suites
@@ -58,7 +58,8 @@ and `atm doctor`.
 - `doctor` and `members` output tests:
   - session id always rendered as short 8-char prefix in table surfaces
   - JSON output preserves full canonical IDs while human output stays short
-  - no mixed-format rows in same report.
+  - no mixed-format rows in same report
+  - focused unit assertions are sufficient coverage; insta snapshots are optional, not required.
 
 ## AJ.5 — Spawn Env and Resume/Continue
 

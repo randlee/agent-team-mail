@@ -18,7 +18,7 @@ use agent_team_mail_core::schema::TeamConfig;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::util::hook_identity::read_hook_file;
+use crate::util::caller_identity::resolve_caller_session_id_optional;
 use crate::util::member_labels::UNREGISTERED_MARKER;
 use crate::util::settings::get_home_dir;
 
@@ -115,6 +115,8 @@ struct DoctorReport {
     env_overrides: EnvOverrides,
     #[serde(default)]
     logging: LoggingHealthSnapshot,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    members: Vec<MemberSnapshot>,
     #[serde(skip_serializing, skip_deserializing, default)]
     member_snapshot: Vec<MemberSnapshot>,
 }
@@ -198,6 +200,10 @@ pub fn execute(args: DoctorArgs) -> Result<()> {
         &home_dir,
     )?;
     let team = config.core.default_team.clone();
+    let caller_session_id =
+        resolve_caller_session_id_optional(Some(&team), Some(&config.core.identity))
+            .ok()
+            .flatten();
 
     let report = build_report(&home_dir, &team, &args)?;
 
@@ -206,7 +212,7 @@ pub fn execute(args: DoctorArgs) -> Result<()> {
         source: "atm",
         action: "doctor",
         team: Some(team.clone()),
-        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+        session_id: caller_session_id,
         agent_id: Some(config.core.identity.clone()),
         agent_name: Some(config.core.identity.clone()),
         result: Some(
@@ -327,6 +333,7 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
         counts,
     };
 
+    let member_snapshot = build_member_snapshot(team_config.as_ref(), &daemon_states_by_agent);
     Ok(DoctorReport {
         summary,
         findings,
@@ -342,7 +349,8 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
         },
         env_overrides: active_env_overrides(),
         logging: read_daemon_status(home_dir).logging,
-        member_snapshot: build_member_snapshot(team_config.as_ref(), &daemon_states_by_agent),
+        members: member_snapshot.clone(),
+        member_snapshot,
     })
 }
 
@@ -1092,16 +1100,10 @@ fn count_findings(findings: &[Finding]) -> FindingCounts {
 }
 
 fn has_register_session_context() -> bool {
-    if let Ok(session_id) = std::env::var("CLAUDE_SESSION_ID")
-        && !session_id.trim().is_empty()
-    {
-        return true;
-    }
-    read_hook_file()
+    resolve_caller_session_id_optional(None, None)
         .ok()
         .flatten()
-        .map(|d| !d.session_id.trim().is_empty())
-        .unwrap_or(false)
+        .is_some()
 }
 
 fn build_recommendations(
@@ -1145,7 +1147,7 @@ fn build_recommendations(
         } else {
             recs.push(Recommendation {
                 command: format!("atm --as team-lead register {team}"),
-                reason: "No session context detected. Run from a managed Claude session (or set CLAUDE_SESSION_ID) before retrying register.".to_string(),
+                reason: "No session context detected. Run from a managed session (or set ATM_SESSION_ID) before retrying register.".to_string(),
             });
         }
     }
@@ -1161,32 +1163,7 @@ fn format_session_short(session_id: Option<&str>) -> String {
     let Some(session) = session_id.map(str::trim).filter(|s| !s.is_empty()) else {
         return "-".to_string();
     };
-
-    if looks_like_uuid(session) {
-        return session.chars().take(8).collect();
-    }
-
-    if let Some(rest) = session.strip_prefix("local:")
-        && let Some(name) = rest.split(':').next()
-        && !name.is_empty()
-    {
-        return format!("local:{name}");
-    }
-
-    session.to_string()
-}
-
-fn looks_like_uuid(value: &str) -> bool {
-    let mut parts = value.split('-');
-    for expected_len in [8usize, 4, 4, 4, 12] {
-        let Some(part) = parts.next() else {
-            return false;
-        };
-        if part.len() != expected_len || !part.chars().all(|c| c.is_ascii_hexdigit()) {
-            return false;
-        }
-    }
-    parts.next().is_none()
+    session.chars().take(8).collect()
 }
 
 fn render_human(report: &DoctorReport) -> String {
@@ -1442,15 +1419,16 @@ mod tests {
     }
 
     #[test]
-    fn format_session_short_formats_uuid_and_local_ids() {
+    fn format_session_short_always_uses_8_char_prefix() {
         assert_eq!(
             format_session_short(Some("123e4567-e89b-12d3-a456-426614174000")),
             "123e4567"
         );
         assert_eq!(
             format_session_short(Some("local:team-lead:1772608955543:20111")),
-            "local:team-lead"
+            "local:te"
         );
+        assert_eq!(format_session_short(Some("sess-123456789")), "sess-123");
         assert_eq!(format_session_short(Some("sess-1")), "sess-1");
         assert_eq!(format_session_short(None), "-");
         assert_eq!(format_session_short(Some("   ")), "-");
@@ -1815,6 +1793,7 @@ mod tests {
             session_id: "lead-session".to_string(),
             process_id: 4242,
             alive: false,
+            last_seen_at: None,
             runtime: None,
             runtime_session_id: None,
             pane_id: None,
@@ -1860,6 +1839,7 @@ mod tests {
             session_id: "member-session".to_string(),
             process_id: 4243,
             alive: false,
+            last_seen_at: None,
             runtime: None,
             runtime_session_id: None,
             pane_id: None,
@@ -2154,6 +2134,15 @@ mod tests {
             },
             env_overrides: EnvOverrides::default(),
             logging: LoggingHealthSnapshot::default(),
+            members: vec![MemberSnapshot {
+                name: "team-lead".to_string(),
+                agent_type: "team-lead".to_string(),
+                model: "claude".to_string(),
+                status: "Online".to_string(),
+                activity: "Busy".to_string(),
+                session_id: Some("sess-1".to_string()),
+                process_id: Some(4242),
+            }],
             member_snapshot: vec![MemberSnapshot {
                 name: "team-lead".to_string(),
                 agent_type: "team-lead".to_string(),
@@ -2206,11 +2195,12 @@ mod tests {
     }
 
     #[test]
-    fn doctor_json_schema_excludes_member_snapshot() {
+    fn doctor_json_schema_includes_members_and_excludes_member_snapshot() {
         let atm_home = std::env::temp_dir()
             .join("atm-home")
             .to_string_lossy()
             .into_owned();
+        let full_session = "123e4567-e89b-12d3-a456-426614174000".to_string();
         let report = DoctorReport {
             summary: Summary {
                 team: "atm-dev".to_string(),
@@ -2245,10 +2235,23 @@ mod tests {
                 }),
             },
             logging: LoggingHealthSnapshot::default(),
+            members: vec![MemberSnapshot {
+                name: "arch-ctm".to_string(),
+                agent_type: "codex".to_string(),
+                model: "custom:codex".to_string(),
+                status: "Online".to_string(),
+                activity: "Busy".to_string(),
+                session_id: Some(full_session.clone()),
+                process_id: Some(4242),
+            }],
             member_snapshot: vec![MemberSnapshot::default()],
         };
         let value = serde_json::to_value(report).unwrap();
         assert!(value.get("member_snapshot").is_none());
+        assert_eq!(
+            value["members"][0]["session_id"],
+            serde_json::Value::String(full_session)
+        );
         assert_eq!(
             value["env_overrides"]["atm_home"]["source"],
             serde_json::Value::String("env".to_string())
@@ -2341,6 +2344,7 @@ mod tests {
                 }),
             },
             logging: LoggingHealthSnapshot::default(),
+            members: vec![],
             member_snapshot: vec![],
         };
 
@@ -2349,5 +2353,61 @@ mod tests {
         assert!(rendered.contains(&format!("ATM_HOME={home} (source=env)")));
         assert!(rendered.contains("ATM_TEAM=atm-dev"));
         assert!(rendered.contains("ATM_IDENTITY=arch-ctm"));
+    }
+
+    #[test]
+    fn render_human_members_use_short_session_ids_while_snapshot_keeps_full() {
+        let full_session = "123e4567-e89b-12d3-a456-426614174000";
+        let report = DoctorReport {
+            summary: Summary {
+                team: "atm-dev".to_string(),
+                generated_at: "2026-03-02T00:00:00Z".to_string(),
+                has_critical: false,
+                counts: FindingCounts {
+                    critical: 0,
+                    warn: 0,
+                    info: 0,
+                },
+            },
+            findings: vec![],
+            recommendations: vec![],
+            log_window: LogWindow {
+                mode: "default_incremental".to_string(),
+                start: "2026-03-02T00:00:00Z".to_string(),
+                end: "2026-03-02T00:01:00Z".to_string(),
+                elapsed_secs: 60,
+            },
+            env_overrides: EnvOverrides::default(),
+            logging: LoggingHealthSnapshot::default(),
+            members: vec![MemberSnapshot {
+                name: "arch-ctm".to_string(),
+                agent_type: "codex".to_string(),
+                model: "custom:codex".to_string(),
+                status: "Online".to_string(),
+                activity: "Busy".to_string(),
+                session_id: Some(full_session.to_string()),
+                process_id: Some(1234),
+            }],
+            member_snapshot: vec![MemberSnapshot {
+                name: "arch-ctm".to_string(),
+                agent_type: "codex".to_string(),
+                model: "custom:codex".to_string(),
+                status: "Online".to_string(),
+                activity: "Busy".to_string(),
+                session_id: Some(full_session.to_string()),
+                process_id: Some(1234),
+            }],
+        };
+
+        let rendered = render_human(&report);
+        assert!(rendered.contains("123e4567"));
+        assert!(!rendered.contains(full_session));
+
+        let json_value = serde_json::to_value(report).unwrap();
+        assert!(json_value.get("member_snapshot").is_none());
+        assert_eq!(
+            json_value["members"][0]["session_id"],
+            serde_json::Value::String(full_session.to_string())
+        );
     }
 }

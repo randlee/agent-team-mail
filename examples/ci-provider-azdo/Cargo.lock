@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-team-mail-core"
-version = "0.42.1"
+version = "0.43.4"
 dependencies = [
  "anyhow",
  "blake3",
@@ -24,7 +24,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-daemon"
-version = "0.42.1"
+version = "0.43.4"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
@@ -1033,10 +1033,11 @@ dependencies = [
 
 [[package]]
 name = "sc-observability"
-version = "0.42.1"
+version = "0.43.4"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
+ "chrono",
  "serde_json",
  "thiserror 2.0.18",
 ]

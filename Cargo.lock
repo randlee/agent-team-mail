@@ -17,6 +17,7 @@ dependencies = [
  "minijinja",
  "notify",
  "predicates",
+ "regex",
  "sc-composer",
  "sc-observability",
  "serde",
