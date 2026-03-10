@@ -601,6 +601,7 @@ mod tests {
         let lines: Vec<String> = std::fs::read_to_string(&log_path)
             .expect("log file should exist")
             .lines()
+            .filter(|l| !l.is_empty())
             .map(str::to_string)
             .collect();
         let event: LogEventV1 =
