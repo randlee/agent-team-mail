@@ -57,3 +57,39 @@ After initialization, the team-lead uses these skills to coordinate the team:
 
 > Additional orchestration guides are in `.claude/skills/*/SKILL.md`. Consult
 > the relevant skill before starting a new phase or delegating to a teammate.
+
+---
+
+## Task Assignment Protocol
+
+When assigning work to any teammate:
+
+1. **Create or update the task list** — `TaskCreate` or `TaskUpdate` with assignee and description before sending the first message.
+2. **Include in the assignment message**:
+   - The task and its scope (link to worktree, relevant issues, design docs)
+   - Applicable development guidelines (`docs/cross-platform-guidelines.md`, Rust guidelines, etc.)
+   - Expected deliverables and acceptance criteria
+3. **Use Jinja2 templates** (see `/codex-orchestration` skill) that require:
+   - **Immediate ACK** when the agent starts the skill
+   - **Intermediate status** notifications at meaningful milestones
+   - **Completion notification** with commit/PR reference when done
+
+### Communication Rules
+
+- **No ACK = work is not being done.** If a teammate does not acknowledge within a reasonable
+  window, assume the message was not received and follow up (nudge via tmux for Codex agents).
+- **Codex agents (arch-ctm, arch-ctask)** do not receive message injection — they only see
+  new messages when they check mail after their current task completes. Do not assume they
+  received a message until they ACK.
+
+---
+
+## PR and CI Protocol
+
+- **Create the PR as soon as dev completes work and begins self-testing** — before QA starts,
+  so CI runs in parallel with the QA review.
+- **Immediately after PR creation**, run:
+  ```bash
+  atm gh monitor pr <NUMBER>
+  ```
+  to receive CI notifications automatically. Do not wait for the user to ask.
