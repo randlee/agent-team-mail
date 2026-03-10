@@ -190,3 +190,57 @@ fn cross_platform_tempdir_absolute_paths_are_supported() {
             .is_some_and(|resolved| resolved == &template_path)
     );
 }
+
+#[test]
+fn trim_blocks_removes_newline_after_block_tag() {
+    // With trim_blocks enabled the newline immediately after a block tag ({% %})
+    // is consumed so that block-only lines do not produce blank lines in the
+    // rendered output.  The template below has one conditional block tag on its
+    // own line; without trim_blocks the output would be "\nHello Kai" (leading
+    // blank line); with trim_blocks it must be "Hello Kai".
+    let tmp = TempDir::new().expect("tempdir");
+    write_file(
+        &tmp,
+        "trim.md.j2",
+        "{% if name %}\nHello {{ name }}\n{% endif %}\n",
+    );
+
+    let mut request = file_request(&tmp, "trim.md.j2");
+    request
+        .vars_input
+        .insert("name".to_string(), "Kai".to_string());
+    let result = compose(&request).expect("compose should succeed");
+
+    // trim_blocks also consumes the newline after {% endif %}, so the final
+    // output has no trailing newline when the template ends with {% endif %}\n.
+    assert_eq!(
+        result.rendered_text, "Hello Kai",
+        "trim_blocks must eliminate blank lines produced by block tags"
+    );
+}
+
+#[test]
+fn lstrip_blocks_removes_leading_whitespace_before_block_tag() {
+    // With lstrip_blocks enabled, leading whitespace before a block tag on its
+    // own line is stripped from the rendered output.  The template below
+    // indents the {% if %} / {% endif %} tags with four spaces; the rendered
+    // output must not carry that indentation as a literal prefix.
+    // trim_blocks also fires on the final {% endif %}\n, consuming the newline.
+    let tmp = TempDir::new().expect("tempdir");
+    write_file(
+        &tmp,
+        "lstrip.md.j2",
+        "    {% if name %}Hello {{ name }}{% endif %}\n",
+    );
+
+    let mut request = file_request(&tmp, "lstrip.md.j2");
+    request
+        .vars_input
+        .insert("name".to_string(), "Kai".to_string());
+    let result = compose(&request).expect("compose should succeed");
+
+    assert_eq!(
+        result.rendered_text, "Hello Kai",
+        "lstrip_blocks must strip leading whitespace before block tags"
+    );
+}
