@@ -72,7 +72,14 @@ fn fields_to_log_event(fields: &EventFields) -> crate::logging_event::LogEventV1
             .agent_id
             .clone()
             .or_else(|| fields.agent_name.clone()),
-        session_id: fields.session_id.clone(),
+        runtime: fields.runtime.clone(),
+        session_id: fields
+            .session_id
+            .clone()
+            .or_else(|| fields.runtime_session_id.clone()),
+        trace_id: None,
+        span_id: None,
+        subagent_id: None,
         request_id: fields.request_id.clone(),
         correlation_id: None,
         outcome: fields.result.clone(),
