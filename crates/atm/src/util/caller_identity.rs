@@ -83,10 +83,6 @@ fn daemon_resolution_enabled() -> bool {
 }
 
 fn explicit_session_override() -> Option<String> {
-    // Unit tests should not pick up ambient shell session variables.
-    if running_test_harness() {
-        return None;
-    }
     env_var_nonempty("ATM_SESSION_ID")
 }
 
