@@ -104,6 +104,7 @@ pub struct SessionRegistry {
 }
 
 impl SessionRegistry {
+    /// Time-to-live for cached PID liveness probe results.
     pub(crate) const PID_LIVENESS_TTL: Duration = Duration::from_secs(5);
 
     /// Create a new, empty registry.
