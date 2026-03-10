@@ -1790,7 +1790,7 @@ fn remove_member(args: RemoveMemberArgs) -> Result<()> {
                 }
                 None => {
                     anyhow::bail!(
-                        "Liveness for member '{}' could not be confirmed. Use --force to override.",
+                        "External member '{}' has no session_id, so liveness cannot be confirmed. Use --force to override.",
                         args.agent
                     );
                 }
@@ -2511,7 +2511,7 @@ fn archive_member_inbox(home_dir: &Path, team: &str, member_name: &str) -> Resul
 
     let timestamp = Utc::now().format("%Y%m%dT%H%M%S%fZ").to_string();
     let archive_dir = home_dir
-        .join(".claude/teams/.backups")
+        .join(".claude/teams/.archives")
         .join(team)
         .join(format!("removed-{member_name}-{timestamp}"))
         .join("inboxes");
@@ -2965,6 +2965,7 @@ fn restore(args: RestoreArgs) -> Result<()> {
                 restored.is_active = Some(false);
                 restored.last_active = None;
                 restored.session_id = None;
+                restored.tmux_pane_id = None;
                 config.members.push(restored);
             }
         }
@@ -5010,6 +5011,98 @@ mod tests {
 
     #[test]
     #[serial]
+    fn test_backup_project_tasks_omitted_when_project_scope_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = set_atm_home(&temp_dir);
+        create_test_team(&temp_dir, "atm-dev");
+        create_test_tasks(&temp_dir, "atm-dev");
+
+        let original = std::env::var("ATM_HOME").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        backup(BackupArgs {
+            team: "atm-dev".to_string(),
+            project: Some("missing-project".to_string()),
+            json: false,
+        })
+        .unwrap();
+
+        let backups_root = temp_dir.path().join(".claude/teams/.backups/atm-dev");
+        let backup_dir = fs::read_dir(&backups_root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .next()
+            .expect("backup dir should exist")
+            .path();
+        assert!(!backup_dir.join("tasks-cc").exists());
+
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_resume_with_project_backs_up_project_tasks() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = set_atm_home(&temp_dir);
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        create_numeric_task_files(&temp_dir, "agent-team-mail", &[90, 91]);
+
+        let original_home = std::env::var("ATM_HOME").ok();
+        let original_id = std::env::var("ATM_IDENTITY").ok();
+        let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
+
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("ATM_IDENTITY", "team-lead");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        resume(ResumeArgs {
+            team: "atm-dev".to_string(),
+            message: None,
+            project: Some("agent-team-mail".to_string()),
+            force: false,
+            kill: false,
+            session_id: None,
+        })
+        .unwrap();
+
+        assert!(!team_dir.exists());
+        let backups_root = temp_dir.path().join(".claude/teams/.backups/atm-dev");
+        let backup_dir = fs::read_dir(&backups_root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .max()
+            .expect("backup dir should exist");
+        assert!(backup_dir.join("tasks-cc/90.json").exists());
+        assert!(backup_dir.join("tasks-cc/91.json").exists());
+
+        unsafe {
+            match original_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+            match original_id {
+                Some(v) => std::env::set_var("ATM_IDENTITY", v),
+                None => std::env::remove_var("ATM_IDENTITY"),
+            }
+            match original_session {
+                Some(v) => std::env::set_var("CLAUDE_SESSION_ID", v),
+                None => std::env::remove_var("CLAUDE_SESSION_ID"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
     fn test_restore_skip_tasks_flag() {
         // When --skip-tasks is set, tasks should NOT be restored even if present in backup.
         let temp_dir = TempDir::new().unwrap();
@@ -5195,6 +5288,58 @@ mod tests {
 
     #[test]
     #[serial]
+    fn test_restore_clears_restored_tmux_pane_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = set_atm_home(&temp_dir);
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+
+        let original = std::env::var("ATM_HOME").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        backup(BackupArgs {
+            team: "atm-dev".to_string(),
+            project: None,
+            json: false,
+        })
+        .unwrap();
+
+        let config_path = team_dir.join("config.json");
+        let mut config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        config.members.retain(|m| m.name == "team-lead");
+        fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        restore(RestoreArgs {
+            team: "atm-dev".to_string(),
+            from: None,
+            project: None,
+            dry_run: false,
+            skip_tasks: false,
+            json: false,
+        })
+        .unwrap();
+
+        let config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        let publisher = config
+            .members
+            .iter()
+            .find(|m| m.name == "publisher")
+            .expect("publisher restored");
+        assert!(publisher.tmux_pane_id.is_none());
+
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
     fn test_remove_member_force_archives_inbox_and_removes_roster_entry() {
         let temp_dir = TempDir::new().unwrap();
         let home_env = temp_dir.path().to_str().unwrap().to_string();
@@ -5222,8 +5367,8 @@ mod tests {
         assert!(!config.members.iter().any(|m| m.name == "publisher"));
         assert!(!inbox.exists());
 
-        let backups_root = temp_dir.path().join(".claude/teams/.backups/atm-dev");
-        let archived = fs::read_dir(&backups_root)
+        let archives_root = temp_dir.path().join(".claude/teams/.archives/atm-dev");
+        let archived = fs::read_dir(&archives_root)
             .unwrap()
             .filter_map(|e| e.ok())
             .map(|e| e.path().join("inboxes/publisher.json"))
@@ -5268,6 +5413,78 @@ mod tests {
             }
         }
         restore_autostart_env(original_autostart);
+    }
+
+    #[test]
+    #[serial]
+    fn test_remove_member_refuses_external_member_without_session_id_without_force() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+
+        let config_path = team_dir.join("config.json");
+        let mut config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        let publisher = config
+            .members
+            .iter_mut()
+            .find(|m| m.name == "publisher")
+            .expect("publisher exists");
+        publisher.external_backend_type = Some(BackendType::Codex);
+        publisher.session_id = None;
+        fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let err = remove_member(RemoveMemberArgs {
+            team: "atm-dev".to_string(),
+            agent: "publisher".to_string(),
+            archive_inbox: false,
+            force: false,
+        })
+        .expect_err("remove-member should refuse external member without session_id");
+        assert!(format!("{err}").contains("has no session_id"));
+
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+        restore_autostart_env(original_autostart);
+    }
+
+    #[test]
+    #[serial]
+    fn test_remove_member_refuses_team_lead() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        create_test_team(&temp_dir, "atm-dev");
+
+        let original = std::env::var("ATM_HOME").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let err = remove_member(RemoveMemberArgs {
+            team: "atm-dev".to_string(),
+            agent: "team-lead".to_string(),
+            archive_inbox: false,
+            force: true,
+        })
+        .expect_err("team-lead should remain protected");
+        assert!(format!("{err}").contains("team-lead is protected"));
+
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
     }
 
     #[test]

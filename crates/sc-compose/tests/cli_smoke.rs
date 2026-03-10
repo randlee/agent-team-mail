@@ -456,15 +456,13 @@ fn sc_compose_log_format_human_writes_human_readable_lines() {
 fn sc_compose_config_prefers_atm_home_for_default_log_path() {
     let tmp = TempDir::new().expect("tempdir");
     let atm_home = tmp.path().join("atm-home");
-    let fake_home = tmp.path().join("fake-home");
-    let fake_userprofile = tmp.path().join("fake-userprofile");
     let template = tmp.path().join("template.md.j2");
     fs::write(&template, "hello {{ name }}").expect("write");
 
     run_sc_compose()
         .env("ATM_HOME", &atm_home)
-        .env("HOME", &fake_home)
-        .env("USERPROFILE", &fake_userprofile)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
         .arg("--root")
         .arg(tmp.path())
         .arg("--var")

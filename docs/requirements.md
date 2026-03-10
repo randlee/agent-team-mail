@@ -654,8 +654,10 @@ atm teams remove-member <team> <agent> [--archive-inbox] [--force]
 - Remove the member entry from `config.json`.
 - Remove or archive mailbox artifacts for the member as part of the same command path.
 - Default behavior deletes mailbox artifacts. `--archive-inbox` preserves prior inbox
-  contents at `~/.claude/teams/.backups/<team>/removed-<agent>-<timestamp>/inboxes/<agent>.json`
+  contents at `~/.claude/teams/.archives/<team>/removed-<agent>-<timestamp>/inboxes/<agent>.json`
   before removal.
+- For external members that have no `session_id`, remove-member must treat liveness as
+  unknown and require `--force` rather than assuming the daemon is not tracking them.
 
 **Acceptance checks**:
 - After successful removal, `<agent>` is absent from `config.json`.
@@ -673,6 +675,9 @@ when explicitly requested.
 - When `--project <name>` is provided, backup must also snapshot Claude Code
   project-scoped task files from `~/.claude/tasks/<project>/` into `tasks-cc/` in the
   backup bundle.
+- Backup directory names must use compact UTC timestamps with a 9-digit fractional
+  suffix (`YYYYMMDDTHHMMSSfffffffffZ`) so lexicographic sort still tracks chronology
+  while allowing immediate successive snapshots without collisions.
 - If `~/.claude/tasks/<project>/` does not exist, backup must omit `tasks-cc/` and
   continue without error.
 - `atm teams restore <team>` must restore team-scoped task files back into
@@ -685,6 +690,8 @@ when explicitly requested.
 - Restore must preserve the existing team restore safety invariants defined in
   `docs/agent-team-api.md`: `leadSessionId` is never overwritten and `team-lead`
   is never restored from backup.
+- Restore must clear restored runtime-only member fields before writing them back:
+  `isActive=false`, `lastActive=null`, `sessionId=null`, and `tmuxPaneId=null`.
 - After restoring task files into any destination task directory, restore must recompute
   `.highwatermark` from the highest numeric `<task-id>.json` filename present in that
   destination. Restore must not blindly preserve a stale or lower watermark from backup.

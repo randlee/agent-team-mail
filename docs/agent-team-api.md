@@ -193,7 +193,9 @@ Creates a timestamped snapshot of team state at `~/.claude/teams/.backups/<team>
   `~/.claude/tasks/<project>/` as `tasks-cc/`
 - If `~/.claude/tasks/<project>/` does not exist, `tasks-cc/` is omitted and backup
   continues without error
-- Timestamp format: `YYYYMMDDTHHMMSSz` (ISO 8601 compact UTC)
+- Timestamp format: `YYYYMMDDTHHMMSSfffffffffZ` (compact UTC with 9-digit fractional
+  seconds; chosen so immediate successive backups remain lexicographically sortable and
+  collision-resistant)
 - Auto-prunes to the last 5 backups per team (oldest removed first)
 - Also triggered automatically at the start of `atm teams resume` (non-fatal: a backup failure does not abort the resume); when resume is invoked with `--project <name>`, the same project-scoped `tasks-cc/` handling applies
 
@@ -214,6 +216,8 @@ Restores team state from a backup:
 - `leadSessionId` in `config.json` is **never** overwritten — the current session's lead ID is always preserved
 - `team-lead` member entry is **never** restored from backup — only non-leader members are restored
 - Restore is **idempotent**: members already present in the current config are not duplicated
+- Restored members are detached from stale runtime session state before being written back:
+  `isActive=false`, `lastActive=null`, `sessionId=null`, `tmuxPaneId=null`
 - After restoring task files into any task directory, `.highwatermark` is recomputed from the highest numeric task id present; if no numeric task files exist, `.highwatermark` is set to `0`
 
 **Relationship to TeamDelete**: `TeamDelete` permanently destroys all team data. Creating a backup before `TeamDelete` and restoring afterward is the supported recovery path.
@@ -224,11 +228,13 @@ Removes a non-lead member from the team roster and cleans up mailbox artifacts.
 
 - Command form: `atm teams remove-member <team> <agent> [--archive-inbox] [--force]`
 - `--archive-inbox`: preserve the inbox at
-  `~/.claude/teams/.backups/<team>/removed-<agent>-<timestamp>/inboxes/<agent>.json`
+  `~/.claude/teams/.archives/<team>/removed-<agent>-<timestamp>/inboxes/<agent>.json`
   before removing the live mailbox
 - Liveness behavior follows daemon shutdown/liveness semantics from the ATM
   requirements: the command checks active state before mutation and refuses by default
   when the member appears active or liveness is unknown
+- For external members without a tracked `session_id`, liveness is treated as unknown
+  and the command requires `--force`
 - `--force`: explicit operator override for manual recovery that bypasses the default
   liveness refusal and removes roster/mailbox state anyway
 - `team-lead` is protected and must not be removed through this command

@@ -842,6 +842,7 @@ Acceptance criteria:
 7. Preserve the new `leadSessionId` from TeamCreate; restore never overwrites it. `team-lead` member is never restored from backup.
 8. Daemon injects status into team-lead session: `"<team> re-established. Active members: <name> (<type>, pane <id>), ..."`.
 9. Restore recomputes `.highwatermark` for each restored task directory from the highest numeric task id present after file copy; when no numeric task files are present, it sets `.highwatermark` to `0`.
+10. `atm teams remove-member --archive-inbox` archives mail to `.claude/teams/.archives/<team>/removed-<agent>-<timestamp>/` so retention pruning for `.backups/` cannot delete archived mail unexpectedly.
 
 **Failure-mode acceptance criteria**:
 - Stale PID/session mismatch is detected and does not cause identity theft.
@@ -2121,6 +2122,7 @@ Key commits:
 | [#649](https://github.com/randlee/agent-team-mail/issues/649) | Add `atm teams remove-member` command | BF.1 | Promoted to active fix sprint BF.1 |
 | [#650](https://github.com/randlee/agent-team-mail/issues/650) | Backup/restore should capture Claude Code project task list (`~/.claude/tasks/<project>/`) | BF.1 | Promoted to active fix sprint BF.1 |
 | [#651](https://github.com/randlee/agent-team-mail/issues/651) | Restore sets highwatermark off-by-one | BF.1 | Promoted to active fix sprint BF.1 |
+| [#652](https://github.com/randlee/agent-team-mail/issues/652) | `ux(gh pr list)`: make merge conflicts and CI-blocked-by-merge visually prominent | AI follow-on | Explicitly out of BF.1 scope; unrelated to backup/restore hardening |
 | [#287](https://github.com/randlee/agent-team-mail/issues/287) | `parse_since_input` accepts `0m` and negative durations | X.4 (deferred) | Deferred follow-on from Phase X onboarding tranche |
 | [#337](https://github.com/randlee/agent-team-mail/issues/337) | Missing `#[serial]` on env-mutating daemon tests (`ATM_HOME`) | X.5 (deferred) | Deferred CI-debt cleanup in Phase X follow-on |
 | [#338](https://github.com/randlee/agent-team-mail/issues/338) | `add-member` does not create inbox atomically | X.6 (deferred) | Deferred follow-on after onboarding contract closure |
