@@ -709,7 +709,7 @@ Index Summary Last Active Session ID
         unsafe {
             std::env::set_var("ATM_RUNTIME", "gemini");
             std::env::set_var("ATM_GEMINI_TMP_DIR", temp.path());
-            std::env::set_var("ATM_PROJECT_DIR", "/tmp/agent-team-mail");
+            std::env::set_var("ATM_PROJECT_DIR", project_dir.to_string_lossy().to_string());
         }
 
         let resolved = resolve_caller_session_id_optional(Some("atm-dev"), Some("arch-gtm"))

@@ -1515,32 +1515,6 @@ observability scope.
 
 ---
 
-## 17.19 Phase AJ: OpenTelemetry Baseline + Observability API Completion
-
-**Goal**: Deliver the OTel feature gate deferred from AH, complete the `sc_observability::init()`
-zero-config API, define and implement log injection for library calls, and integrate
-`scmux`/`schook` with `sc-observability`.
-
-**Planning doc**: `docs/phase-aj-planning.md` _(planning session pending)_
-**Requirements doc**: `docs/observability/requirements.md` (§9 OTel — deferred from AH)
-**Architecture doc**: `docs/observability/architecture.md` (§9 OTel — deferred from AH)
-
-### Deferred inputs from Phase AH
-- AH-OBS-5/5a/5b: OTel optional feature gate, trace/metric baseline, sub-agent-first instrumentation
-- AH-OBS-1: scmux and schook `sc-observability` adoption
-- AH-OBS-2: `sc_observability::init("<tool>")` zero-config API
-- Log injection contract: library calls from ATM tools must route logs to host tool's log file
-
-### Planned Sprint Map
-| Sprint | Focus | Issues | Status |
-|---|---|---|---|
-| AJ.1 | `sc_observability::init()` API + log injection contract | TBD | PLANNED |
-| AJ.2 | OTel feature gate + trace/metric baseline | TBD | PLANNED |
-| AJ.3 | scmux/schook sc-observability adoption | TBD | PLANNED |
-| AJ.4 | Integration hardening + docs | TBD | PLANNED |
-
----
-
 ## 17.19 Phase AJ: Session-ID SSoT Normalization
 
 **Goal**: Make daemon registry the canonical session authority and eliminate
