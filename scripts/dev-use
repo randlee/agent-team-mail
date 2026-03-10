@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""dev-use: Switch the active ATM dev install to a saved backup version.
+
+Copies binaries from ~/.local/atm-dev/<label>/bin/ into the active
+~/.local/atm-dev/bin/, restarts the daemon, and runs verification.
+No symlinks. PATH never changes.
+
+Usage:
+    dev-use <label>
+    dev-use --list
+
+Options:
+    --list        List available saved versions
+    -h, --help    Show this help message
+"""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+ATM_DEV_ROOT = Path.home() / ".local" / "atm-dev"
+ATM_HOME = Path.home() / ".local" / "share" / "atm-dev" / "home"
+BIN_DIR = ATM_DEV_ROOT / "bin"
+
+BINARIES = ["atm", "atm-daemon", "atm-agent-mcp", "atm-tui", "sc-compose"]
+
+
+def die(msg: str) -> None:
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def run(cmd: list, *, env: dict = None) -> subprocess.CompletedProcess:
+    display = " ".join(str(c) for c in cmd)
+    print(f"  $ {display}")
+    try:
+        return subprocess.run(cmd, check=True, text=True, env=env)
+    except subprocess.CalledProcessError as exc:
+        die(f"command failed (exit {exc.returncode}): {display}")
+
+
+def dev_env() -> dict:
+    env = os.environ.copy()
+    env["ATM_HOME"] = str(ATM_HOME)
+    env["ATM_DAEMON_BIN"] = str(BIN_DIR / "atm-daemon")
+    env["ATM_CHANNEL"] = "dev"
+    env["PATH"] = str(BIN_DIR) + os.pathsep + env.get("PATH", "")
+    return env
+
+
+def list_versions() -> list:
+    """Return sorted list of available backup version labels."""
+    versions = []
+    for d in ATM_DEV_ROOT.iterdir():
+        if d.is_dir() and (d / "bin").is_dir():
+            versions.append(d.name)
+    return sorted(versions)
+
+
+def current_label() -> str:
+    txt = ATM_DEV_ROOT / "current.txt"
+    return txt.read_text().strip() if txt.exists() else "(unknown)"
+
+
+def show_list() -> None:
+    versions = list_versions()
+    if not versions:
+        print("No saved versions found under ~/.local/atm-dev/")
+        return
+    cur = current_label()
+    prev_txt = ATM_DEV_ROOT / "previous.txt"
+    prev = prev_txt.read_text().strip() if prev_txt.exists() else None
+    print("Saved versions:")
+    for v in reversed(versions):
+        markers = []
+        if v == cur:
+            markers.append("active")
+        if v == prev:
+            markers.append("previous")
+        manifest_path = ATM_DEV_ROOT / v / "manifest.json"
+        branch_info = ""
+        if manifest_path.exists():
+            try:
+                data = json.loads(manifest_path.read_text())
+                branch_info = f"  branch={data.get('git_branch','?')}  sha={data.get('git_sha','?')[:7]}"
+            except (json.JSONDecodeError, OSError):
+                pass
+        suffix = f"  [{', '.join(markers)}]" if markers else ""
+        print(f"  {v}{branch_info}{suffix}")
+
+
+def restart_daemon() -> None:
+    print("\n[restart daemon]")
+    atm_bin = BIN_DIR / "atm"
+    if not atm_bin.exists():
+        die(f"atm binary not found at {atm_bin}")
+    try:
+        run([str(atm_bin), "daemon", "restart"], env=dev_env())
+    except SystemExit:
+        print("  note: daemon restart returned non-zero (ok)")
+
+
+def verify_install() -> bool:
+    print("\n[post-install verification]")
+    env = dev_env()
+    checks = [
+        ([str(BIN_DIR / "atm"), "daemon", "status"], "daemon status"),
+        ([str(BIN_DIR / "atm"), "--version"], "atm --version"),
+        ([str(BIN_DIR / "atm-daemon"), "--version"], "atm-daemon --version"),
+        ([str(BIN_DIR / "sc-compose"), "--version"], "sc-compose --version"),
+    ]
+    all_pass = True
+    for cmd, label in checks:
+        try:
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
+            line = (result.stdout or result.stderr).strip().splitlines()[0]
+            print(f"  [PASS] {label}: {line}")
+        except (subprocess.CalledProcessError, FileNotFoundError, IndexError) as exc:
+            print(f"  [FAIL] {label}: {exc}")
+            all_pass = False
+    return all_pass
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Switch active ATM dev binaries to a saved backup version.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("label", nargs="?", metavar="LABEL",
+                        help="version label to activate")
+    parser.add_argument("--list", action="store_true",
+                        help="list available versions and exit")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    if args.list:
+        show_list()
+        return
+
+    if not args.label:
+        print("error: provide a label or use --list", file=sys.stderr)
+        sys.exit(1)
+
+    label = args.label
+    src_dir = ATM_DEV_ROOT / label / "bin"
+
+    print(f"[dev-use] activating: {label}")
+
+    if not src_dir.is_dir():
+        print(f"error: version not found: {ATM_DEV_ROOT / label}", file=sys.stderr)
+        print()
+        show_list()
+        sys.exit(1)
+
+    # Verify source binaries exist
+    print("\n[verify source binaries]")
+    for name in BINARIES:
+        if not (src_dir / name).exists():
+            die(f"binary missing from version backup: {src_dir / name}")
+        print(f"  found {name}")
+
+    # Save current as previous before switching
+    cur = current_label()
+    if cur != label:
+        (ATM_DEV_ROOT / "previous.txt").write_text(cur + "\n")
+
+    # Overwrite active bin/
+    print("\n[install binaries -> ~/.local/atm-dev/bin/]")
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
+    for name in BINARIES:
+        shutil.copy2(src_dir / name, BIN_DIR / name)
+        (BIN_DIR / name).chmod(0o755)
+        print(f"  installed {name}")
+
+    # Update current.txt and manifest
+    (ATM_DEV_ROOT / "current.txt").write_text(label + "\n")
+    src_manifest = ATM_DEV_ROOT / label / "manifest.json"
+    if src_manifest.exists():
+        shutil.copy2(src_manifest, ATM_DEV_ROOT / "manifest.json")
+
+    restart_daemon()
+    all_pass = verify_install()
+
+    print("\n" + "=" * 60)
+    print("dev-use complete")
+    print(f"  label:    {label}")
+    print(f"  bin:      {BIN_DIR}")
+    print(f"  verification: {'ALL PASS' if all_pass else 'SOME CHECKS FAILED'}")
+    if not all_pass:
+        print("\nTo rollback:  scripts/dev-rollback")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
