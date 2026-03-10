@@ -1,6 +1,14 @@
 use assert_cmd::cargo;
 use predicates::prelude::*;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::process::Command;
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
@@ -64,6 +72,128 @@ fn write_team_config(home: &TempDir, team: &str) {
         serde_json::to_string_pretty(&config).unwrap(),
     )
     .unwrap();
+}
+
+#[cfg(unix)]
+fn write_fake_spawn_session_daemon_script(home: &Path) -> PathBuf {
+    let script = home.join("fake-spawn-session-daemon.py");
+    let body = r#"#!/usr/bin/env python3
+import json
+import os
+import signal
+import socket
+from pathlib import Path
+
+home = Path(os.environ["ATM_HOME"])
+daemon_dir = home / ".claude" / "daemon"
+daemon_dir.mkdir(parents=True, exist_ok=True)
+sock_path = daemon_dir / "atm-daemon.sock"
+pid_path = daemon_dir / "atm-daemon.pid"
+if sock_path.exists():
+    sock_path.unlink()
+pid_path.write_text(str(os.getpid()))
+
+running = True
+def _stop(_signum, _frame):
+    global running
+    running = False
+signal.signal(signal.SIGTERM, _stop)
+signal.signal(signal.SIGINT, _stop)
+
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(str(sock_path))
+srv.listen(64)
+srv.settimeout(0.2)
+
+while running:
+    try:
+        conn, _ = srv.accept()
+    except TimeoutError:
+        continue
+    except OSError:
+        break
+    with conn:
+        buf = b""
+        while b"\n" not in buf:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+        try:
+            req = json.loads(buf.decode().strip() or "{}")
+        except Exception:
+            req = {}
+        request_id = req.get("request_id", "req")
+        command = req.get("command", "")
+        if command == "list-agents":
+            payload = [
+                {
+                    "agent": "member-a",
+                    "state": "active",
+                    "activity": "busy",
+                    "session_id": "abc11111-1111-4111-8111-111111111111",
+                    "process_id": 1001,
+                    "reason": "ok",
+                    "source": "daemon",
+                    "in_config": True,
+                },
+                {
+                    "agent": "member-b",
+                    "state": "active",
+                    "activity": "busy",
+                    "session_id": "abc22222-2222-4222-8222-222222222222",
+                    "process_id": 1002,
+                    "reason": "ok",
+                    "source": "daemon",
+                    "in_config": True,
+                },
+            ]
+        else:
+            payload = {}
+        response = {
+            "version": 1,
+            "request_id": request_id,
+            "status": "ok",
+            "payload": payload,
+        }
+        try:
+            conn.sendall((json.dumps(response) + "\n").encode())
+        except BrokenPipeError:
+            continue
+
+try:
+    srv.close()
+finally:
+    try:
+        sock_path.unlink()
+    except FileNotFoundError:
+        pass
+    try:
+        pid_path.unlink()
+    except FileNotFoundError:
+        pass
+"#;
+    fs::write(&script, body).unwrap();
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).unwrap();
+    script
+}
+
+#[cfg(unix)]
+fn wait_for_daemon_socket(home: &Path) {
+    let socket = home.join(".claude/daemon/atm-daemon.sock");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if socket.exists() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!(
+        "fake daemon socket was not created in time: {}",
+        socket.display()
+    );
 }
 
 #[test]
@@ -492,6 +622,50 @@ fn test_spawn_continue_without_tracked_session_returns_stable_not_found_code() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("SESSION_ID_NOT_FOUND"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_spawn_resume_prefix_ambiguous_returns_stable_error_code() {
+    let temp_dir = TempDir::new().unwrap();
+    let folder = temp_dir.path().join("workdir").join("spawn-folder");
+    fs::create_dir_all(&folder).unwrap();
+
+    let script = write_fake_spawn_session_daemon_script(temp_dir.path());
+    let mut daemon = Command::new(&script)
+        .env("ATM_HOME", temp_dir.path())
+        .spawn()
+        .expect("failed to launch fake daemon");
+    wait_for_daemon_socket(temp_dir.path());
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    let assert = cmd
+        .env("ATM_IDENTITY", "team-lead")
+        .args([
+            "teams",
+            "spawn",
+            "agent-ambiguous",
+            "--team",
+            "atm-dev",
+            "--runtime",
+            "codex",
+            "--folder",
+            folder.to_str().unwrap(),
+            "--resume",
+            "abc",
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("SESSION_ID_AMBIGUOUS"),
+        "expected SESSION_ID_AMBIGUOUS, got: {stderr}"
+    );
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
 }
 
 #[test]
