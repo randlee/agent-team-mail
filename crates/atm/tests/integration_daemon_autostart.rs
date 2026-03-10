@@ -123,7 +123,11 @@ while running:
             "status": "ok",
             "payload": response_payload,
         }
-        conn.sendall((json.dumps(response) + "\n").encode())
+        try:
+            conn.sendall((json.dumps(response) + "\n").encode())
+        except BrokenPipeError:
+            # Client closed early; keep daemon running for subsequent requests.
+            continue
 
 try:
     srv.close()
