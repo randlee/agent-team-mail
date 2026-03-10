@@ -153,10 +153,17 @@ Compatibility:
 - `doctor --json` and `status --json` must use the same overlapping field semantics.
 
 Required JSON keys for both `atm doctor --json` and `atm status --json`:
-- `logging_health.status`
-- `logging_health.otel_exporter`
-- `logging_health.local_structured`
-- `logging_health.last_export_error`
+- `logging_health.schema_version`
+- `logging_health.state`
+- `logging_health.log_root`
+- `logging_health.canonical_log_path`
+- `logging_health.spool_path`
+- `logging_health.dropped_events_total`
+- `logging_health.spool_file_count`
+- `logging_health.oldest_spool_age_seconds`
+- `logging_health.last_error.code`
+- `logging_health.last_error.message`
+- `logging_health.last_error.at`
 
 Contract lock (ATM-QA-009):
 - The `logging_health` object name and key set above are stable contract keys.
@@ -167,10 +174,17 @@ Formal `logging_health` JSON schema (v1):
 
 | Field | Type | Nullable | Notes |
 |---|---|---|---|
-| `logging_health.status` | string enum | no | `ok|degraded|unavailable` |
-| `logging_health.otel_exporter` | string enum | no | `ok|degraded|unavailable` |
-| `logging_health.local_structured` | boolean | no | always `true` in AK scope |
-| `logging_health.last_export_error` | string | yes | null when no export error |
+| `logging_health.schema_version` | string | no | currently `v1` |
+| `logging_health.state` | string enum | no | `healthy|degraded_spooling|degraded_dropping|unavailable` |
+| `logging_health.log_root` | string | no | resolved log root directory |
+| `logging_health.canonical_log_path` | string | no | canonical structured sink path |
+| `logging_health.spool_path` | string | no | spool directory path |
+| `logging_health.dropped_events_total` | integer (`u64`) | no | dropped event counter |
+| `logging_health.spool_file_count` | integer (`u64`) | no | spool file count |
+| `logging_health.oldest_spool_age_seconds` | integer (`u64`) | yes | null when spool empty |
+| `logging_health.last_error.code` | string | yes | null when no current error |
+| `logging_health.last_error.message` | string | yes | null when no current error |
+| `logging_health.last_error.at` | string (RFC3339 UTC) | yes | null when no current error |
 
 ## 7. Event Coverage Requirements
 
