@@ -22,9 +22,7 @@
 //! starts a fresh base file. The oldest rotation file (`.N`) is removed.
 
 use agent_team_mail_core::logging_event::LogEventV1;
-use sc_observability::{
-    DEFAULT_QUEUE_CAPACITY, FileOtelExporter, OtelConfig, export_otel_best_effort,
-};
+use sc_observability::{DEFAULT_QUEUE_CAPACITY, export_otel_best_effort_from_path};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -241,16 +239,6 @@ fn write_events(config: &LogWriterConfig, events: &[LogEventV1]) {
     use std::fs::{self, OpenOptions};
     use std::io::Write;
 
-    let otel_cfg = OtelConfig::from_env();
-    let mut otel_path = config.log_path.clone();
-    let stem = config
-        .log_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("telemetry");
-    otel_path.set_file_name(format!("{stem}.otel.jsonl"));
-    let otel_exporter = FileOtelExporter::new(otel_path);
-
     // Rotate if file is at or over the size threshold.
     if let Ok(meta) = fs::metadata(&config.log_path) {
         if meta.len() >= config.max_bytes {
@@ -280,7 +268,7 @@ fn write_events(config: &LogWriterConfig, events: &[LogEventV1]) {
                     warn!("log_writer: write error: {e}");
                     continue;
                 }
-                export_otel_best_effort(event, &otel_cfg, &otel_exporter);
+                export_otel_best_effort_from_path(&config.log_path, event);
             }
             Err(e) => {
                 warn!("log_writer: failed to serialize event: {e}");

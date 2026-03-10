@@ -714,6 +714,23 @@ impl Logger {
     }
 }
 
+/// Export a single event to OTel using default pipeline settings (fail-open).
+///
+/// This helper is intended for producers that already own canonical JSONL
+/// writing and only need shared OTel export semantics. It creates an
+/// [`OtelPipeline`] from the given log path using default configuration.
+///
+/// For callers that already have an exporter, use [`export_otel_best_effort`]
+/// instead.
+pub fn export_otel_best_effort_from_path(log_path: &Path, event: &LogEventV1) {
+    let pipeline = OtelPipeline::new_default(log_path);
+    export_otel_best_effort_with_pipeline(&pipeline, event);
+}
+
+fn export_otel_best_effort_with_pipeline(pipeline: &OtelPipeline, event: &LogEventV1) {
+    let _ = pipeline.export_event(event);
+}
+
 pub fn spool_file_name(source_binary: &str, pid: u32, unix_millis: u128) -> String {
     let sanitized = sanitize_source_binary(source_binary);
     format!("{}-{}-{}.jsonl", sanitized, pid, unix_millis)
@@ -1236,6 +1253,18 @@ mod tests {
     }
 
     #[test]
+    fn export_otel_best_effort_from_path_is_fail_open_when_export_fails() {
+        let tmp = TempDir::new().expect("temp dir");
+        let parent_file = tmp.path().join("not-a-directory");
+        std::fs::write(&parent_file, "occupied").expect("create parent file");
+        let log_path = parent_file.join("atm.log.jsonl");
+        let event = new_log_event("atm-daemon", "register_hint", "atm_daemon::socket", "info");
+
+        // Must not panic or propagate errors when exporter cannot create its output path.
+        export_otel_best_effort_from_path(&log_path, &event);
+    }
+
+    #[test]
     fn otel_exporter_retries_then_succeeds() {
         let tmp = TempDir::new().expect("temp dir");
         let cfg = LogConfig {
@@ -1280,6 +1309,59 @@ mod tests {
             exporter.records.lock().expect("records lock").len(),
             1,
             "record should be exported after retries"
+        );
+    }
+
+    #[test]
+    fn producer_events_export_through_pipeline_with_counting_exporter() {
+        let tmp = TempDir::new().expect("temp dir");
+        let cfg = LogConfig {
+            log_path: tmp.path().join("atm.log.jsonl"),
+            spool_dir: tmp.path().join("log-spool"),
+            level: LogLevel::Info,
+            message_preview_enabled: false,
+            max_bytes: DEFAULT_MAX_BYTES,
+            max_files: DEFAULT_MAX_FILES,
+            retention_days: DEFAULT_RETENTION_DAYS,
+            queue_capacity: DEFAULT_QUEUE_CAPACITY,
+            max_event_bytes: DEFAULT_MAX_EVENT_BYTES,
+        };
+        let exporter = Arc::new(CountingExporter::with_failures(0));
+        let logger = Logger::with_otel_exporter(
+            cfg,
+            OtelConfig {
+                enabled: true,
+                max_retries: 0,
+                initial_backoff_ms: 0,
+                max_backoff_ms: 0,
+            },
+            exporter.clone(),
+        );
+
+        for (idx, source, action) in [
+            (1u8, "atm", "send"),
+            (2u8, "atm-daemon", "register_hint"),
+            (3u8, "sc-composer", "compose"),
+        ] {
+            let mut event = new_log_event(source, action, "atm::test", "info");
+            event.team = Some("atm-dev".to_string());
+            event.agent = Some("arch-ctm".to_string());
+            event.runtime = Some("codex".to_string());
+            event.session_id = Some("sess-123".to_string());
+            event.trace_id = Some("trace-123".to_string());
+            event.span_id = Some(format!("span-{idx}"));
+            logger.emit(&event).expect("emit should succeed");
+        }
+
+        let records = exporter.records.lock().expect("records lock");
+        assert_eq!(records.len(), 3, "all producer events should export");
+        assert_eq!(
+            records.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
+            vec![
+                "send".to_string(),
+                "register_hint".to_string(),
+                "compose".to_string()
+            ]
         );
     }
 
