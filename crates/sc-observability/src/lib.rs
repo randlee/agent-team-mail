@@ -135,11 +135,12 @@ impl LogConfig {
             .map(PathBuf::from)
             .unwrap_or_else(|_| Self::canonical_log_path(home_dir, tool));
 
-        let spool_dir = if std::env::var("ATM_LOG_FILE").is_ok() || std::env::var("ATM_LOG_PATH").is_ok() {
-            Self::spool_dir_from_log_path(&log_path)
-        } else {
-            Self::canonical_spool_dir(home_dir, tool)
-        };
+        let spool_dir =
+            if std::env::var("ATM_LOG_FILE").is_ok() || std::env::var("ATM_LOG_PATH").is_ok() {
+                Self::spool_dir_from_log_path(&log_path)
+            } else {
+                Self::canonical_spool_dir(home_dir, tool)
+            };
         let level = std::env::var("ATM_LOG")
             .ok()
             .and_then(|v| LogLevel::from_str(&v).ok())

@@ -320,7 +320,10 @@ mod tests {
         let original = env::var("ATM_HOME").ok();
         unsafe { env::set_var("ATM_HOME", "/custom/atm-home") };
 
-        assert_eq!(get_atm_log_dir(), PathBuf::from("/custom/atm-home/.atm/logs"));
+        assert_eq!(
+            get_atm_log_dir(),
+            PathBuf::from("/custom/atm-home/.atm/logs")
+        );
         assert_eq!(
             get_atm_otel_dir(),
             PathBuf::from("/custom/atm-home/.atm/otel")
