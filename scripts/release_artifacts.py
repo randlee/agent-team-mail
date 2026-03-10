@@ -8,10 +8,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import tomllib
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from time import sleep
@@ -228,29 +227,22 @@ def _cmd_cargo_build_bin_args(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cratesio_version_exists(crate: str, version: str) -> bool:
-    url = f"https://crates.io/api/v1/crates/{crate}/{version}"
-    request = urllib.request.Request(
-        url,
-        headers={"User-Agent": "agent-team-mail-release-artifacts/1"},
-        method="GET",
+def _cargo_search_version_exists(crate: str, version: str) -> bool:
+    """Return True when *crate* at *version* is visible in the crates.io sparse index.
+
+    Uses ``cargo search`` rather than the crates.io HTTP API so that GitHub
+    Actions runners are not blocked by Cloudflare rate-limiting (issue #399).
+    ``cargo search`` queries the sparse registry index, which is not subject to
+    the same IP-based restrictions.
+    """
+    result = subprocess.run(
+        ["cargo", "search", crate, "--limit", "1"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
-    attempts = 3
-    for attempt in range(1, attempts + 1):
-        try:
-            with urllib.request.urlopen(request) as response:
-                return response.getcode() == 200
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404:
-                return False
-            if attempt == attempts:
-                raise SystemExit(f"{crate}@{version}: crates.io query failed with HTTP {exc.code}") from exc
-            sleep(2)
-        except urllib.error.URLError as exc:
-            if attempt == attempts:
-                raise SystemExit(f"{crate}@{version}: crates.io query failed ({exc.reason})") from exc
-            sleep(2)
-    return False
+    needle = f'{crate} = "{version}"'
+    return needle in result.stdout
 
 
 def check_version_unpublished(manifest_path: Path, version: str) -> list[str]:
@@ -259,7 +251,7 @@ def check_version_unpublished(manifest_path: Path, version: str) -> list[str]:
     for crate in crates:
         if not crate["publish"]:
             continue
-        if _cratesio_version_exists(crate["package"], version):
+        if _cargo_search_version_exists(crate["package"], version):
             published.append(crate["artifact"])
     return published
 
