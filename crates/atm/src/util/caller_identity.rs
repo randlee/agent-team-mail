@@ -178,65 +178,6 @@ fn resolve_from_session_file(team: Option<&str>, identity: Option<&str>) -> Resu
     Ok(None)
 }
 
-#[cfg(test)]
-fn session_from_daemon(info: &SessionQueryResult) -> Option<String> {
-    info.runtime_session_id
-        .as_deref()
-        .and_then(normalize_session_id)
-        .or_else(|| normalize_session_id(&info.session_id))
-}
-
-#[cfg(test)]
-fn resolve_caller_session_id_optional_with_query<F>(
-    team: Option<&str>,
-    identity: Option<&str>,
-    mut query_daemon_session: F,
-) -> Result<Option<String>>
-where
-    F: FnMut(&str, &str) -> Result<Option<SessionQueryResult>>,
-{
-    // Use env_var_nonempty directly (not the test-harness-guarded explicit_session_override)
-    // so that tests that inject a mock query can still exercise the ATM_SESSION_ID override path.
-    if let Some(v) = env_var_nonempty("ATM_SESSION_ID") {
-        return Ok(Some(v));
-    }
-
-    if let (Some(t), Some(id)) = (team, identity) {
-        match query_daemon_session(t, id) {
-            Ok(Some(info)) if info.alive => {
-                if let Some(sid) = session_from_daemon(&info) {
-                    return Ok(Some(sid));
-                }
-            }
-            Ok(_) => {}
-            Err(e) => classify_ambiguity_error(team, identity, e)?,
-        }
-    }
-
-    if let Ok(Some(hook)) = read_hook_file()
-        && let Some(sid) = normalize_session_id(&hook.session_id)
-    {
-        return Ok(Some(sid));
-    }
-
-    if let Some(v) = env_var_nonempty("CLAUDE_SESSION_ID") {
-        return Ok(Some(v));
-    }
-    if let Some(v) = env_var_nonempty("CODEX_THREAD_ID") {
-        return Ok(Some(v));
-    }
-
-    if let (Some(t), Some(id)) = (team, identity) {
-        match read_session_file(t, id) {
-            Ok(Some(v)) => return Ok(normalize_session_id(&v)),
-            Ok(None) => {}
-            Err(e) => classify_ambiguity_error(team, identity, e)?,
-        }
-    }
-
-    Ok(None)
-}
-
 fn read_session_file_scoped(team: &str, identity: &str) -> Result<Option<String>> {
     if !running_test_harness() {
         return read_session_file(team, identity);
