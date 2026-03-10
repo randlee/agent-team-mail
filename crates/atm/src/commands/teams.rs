@@ -2,8 +2,8 @@
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config, resolve_identity};
 use agent_team_mail_core::daemon_client::{
-    AgentSummary, LaunchConfig, RegisterHintOutcome, launch_agent, query_list_agents,
-    query_session_for_team, query_team_member_states, register_hint,
+    AgentSummary, LaunchConfig, RegisterHintOutcome, SessionQueryResult, launch_agent,
+    query_list_agents, query_session_for_team, query_team_member_states, register_hint,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
@@ -739,7 +739,14 @@ fn apply_spawn_contract_env(
 }
 
 fn resolve_continue_session_id(team: &str, agent: &str) -> Result<String> {
-    let session = query_session_for_team(team, agent)
+    resolve_continue_session_id_with_query(team, agent, query_session_for_team)
+}
+
+fn resolve_continue_session_id_with_query<F>(team: &str, agent: &str, query: F) -> Result<String>
+where
+    F: Fn(&str, &str) -> Result<Option<SessionQueryResult>>,
+{
+    let session = query(team, agent)
         .with_context(|| {
             format!(
                 "{SESSION_ID_NOT_FOUND}: failed to resolve --continue session for {agent}@{team}"
@@ -750,6 +757,13 @@ fn resolve_continue_session_id(team: &str, agent: &str) -> Result<String> {
                 "{SESSION_ID_NOT_FOUND}: no known session to continue for {agent}@{team}"
             )
         })?;
+
+    if session.alive {
+        anyhow::bail!(
+            "{SESSION_ID_NOT_FOUND}: --continue requires a non-running session for {agent}@{team} (current pid {} is still active)",
+            session.process_id
+        );
+    }
 
     let selected = session.runtime_session_id.unwrap_or(session.session_id);
     if selected.trim().is_empty() {
@@ -5414,6 +5428,33 @@ spawn_policy = "any-member"
         apply_spawn_contract_env(&mut env, &spec, &RuntimeKind::Gemini);
         assert!(!env.contains_key("ATM_SESSION_ID"));
         assert_eq!(env.get("ATM_RUNTIME").map(String::as_str), Some("gemini"));
+    }
+
+    #[test]
+    fn test_resolve_continue_session_id_rejects_active_session() {
+        let err = resolve_continue_session_id_with_query("atm-dev", "arch-ctm", |_team, _agent| {
+            Ok(Some(SessionQueryResult {
+                session_id: "local:arch-ctm:active".to_string(),
+                process_id: 4242,
+                alive: true,
+                last_seen_at: None,
+                runtime: Some("codex".to_string()),
+                runtime_session_id: Some("thread-id:abc123".to_string()),
+                pane_id: None,
+                runtime_home: None,
+            }))
+        })
+        .expect_err("active session must be rejected for --continue");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains(SESSION_ID_NOT_FOUND),
+            "error must carry stable not-found code: {msg}"
+        );
+        assert!(
+            msg.contains("non-running session"),
+            "error must explain --continue requires non-running target: {msg}"
+        );
     }
 
     #[test]
