@@ -21,8 +21,13 @@ fn configure_cmd(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     cmd.env("ATM_HOME", temp_dir.path())
         .env_remove("ATM_TEAM")
         .env_remove("ATM_IDENTITY")
+        .env_remove("ATM_SESSION_ID")
         .env_remove("ATM_CONFIG")
         .env_remove("CLAUDE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env("TMPDIR", temp_dir.path())
+        .env("TMP", temp_dir.path())
+        .env("TEMP", temp_dir.path())
         .current_dir(&workdir);
 }
 
