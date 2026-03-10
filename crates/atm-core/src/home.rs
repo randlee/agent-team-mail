@@ -116,6 +116,28 @@ pub fn get_os_home_dir() -> Result<PathBuf> {
     dirs::home_dir().context("Could not determine OS home directory")
 }
 
+/// Return the canonical ATM log directory (`<home>/.atm/logs`).
+///
+/// The base home directory is resolved via [`get_home_dir`], so `ATM_HOME`
+/// overrides are honored consistently across tools and tests.
+pub fn get_atm_log_dir() -> PathBuf {
+    get_home_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(".atm")
+        .join("logs")
+}
+
+/// Return the canonical ATM OpenTelemetry directory (`<home>/.atm/otel`).
+///
+/// The base home directory is resolved via [`get_home_dir`], so `ATM_HOME`
+/// overrides are honored consistently across tools and tests.
+pub fn get_atm_otel_dir() -> PathBuf {
+    get_home_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(".atm")
+        .join("otel")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,6 +310,43 @@ mod tests {
             match original {
                 Some(v) => env::set_var("ATM_HOME", v),
                 None => env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_get_atm_dirs_respect_atm_home_override() {
+        let original = env::var("ATM_HOME").ok();
+        unsafe { env::set_var("ATM_HOME", "/custom/atm-home") };
+
+        assert_eq!(get_atm_log_dir(), PathBuf::from("/custom/atm-home/.atm/logs"));
+        assert_eq!(
+            get_atm_otel_dir(),
+            PathBuf::from("/custom/atm-home/.atm/otel")
+        );
+
+        unsafe {
+            match original {
+                Some(v) => env::set_var("ATM_HOME", v),
+                None => env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_get_atm_dirs_default_to_platform_home() {
+        let original = env::var("ATM_HOME").ok();
+        unsafe { env::remove_var("ATM_HOME") };
+
+        let platform_home = dirs::home_dir().expect("platform home should resolve");
+        assert_eq!(get_atm_log_dir(), platform_home.join(".atm/logs"));
+        assert_eq!(get_atm_otel_dir(), platform_home.join(".atm/otel"));
+
+        unsafe {
+            if let Some(v) = original {
+                env::set_var("ATM_HOME", v);
             }
         }
     }
