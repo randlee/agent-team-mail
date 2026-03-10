@@ -21,8 +21,9 @@ use agent_team_mail_core::text::{
 };
 
 use crate::util::addressing::parse_address;
+use crate::util::caller_identity::resolve_caller_session_id_required;
 use crate::util::file_policy::check_file_reference;
-use crate::util::hook_identity::{read_hook_file, read_hook_file_identity, read_session_file};
+use crate::util::hook_identity::{read_hook_file, read_hook_file_identity};
 use crate::util::settings::get_home_dir;
 
 /// Send a message to a specific agent
@@ -163,7 +164,6 @@ pub fn execute(args: SendArgs) -> Result<()> {
         let session_id = sender_session_id
             .as_deref()
             .map(str::to_string)
-            .or_else(|| std::env::var("CLAUDE_SESSION_ID").ok())
             .unwrap_or_else(|| "unknown".to_string());
         let session_short = &session_id[..8.min(session_id.len())];
         let warning = format!(
@@ -243,7 +243,7 @@ pub fn execute(args: SendArgs) -> Result<()> {
             source: "atm",
             action: "send_dry_run",
             team: Some(team_name.clone()),
-            session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+            session_id: sender_session_id.clone(),
             agent_id: Some(config.core.identity.clone()),
             agent_name: Some(config.core.identity.clone()),
             target: Some(destination),
@@ -299,7 +299,7 @@ pub fn execute(args: SendArgs) -> Result<()> {
         source: "atm",
         action: "send",
         team: Some(team_name.clone()),
-        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+        session_id: sender_session_id.clone(),
         agent_id: Some(config.core.identity.clone()),
         agent_name: Some(config.core.identity.clone()),
         target: Some(destination),
@@ -481,11 +481,10 @@ fn register_sender_hint(
         return Ok(());
     }
 
-    let session_id = sender_session_id
-        .map(str::to_string)
-        // Non-hook shells (Codex/Gemini CLI) still need a stable daemon session
-        // key. Keep this stable for the life of the detected PID.
-        .unwrap_or_else(|| format!("local:{sender}:pid:{process_id}"));
+    let Some(session_id) = sender_session_id.map(str::to_string) else {
+        // Never fabricate synthetic session IDs in command paths.
+        return Ok(());
+    };
 
     let runtime = member.effective_backend_type().and_then(|bt| match bt {
         BackendType::ClaudeCode => Some("claude"),
@@ -614,28 +613,7 @@ fn resolve_sender_session_id_with_context(
     team: Option<&str>,
     identity: Option<&str>,
 ) -> Result<Option<String>> {
-    // 1. PID-based hook file (fastest, most precise — set by PreToolUse Bash hook).
-    if let Ok(Some(hook)) = read_hook_file() {
-        let trimmed = hook.session_id.trim();
-        if !trimmed.is_empty() {
-            return Ok(Some(trimmed.to_string()));
-        }
-    }
-    // 2. Explicit environment override.
-    if let Some(env_session) = std::env::var("CLAUDE_SESSION_ID")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        return Ok(Some(env_session));
-    }
-    // 3. Session file written by SessionStart hook (survives bash subshell env loss).
-    if let (Some(t), Some(id)) = (team, identity) {
-        if let Some(session_id) = read_session_file(t, id)? {
-            return Ok(Some(session_id));
-        }
-    }
-    Ok(None)
+    resolve_caller_session_id_required(team, identity).map(Some)
 }
 
 fn should_warn_self_send(
@@ -1283,8 +1261,8 @@ mod tests {
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
-        assert!(err.to_string().contains("Ambiguous:"));
-        assert!(err.to_string().contains("Export CLAUDE_SESSION_ID"));
+        assert!(err.to_string().contains("CALLER_AMBIGUOUS"));
+        assert!(err.to_string().contains("ATM_SESSION_ID"));
     }
 
     #[test]

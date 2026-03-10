@@ -18,7 +18,7 @@ use agent_team_mail_core::schema::TeamConfig;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::util::hook_identity::read_hook_file;
+use crate::util::caller_identity::resolve_caller_session_id_optional;
 use crate::util::member_labels::UNREGISTERED_MARKER;
 use crate::util::settings::get_home_dir;
 
@@ -198,6 +198,10 @@ pub fn execute(args: DoctorArgs) -> Result<()> {
         &home_dir,
     )?;
     let team = config.core.default_team.clone();
+    let caller_session_id =
+        resolve_caller_session_id_optional(Some(&team), Some(&config.core.identity))
+            .ok()
+            .flatten();
 
     let report = build_report(&home_dir, &team, &args)?;
 
@@ -206,7 +210,7 @@ pub fn execute(args: DoctorArgs) -> Result<()> {
         source: "atm",
         action: "doctor",
         team: Some(team.clone()),
-        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+        session_id: caller_session_id,
         agent_id: Some(config.core.identity.clone()),
         agent_name: Some(config.core.identity.clone()),
         result: Some(
@@ -1092,16 +1096,10 @@ fn count_findings(findings: &[Finding]) -> FindingCounts {
 }
 
 fn has_register_session_context() -> bool {
-    if let Ok(session_id) = std::env::var("CLAUDE_SESSION_ID")
-        && !session_id.trim().is_empty()
-    {
-        return true;
-    }
-    read_hook_file()
+    resolve_caller_session_id_optional(None, None)
         .ok()
         .flatten()
-        .map(|d| !d.session_id.trim().is_empty())
-        .unwrap_or(false)
+        .is_some()
 }
 
 fn build_recommendations(
@@ -1145,7 +1143,7 @@ fn build_recommendations(
         } else {
             recs.push(Recommendation {
                 command: format!("atm --as team-lead register {team}"),
-                reason: "No session context detected. Run from a managed Claude session (or set CLAUDE_SESSION_ID) before retrying register.".to_string(),
+                reason: "No session context detected. Run from a managed session (or set ATM_SESSION_ID) before retrying register.".to_string(),
             });
         }
     }
