@@ -58,6 +58,24 @@ After initialization, the team-lead uses these skills to coordinate the team:
 > Additional orchestration guides are in `.claude/skills/*/SKILL.md`. Consult
 > the relevant skill before starting a new phase or delegating to a teammate.
 
+### Phased Development — MANDATORY
+
+> ⚠️ **For any multi-sprint phased development, `/codex-orchestration` or
+> `/phase-orchestration` MUST be used as directed by the user. Using ad-hoc
+> coordination instead of these skills leads to process drift, missed
+> communications, and inconsistent QA gates.**
+
+**After every session start or context compaction**, if a phase is in progress:
+
+1. Identify the active phase and which skill governs it (`/codex-orchestration`
+   or `/phase-orchestration`).
+2. **Re-read that skill's `SKILL.md` in full** before taking any coordination
+   action.
+3. Resume execution from the last documented state — do not rely on memory
+   alone.
+
+Skipping this re-read is the primary cause of process drift between sessions.
+
 ---
 
 ## Task Assignment Protocol
