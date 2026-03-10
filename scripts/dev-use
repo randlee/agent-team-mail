@@ -1,54 +1,41 @@
 #!/usr/bin/env python3
-"""dev-use: Switch the active ATM dev install to an existing versioned prefix.
+"""dev-use: Switch the active ATM dev install to a saved backup version.
 
-Does not rebuild. Repoints the current symlink to the named install, restarts
-the daemon, and runs post-install verification.
+Copies binaries from ~/.local/atm-dev/<label>/bin/ into the active
+~/.local/atm-dev/bin/, restarts the daemon, and runs verification.
+No symlinks. PATH never changes.
 
 Usage:
     dev-use <label>
     dev-use --list
 
 Options:
-    --list        List available installs
+    --list        List available saved versions
     -h, --help    Show this help message
 """
 
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 
-# ---------------------------------------------------------------------------
-# Constants (mirrored from dev-install)
-# ---------------------------------------------------------------------------
-
 ATM_DEV_ROOT = Path.home() / ".local" / "atm-dev"
 ATM_HOME = Path.home() / ".local" / "share" / "atm-dev" / "home"
+BIN_DIR = ATM_DEV_ROOT / "bin"
 
-BINARIES = [
-    "atm",
-    "atm-daemon",
-    "atm-agent-mcp",
-    "atm-tui",
-    "sc-compose",
-]
+BINARIES = ["atm", "atm-daemon", "atm-agent-mcp", "atm-tui", "sc-compose"]
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def die(msg: str) -> None:
-    """Print an error message and exit with code 1."""
     print(f"error: {msg}", file=sys.stderr)
     sys.exit(1)
 
 
-def run(cmd: list[str], *, env: dict | None = None) -> subprocess.CompletedProcess:
-    """Run a command, printing it first. Raise on non-zero exit."""
+def run(cmd: list, *, env: dict = None) -> subprocess.CompletedProcess:
     display = " ".join(str(c) for c in cmd)
     print(f"  $ {display}")
     try:
@@ -57,136 +44,97 @@ def run(cmd: list[str], *, env: dict | None = None) -> subprocess.CompletedProce
         die(f"command failed (exit {exc.returncode}): {display}")
 
 
-def dev_env(path_prefix: Path) -> dict:
-    """Build the subprocess environment for ATM dev channel commands."""
+def dev_env() -> dict:
     env = os.environ.copy()
     env["ATM_HOME"] = str(ATM_HOME)
-    env["ATM_DAEMON_BIN"] = str(path_prefix / "bin" / "atm-daemon")
+    env["ATM_DAEMON_BIN"] = str(BIN_DIR / "atm-daemon")
     env["ATM_CHANNEL"] = "dev"
-    env["PATH"] = str(path_prefix / "bin") + os.pathsep + env.get("PATH", "")
+    env["PATH"] = str(BIN_DIR) + os.pathsep + env.get("PATH", "")
     return env
 
 
-def list_installs() -> list[str]:
-    """Return sorted list of available install labels."""
-    installs_dir = ATM_DEV_ROOT / "installs"
-    if not installs_dir.exists():
-        return []
-    labels = sorted(
-        d.name for d in installs_dir.iterdir() if d.is_dir()
-    )
-    return labels
+def list_versions() -> list:
+    """Return sorted list of available backup version labels."""
+    versions = []
+    for d in ATM_DEV_ROOT.iterdir():
+        if d.is_dir() and (d / "bin").is_dir():
+            versions.append(d.name)
+    return sorted(versions)
+
+
+def current_label() -> str:
+    txt = ATM_DEV_ROOT / "current.txt"
+    return txt.read_text().strip() if txt.exists() else "(unknown)"
 
 
 def show_list() -> None:
-    """Print available installs, marking current and previous."""
-    labels = list_installs()
-    if not labels:
-        print("No installs found under ~/.local/atm-dev/installs/")
+    versions = list_versions()
+    if not versions:
+        print("No saved versions found under ~/.local/atm-dev/")
         return
-
-    current_target = None
-    previous_target = None
-    current_link = ATM_DEV_ROOT / "current"
-    previous_link = ATM_DEV_ROOT / "previous"
-
-    if current_link.is_symlink():
-        current_target = Path(os.readlink(current_link)).name
-    if previous_link.is_symlink():
-        previous_target = Path(os.readlink(previous_link)).name
-
-    print("Available installs:")
-    for label in reversed(labels):  # newest first
+    cur = current_label()
+    prev_txt = ATM_DEV_ROOT / "previous.txt"
+    prev = prev_txt.read_text().strip() if prev_txt.exists() else None
+    print("Saved versions:")
+    for v in reversed(versions):
         markers = []
-        if label == current_target:
-            markers.append("current")
-        if label == previous_target:
+        if v == cur:
+            markers.append("active")
+        if v == prev:
             markers.append("previous")
-        suffix = f"  [{', '.join(markers)}]" if markers else ""
-        manifest_path = ATM_DEV_ROOT / "installs" / label / "manifest.json"
+        manifest_path = ATM_DEV_ROOT / v / "manifest.json"
         branch_info = ""
         if manifest_path.exists():
             try:
                 data = json.loads(manifest_path.read_text())
-                branch_info = f"  branch={data.get('git_branch', '?')}"
+                branch_info = f"  branch={data.get('git_branch','?')}  sha={data.get('git_sha','?')[:7]}"
             except (json.JSONDecodeError, OSError):
                 pass
-        print(f"  {label}{branch_info}{suffix}")
+        suffix = f"  [{', '.join(markers)}]" if markers else ""
+        print(f"  {v}{branch_info}{suffix}")
 
 
-def switch_current(new_prefix: Path) -> None:
-    """Atomically move current -> previous, then set current -> new_prefix."""
-    current = ATM_DEV_ROOT / "current"
-    previous = ATM_DEV_ROOT / "previous"
-
-    if current.is_symlink() or current.exists():
-        if previous.is_symlink() or previous.exists():
-            previous.unlink()
-        os.rename(current, previous)
-        print(f"  moved current -> previous ({os.readlink(previous)})")
-
-    os.symlink(new_prefix, current)
-    print(f"  current -> {new_prefix}")
-
-
-def restart_daemon(prefix: Path) -> None:
-    """Restart the ATM daemon using the dev environment."""
+def restart_daemon() -> None:
     print("\n[restart daemon]")
-    atm_bin = prefix / "bin" / "atm"
+    atm_bin = BIN_DIR / "atm"
     if not atm_bin.exists():
         die(f"atm binary not found at {atm_bin}")
-    env = dev_env(prefix)
     try:
-        run([str(atm_bin), "daemon", "restart"], env=env)
+        run([str(atm_bin), "daemon", "restart"], env=dev_env())
     except SystemExit:
-        print("  note: daemon restart returned non-zero (may be first-time start)")
+        print("  note: daemon restart returned non-zero (ok)")
 
 
-def verify_install(prefix: Path) -> bool:
-    """Run post-install verification checks. Returns True if all pass."""
+def verify_install() -> bool:
     print("\n[post-install verification]")
-    atm_bin = prefix / "bin" / "atm"
-    env = dev_env(prefix)
+    env = dev_env()
     checks = [
-        ([str(atm_bin), "daemon", "status"], "daemon status"),
-        ([str(atm_bin), "--version"], "atm --version"),
-        ([str(prefix / "bin" / "atm-daemon"), "--version"], "atm-daemon --version"),
-        ([str(prefix / "bin" / "sc-compose"), "--version"], "sc-compose --version"),
+        ([str(BIN_DIR / "atm"), "daemon", "status"], "daemon status"),
+        ([str(BIN_DIR / "atm"), "--version"], "atm --version"),
+        ([str(BIN_DIR / "atm-daemon"), "--version"], "atm-daemon --version"),
+        ([str(BIN_DIR / "sc-compose"), "--version"], "sc-compose --version"),
     ]
     all_pass = True
     for cmd, label in checks:
         try:
-            result = subprocess.run(
-                cmd, check=True, capture_output=True, text=True, env=env
-            )
-            version_line = (result.stdout or result.stderr).strip().splitlines()[0]
-            print(f"  [PASS] {label}: {version_line}")
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
+            line = (result.stdout or result.stderr).strip().splitlines()[0]
+            print(f"  [PASS] {label}: {line}")
         except (subprocess.CalledProcessError, FileNotFoundError, IndexError) as exc:
             print(f"  [FAIL] {label}: {exc}")
             all_pass = False
     return all_pass
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Switch the active ATM dev install without rebuilding.",
+        description="Switch active ATM dev binaries to a saved backup version.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
-        "label",
-        nargs="?",
-        metavar="LABEL",
-        help="install label to activate (e.g. 2026-03-10-6ed6420)",
-    )
-    parser.add_argument(
-        "--list",
-        action="store_true",
-        help="list available installs and exit",
-    )
+    parser.add_argument("label", nargs="?", metavar="LABEL",
+                        help="version label to activate")
+    parser.add_argument("--list", action="store_true",
+                        help="list available versions and exit")
     return parser.parse_args()
 
 
@@ -202,55 +150,52 @@ def main() -> None:
         sys.exit(1)
 
     label = args.label
-    prefix = ATM_DEV_ROOT / "installs" / label
+    src_dir = ATM_DEV_ROOT / label / "bin"
 
-    # ------------------------------------------------------------------
-    # 1. Verify install exists
-    # ------------------------------------------------------------------
     print(f"[dev-use] activating: {label}")
-    if not prefix.is_dir():
-        print(f"error: install not found: {prefix}", file=sys.stderr)
-        print("\nAvailable installs:")
+
+    if not src_dir.is_dir():
+        print(f"error: version not found: {ATM_DEV_ROOT / label}", file=sys.stderr)
+        print()
         show_list()
         sys.exit(1)
 
-    # Verify all binaries are present in the target prefix
-    print("\n[verify binaries]")
+    # Verify source binaries exist
+    print("\n[verify source binaries]")
     for name in BINARIES:
-        binary = prefix / "bin" / name
-        if not binary.exists():
-            die(f"binary missing from install prefix: {binary}")
+        if not (src_dir / name).exists():
+            die(f"binary missing from version backup: {src_dir / name}")
         print(f"  found {name}")
 
-    # ------------------------------------------------------------------
-    # 2. Switch current
-    # ------------------------------------------------------------------
-    print("\n[switch current]")
-    switch_current(prefix)
+    # Save current as previous before switching
+    cur = current_label()
+    if cur != label:
+        (ATM_DEV_ROOT / "previous.txt").write_text(cur + "\n")
 
-    # ------------------------------------------------------------------
-    # 3. Restart daemon
-    # ------------------------------------------------------------------
-    restart_daemon(prefix)
+    # Overwrite active bin/
+    print("\n[install binaries -> ~/.local/atm-dev/bin/]")
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
+    for name in BINARIES:
+        shutil.copy2(src_dir / name, BIN_DIR / name)
+        (BIN_DIR / name).chmod(0o755)
+        print(f"  installed {name}")
 
-    # ------------------------------------------------------------------
-    # 4. Post-install verification
-    # ------------------------------------------------------------------
-    all_pass = verify_install(prefix)
+    # Update current.txt and manifest
+    (ATM_DEV_ROOT / "current.txt").write_text(label + "\n")
+    src_manifest = ATM_DEV_ROOT / label / "manifest.json"
+    if src_manifest.exists():
+        shutil.copy2(src_manifest, ATM_DEV_ROOT / "manifest.json")
 
-    # ------------------------------------------------------------------
-    # 5. Summary
-    # ------------------------------------------------------------------
+    restart_daemon()
+    all_pass = verify_install()
+
     print("\n" + "=" * 60)
-    print(f"dev-use complete")
+    print("dev-use complete")
     print(f"  label:    {label}")
-    print(f"  prefix:   {prefix}")
-    print(f"  ATM_HOME: {ATM_HOME}")
+    print(f"  bin:      {BIN_DIR}")
     print(f"  verification: {'ALL PASS' if all_pass else 'SOME CHECKS FAILED'}")
-    print()
     if not all_pass:
-        print("One or more verification checks failed.")
-        print("To rollback: scripts/dev-rollback")
+        print("\nTo rollback:  scripts/dev-rollback")
         sys.exit(1)
 
 

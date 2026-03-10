@@ -1,168 +1,142 @@
 #!/usr/bin/env python3
-"""dev-rollback: Roll back to the previous ATM dev install.
+"""dev-rollback: Roll back the active ATM dev binaries to the previous version.
 
-Swaps current <-> previous, restarts the daemon, and verifies the install.
+Reads ~/.local/atm-dev/previous.txt to find the previous version label,
+copies those binaries into the active bin/, and restarts the daemon.
+No symlinks. PATH never changes.
 
 Usage:
-    dev-rollback [-h]
+    dev-rollback
 
 Options:
     -h, --help    Show this help message
 """
 
+import argparse
+import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 
-# ---------------------------------------------------------------------------
-# Constants (mirrored from dev-install)
-# ---------------------------------------------------------------------------
-
 ATM_DEV_ROOT = Path.home() / ".local" / "atm-dev"
 ATM_HOME = Path.home() / ".local" / "share" / "atm-dev" / "home"
+BIN_DIR = ATM_DEV_ROOT / "bin"
 
+BINARIES = ["atm", "atm-daemon", "atm-agent-mcp", "atm-tui", "sc-compose"]
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def die(msg: str) -> None:
-    """Print an error message and exit with code 1."""
     print(f"error: {msg}", file=sys.stderr)
     sys.exit(1)
 
 
-def dev_env(path_prefix: Path) -> dict:
-    """Build the subprocess environment for ATM dev channel commands."""
+def run(cmd: list, *, env: dict = None) -> subprocess.CompletedProcess:
+    display = " ".join(str(c) for c in cmd)
+    print(f"  $ {display}")
+    try:
+        return subprocess.run(cmd, check=True, text=True, env=env)
+    except subprocess.CalledProcessError as exc:
+        die(f"command failed (exit {exc.returncode}): {display}")
+
+
+def dev_env() -> dict:
     env = os.environ.copy()
     env["ATM_HOME"] = str(ATM_HOME)
-    env["ATM_DAEMON_BIN"] = str(path_prefix / "bin" / "atm-daemon")
+    env["ATM_DAEMON_BIN"] = str(BIN_DIR / "atm-daemon")
     env["ATM_CHANNEL"] = "dev"
-    env["PATH"] = str(path_prefix / "bin") + os.pathsep + env.get("PATH", "")
+    env["PATH"] = str(BIN_DIR) + os.pathsep + env.get("PATH", "")
     return env
 
 
-def restart_daemon(prefix: Path) -> None:
-    """Restart the ATM daemon using the dev environment."""
+def restart_daemon() -> None:
     print("\n[restart daemon]")
-    atm_bin = prefix / "bin" / "atm"
+    atm_bin = BIN_DIR / "atm"
     if not atm_bin.exists():
         die(f"atm binary not found at {atm_bin}")
-    env = dev_env(prefix)
-    display = f"ATM_HOME=... atm daemon restart"
-    print(f"  $ {display}")
     try:
-        subprocess.run(
-            [str(atm_bin), "daemon", "restart"],
-            check=True,
-            text=True,
-            env=env,
-        )
-    except subprocess.CalledProcessError:
-        print("  note: daemon restart returned non-zero (may be first-time start)")
+        run([str(atm_bin), "daemon", "restart"], env=dev_env())
+    except SystemExit:
+        print("  note: daemon restart returned non-zero (ok)")
 
 
-def verify_install(prefix: Path) -> bool:
-    """Run post-install verification checks. Returns True if all pass."""
-    print("\n[post-install verification]")
-    atm_bin = prefix / "bin" / "atm"
-    env = dev_env(prefix)
+def verify_install() -> bool:
+    print("\n[post-rollback verification]")
+    env = dev_env()
     checks = [
-        ([str(atm_bin), "daemon", "status"], "daemon status"),
-        ([str(atm_bin), "--version"], "atm --version"),
-        ([str(prefix / "bin" / "atm-daemon"), "--version"], "atm-daemon --version"),
-        ([str(prefix / "bin" / "sc-compose"), "--version"], "sc-compose --version"),
+        ([str(BIN_DIR / "atm"), "daemon", "status"], "daemon status"),
+        ([str(BIN_DIR / "atm"), "--version"], "atm --version"),
+        ([str(BIN_DIR / "atm-daemon"), "--version"], "atm-daemon --version"),
     ]
     all_pass = True
     for cmd, label in checks:
         try:
-            result = subprocess.run(
-                cmd, check=True, capture_output=True, text=True, env=env
-            )
-            version_line = (result.stdout or result.stderr).strip().splitlines()[0]
-            print(f"  [PASS] {label}: {version_line}")
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
+            line = (result.stdout or result.stderr).strip().splitlines()[0]
+            print(f"  [PASS] {label}: {line}")
         except (subprocess.CalledProcessError, FileNotFoundError, IndexError) as exc:
             print(f"  [FAIL] {label}: {exc}")
             all_pass = False
     return all_pass
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
 def main() -> None:
-    # Simple help check without argparse overhead
-    if "--help" in sys.argv or "-h" in sys.argv:
-        print(__doc__.strip())
-        return
+    argparse.ArgumentParser(
+        description="Roll back ATM dev binaries to previous version."
+    ).parse_args()
 
-    current = ATM_DEV_ROOT / "current"
-    previous = ATM_DEV_ROOT / "previous"
+    prev_txt = ATM_DEV_ROOT / "previous.txt"
+    if not prev_txt.exists():
+        die("no previous version recorded — cannot rollback\n"
+            "Use 'scripts/dev-use --list' to see available versions.")
 
-    # ------------------------------------------------------------------
-    # 1. Validate that previous exists
-    # ------------------------------------------------------------------
-    if not (previous.is_symlink() or previous.exists()):
-        die("no previous install found — cannot rollback")
+    prev_label = prev_txt.read_text().strip()
+    src_dir = ATM_DEV_ROOT / prev_label / "bin"
 
-    previous_target = Path(os.readlink(previous)).resolve()
-    current_target = None
-    if current.is_symlink():
-        current_target = Path(os.readlink(current)).resolve()
+    if not src_dir.is_dir():
+        die(f"previous version backup not found: {ATM_DEV_ROOT / prev_label}\n"
+            "Use 'scripts/dev-use --list' to see available versions.")
 
-    from_label = previous_target.name
-    to_label = current_target.name if current_target else "(none)"
+    cur_txt = ATM_DEV_ROOT / "current.txt"
+    cur_label = cur_txt.read_text().strip() if cur_txt.exists() else "(unknown)"
 
-    print(f"[dev-rollback] rolling back")
-    print(f"  from current: {to_label}")
-    print(f"  to previous:  {from_label}")
+    print(f"[dev-rollback] {cur_label} -> {prev_label}")
 
-    # ------------------------------------------------------------------
-    # 2. Swap current <-> previous
-    # ------------------------------------------------------------------
-    print("\n[swap symlinks]")
+    # Verify source binaries exist
+    print("\n[verify rollback binaries]")
+    for name in BINARIES:
+        if not (src_dir / name).exists():
+            die(f"binary missing from rollback version: {src_dir / name}")
+        print(f"  found {name}")
 
-    # Remove current
-    if current.is_symlink() or current.exists():
-        current.unlink()
+    # Swap current/previous labels before touching bin/
+    (ATM_DEV_ROOT / "previous.txt").write_text(cur_label + "\n")
 
-    # Move previous -> current
-    os.symlink(previous_target, current)
-    print(f"  current -> {previous_target}")
+    # Overwrite active bin/ with rollback binaries
+    print("\n[restore binaries -> ~/.local/atm-dev/bin/]")
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
+    for name in BINARIES:
+        shutil.copy2(src_dir / name, BIN_DIR / name)
+        (BIN_DIR / name).chmod(0o755)
+        print(f"  restored {name}")
 
-    # Point previous at what was current (if it existed)
-    previous.unlink()
-    if current_target and current_target.exists():
-        os.symlink(current_target, previous)
-        print(f"  previous -> {current_target}")
-    else:
-        print("  previous: (removed — no previous current to restore)")
+    # Update current.txt and manifest
+    (ATM_DEV_ROOT / "current.txt").write_text(prev_label + "\n")
+    src_manifest = ATM_DEV_ROOT / prev_label / "manifest.json"
+    if src_manifest.exists():
+        shutil.copy2(src_manifest, ATM_DEV_ROOT / "manifest.json")
 
-    # ------------------------------------------------------------------
-    # 3. Restart daemon
-    # ------------------------------------------------------------------
-    restart_daemon(previous_target)
+    restart_daemon()
+    all_pass = verify_install()
 
-    # ------------------------------------------------------------------
-    # 4. Post-rollback verification
-    # ------------------------------------------------------------------
-    all_pass = verify_install(previous_target)
-
-    # ------------------------------------------------------------------
-    # 5. Summary
-    # ------------------------------------------------------------------
     print("\n" + "=" * 60)
-    print(f"dev-rollback complete")
-    print(f"  rolled back to: {from_label}")
-    print(f"  prefix:         {previous_target}")
-    print(f"  ATM_HOME:       {ATM_HOME}")
-    print(f"  verification:   {'ALL PASS' if all_pass else 'SOME CHECKS FAILED'}")
-    print()
+    print("dev-rollback complete")
+    print(f"  rolled back to: {prev_label}")
+    print(f"  previous was:   {cur_label}")
+    print(f"  verification: {'ALL PASS' if all_pass else 'SOME CHECKS FAILED'}")
     if not all_pass:
-        print("One or more verification checks failed after rollback.")
         sys.exit(1)
 
 
