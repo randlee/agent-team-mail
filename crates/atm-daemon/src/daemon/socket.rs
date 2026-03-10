@@ -4512,7 +4512,11 @@ fn control_request_is_live(
 
     let tracker = state_store.lock().unwrap();
     match tracker.get_state(&control.agent_id) {
-        Some(AgentState::Idle) | Some(AgentState::Active) => ControlResult::Ok,
+        Some(AgentState::Idle) | Some(AgentState::Active) => {
+            drop(tracker);
+            registry.heartbeat_for_team(&record.team, &record.agent_name);
+            ControlResult::Ok
+        }
         Some(AgentState::Unknown) | Some(AgentState::Offline) | None => ControlResult::NotLive,
     }
 }
@@ -5024,6 +5028,7 @@ fn handle_session_query(
                     "session_id": record.session_id,
                     "process_id": record.process_id,
                     "alive": alive,
+                    "last_seen_at": record.last_seen_at,
                     "last_alive_at": record.last_alive_at,
                     "runtime": record.runtime,
                     "runtime_session_id": record.runtime_session_id,
@@ -5124,12 +5129,16 @@ fn handle_session_query_team(
     }
 
     let alive = record.state == crate::daemon::session_registry::SessionState::Active;
+    if alive {
+        let _ = registry.heartbeat_for_team(&team, &name);
+    }
     make_ok_response(
         &request.request_id,
         serde_json::json!({
             "session_id": record.session_id,
             "process_id": record.process_id,
             "alive": alive,
+            "last_seen_at": record.last_seen_at,
             "last_alive_at": record.last_alive_at,
             "runtime": record.runtime,
             "runtime_session_id": record.runtime_session_id,
@@ -5600,12 +5609,11 @@ fn bootstrap_session_from_member_hint(
         return;
     }
 
-    let now_ms = chrono::Utc::now().timestamp_millis() as u64;
-    let session_id = member
-        .session_id
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| format!("local:{}:{now_ms}:{pid}", member.name));
+    let Some(session_id) = member.session_id.clone().filter(|s| !s.trim().is_empty()) else {
+        // Do not fabricate synthetic IDs here; daemon bootstrap must only seed
+        // canonical session IDs supplied by lifecycle hooks/register-hint.
+        return;
+    };
     let runtime = runtime_for_member(member);
     let runtime_session_id = runtime.as_ref().map(|_| session_id.clone());
 
@@ -6431,6 +6439,7 @@ notify_target = "team-lead"
             process_id: std::process::id(),
             state: crate::daemon::session_registry::SessionState::Active,
             updated_at: "2026-03-05T00:00:00Z".to_string(),
+            last_seen_at: Some("2026-03-05T00:00:00Z".to_string()),
             last_alive_at: Some("2026-03-05T00:00:00Z".to_string()),
             runtime: runtime.map(str::to_string),
             runtime_session_id: None,
@@ -6766,6 +6775,37 @@ notify_target = "team-lead"
             .expect("session registry upserted");
         assert_eq!(session.session_id, "hint-session-1");
         assert_eq!(session.process_id, std::process::id());
+    }
+
+    #[test]
+    #[serial]
+    fn test_list_agents_bootstrap_skips_member_without_session_id_hint() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let home = std::env::var("ATM_HOME").expect("ATM_HOME set by fixture");
+        let config_path = std::path::Path::new(&home).join(".claude/teams/atm-dev/config.json");
+        let mut cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        let members = cfg["members"].as_array_mut().unwrap();
+        let target = members
+            .iter_mut()
+            .find(|m| m["name"].as_str() == Some("arch-ctm"))
+            .expect("arch-ctm in config");
+        target["processId"] = serde_json::json!(std::process::id());
+        target.as_object_mut().unwrap().remove("sessionId");
+        target["externalBackendType"] = serde_json::json!("external");
+        std::fs::write(&config_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let store = make_store();
+        let sr = make_sr();
+        let req = make_request("list-agents", serde_json::json!({"team": "atm-dev"}));
+        let resp = handle_list_agents(&req, &store, &sr);
+        assert_eq!(resp.status, "ok");
+
+        let reg = sr.lock().unwrap();
+        assert!(
+            reg.query_for_team("atm-dev", "arch-ctm").is_none(),
+            "bootstrap must not fabricate synthetic session IDs when sessionId hint is missing"
+        );
     }
 
     #[test]
@@ -8566,6 +8606,71 @@ exit 1
             files += 1;
         }
         assert_eq!(files, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_control_stdin_updates_session_heartbeat() {
+        use crate::plugins::worker_adapter::AgentState;
+        use uuid::Uuid;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state_store = make_store();
+        {
+            let mut tracker = state_store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Idle);
+        }
+        let sr = make_sr();
+        {
+            sr.lock()
+                .unwrap()
+                .upsert("arch-ctm", "sess-heartbeat", std::process::id());
+        }
+
+        let before = sr
+            .lock()
+            .unwrap()
+            .query("arch-ctm")
+            .expect("seeded session")
+            .updated_at
+            .clone();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        let req = ControlRequest {
+            v: CONTROL_SCHEMA_VERSION,
+            request_id: Uuid::new_v4().to_string(),
+            msg_type: "control.stdin.request".to_string(),
+            signal: None,
+            sent_at: chrono::Utc::now().to_rfc3339(),
+            team: "atm-dev".to_string(),
+            session_id: "sess-heartbeat".to_string(),
+            agent_id: "arch-ctm".to_string(),
+            sender: "team-lead".to_string(),
+            action: ControlAction::Stdin,
+            payload: Some("heartbeat".to_string()),
+            content_ref: None,
+            elicitation_id: None,
+            decision: None,
+        };
+        let dd = make_dd_in(&tmp);
+        let ack = process_control_request(req, tmp.path(), &state_store, &sr, &dd).await;
+        assert_eq!(ack.result, agent_team_mail_core::control::ControlResult::Ok);
+
+        let after = sr
+            .lock()
+            .unwrap()
+            .query("arch-ctm")
+            .expect("session still tracked")
+            .clone();
+        assert_ne!(
+            after.updated_at, before,
+            "control send should refresh updated_at"
+        );
+        assert!(
+            after.last_seen_at.is_some(),
+            "control send should refresh last_seen_at"
+        );
     }
 
     #[cfg(unix)]
@@ -10494,6 +10599,10 @@ exit 1
             std::process::id() as u64
         );
         assert!(payload["alive"].as_bool().unwrap());
+        assert!(
+            payload["last_seen_at"].as_str().is_some(),
+            "live session-query responses should expose last_seen_at"
+        );
         assert!(
             payload["last_alive_at"].as_str().is_some(),
             "live session-query responses should expose last_alive_at"

@@ -194,7 +194,8 @@ CLI must support:
 - `--agent-type <name>` (profile-mode selector; alias to `--agent`),
 - `--ai <claude|codex|gemini|opencode>` (runtime selector; alias to `--runtime`),
 - `--var key=value` (repeatable),
-- `--var-file <json|yaml>`,
+- `--var-file <path|->`  — path to a JSON or YAML variable file, or `-` to
+  read from stdin (useful for piped workflows and shell process substitution),
 - `--env-prefix <PREFIX_>`,
 - `--runtime <claude|codex|gemini|opencode>`,
 - `--agent <name>`,
@@ -252,6 +253,21 @@ ATM init integration:
 - `atm init` must run compose-init-equivalent setup automatically (or call the
   same underlying library helper) so `.prompts/` + `.gitignore` policy is
   enforced without extra user steps.
+
+### FR-7a: Template Whitespace Control
+
+The template engine must enable `trim_blocks` and `lstrip_blocks` by default:
+
+- **`trim_blocks`**: the first newline after a block tag (`{% ... %}`) is
+  automatically removed so that block-only lines do not produce extra blank
+  lines in rendered output.
+- **`lstrip_blocks`**: leading whitespace (spaces and tabs) before a block tag
+  at the start of a line is stripped, allowing templates to indent control-flow
+  tags without injecting that indentation into the output.
+
+These settings match Jinja2's well-known `trim_blocks`/`lstrip_blocks` options
+and are intentional; authors who need to preserve whitespace around a specific
+block tag may opt out per-tag with a `+` modifier (`{%+ if ... %}`).
 
 ### FR-8: Determinism and Diagnostics
 

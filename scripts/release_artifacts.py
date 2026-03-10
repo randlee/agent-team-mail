@@ -274,6 +274,162 @@ def _cmd_check_version_unpublished(args: argparse.Namespace) -> int:
     return 0
 
 
+def _workspace_members(workspace_toml: Path) -> list[str]:
+    """Return the list of workspace member directory paths from the root Cargo.toml."""
+    data = tomllib.loads(workspace_toml.read_text(encoding="utf-8"))
+    members = data.get("workspace", {}).get("members", [])
+    if not isinstance(members, list):
+        raise SystemExit("Cargo.toml [workspace].members must be a list")
+    return members
+
+
+def _crate_is_publishable(crate_toml: Path) -> bool:
+    """Return True unless the crate explicitly sets ``publish = false``."""
+    data = tomllib.loads(crate_toml.read_text(encoding="utf-8"))
+    publish = data.get("package", {}).get("publish")
+    if publish is False:
+        return False
+    # publish = [] (empty list) also means "do not publish to crates.io"
+    if isinstance(publish, list) and len(publish) == 0:
+        return False
+    return True
+
+
+def _crate_name(crate_toml: Path) -> str | None:
+    """Return the crate package name, or None if unreadable."""
+    data = tomllib.loads(crate_toml.read_text(encoding="utf-8"))
+    return data.get("package", {}).get("name")
+
+
+def _cmd_validate_manifest(args: argparse.Namespace) -> int:
+    """Check that every publishable workspace crate is listed in the manifest.
+
+    Exits with code 0 when all publishable crates are present.
+    Prints ``MISSING: <crate-name>`` for each absent crate and exits 1.
+    """
+    workspace_toml = Path(args.workspace_toml)
+    manifest_path = Path(args.manifest)
+    workspace_root = workspace_toml.parent
+
+    members = _workspace_members(workspace_toml)
+    manifest = _load_manifest(manifest_path)
+    manifest_packages: set[str] = {c["package"] for c in manifest["crates"]}
+
+    missing: list[str] = []
+    for member in members:
+        crate_toml = workspace_root / member / "Cargo.toml"
+        if not crate_toml.exists():
+            print(f"WARNING: workspace member {member!r} has no Cargo.toml at {crate_toml}")
+            continue
+        if not _crate_is_publishable(crate_toml):
+            continue
+        name = _crate_name(crate_toml)
+        if name is None:
+            print(f"WARNING: could not determine package name for {crate_toml}")
+            continue
+        if name not in manifest_packages:
+            print(f"MISSING: {name}")
+            missing.append(name)
+
+    if missing:
+        print(
+            f"\n{len(missing)} publishable crate(s) missing from {manifest_path}.",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"ok: all publishable workspace crates are present in {manifest_path}")
+    return 0
+
+
+def _has_workspace_path_deps(crate_toml: Path, workspace_root: Path) -> list[str]:
+    """Return a list of dependency names that are workspace path dependencies.
+
+    A dependency is a workspace path dep when its entry in either
+    ``[dependencies]`` or the resolved ``[workspace.dependencies]`` contains a
+    ``path`` key that resolves to a directory inside the workspace root.
+    """
+    data = tomllib.loads(crate_toml.read_text(encoding="utf-8"))
+    crate_dir = crate_toml.parent
+
+    # Also load workspace deps for resolution.
+    ws_toml = workspace_root / "Cargo.toml"
+    ws_data = tomllib.loads(ws_toml.read_text(encoding="utf-8")) if ws_toml.exists() else {}
+    workspace_deps: dict = ws_data.get("workspace", {}).get("dependencies", {})
+
+    path_deps: list[str] = []
+
+    def _check_dep_table(deps: dict) -> None:
+        for dep_name, dep_spec in deps.items():
+            if isinstance(dep_spec, dict):
+                if "workspace" in dep_spec:
+                    # Resolve via workspace.dependencies
+                    ws_dep = workspace_deps.get(dep_name, {})
+                    if isinstance(ws_dep, dict) and "path" in ws_dep:
+                        dep_path = (workspace_root / ws_dep["path"]).resolve()
+                        if dep_path.is_relative_to(workspace_root.resolve()):
+                            path_deps.append(dep_name)
+                elif "path" in dep_spec:
+                    dep_path = (crate_dir / dep_spec["path"]).resolve()
+                    if dep_path.is_relative_to(workspace_root.resolve()):
+                        path_deps.append(dep_name)
+
+    _check_dep_table(data.get("dependencies", {}))
+    # Also check target-specific deps
+    for _target, target_data in data.get("target", {}).items():
+        if isinstance(target_data, dict):
+            _check_dep_table(target_data.get("dependencies", {}))
+
+    return path_deps
+
+
+def _cmd_validate_preflight_checks(args: argparse.Namespace) -> int:
+    """Validate that crates with ``preflight_check = 'full'`` have no workspace path deps.
+
+    A crate using ``full`` preflight is compiled and tested from source without
+    ``--locked``.  If it depends on another workspace crate via a ``path``
+    dependency, the local (unpublished) version would be used instead of the
+    crates.io version, making the check meaningless.  Such crates must use
+    ``preflight_check = 'locked'`` instead.
+
+    Exits 0 when all full-preflight crates are genuine leaf crates.
+    Exits 1 and prints errors for any violations.
+    """
+    manifest_path = Path(args.manifest)
+    workspace_toml = Path(args.workspace_toml)
+    workspace_root = workspace_toml.parent
+
+    manifest = _load_manifest(manifest_path)
+    full_crates = [c for c in manifest["crates"] if c["preflight_check"] == PREFLIGHT_FULL]
+
+    errors: list[str] = []
+    for crate in full_crates:
+        crate_toml = workspace_root / crate["cargo_toml"]
+        if not crate_toml.exists():
+            errors.append(
+                f"ERROR: {crate['artifact']}: cargo_toml not found at {crate_toml}"
+            )
+            continue
+        path_deps = _has_workspace_path_deps(crate_toml, workspace_root)
+        if path_deps:
+            errors.append(
+                f"ERROR: {crate['artifact']} has workspace path deps "
+                f"({', '.join(sorted(path_deps))}) but preflight_check='full' "
+                f"— must use 'locked'"
+            )
+
+    for err in errors:
+        print(err)
+
+    if errors:
+        print(
+            f"\n{len(errors)} preflight_check violation(s) found.",
+            file=sys.stderr,
+        )
+        return 1
+    print("ok: all preflight_check='full' crates are genuine leaf crates")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Release artifact manifest utilities")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -335,6 +491,44 @@ def _build_parser() -> argparse.ArgumentParser:
     check_unpublished.add_argument("--manifest", required=True)
     check_unpublished.add_argument("--version", required=True)
     check_unpublished.set_defaults(func=_cmd_check_version_unpublished)
+
+    validate_manifest = subparsers.add_parser(
+        "validate-manifest",
+        help=(
+            "Fail when any publishable workspace crate is missing from "
+            "the publish-artifacts manifest"
+        ),
+    )
+    validate_manifest.add_argument(
+        "--manifest",
+        required=True,
+        help="Path to publish-artifacts.toml",
+    )
+    validate_manifest.add_argument(
+        "--workspace-toml",
+        required=True,
+        help="Path to workspace root Cargo.toml",
+    )
+    validate_manifest.set_defaults(func=_cmd_validate_manifest)
+
+    validate_preflight = subparsers.add_parser(
+        "validate-preflight-checks",
+        help=(
+            "Fail when a crate with preflight_check='full' has workspace "
+            "path dependencies (it must use 'locked' instead)"
+        ),
+    )
+    validate_preflight.add_argument(
+        "--manifest",
+        required=True,
+        help="Path to publish-artifacts.toml",
+    )
+    validate_preflight.add_argument(
+        "--workspace-toml",
+        required=True,
+        help="Path to workspace root Cargo.toml",
+    )
+    validate_preflight.set_defaults(func=_cmd_validate_preflight_checks)
 
     return parser
 

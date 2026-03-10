@@ -113,15 +113,6 @@ pub fn execute(args: StatusArgs) -> Result<()> {
                 "pending": pending_tasks,
                 "completed": completed_tasks,
             },
-            "logging": json!({
-                "state": logging.state,
-                "dropped_counter": logging.dropped_counter,
-                "spool_path": logging.spool_path,
-                "last_error": logging.last_error,
-                "canonical_log_path": logging.canonical_log_path,
-                "spool_count": logging.spool_count,
-                "oldest_spool_age": logging.oldest_spool_age,
-            }),
             "logging_health": serde_json::to_value(&logging_health)
                 .expect("logging_health should serialize"),
         });

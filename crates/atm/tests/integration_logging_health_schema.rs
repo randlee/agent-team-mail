@@ -113,11 +113,10 @@ fn status_json_includes_extended_logging_fields() {
     );
     let body = String::from_utf8(output.stdout).expect("utf8 stdout");
     let value: Value = serde_json::from_str(&body).expect("status json");
-    let logging = &value["logging"];
-    assert_eq!(logging["state"], "degraded_spooling");
-    assert!(logging["canonical_log_path"].is_string());
-    assert!(logging["spool_count"].is_u64());
-    assert!(logging["oldest_spool_age"].is_u64());
+    assert!(
+        value.get("logging").is_none(),
+        "legacy logging key must not be emitted"
+    );
     let logging_health = &value["logging_health"];
     assert_canonical_logging_health(logging_health);
     assert_eq!(logging_health["state"], "degraded_spooling");
@@ -150,11 +149,10 @@ fn doctor_json_includes_extended_logging_fields() {
 
     let body = String::from_utf8(output.stdout).expect("utf8 stdout");
     let value: Value = serde_json::from_str(&body).expect("doctor json");
-    let logging = &value["logging"];
-    assert!(logging["state"].is_string());
-    assert!(logging["canonical_log_path"].is_string());
-    assert!(logging["spool_count"].is_u64());
-    assert!(logging["oldest_spool_age"].is_number() || logging["oldest_spool_age"].is_null());
+    assert!(
+        value.get("logging").is_none(),
+        "legacy logging key must not be emitted"
+    );
     let logging_health = &value["logging_health"];
     assert_canonical_logging_health(logging_health);
 }
