@@ -564,6 +564,7 @@ mod tests {
                 session_id: "sess-1".to_string(),
                 process_id: 4242,
                 alive: true,
+                last_seen_at: None,
                 runtime: Some("codex".to_string()),
                 runtime_session_id: None,
                 pane_id: None,

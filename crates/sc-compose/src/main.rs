@@ -10,6 +10,7 @@ use sc_composer::{
 use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -38,8 +39,9 @@ struct Cli {
     #[arg(long = "var", global = true, value_parser = parse_key_val, action = ArgAction::Append)]
     vars: Vec<(String, String)>,
 
+    /// Path to a JSON or YAML file containing variables, or `-` to read from stdin.
     #[arg(long = "var-file", global = true)]
-    var_file: Option<PathBuf>,
+    var_file: Option<String>,
 
     #[arg(long = "env-prefix", global = true)]
     env_prefix: Option<String>,
@@ -522,10 +524,25 @@ fn build_request(
     Ok(request)
 }
 
-fn load_var_file(path: Option<&Path>) -> Result<BTreeMap<String, String>> {
-    let Some(path) = path else {
+/// Load variables from a file path or from stdin when `spec` is `"-"`.
+///
+/// When `spec` is `"-"`, the entire contents of stdin are read and parsed as
+/// JSON (tried first) or YAML. When `spec` is a file path, the format is
+/// inferred from the `.json` extension; all other extensions are parsed as YAML.
+fn load_var_file(spec: Option<&str>) -> Result<BTreeMap<String, String>> {
+    let Some(spec) = spec else {
         return Ok(BTreeMap::new());
     };
+
+    if spec == "-" {
+        let mut raw = String::new();
+        std::io::stdin()
+            .read_to_string(&mut raw)
+            .context("failed to read var-file from stdin")?;
+        return parse_var_file_content(&raw, "<stdin>");
+    }
+
+    let path = Path::new(spec);
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
     if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
@@ -536,6 +553,18 @@ fn load_var_file(path: Option<&Path>) -> Result<BTreeMap<String, String>> {
     let map: BTreeMap<String, String> = serde_yaml::from_str(&raw)
         .with_context(|| format!("invalid YAML var-file {}", path.display()))?;
     Ok(map)
+}
+
+/// Parse a JSON-or-YAML string into a variable map.
+///
+/// JSON is tried first (the JSON spec is a strict subset of YAML, but the
+/// `serde_json` error messages are clearer for JSON input). Falls back to YAML.
+fn parse_var_file_content(raw: &str, source_label: &str) -> Result<BTreeMap<String, String>> {
+    if let Ok(map) = serde_json::from_str::<BTreeMap<String, String>>(raw) {
+        return Ok(map);
+    }
+    serde_yaml::from_str::<BTreeMap<String, String>>(raw)
+        .with_context(|| format!("invalid JSON/YAML var-file from {source_label}"))
 }
 
 fn parse_key_val(s: &str) -> Result<(String, String), String> {

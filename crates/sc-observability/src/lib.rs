@@ -11,6 +11,8 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 use thiserror::Error;
 
 pub const DEFAULT_QUEUE_CAPACITY: usize = 4096;
@@ -18,10 +20,296 @@ pub const DEFAULT_MAX_EVENT_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_BYTES: u64 = 50 * 1024 * 1024;
 pub const DEFAULT_MAX_FILES: u32 = 5;
 pub const DEFAULT_RETENTION_DAYS: u32 = 7;
+pub const DEFAULT_OTEL_MAX_RETRIES: u32 = 2;
+pub const DEFAULT_OTEL_INITIAL_BACKOFF_MS: u64 = 25;
+pub const DEFAULT_OTEL_MAX_BACKOFF_MS: u64 = 250;
 
 pub const SOCKET_ERROR_VERSION_MISMATCH: &str = "VERSION_MISMATCH";
 pub const SOCKET_ERROR_INVALID_PAYLOAD: &str = "INVALID_PAYLOAD";
 pub const SOCKET_ERROR_INTERNAL_ERROR: &str = "INTERNAL_ERROR";
+
+#[derive(Debug, Clone)]
+pub struct OtelConfig {
+    pub enabled: bool,
+    pub max_retries: u32,
+    pub initial_backoff_ms: u64,
+    pub max_backoff_ms: u64,
+}
+
+impl Default for OtelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_retries: DEFAULT_OTEL_MAX_RETRIES,
+            initial_backoff_ms: DEFAULT_OTEL_INITIAL_BACKOFF_MS,
+            max_backoff_ms: DEFAULT_OTEL_MAX_BACKOFF_MS,
+        }
+    }
+}
+
+impl OtelConfig {
+    pub fn from_env() -> Self {
+        let mut cfg = Self::default();
+
+        if let Ok(raw) = std::env::var("ATM_OTEL_ENABLED") {
+            let norm = raw.trim().to_ascii_lowercase();
+            cfg.enabled = !matches!(norm.as_str(), "0" | "false" | "off" | "no");
+        }
+        if let Ok(raw) = std::env::var("ATM_OTEL_MAX_RETRIES")
+            && let Ok(parsed) = raw.parse::<u32>()
+        {
+            cfg.max_retries = parsed;
+        }
+        if let Ok(raw) = std::env::var("ATM_OTEL_INITIAL_BACKOFF_MS")
+            && let Ok(parsed) = raw.parse::<u64>()
+        {
+            cfg.initial_backoff_ms = parsed;
+        }
+        if let Ok(raw) = std::env::var("ATM_OTEL_MAX_BACKOFF_MS")
+            && let Ok(parsed) = raw.parse::<u64>()
+        {
+            cfg.max_backoff_ms = parsed;
+        }
+        if cfg.max_backoff_ms < cfg.initial_backoff_ms {
+            cfg.max_backoff_ms = cfg.initial_backoff_ms;
+        }
+        cfg
+    }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum OtelError {
+    #[error("missing required correlation field '{field}'")]
+    MissingRequiredField { field: &'static str },
+    #[error(
+        "invalid span context: trace_id and span_id must either both be present or both be absent"
+    )]
+    InvalidSpanContext,
+    #[error("export failed: {0}")]
+    ExportFailed(String),
+}
+
+pub trait OtelExporter: Send + Sync {
+    fn export(&self, record: &OtelRecord) -> Result<(), OtelError>;
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct OtelRecord {
+    pub name: String,
+    pub trace_id: Option<String>,
+    pub span_id: Option<String>,
+    pub attributes: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileOtelExporter {
+    path: PathBuf,
+}
+
+impl FileOtelExporter {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl OtelExporter for FileOtelExporter {
+    fn export(&self, record: &OtelRecord) -> Result<(), OtelError> {
+        if let Some(parent) = self.path.parent()
+            && let Err(err) = fs::create_dir_all(parent)
+        {
+            return Err(OtelError::ExportFailed(err.to_string()));
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(|err| OtelError::ExportFailed(err.to_string()))?;
+        let line = serde_json::to_string(record)
+            .map_err(|err| OtelError::ExportFailed(err.to_string()))?;
+        writeln!(file, "{line}").map_err(|err| OtelError::ExportFailed(err.to_string()))
+    }
+}
+
+#[derive(Clone)]
+struct OtelPipeline {
+    config: OtelConfig,
+    exporter: Arc<dyn OtelExporter>,
+    sleeper: fn(Duration),
+}
+
+impl std::fmt::Debug for OtelPipeline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OtelPipeline")
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
+impl OtelPipeline {
+    fn new_default(log_path: &Path) -> Self {
+        let mut otel_path = log_path.to_path_buf();
+        let stem = log_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("telemetry");
+        otel_path.set_file_name(format!("{stem}.otel.jsonl"));
+        Self {
+            config: OtelConfig::from_env(),
+            exporter: Arc::new(FileOtelExporter::new(otel_path)),
+            sleeper: std::thread::sleep,
+        }
+    }
+
+    fn export_event(&self, event: &LogEventV1) -> Result<(), OtelError> {
+        export_otel_with_retry(event, &self.config, self.exporter.as_ref(), self.sleeper)
+    }
+}
+
+fn export_otel_with_retry(
+    event: &LogEventV1,
+    config: &OtelConfig,
+    exporter: &dyn OtelExporter,
+    sleeper: fn(Duration),
+) -> Result<(), OtelError> {
+    if !config.enabled {
+        return Ok(());
+    }
+    let record = build_otel_record(event)?;
+
+    let mut attempt: u32 = 0;
+    let mut backoff = config.initial_backoff_ms;
+    loop {
+        match exporter.export(&record) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                if attempt >= config.max_retries {
+                    return Err(err);
+                }
+                sleeper(Duration::from_millis(backoff));
+                backoff = backoff.saturating_mul(2).min(config.max_backoff_ms);
+                attempt = attempt.saturating_add(1);
+            }
+        }
+    }
+}
+
+/// Export to OTel without allowing exporter failures to fail the caller.
+///
+/// This is the public fail-open helper for producer-only code paths that do
+/// not own a full [`Logger`] instance.
+pub fn export_otel_best_effort(
+    event: &LogEventV1,
+    config: &OtelConfig,
+    exporter: &dyn OtelExporter,
+) {
+    let _ = export_otel_with_retry(event, config, exporter, std::thread::sleep);
+}
+
+fn build_otel_record(event: &LogEventV1) -> Result<OtelRecord, OtelError> {
+    let runtime_scoped = event.team.is_some()
+        || event.agent.is_some()
+        || event.runtime.is_some()
+        || event.session_id.is_some();
+    if runtime_scoped {
+        for (field, value) in [
+            ("team", event.team.as_deref()),
+            ("agent", event.agent.as_deref()),
+            ("runtime", event.runtime.as_deref()),
+            ("session_id", event.session_id.as_deref()),
+        ] {
+            if value.is_none_or(|v| v.trim().is_empty()) {
+                return Err(OtelError::MissingRequiredField { field });
+            }
+        }
+    }
+
+    let has_trace = event
+        .trace_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_span = event
+        .span_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    if has_trace != has_span {
+        return Err(OtelError::InvalidSpanContext);
+    }
+
+    let subagent_scoped = event.subagent_id.is_some() || event.action.starts_with("subagent.");
+    if subagent_scoped {
+        if event
+            .subagent_id
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(OtelError::MissingRequiredField {
+                field: "subagent_id",
+            });
+        }
+        for (field, value) in [
+            ("team", event.team.as_deref()),
+            ("agent", event.agent.as_deref()),
+            ("runtime", event.runtime.as_deref()),
+            ("session_id", event.session_id.as_deref()),
+            ("trace_id", event.trace_id.as_deref()),
+            ("span_id", event.span_id.as_deref()),
+        ] {
+            if value.is_none_or(|v| v.trim().is_empty()) {
+                return Err(OtelError::MissingRequiredField { field });
+            }
+        }
+    }
+
+    let mut attributes = serde_json::Map::new();
+    if let Some(team) = event.team.as_ref() {
+        attributes.insert("team".to_string(), serde_json::Value::String(team.clone()));
+    }
+    if let Some(agent) = event.agent.as_ref() {
+        attributes.insert(
+            "agent".to_string(),
+            serde_json::Value::String(agent.clone()),
+        );
+    }
+    if let Some(runtime) = event.runtime.as_ref() {
+        attributes.insert(
+            "runtime".to_string(),
+            serde_json::Value::String(runtime.clone()),
+        );
+    }
+    if let Some(session_id) = event.session_id.as_ref() {
+        attributes.insert(
+            "session_id".to_string(),
+            serde_json::Value::String(session_id.clone()),
+        );
+    }
+    if let Some(subagent_id) = event.subagent_id.as_ref() {
+        attributes.insert(
+            "subagent_id".to_string(),
+            serde_json::Value::String(subagent_id.clone()),
+        );
+    }
+    attributes.insert(
+        "source_binary".to_string(),
+        serde_json::Value::String(event.source_binary.clone()),
+    );
+    attributes.insert(
+        "target".to_string(),
+        serde_json::Value::String(event.target.clone()),
+    );
+    attributes.insert(
+        "action".to_string(),
+        serde_json::Value::String(event.action.clone()),
+    );
+
+    Ok(OtelRecord {
+        name: event.action.clone(),
+        trace_id: event.trace_id.clone(),
+        span_id: event.span_id.clone(),
+        attributes,
+    })
+}
+
+pub use agent_team_mail_core::logging_event::SpanRefV1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
@@ -73,12 +361,66 @@ pub struct LogConfig {
 }
 
 impl LogConfig {
-    pub fn from_home(home_dir: &Path) -> Self {
-        let log_path = std::env::var("ATM_LOG_FILE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| home_dir.join(".config/atm/atm.log.jsonl"));
+    fn normalize_tool_name(tool: &str) -> String {
+        let trimmed = tool.trim();
+        if trimmed.is_empty() {
+            return "atm".to_string();
+        }
+        trimmed
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    }
 
-        let spool_dir = home_dir.join(".config/atm/log-spool");
+    fn canonical_log_path(home_dir: &Path, tool: &str) -> PathBuf {
+        let tool = Self::normalize_tool_name(tool);
+        home_dir
+            .join(".config")
+            .join("atm")
+            .join("logs")
+            .join(&tool)
+            .join(format!("{tool}.log.jsonl"))
+    }
+
+    fn canonical_spool_dir(home_dir: &Path, tool: &str) -> PathBuf {
+        let tool = Self::normalize_tool_name(tool);
+        home_dir
+            .join(".config")
+            .join("atm")
+            .join("logs")
+            .join(tool)
+            .join("spool")
+    }
+
+    fn spool_dir_from_log_path(log_path: &Path) -> PathBuf {
+        log_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("spool")
+    }
+
+    pub fn from_home(home_dir: &Path) -> Self {
+        Self::from_home_for_tool(home_dir, "atm")
+    }
+
+    pub fn from_home_for_tool(home_dir: &Path, tool: &str) -> Self {
+        let log_path = std::env::var("ATM_LOG_FILE")
+            .or_else(|_| std::env::var("ATM_LOG_PATH"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| Self::canonical_log_path(home_dir, tool));
+
+        let spool_dir =
+            if std::env::var("ATM_LOG_FILE").is_ok() || std::env::var("ATM_LOG_PATH").is_ok() {
+                Self::spool_dir_from_log_path(&log_path)
+            } else {
+                Self::canonical_spool_dir(home_dir, tool)
+            };
         let level = std::env::var("ATM_LOG")
             .ok()
             .and_then(|v| LogLevel::from_str(&v).ok())
@@ -130,6 +472,7 @@ pub enum LoggerError {
 #[derive(Debug, Clone)]
 pub struct Logger {
     config: LogConfig,
+    otel: OtelPipeline,
 }
 
 /// Apply canonical redaction rules to a logging event.
@@ -139,7 +482,23 @@ pub fn redact_event(event: &mut LogEventV1) {
 
 impl Logger {
     pub fn new(config: LogConfig) -> Self {
-        Self { config }
+        let otel = OtelPipeline::new_default(&config.log_path);
+        Self { config, otel }
+    }
+
+    pub fn with_otel_exporter(
+        config: LogConfig,
+        otel_config: OtelConfig,
+        exporter: Arc<dyn OtelExporter>,
+    ) -> Self {
+        Self {
+            config,
+            otel: OtelPipeline {
+                config: otel_config,
+                exporter,
+                sleeper: std::thread::sleep,
+            },
+        }
     }
 
     pub fn config(&self) -> &LogConfig {
@@ -155,6 +514,7 @@ impl Logger {
     pub fn emit(&self, event: &LogEventV1) -> Result<(), LoggerError> {
         let line = self.prepare_line(event)?;
         self.append_line_to_canonical(&line)?;
+        let _ = self.otel.export_event(event);
         Ok(())
     }
 
@@ -328,6 +688,10 @@ impl Logger {
     }
 
     fn append_line_to_canonical(&self, line: &str) -> Result<(), LoggerError> {
+        static CANONICAL_APPEND_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock = CANONICAL_APPEND_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock.lock().expect("canonical append lock poisoned");
+
         if let Some(parent) = self.config.log_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -352,6 +716,23 @@ impl Logger {
         rotate_log_files(&self.config.log_path, self.config.max_files)?;
         Ok(())
     }
+}
+
+/// Export a single event to OTel using default pipeline settings (fail-open).
+///
+/// This helper is intended for producers that already own canonical JSONL
+/// writing and only need shared OTel export semantics. It creates an
+/// [`OtelPipeline`] from the given log path using default configuration.
+///
+/// For callers that already have an exporter, use [`export_otel_best_effort`]
+/// instead.
+pub fn export_otel_best_effort_from_path(log_path: &Path, event: &LogEventV1) {
+    let pipeline = OtelPipeline::new_default(log_path);
+    export_otel_best_effort_with_pipeline(&pipeline, event);
+}
+
+fn export_otel_best_effort_with_pipeline(pipeline: &OtelPipeline, event: &LogEventV1) {
+    let _ = pipeline.export_event(event);
 }
 
 pub fn spool_file_name(source_binary: &str, pid: u32, unix_millis: u128) -> String {
@@ -421,12 +802,59 @@ mod tests {
     use super::*;
     use agent_team_mail_core::logging_event::new_log_event;
     use serial_test::serial;
+    use std::sync::Mutex;
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
+
+    #[derive(Default)]
+    struct CountingExporter {
+        attempts: AtomicUsize,
+        fail_for: AtomicUsize,
+        records: Mutex<Vec<OtelRecord>>,
+    }
+
+    impl CountingExporter {
+        fn with_failures(failures: usize) -> Self {
+            Self {
+                attempts: AtomicUsize::new(0),
+                fail_for: AtomicUsize::new(failures),
+                records: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl OtelExporter for CountingExporter {
+        fn export(&self, record: &OtelRecord) -> Result<(), OtelError> {
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            let fail_for = self.fail_for.load(Ordering::SeqCst);
+            if attempt <= fail_for {
+                return Err(OtelError::ExportFailed(
+                    "simulated transport outage".to_string(),
+                ));
+            }
+            self.records
+                .lock()
+                .expect("records lock")
+                .push(record.clone());
+            Ok(())
+        }
+    }
 
     fn make_event(ts: &str) -> LogEventV1 {
         let mut event = new_log_event("atm", "test_action", "atm::test", "info");
         event.ts = ts.to_string();
         event
+    }
+
+    static BACKOFF_SLEEPS_MS: OnceLock<Mutex<Vec<u64>>> = OnceLock::new();
+
+    fn record_sleep(duration: Duration) {
+        BACKOFF_SLEEPS_MS
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .expect("backoff sleeps lock")
+            .push(duration.as_millis() as u64);
     }
 
     #[test]
@@ -448,6 +876,7 @@ mod tests {
         assert_eq!(cfg.level, LogLevel::Debug);
         assert!(cfg.message_preview_enabled);
         assert_eq!(cfg.log_path, custom_log);
+        assert_eq!(cfg.spool_dir, tmp.path().join("spool"));
         assert_eq!(cfg.max_bytes, 1024);
         assert_eq!(cfg.max_files, 7);
         assert_eq!(cfg.retention_days, 9);
@@ -462,6 +891,55 @@ mod tests {
             std::env::remove_var("ATM_LOG_MAX_FILES");
             std::env::remove_var("ATM_LOG_RETENTION_DAYS");
         }
+    }
+
+    #[test]
+    #[serial]
+    fn config_default_paths_follow_tool_scoped_contract() {
+        let tmp = TempDir::new().expect("temp dir");
+        // SAFETY: test-scoped env cleanup to force default path resolution.
+        unsafe {
+            std::env::remove_var("ATM_LOG_FILE");
+            std::env::remove_var("ATM_LOG_PATH");
+        }
+
+        let cfg = LogConfig::from_home_for_tool(tmp.path(), "atm-daemon");
+        assert_eq!(
+            cfg.log_path,
+            tmp.path()
+                .join(".config/atm/logs/atm-daemon/atm-daemon.log.jsonl")
+        );
+        assert_eq!(
+            cfg.spool_dir,
+            tmp.path().join(".config/atm/logs/atm-daemon/spool")
+        );
+    }
+
+    #[test]
+    fn span_ref_v1_round_trip_serialization() {
+        let span = SpanRefV1 {
+            name: "compose".to_string(),
+            trace_id: "trace-123".to_string(),
+            span_id: "span-456".to_string(),
+            parent_span_id: None,
+            fields: serde_json::Map::new(),
+        };
+        let json = serde_json::to_string(&span).expect("serialize span");
+        let decoded: SpanRefV1 = serde_json::from_str(&json).expect("deserialize span");
+        assert_eq!(decoded, span);
+    }
+
+    #[test]
+    fn span_ref_v1_fields_are_non_empty_after_construction() {
+        let span = SpanRefV1 {
+            name: "compose".to_string(),
+            trace_id: "trace-abc".to_string(),
+            span_id: "span-def".to_string(),
+            parent_span_id: None,
+            fields: serde_json::Map::new(),
+        };
+        assert!(!span.trace_id.is_empty());
+        assert!(!span.span_id.is_empty());
     }
 
     #[test]
@@ -706,5 +1184,319 @@ mod tests {
         assert_eq!(parsed.action, "command_end");
         assert_eq!(parsed.outcome.as_deref(), Some("success"));
         assert_eq!(parsed.fields.get("code").and_then(|v| v.as_u64()), Some(0));
+    }
+
+    #[test]
+    #[serial]
+    fn otel_default_on_env_override_supported() {
+        // SAFETY: test-scoped environment mutation.
+        unsafe {
+            std::env::remove_var("ATM_OTEL_ENABLED");
+        }
+        let default_cfg = OtelConfig::from_env();
+        assert!(default_cfg.enabled, "OTel should be enabled by default");
+
+        // SAFETY: test-scoped environment mutation.
+        unsafe {
+            std::env::set_var("ATM_OTEL_ENABLED", "false");
+        }
+        let disabled_cfg = OtelConfig::from_env();
+        assert!(
+            !disabled_cfg.enabled,
+            "ATM_OTEL_ENABLED=false should disable exporter"
+        );
+        // SAFETY: cleanup after test.
+        unsafe {
+            std::env::remove_var("ATM_OTEL_ENABLED");
+        }
+    }
+
+    #[test]
+    fn emit_is_fail_open_when_otel_exporter_fails() {
+        let tmp = TempDir::new().expect("temp dir");
+        let cfg = LogConfig {
+            log_path: tmp.path().join("atm.log.jsonl"),
+            spool_dir: tmp.path().join("log-spool"),
+            level: LogLevel::Info,
+            message_preview_enabled: false,
+            max_bytes: DEFAULT_MAX_BYTES,
+            max_files: DEFAULT_MAX_FILES,
+            retention_days: DEFAULT_RETENTION_DAYS,
+            queue_capacity: DEFAULT_QUEUE_CAPACITY,
+            max_event_bytes: DEFAULT_MAX_EVENT_BYTES,
+        };
+        let exporter = Arc::new(CountingExporter::with_failures(10));
+        let logger = Logger::with_otel_exporter(
+            cfg.clone(),
+            OtelConfig {
+                enabled: true,
+                max_retries: 2,
+                initial_backoff_ms: 0,
+                max_backoff_ms: 0,
+            },
+            exporter.clone(),
+        );
+
+        let event = new_log_event("atm", "send_message", "atm::send", "info");
+        logger.emit(&event).expect("emit should not fail");
+
+        let log_lines = fs::read_to_string(&cfg.log_path).expect("canonical log should exist");
+        assert!(
+            !log_lines.trim().is_empty(),
+            "canonical log should be written"
+        );
+        assert_eq!(
+            exporter.attempts.load(Ordering::SeqCst),
+            3,
+            "initial attempt + 2 retries"
+        );
+        assert!(
+            exporter.records.lock().expect("records lock").is_empty(),
+            "all export attempts should fail in this test"
+        );
+    }
+
+    #[test]
+    fn export_otel_best_effort_from_path_is_fail_open_when_export_fails() {
+        let tmp = TempDir::new().expect("temp dir");
+        let parent_file = tmp.path().join("not-a-directory");
+        std::fs::write(&parent_file, "occupied").expect("create parent file");
+        let log_path = parent_file.join("atm.log.jsonl");
+        let event = new_log_event("atm-daemon", "register_hint", "atm_daemon::socket", "info");
+
+        // Must not panic or propagate errors when exporter cannot create its output path.
+        export_otel_best_effort_from_path(&log_path, &event);
+    }
+
+    #[test]
+    fn otel_exporter_retries_then_succeeds() {
+        let tmp = TempDir::new().expect("temp dir");
+        let cfg = LogConfig {
+            log_path: tmp.path().join("atm.log.jsonl"),
+            spool_dir: tmp.path().join("log-spool"),
+            level: LogLevel::Info,
+            message_preview_enabled: false,
+            max_bytes: DEFAULT_MAX_BYTES,
+            max_files: DEFAULT_MAX_FILES,
+            retention_days: DEFAULT_RETENTION_DAYS,
+            queue_capacity: DEFAULT_QUEUE_CAPACITY,
+            max_event_bytes: DEFAULT_MAX_EVENT_BYTES,
+        };
+        let exporter = Arc::new(CountingExporter::with_failures(2));
+        let logger = Logger::with_otel_exporter(
+            cfg,
+            OtelConfig {
+                enabled: true,
+                max_retries: 4,
+                initial_backoff_ms: 0,
+                max_backoff_ms: 0,
+            },
+            exporter.clone(),
+        );
+
+        let mut event = new_log_event("atm", "subagent.run", "atm::runtime", "info");
+        event.team = Some("atm-dev".to_string());
+        event.agent = Some("arch-ctm".to_string());
+        event.runtime = Some("codex".to_string());
+        event.session_id = Some("local:arch-ctm:123".to_string());
+        event.trace_id = Some("trace-123".to_string());
+        event.span_id = Some("span-456".to_string());
+        event.subagent_id = Some("subagent-7".to_string());
+
+        logger.emit(&event).expect("emit should succeed");
+        assert_eq!(
+            exporter.attempts.load(Ordering::SeqCst),
+            3,
+            "2 failures + 1 success"
+        );
+        assert_eq!(
+            exporter.records.lock().expect("records lock").len(),
+            1,
+            "record should be exported after retries"
+        );
+    }
+
+    #[test]
+    fn producer_events_export_through_pipeline_with_counting_exporter() {
+        let tmp = TempDir::new().expect("temp dir");
+        let cfg = LogConfig {
+            log_path: tmp.path().join("atm.log.jsonl"),
+            spool_dir: tmp.path().join("log-spool"),
+            level: LogLevel::Info,
+            message_preview_enabled: false,
+            max_bytes: DEFAULT_MAX_BYTES,
+            max_files: DEFAULT_MAX_FILES,
+            retention_days: DEFAULT_RETENTION_DAYS,
+            queue_capacity: DEFAULT_QUEUE_CAPACITY,
+            max_event_bytes: DEFAULT_MAX_EVENT_BYTES,
+        };
+        let exporter = Arc::new(CountingExporter::with_failures(0));
+        let logger = Logger::with_otel_exporter(
+            cfg,
+            OtelConfig {
+                enabled: true,
+                max_retries: 0,
+                initial_backoff_ms: 0,
+                max_backoff_ms: 0,
+            },
+            exporter.clone(),
+        );
+
+        for (idx, source, action) in [
+            (1u8, "atm", "send"),
+            (2u8, "atm-daemon", "register_hint"),
+            (3u8, "sc-composer", "compose"),
+        ] {
+            let mut event = new_log_event(source, action, "atm::test", "info");
+            event.team = Some("atm-dev".to_string());
+            event.agent = Some("arch-ctm".to_string());
+            event.runtime = Some("codex".to_string());
+            event.session_id = Some("sess-123".to_string());
+            event.trace_id = Some("trace-123".to_string());
+            event.span_id = Some(format!("span-{idx}"));
+            logger.emit(&event).expect("emit should succeed");
+        }
+
+        let records = exporter.records.lock().expect("records lock");
+        assert_eq!(records.len(), 3, "all producer events should export");
+        assert_eq!(
+            records.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
+            vec![
+                "send".to_string(),
+                "register_hint".to_string(),
+                "compose".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn export_otel_best_effort_is_public_and_fail_open() {
+        let exporter = CountingExporter::with_failures(10);
+        let event = new_log_event("atm", "send_message", "atm::send", "info");
+        export_otel_best_effort(
+            &event,
+            &OtelConfig {
+                enabled: true,
+                max_retries: 2,
+                initial_backoff_ms: 0,
+                max_backoff_ms: 0,
+            },
+            &exporter,
+        );
+
+        assert_eq!(
+            exporter.attempts.load(Ordering::SeqCst),
+            3,
+            "initial attempt + 2 retries"
+        );
+    }
+
+    #[test]
+    fn otel_retry_backoff_is_bounded_by_max_backoff() {
+        let sleeps = BACKOFF_SLEEPS_MS.get_or_init(|| Mutex::new(Vec::new()));
+        sleeps.lock().expect("backoff sleeps lock").clear();
+
+        let exporter = CountingExporter::with_failures(10);
+        let event = new_log_event("atm", "send_message", "atm::send", "info");
+        let err = export_otel_with_retry(
+            &event,
+            &OtelConfig {
+                enabled: true,
+                max_retries: 4,
+                initial_backoff_ms: 5,
+                max_backoff_ms: 12,
+            },
+            &exporter,
+            record_sleep,
+        )
+        .expect_err("should return final export error");
+        assert!(matches!(err, OtelError::ExportFailed(_)));
+
+        let sleeps = sleeps.lock().expect("backoff sleeps lock").clone();
+        assert_eq!(sleeps, vec![5, 10, 12, 12]);
+        assert!(
+            sleeps.iter().all(|v| *v <= 12),
+            "sleep exceeded max_backoff"
+        );
+    }
+
+    #[test]
+    fn build_otel_record_requires_runtime_for_runtime_scoped_events() {
+        let mut event = new_log_event("atm", "send_message", "atm::send", "info");
+        event.team = Some("atm-dev".to_string());
+        event.agent = Some("arch-ctm".to_string());
+        event.session_id = Some("local:arch-ctm".to_string());
+        // runtime intentionally missing
+
+        let err = build_otel_record(&event).expect_err("runtime should be required");
+        assert_eq!(err, OtelError::MissingRequiredField { field: "runtime" });
+    }
+
+    #[test]
+    fn build_otel_record_requires_subagent_id_for_subagent_actions() {
+        let mut event = new_log_event("atm", "subagent.run", "atm::runtime", "info");
+        event.team = Some("atm-dev".to_string());
+        event.agent = Some("arch-ctm".to_string());
+        event.runtime = Some("codex".to_string());
+        event.session_id = Some("local:arch-ctm".to_string());
+        event.trace_id = Some("trace-123".to_string());
+        event.span_id = Some("span-456".to_string());
+        // subagent_id intentionally missing
+
+        let err = build_otel_record(&event).expect_err("subagent_id should be required");
+        assert_eq!(
+            err,
+            OtelError::MissingRequiredField {
+                field: "subagent_id"
+            }
+        );
+    }
+
+    #[test]
+    fn build_otel_record_requires_full_span_context_when_partial() {
+        let mut event = new_log_event("atm", "send_message", "atm::send", "info");
+        event.trace_id = Some("trace-123".to_string());
+        // span_id intentionally missing
+        let err = build_otel_record(&event).expect_err("partial span context should fail");
+        assert_eq!(err, OtelError::InvalidSpanContext);
+    }
+
+    #[test]
+    fn build_otel_record_includes_required_correlation_attributes() {
+        let mut event = new_log_event("atm", "subagent.run", "atm::runtime", "info");
+        event.team = Some("atm-dev".to_string());
+        event.agent = Some("arch-ctm".to_string());
+        event.runtime = Some("codex".to_string());
+        event.session_id = Some("local:arch-ctm".to_string());
+        event.trace_id = Some("trace-123".to_string());
+        event.span_id = Some("span-456".to_string());
+        event.subagent_id = Some("subagent-7".to_string());
+
+        let record = build_otel_record(&event).expect("record should build");
+        assert_eq!(record.trace_id.as_deref(), Some("trace-123"));
+        assert_eq!(record.span_id.as_deref(), Some("span-456"));
+        assert_eq!(
+            record.attributes.get("team").and_then(|v| v.as_str()),
+            Some("atm-dev")
+        );
+        assert_eq!(
+            record.attributes.get("agent").and_then(|v| v.as_str()),
+            Some("arch-ctm")
+        );
+        assert_eq!(
+            record.attributes.get("runtime").and_then(|v| v.as_str()),
+            Some("codex")
+        );
+        assert_eq!(
+            record.attributes.get("session_id").and_then(|v| v.as_str()),
+            Some("local:arch-ctm")
+        );
+        assert_eq!(
+            record
+                .attributes
+                .get("subagent_id")
+                .and_then(|v| v.as_str()),
+            Some("subagent-7")
+        );
     }
 }

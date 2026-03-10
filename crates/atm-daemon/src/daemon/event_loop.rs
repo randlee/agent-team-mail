@@ -808,7 +808,7 @@ fn reconcile_team_member_activity_with_mode(
             let live_member_names: std::collections::HashSet<String> =
                 config.members.iter().map(|m| m.name.clone()).collect();
             let mut reg = session_registry.lock().unwrap();
-            let tracked_for_team = reg.sessions_for_team(&team_name);
+            let tracked_for_team = reg.sessions_for_team_with_liveness(&team_name);
             let mut reconcile_state = cycle_state.lock().unwrap();
             let absent_cycles = &mut reconcile_state.absent_registry_cycles;
 
@@ -2441,6 +2441,57 @@ mod tests {
                 .query_for_team("atm-dev", "arch-ctm")
                 .is_some(),
             "active absent sessions must never be stale-pruned"
+        );
+    }
+
+    #[test]
+    fn test_reconcile_prunes_absent_sessions_after_liveness_refresh_marks_them_dead() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let cwd = home.display().to_string();
+        stdfs::create_dir_all(home.join(".claude/teams/atm-dev/inboxes")).unwrap();
+        write_team_config(
+            home,
+            "atm-dev",
+            serde_json::json!([
+                {
+                    "agentId": "team-lead@atm-dev",
+                    "name": "team-lead",
+                    "agentType": "general-purpose",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": cwd,
+                    "subscriptions": [],
+                    "isActive": true
+                }
+            ]),
+        );
+
+        let sr = new_session_registry();
+        let state_store = new_state_store();
+        let cycle_state = super::new_reconcile_cycle_state();
+        {
+            let mut reg = sr.lock().unwrap();
+            // Seed as Active with a dead PID to simulate stale records left after abrupt process exit.
+            reg.upsert_for_team("atm-dev", "arch-ctm", "stale-active", i32::MAX as u32);
+        }
+
+        for _ in 0..3 {
+            super::reconcile_team_member_activity(
+                &home.join(".claude"),
+                &sr,
+                &state_store,
+                &cycle_state,
+            )
+            .unwrap();
+        }
+
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
+                .is_none(),
+            "absent sessions whose PID is dead should be stale-pruned after liveness refresh"
         );
     }
 

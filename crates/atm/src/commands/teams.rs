@@ -2,8 +2,8 @@
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config, resolve_identity};
 use agent_team_mail_core::daemon_client::{
-    AgentSummary, LaunchConfig, RegisterHintOutcome, launch_agent, query_list_agents,
-    query_session_for_team, register_hint,
+    AgentSummary, LaunchConfig, RegisterHintOutcome, SessionQueryResult, launch_agent,
+    query_list_agents, query_session_for_team, query_team_member_states, register_hint,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::atomic::atomic_swap;
@@ -36,6 +36,8 @@ use crate::util::state::{SeenState, get_last_seen, load_seen_state};
 /// are needed.
 const BACKUP_RETENTION_COUNT: usize = 5;
 const SPAWN_UNAUTHORIZED: &str = "SPAWN_UNAUTHORIZED";
+const SESSION_ID_AMBIGUOUS: &str = "SESSION_ID_AMBIGUOUS";
+const SESSION_ID_NOT_FOUND: &str = "SESSION_ID_NOT_FOUND";
 const DEFAULT_EXTERNAL_AGENT_STALE_DAYS: i64 = 7;
 const EXTERNAL_AGENT_STALE_DAYS_ENV: &str = "ATM_EXTERNAL_AGENT_STALE_DAYS";
 
@@ -124,13 +126,13 @@ pub struct SpawnArgs {
     #[arg(long)]
     system_prompt: Option<PathBuf>,
 
-    /// Resume previous runtime session for this agent
-    #[arg(long)]
-    resume: bool,
+    /// Resume a runtime session by ID or unique prefix
+    #[arg(long, value_name = "SESSION_ID", conflicts_with = "continue_flag")]
+    resume: Option<String>,
 
-    /// Explicit runtime session ID for resume (otherwise resolved from daemon registry)
-    #[arg(long)]
-    resume_session_id: Option<String>,
+    /// Continue from the most recently tracked session for this team member
+    #[arg(long = "continue", conflicts_with = "resume")]
+    continue_flag: bool,
 
     /// Readiness timeout in seconds
     #[arg(long, default_value_t = 30)]
@@ -500,13 +502,17 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     let parsed_env = parse_env_vars(&args.env)?;
     let parsed_prompt_vars = parse_template_vars(&args.var)?;
 
-    let resolved_resume_session_id = if args.resume_session_id.is_some() {
-        args.resume_session_id.clone()
-    } else if args.resume {
-        query_session_for_team(&team_name, &args.agent)
-            .ok()
-            .flatten()
-            .map(|info| info.runtime_session_id.unwrap_or(info.session_id))
+    if args.resume.is_some() && args.continue_flag {
+        anyhow::bail!("--resume and --continue are mutually exclusive");
+    }
+
+    let resolved_resume_session_id = if let Some(session_id_or_prefix) = args.resume.as_deref() {
+        Some(resolve_resume_session_id_from_prefix(
+            &team_name,
+            session_id_or_prefix,
+        )?)
+    } else if args.continue_flag {
+        Some(resolve_continue_session_id(&team_name, &args.agent)?)
     } else {
         None
     };
@@ -530,7 +536,7 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         model: args.model.clone(),
         sandbox: args.sandbox,
         approval_mode: args.approval_mode.clone(),
-        resume: args.resume,
+        resume: args.resume.is_some() || args.continue_flag,
         resume_session_id: resolved_resume_session_id,
         system_prompt: resolved_system_prompt,
         prompt_vars: parsed_prompt_vars.clone(),
@@ -540,6 +546,7 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
     let _prompt_vars_len = spec.prompt_vars.len();
     let command = adapter.build_command(&spec)?;
     let mut env_vars = adapter.build_env(&spec, &home_dir)?;
+    apply_spawn_contract_env(&mut env_vars, &spec, &args.runtime);
     for (k, v) in parsed_env {
         env_vars.insert(k, v);
     }
@@ -740,6 +747,119 @@ fn runtime_name(runtime: &RuntimeKind) -> &'static str {
         RuntimeKind::Codex => "codex",
         RuntimeKind::Gemini => "gemini",
         RuntimeKind::Opencode => "opencode",
+    }
+}
+
+fn apply_spawn_contract_env(
+    env_vars: &mut std::collections::HashMap<String, String>,
+    spec: &SpawnSpec,
+    runtime: &RuntimeKind,
+) {
+    env_vars.insert("ATM_TEAM".to_string(), spec.team.clone());
+    env_vars.insert("ATM_IDENTITY".to_string(), spec.agent.clone());
+    env_vars.insert("ATM_RUNTIME".to_string(), runtime_name(runtime).to_string());
+    env_vars.insert(
+        "ATM_PROJECT_DIR".to_string(),
+        spec.cwd.to_string_lossy().to_string(),
+    );
+    if let Some(session_id) = spec.resume_session_id.as_ref()
+        && !session_id.trim().is_empty()
+    {
+        env_vars.insert("ATM_SESSION_ID".to_string(), session_id.clone());
+    } else {
+        env_vars.remove("ATM_SESSION_ID");
+    }
+}
+
+fn resolve_continue_session_id(team: &str, agent: &str) -> Result<String> {
+    resolve_continue_session_id_with_query(team, agent, query_session_for_team)
+}
+
+fn resolve_continue_session_id_with_query<F>(team: &str, agent: &str, query: F) -> Result<String>
+where
+    F: Fn(&str, &str) -> Result<Option<SessionQueryResult>>,
+{
+    let session = query(team, agent)
+        .with_context(|| {
+            format!(
+                "{SESSION_ID_NOT_FOUND}: failed to resolve --continue session for {agent}@{team}"
+            )
+        })?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{SESSION_ID_NOT_FOUND}: no known session to continue for {agent}@{team}"
+            )
+        })?;
+
+    if session.alive {
+        anyhow::bail!(
+            "{SESSION_ID_NOT_FOUND}: --continue requires a non-running session for {agent}@{team} (current pid {} is still active)",
+            session.process_id
+        );
+    }
+
+    let selected = session.runtime_session_id.unwrap_or(session.session_id);
+    if selected.trim().is_empty() {
+        anyhow::bail!(
+            "{SESSION_ID_NOT_FOUND}: daemon returned an empty session id for {agent}@{team}"
+        );
+    }
+    Ok(selected)
+}
+
+fn resolve_resume_session_id_from_prefix(team: &str, prefix_or_id: &str) -> Result<String> {
+    let candidates = query_team_member_states(team)
+        .with_context(|| {
+            format!(
+                "{SESSION_ID_NOT_FOUND}: unable to query daemon for session IDs in team '{team}'"
+            )
+        })?
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|state| state.session_id)
+        .filter(|id| !id.trim().is_empty())
+        .collect::<Vec<_>>();
+    resolve_session_id_prefix(prefix_or_id, &candidates)
+}
+
+fn resolve_session_id_prefix(prefix_or_id: &str, candidates: &[String]) -> Result<String> {
+    let needle = prefix_or_id.trim();
+    if needle.is_empty() {
+        anyhow::bail!("{SESSION_ID_NOT_FOUND}: empty --resume value");
+    }
+
+    let mut dedup = std::collections::BTreeSet::new();
+    for candidate in candidates {
+        if !candidate.trim().is_empty() {
+            dedup.insert(candidate.trim().to_string());
+        }
+    }
+    let unique_candidates = dedup.into_iter().collect::<Vec<_>>();
+
+    let exact = unique_candidates
+        .iter()
+        .filter(|candidate| candidate.as_str() == needle)
+        .cloned()
+        .collect::<Vec<_>>();
+    if exact.len() == 1 {
+        return Ok(exact[0].clone());
+    }
+
+    let matches = unique_candidates
+        .iter()
+        .filter(|candidate| candidate.starts_with(needle))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    match matches.len() {
+        1 => Ok(matches[0].clone()),
+        0 => {
+            anyhow::bail!("{SESSION_ID_NOT_FOUND}: '{needle}' did not match any known session IDs")
+        }
+        _ => anyhow::bail!(
+            "{SESSION_ID_AMBIGUOUS}: '{needle}' matches multiple sessions ({})",
+            matches.join(", ")
+        ),
     }
 }
 
@@ -6042,6 +6162,135 @@ spawn_policy = "any-member"
         assert_eq!(runtime_name(&RuntimeKind::Codex), "codex");
         assert_eq!(runtime_name(&RuntimeKind::Gemini), "gemini");
         assert_eq!(runtime_name(&RuntimeKind::Opencode), "opencode");
+    }
+
+    #[test]
+    fn test_apply_spawn_contract_env_sets_required_fields() {
+        let cwd = std::env::temp_dir().join("spawn-contract");
+        let spec = SpawnSpec {
+            team: "atm-dev".to_string(),
+            agent: "arch-ctm".to_string(),
+            color: None,
+            cwd: cwd.clone(),
+            model: None,
+            sandbox: None,
+            approval_mode: None,
+            resume: true,
+            resume_session_id: Some("abcd1234-ffff-eeee-dddd-ccccbbbb9999".to_string()),
+            system_prompt: None,
+            prompt_vars: BTreeMap::new(),
+        };
+        let mut env = HashMap::new();
+        apply_spawn_contract_env(&mut env, &spec, &RuntimeKind::Codex);
+
+        assert_eq!(env.get("ATM_TEAM").map(String::as_str), Some("atm-dev"));
+        assert_eq!(
+            env.get("ATM_IDENTITY").map(String::as_str),
+            Some("arch-ctm")
+        );
+        assert_eq!(env.get("ATM_RUNTIME").map(String::as_str), Some("codex"));
+        assert_eq!(
+            env.get("ATM_PROJECT_DIR").map(String::as_str),
+            Some(cwd.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            env.get("ATM_SESSION_ID").map(String::as_str),
+            Some("abcd1234-ffff-eeee-dddd-ccccbbbb9999")
+        );
+    }
+
+    #[test]
+    fn test_apply_spawn_contract_env_omits_optional_session_when_unknown() {
+        let spec = SpawnSpec {
+            team: "atm-dev".to_string(),
+            agent: "arch-ctm".to_string(),
+            color: None,
+            cwd: std::env::temp_dir().join("spawn-contract-no-session"),
+            model: None,
+            sandbox: None,
+            approval_mode: None,
+            resume: false,
+            resume_session_id: None,
+            system_prompt: None,
+            prompt_vars: BTreeMap::new(),
+        };
+        let mut env = HashMap::from([("ATM_SESSION_ID".to_string(), "stale".to_string())]);
+        apply_spawn_contract_env(&mut env, &spec, &RuntimeKind::Gemini);
+        assert!(!env.contains_key("ATM_SESSION_ID"));
+        assert_eq!(env.get("ATM_RUNTIME").map(String::as_str), Some("gemini"));
+    }
+
+    #[test]
+    fn test_resolve_continue_session_id_rejects_active_session() {
+        let err = resolve_continue_session_id_with_query("atm-dev", "arch-ctm", |_team, _agent| {
+            Ok(Some(SessionQueryResult {
+                session_id: "local:arch-ctm:active".to_string(),
+                process_id: 4242,
+                alive: true,
+                last_seen_at: None,
+                runtime: Some("codex".to_string()),
+                runtime_session_id: Some("thread-id:abc123".to_string()),
+                pane_id: None,
+                runtime_home: None,
+            }))
+        })
+        .expect_err("active session must be rejected for --continue");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains(SESSION_ID_NOT_FOUND),
+            "error must carry stable not-found code: {msg}"
+        );
+        assert!(
+            msg.contains("non-running session"),
+            "error must explain --continue requires non-running target: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_session_id_prefix_accepts_exact_match() {
+        let candidates = vec![
+            "11111111-aaaa-bbbb-cccc-dddddddddddd".to_string(),
+            "22222222-aaaa-bbbb-cccc-dddddddddddd".to_string(),
+        ];
+        let resolved =
+            resolve_session_id_prefix("11111111-aaaa-bbbb-cccc-dddddddddddd", &candidates)
+                .expect("exact match should resolve");
+        assert_eq!(resolved, "11111111-aaaa-bbbb-cccc-dddddddddddd");
+    }
+
+    #[test]
+    fn test_resolve_session_id_prefix_accepts_unique_prefix() {
+        let candidates = vec![
+            "abcde111-aaaa-bbbb-cccc-dddddddddddd".to_string(),
+            "f1234567-aaaa-bbbb-cccc-dddddddddddd".to_string(),
+        ];
+        let resolved = resolve_session_id_prefix("abcde111", &candidates)
+            .expect("unique prefix should resolve");
+        assert_eq!(resolved, "abcde111-aaaa-bbbb-cccc-dddddddddddd");
+    }
+
+    #[test]
+    fn test_resolve_session_id_prefix_rejects_ambiguous_prefix() {
+        let candidates = vec![
+            "abc11111-aaaa-bbbb-cccc-dddddddddddd".to_string(),
+            "abc22222-aaaa-bbbb-cccc-dddddddddddd".to_string(),
+        ];
+        let err = resolve_session_id_prefix("abc", &candidates).expect_err("must be ambiguous");
+        assert!(
+            err.to_string().contains(SESSION_ID_AMBIGUOUS),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_session_id_prefix_rejects_unknown_prefix() {
+        let candidates = vec!["abc11111-aaaa-bbbb-cccc-dddddddddddd".to_string()];
+        let err = resolve_session_id_prefix("xyz", &candidates).expect_err("must be not found");
+        assert!(
+            err.to_string().contains(SESSION_ID_NOT_FOUND),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

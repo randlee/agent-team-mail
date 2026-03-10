@@ -58,6 +58,9 @@ pub struct SessionRecord {
     pub state: SessionState,
     /// Last state update timestamp (RFC3339 UTC).
     pub updated_at: String,
+    /// Most recent successful daemon-side heartbeat (resolve/send) for this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<String>,
     /// Most recent timestamp where daemon liveness probe confirmed process alive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_alive_at: Option<String>,
@@ -101,6 +104,7 @@ pub struct SessionRegistry {
 }
 
 impl SessionRegistry {
+    /// Time-to-live for cached PID liveness probe results.
     pub(crate) const PID_LIVENESS_TTL: Duration = Duration::from_secs(5);
 
     /// Create a new, empty registry.
@@ -189,6 +193,7 @@ impl SessionRegistry {
                 process_id,
                 state: SessionState::Active,
                 updated_at: now,
+                last_seen_at: Some(now_dt.to_rfc3339()),
                 last_alive_at: pid_alive.then(|| now_dt.to_rfc3339()),
                 runtime,
                 runtime_session_id,
@@ -433,6 +438,8 @@ impl SessionRegistry {
                 return false;
             };
             if alive {
+                record.last_seen_at = Some(now.to_rfc3339());
+                changed = true;
                 if probed || record.last_alive_at.is_none() {
                     record.last_alive_at = Some(now.to_rfc3339());
                     changed = true;
@@ -465,6 +472,21 @@ impl SessionRegistry {
             },
         );
         (alive, true)
+    }
+
+    /// Record a successful daemon-side heartbeat for `team/name`.
+    ///
+    /// Returns `true` when the record exists and was updated.
+    pub fn heartbeat_for_team(&mut self, team: &str, name: &str) -> bool {
+        let key = make_key(team, name);
+        let Some(record) = self.sessions.get_mut(&key) else {
+            return false;
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        record.last_seen_at = Some(now.clone());
+        record.updated_at = now;
+        self.persist_best_effort();
+        true
     }
 }
 
@@ -751,6 +773,66 @@ mod tests {
     }
 
     #[test]
+    fn test_stale_cleanup_selection_preserves_active_and_removes_only_stale_records() {
+        let mut reg = SessionRegistry::new();
+        let active_pid = std::process::id();
+        let stale_pid = i32::MAX as u32;
+        reg.upsert_for_team("atm-dev", "active-member", "sess-active", active_pid);
+        reg.upsert_for_team("atm-dev", "stale-member", "sess-stale", stale_pid);
+
+        // Force stale PID cache to expire so cleanup selection re-probes liveness.
+        if let Some(entry) = reg.liveness_cache.get_mut(&stale_pid) {
+            entry.checked_at = chrono::Utc::now()
+                - chrono::Duration::from_std(SessionRegistry::PID_LIVENESS_TTL).unwrap()
+                - chrono::Duration::milliseconds(10);
+        }
+
+        // Simulate cleanup selection logic: remove only sessions that converge to Dead.
+        let sessions = reg.sessions_for_team_with_liveness("atm-dev");
+        for session in sessions
+            .into_iter()
+            .filter(|session| session.state == SessionState::Dead)
+        {
+            reg.remove_for_team("atm-dev", &session.agent_name);
+        }
+
+        assert!(
+            reg.query_for_team("atm-dev", "active-member").is_some(),
+            "cleanup must preserve active/living sessions"
+        );
+        assert!(
+            reg.query_for_team("atm-dev", "stale-member").is_none(),
+            "cleanup must remove stale dead sessions only"
+        );
+    }
+
+    #[test]
+    fn test_load_or_new_upsert_same_team_agent_replaces_without_duplication() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude/daemon/session-registry.json");
+
+        let mut initial = SessionRegistry::with_persist_path(path.clone());
+        initial.upsert_for_team("atm-dev", "arch-ctm", "sess-initial", 111);
+        drop(initial);
+
+        let mut loaded = SessionRegistry::load_or_new(path);
+        loaded.upsert_for_team("atm-dev", "arch-ctm", "sess-restarted", 222);
+
+        let members = loaded.sessions_for_team("atm-dev");
+        assert_eq!(
+            members.len(),
+            1,
+            "reload + upsert for same (team,agent) must not duplicate rows"
+        );
+        let record = loaded
+            .query_for_team("atm-dev", "arch-ctm")
+            .expect("member should remain queryable");
+        assert_eq!(record.session_id, "sess-restarted");
+        assert_eq!(record.process_id, 222);
+        assert_eq!(record.state, SessionState::Active);
+    }
+
+    #[test]
     fn test_query_for_team_with_liveness_marks_dead_when_pid_is_not_alive() {
         let mut reg = SessionRegistry::new();
         let pid = i32::MAX as u32;
@@ -772,6 +854,7 @@ mod tests {
         let pid = std::process::id();
         reg.upsert_for_team("atm-dev", "team-lead", "sess-live", pid);
         if let Some(record) = reg.sessions.get_mut("atm-dev::team-lead") {
+            record.last_seen_at = None;
             record.last_alive_at = None;
         }
         let refreshed = reg
@@ -779,9 +862,38 @@ mod tests {
             .expect("session should exist");
         assert_eq!(refreshed.state, SessionState::Active);
         assert!(
+            refreshed.last_seen_at.is_some(),
+            "active liveness query should refresh last_seen_at heartbeat"
+        );
+        assert!(
             refreshed.last_alive_at.is_some(),
             "active liveness probe should refresh last_alive_at"
         );
+    }
+
+    #[test]
+    fn test_heartbeat_for_team_updates_last_seen_and_updated_at() {
+        let mut reg = SessionRegistry::new();
+        reg.upsert_for_team("atm-dev", "arch-ctm", "sess-live", std::process::id());
+        let before = reg
+            .query_for_team("atm-dev", "arch-ctm")
+            .expect("record should exist")
+            .updated_at
+            .clone();
+
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        assert!(
+            reg.heartbeat_for_team("atm-dev", "arch-ctm"),
+            "heartbeat should update existing record"
+        );
+        let after = reg
+            .query_for_team("atm-dev", "arch-ctm")
+            .expect("record should exist");
+        assert!(
+            after.last_seen_at.is_some(),
+            "heartbeat must set last_seen_at"
+        );
+        assert_ne!(after.updated_at, before, "updated_at must advance");
     }
 
     #[test]
@@ -846,6 +958,7 @@ mod tests {
             process_id: std::process::id(),
             state: SessionState::Active,
             updated_at: chrono::Utc::now().to_rfc3339(),
+            last_seen_at: Some(chrono::Utc::now().to_rfc3339()),
             last_alive_at: Some(chrono::Utc::now().to_rfc3339()),
             runtime: None,
             runtime_session_id: None,

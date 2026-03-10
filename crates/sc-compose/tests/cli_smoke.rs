@@ -479,3 +479,44 @@ fn sc_compose_config_prefers_atm_home_for_default_log_path() {
         expected.display()
     );
 }
+
+#[test]
+fn var_file_dash_reads_json_from_stdin() {
+    let tmp = TempDir::new().expect("tempdir");
+    let template = tmp.path().join("template.md.j2");
+    fs::write(&template, "hello {{ name }}").expect("write");
+
+    // Use assert_cmd::Command (wraps std::process::Command) so that write_stdin
+    // is available.  The cargo_bin! macro resolves the binary path at compile
+    // time; Command::new avoids the deprecated cargo_bin associated function.
+    let mut cmd = assert_cmd::Command::new(cargo::cargo_bin!("sc-compose"));
+    cmd.arg("--root")
+        .arg(tmp.path())
+        .arg("--var-file")
+        .arg("-")
+        .arg("render")
+        .arg(&template)
+        .write_stdin(r#"{"name": "Stdin"}"#)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hello Stdin"));
+}
+
+#[test]
+fn var_file_dash_reads_yaml_from_stdin() {
+    let tmp = TempDir::new().expect("tempdir");
+    let template = tmp.path().join("template.md.j2");
+    fs::write(&template, "hello {{ name }}").expect("write");
+
+    let mut cmd = assert_cmd::Command::new(cargo::cargo_bin!("sc-compose"));
+    cmd.arg("--root")
+        .arg(tmp.path())
+        .arg("--var-file")
+        .arg("-")
+        .arg("render")
+        .arg(&template)
+        .write_stdin("name: Stdin\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hello Stdin"));
+}

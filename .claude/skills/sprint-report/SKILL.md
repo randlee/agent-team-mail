@@ -19,9 +19,14 @@ Default: `--table`
 
 ## Invocation
 
-Build the fenced JSON context, write to temp file, render via sc-compose:
+Build the fenced JSON context and pipe it directly via `--var-file -` (stdin),
+or write to a temp file and pass the path:
 
 ```bash
+# Preferred: pipe JSON directly without a temp file
+echo '<json>' | sc-compose render .claude/skills/sprint-report/report.md.j2 --var-file -
+
+# Alternative: write to a temp file first
 echo '<json>' > /tmp/sprint-report.json
 sc-compose render .claude/skills/sprint-report/report.md.j2 --var-file /tmp/sprint-report.json
 ```

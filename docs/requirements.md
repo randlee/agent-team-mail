@@ -1113,7 +1113,8 @@ backend:
 | Gemini | `node` AND full args contain `gemini` |
 
 If the process name does not match, the daemon MUST:
-1. Reject the registration (mark PID as invalid in the session registry).
+1. Treat the mismatch as advisory/diagnostic only (MUST NOT reject registration writes
+   solely for PID/backend mismatch).
 2. Emit a WARN log including: agent name, backend type, expected process name, actual
    process name, and PID.
 
@@ -1175,8 +1176,8 @@ To prevent stale lifecycle events from incorrectly dead-marking live sessions:
 - If `session_end` is replayed for a record already marked `state=dead`, daemon
   must treat it as a no-op and MUST NOT re-trigger teardown/cleanup/reconcile.
 - If a member is marked dead/offline and PID appears alive but backend/session
-  validation is mismatched, daemon MUST NOT auto-promote to active/idle. Clearing
-  this state requires explicit re-registration (`session_start` or `register-hint`).
+  validation is mismatched, daemon must emit mismatch diagnostics and then use
+  normal liveness/activity derivation. Mismatch alone must not force dead/offline.
 
 #### Logging Level Requirements for PID/Process Events (REQUIRED)
 
@@ -1274,16 +1275,17 @@ Required behavior:
   session registry.
 - On daemon cold start (or when no live registry record exists for a configured
   member), daemon may bootstrap a session-registry record from roster hints only
-  when `processId` is present, alive, and backend validation does not report a
-  mismatch.
+  when `processId` is present and alive. Backend validation mismatch is
+  diagnostic-only and must not block bootstrap registration.
 - `atm send` PID fallback detection must use the same strict backend rules as the
   daemon validator (`claude=basename(comm):claude`,
   `codex=basename(comm):codex`, `gemini=basename(comm):node+args~gemini`) and
   must not stamp unmatched fallback PIDs.
 - If registry state says `Dead` but PID/backend validation indicates the tracked
-  process is alive and validation is mismatched, daemon must keep dead/offline
-  status and require explicit re-registration to clear mismatch.
-  Auto-reconcile is allowed only when PID/backend/session validation is consistent.
+  process is alive and validation is mismatched, daemon must emit
+  `PID_PROCESS_MISMATCH` diagnostics and then fall through to normal
+  liveness/activity-based state derivation. PID/backend mismatch alone must not
+  force offline/unknown presentation.
 
 #### Operational State Variable Inventory
 
@@ -1969,7 +1971,8 @@ identity and liveness.
     incoming `(team, agent, session_id)` matches the currently tracked session
   - daemon liveness sweeps may mark stale PIDs dead when process no longer exists
   - successful liveness checks refresh `last_alive_at`
-  - mismatch-marked dead records must not auto-promote from PID aliveness alone
+  - PID/backend mismatch emits diagnostics but does not block normal
+    liveness/activity-based state derivation
 - **Lookup semantics**:
   - Team-scoped lead check must resolve by `(team, agent=team-lead)`
   - CLI `teams resume` refusal logic must use this team-scoped daemon result, not bare-name process lookup
