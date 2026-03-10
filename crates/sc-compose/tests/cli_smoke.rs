@@ -461,6 +461,8 @@ fn sc_compose_config_prefers_atm_home_for_default_log_path() {
 
     run_sc_compose()
         .env("ATM_HOME", &atm_home)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
         .arg("--root")
         .arg(tmp.path())
         .arg("--var")

@@ -75,6 +75,8 @@ pub enum TeamsCommand {
     Join(JoinArgs),
     /// Add a member to a team without launching an agent
     AddMember(AddMemberArgs),
+    /// Remove a member from a team without going through cleanup
+    RemoveMember(RemoveMemberArgs),
     /// Update fields on an existing team member
     UpdateMember(UpdateMemberArgs),
     /// Resume as team-lead for an existing team (updates leadSessionId)
@@ -262,6 +264,24 @@ pub struct UpdateMemberArgs {
     active: Option<bool>,
 }
 
+/// Remove a member from a team (explicit operator action)
+#[derive(Args, Debug)]
+pub struct RemoveMemberArgs {
+    /// Team name
+    team: String,
+
+    /// Agent name to remove
+    agent: String,
+
+    /// Archive the inbox JSON before deletion
+    #[arg(long)]
+    archive_inbox: bool,
+
+    /// Remove even when liveness is active or cannot be confirmed
+    #[arg(long)]
+    force: bool,
+}
+
 /// Resume as team-lead for an existing team
 #[derive(Args, Debug)]
 pub struct ResumeArgs {
@@ -270,6 +290,10 @@ pub struct ResumeArgs {
 
     /// Optional message to send to members on resume
     message: Option<String>,
+
+    /// Optional Claude Code project scope to include in backup/restore handoff
+    #[arg(long)]
+    project: Option<String>,
 
     /// Override alive-session check and proceed even if old session appears alive
     #[arg(long)]
@@ -310,6 +334,10 @@ pub struct BackupArgs {
     /// Team name
     team: String,
 
+    /// Optional Claude Code project scope to back up as tasks-cc/
+    #[arg(long)]
+    project: Option<String>,
+
     /// Output as JSON
     #[arg(long)]
     json: bool,
@@ -324,6 +352,10 @@ pub struct RestoreArgs {
     /// Restore from a specific backup path (default: latest backup)
     #[arg(long)]
     from: Option<PathBuf>,
+
+    /// Optional Claude Code project scope to restore from tasks-cc/
+    #[arg(long)]
+    project: Option<String>,
 
     /// Show what would be restored without making changes
     #[arg(long)]
@@ -353,6 +385,7 @@ pub fn execute(args: TeamsArgs) -> Result<()> {
             TeamsCommand::Spawn(spawn_args) => spawn_member(spawn_args),
             TeamsCommand::Join(join_args) => join_member(join_args),
             TeamsCommand::AddMember(add_args) => add_member(add_args),
+            TeamsCommand::RemoveMember(remove_args) => remove_member(remove_args),
             TeamsCommand::UpdateMember(update_args) => update_member(update_args),
             TeamsCommand::Resume(resume_args) => resume(resume_args),
             TeamsCommand::Cleanup(cleanup_args) => cleanup(cleanup_args),
@@ -1815,6 +1848,130 @@ fn update_member(args: UpdateMemberArgs) -> Result<()> {
     Ok(())
 }
 
+fn remove_member(args: RemoveMemberArgs) -> Result<()> {
+    let home_dir = get_home_dir()?;
+    let team_dir = home_dir.join(".claude/teams").join(&args.team);
+    let config_path = team_dir.join("config.json");
+
+    if !config_path.exists() {
+        anyhow::bail!("No team '{}' found.", args.team);
+    }
+
+    let lock_path = config_path.with_extension("lock");
+    let _lock = acquire_lock(&lock_path, 5)
+        .map_err(|e| anyhow::anyhow!("Failed to acquire lock for team config: {e}"))?;
+
+    let mut team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
+    let member = team_config
+        .members
+        .iter()
+        .find(|m| m.name == args.agent)
+        .cloned()
+        .ok_or_else(|| {
+            anyhow::anyhow!("Member '{}' not found in team '{}'.", args.agent, args.team)
+        })?;
+
+    if member.name == "team-lead" {
+        anyhow::bail!("team-lead is protected and cannot be removed");
+    }
+
+    if !args.force {
+        let daemon_running = agent_team_mail_core::daemon_client::daemon_is_running();
+        let is_external = member.external_backend_type.is_some()
+            || matches!(
+                member.agent_type.trim().to_ascii_lowercase().as_str(),
+                "codex" | "gemini" | "external"
+            );
+
+        if is_external {
+            match member.session_id.as_deref() {
+                Some(query_key) => {
+                    match agent_team_mail_core::daemon_client::query_session(query_key) {
+                        Ok(Some(info)) if info.alive => {
+                            anyhow::bail!(
+                                "Member '{}' appears active. Use --force to override.",
+                                args.agent
+                            );
+                        }
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            anyhow::bail!(
+                                "Liveness for member '{}' could not be confirmed. Use --force to override.",
+                                args.agent
+                            );
+                        }
+                        Err(e) => {
+                            anyhow::bail!(
+                                "Liveness for member '{}' could not be confirmed: {e}. Use --force to override.",
+                                args.agent
+                            );
+                        }
+                    }
+                }
+                None => {
+                    anyhow::bail!(
+                        "External member '{}' has no session_id, so liveness cannot be confirmed. Use --force to override.",
+                        args.agent
+                    );
+                }
+            }
+        } else {
+            match query_session_for_team(&args.team, &args.agent) {
+                Ok(Some(info)) if info.alive => {
+                    anyhow::bail!(
+                        "Member '{}' appears active in PID {}. Use --force to override.",
+                        args.agent,
+                        info.process_id
+                    );
+                }
+                Ok(Some(_)) => {}
+                Ok(None) if daemon_running => {}
+                Ok(None) => {
+                    anyhow::bail!(
+                        "Liveness for member '{}' could not be confirmed because the daemon is unavailable. Use --force to override.",
+                        args.agent
+                    );
+                }
+                Err(e) => {
+                    anyhow::bail!(
+                        "Liveness for member '{}' could not be confirmed: {e}. Use --force to override.",
+                        args.agent
+                    );
+                }
+            }
+        }
+    }
+
+    let mut archived_to: Option<PathBuf> = None;
+    if args.archive_inbox {
+        archived_to = archive_member_inbox(&home_dir, &args.team, &args.agent)?;
+    }
+
+    team_config.members.retain(|m| m.name != args.agent);
+    write_team_config(&config_path, &team_config)?;
+    remove_member_mailbox_artifacts(&team_dir, &args.agent);
+
+    emit_event_best_effort(EventFields {
+        level: "info",
+        source: "atm",
+        action: "teams_remove_member",
+        team: Some(args.team.clone()),
+        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+        agent_id: std::env::var("ATM_IDENTITY").ok(),
+        agent_name: std::env::var("ATM_IDENTITY").ok(),
+        result: Some("ok".to_string()),
+        count: Some(1),
+        ..Default::default()
+    });
+
+    println!("Removed member '{}' from team '{}'.", args.agent, args.team);
+    if let Some(path) = archived_to {
+        println!("  Archived inbox: {}", path.display());
+    }
+
+    Ok(())
+}
+
 /// Implement `atm teams resume <team> [message]`
 ///
 /// Performs R.1 handoff semantics:
@@ -1897,7 +2054,7 @@ fn resume(args: ResumeArgs) -> Result<()> {
     }
 
     // Snapshot first; abort if backup fails.
-    let backup_path = do_backup(&home_dir, &args.team, false)?;
+    let backup_path = do_backup(&home_dir, &args.team, args.project.as_deref(), false)?;
     prune_old_backups(&home_dir, &args.team, BACKUP_RETENTION_COUNT)?;
 
     // Remove active team directory so TeamCreate can re-establish the team lead context.
@@ -2462,6 +2619,28 @@ fn remove_member_mailbox_artifacts(team_dir: &Path, member_name: &str) {
     }
 }
 
+fn archive_member_inbox(home_dir: &Path, team: &str, member_name: &str) -> Result<Option<PathBuf>> {
+    let inbox_path = home_dir
+        .join(".claude/teams")
+        .join(team)
+        .join("inboxes")
+        .join(format!("{member_name}.json"));
+    if !inbox_path.exists() {
+        return Ok(None);
+    }
+
+    let timestamp = Utc::now().format("%Y%m%dT%H%M%S%fZ").to_string();
+    let archive_dir = home_dir
+        .join(".claude/teams/.archives")
+        .join(team)
+        .join(format!("removed-{member_name}-{timestamp}"))
+        .join("inboxes");
+    fs::create_dir_all(&archive_dir)?;
+    let archive_path = archive_dir.join(format!("{member_name}.json"));
+    fs::copy(&inbox_path, &archive_path)?;
+    Ok(Some(archive_path))
+}
+
 fn collect_orphan_mailboxes(team_dir: &Path, roster: &HashSet<String>) -> Vec<String> {
     let mut found: HashSet<String> = HashSet::new();
 
@@ -2577,7 +2756,44 @@ pub(crate) fn cleanup_single_agent_dry_run(team: String, agent: String, force: b
 /// - The team directory does not exist
 /// - `config.json` is missing from the team directory
 /// - Any filesystem I/O operation fails (directory creation, file copy)
-fn do_backup(home_dir: &Path, team: &str, json: bool) -> Result<PathBuf> {
+fn copy_task_directory(src: &Path, dst: &Path) -> Result<usize> {
+    if !src.exists() {
+        return Ok(0);
+    }
+
+    fs::create_dir_all(dst)?;
+    let mut count = 0usize;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() {
+            fs::copy(&path, dst.join(entry.file_name()))?;
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn recompute_highwatermark(tasks_dir: &Path) -> Result<u64> {
+    fs::create_dir_all(tasks_dir)?;
+    let max_id = fs::read_dir(tasks_dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|path| {
+            path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("json")
+        })
+        .filter_map(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .and_then(|stem| stem.parse::<u64>().ok())
+        })
+        .max()
+        .unwrap_or(0);
+    fs::write(tasks_dir.join(".highwatermark"), format!("{max_id}\n"))?;
+    Ok(max_id)
+}
+
+fn do_backup(home_dir: &Path, team: &str, project: Option<&str>, json: bool) -> Result<PathBuf> {
     let team_dir = home_dir.join(".claude/teams").join(team);
 
     if !team_dir.exists() {
@@ -2631,14 +2847,13 @@ fn do_backup(home_dir: &Path, team: &str, json: bool) -> Result<PathBuf> {
     // Copy tasks directory if it exists
     let tasks_src = home_dir.join(".claude/tasks").join(team);
     let tasks_dst = backup_dir.join("tasks");
-    if tasks_src.exists() {
-        fs::create_dir_all(&tasks_dst)?;
-        for entry in fs::read_dir(&tasks_src)? {
-            let entry = entry?;
-            if entry.path().is_file() {
-                fs::copy(entry.path(), tasks_dst.join(entry.file_name()))?;
-            }
-        }
+    let task_count = copy_task_directory(&tasks_src, &tasks_dst)?;
+
+    let mut project_task_count = 0usize;
+    if let Some(project_name) = project {
+        let tasks_cc_src = home_dir.join(".claude/tasks").join(project_name);
+        let tasks_cc_dst = backup_dir.join("tasks-cc");
+        project_task_count = copy_task_directory(&tasks_cc_src, &tasks_cc_dst)?;
     }
 
     emit_event_best_effort(EventFields {
@@ -2650,7 +2865,7 @@ fn do_backup(home_dir: &Path, team: &str, json: bool) -> Result<PathBuf> {
         agent_id: std::env::var("ATM_IDENTITY").ok(),
         agent_name: std::env::var("ATM_IDENTITY").ok(),
         result: Some("ok".to_string()),
-        count: Some(inbox_count as u64),
+        count: Some((inbox_count + task_count + project_task_count) as u64),
         ..Default::default()
     });
 
@@ -2660,11 +2875,17 @@ fn do_backup(home_dir: &Path, team: &str, json: bool) -> Result<PathBuf> {
             "team": team,
             "backup_path": backup_dir.to_string_lossy(),
             "inbox_count": inbox_count,
+            "task_count": task_count,
+            "project_task_count": project_task_count,
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         println!("Backup created: {}", backup_dir.display());
-        println!("  config.json + {} inbox file(s) copied", inbox_count);
+        println!(
+            "  config.json + {} inbox file(s) + {} task file(s) copied",
+            inbox_count,
+            task_count + project_task_count
+        );
     }
 
     Ok(backup_dir)
@@ -2677,7 +2898,7 @@ fn do_backup(home_dir: &Path, team: &str, json: bool) -> Result<PathBuf> {
 /// Automatically prunes old backups keeping only the last 5.
 fn backup(args: BackupArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
-    do_backup(&home_dir, &args.team, args.json)?;
+    do_backup(&home_dir, &args.team, args.project.as_deref(), args.json)?;
     prune_old_backups(&home_dir, &args.team, BACKUP_RETENTION_COUNT)?;
     Ok(())
 }
@@ -2791,13 +3012,27 @@ fn restore(args: RestoreArgs) -> Result<()> {
 
     // Count tasks that would be restored for dry-run reporting
     let tasks_backup = backup_dir.join("tasks");
-    let task_count_would_restore: usize = if !args.skip_tasks && tasks_backup.exists() {
-        fs::read_dir(&tasks_backup)?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_file())
-            .count()
-    } else {
+    let tasks_cc_backup = backup_dir.join("tasks-cc");
+    let task_count_would_restore: usize = if args.skip_tasks {
         0
+    } else {
+        let team_task_count = if tasks_backup.exists() {
+            fs::read_dir(&tasks_backup)?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_file())
+                .count()
+        } else {
+            0
+        };
+        let project_task_count = if args.project.is_some() && tasks_cc_backup.exists() {
+            fs::read_dir(&tasks_cc_backup)?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_file())
+                .count()
+        } else {
+            0
+        };
+        team_task_count + project_task_count
     };
 
     if args.dry_run {
@@ -2850,6 +3085,7 @@ fn restore(args: RestoreArgs) -> Result<()> {
                 restored.is_active = Some(false);
                 restored.last_active = None;
                 restored.session_id = None;
+                restored.tmux_pane_id = None;
                 config.members.push(restored);
             }
         }
@@ -2875,14 +3111,16 @@ fn restore(args: RestoreArgs) -> Result<()> {
     let mut task_count = 0usize;
     if !args.skip_tasks && tasks_backup.exists() {
         let tasks_dst = home_dir.join(".claude/tasks").join(&args.team);
-        fs::create_dir_all(&tasks_dst)?;
-        for entry in fs::read_dir(&tasks_backup)? {
-            let entry = entry?;
-            if entry.path().is_file() {
-                fs::copy(entry.path(), tasks_dst.join(entry.file_name()))?;
-                task_count += 1;
-            }
-        }
+        task_count += copy_task_directory(&tasks_backup, &tasks_dst)?;
+        recompute_highwatermark(&tasks_dst)?;
+    }
+    if !args.skip_tasks
+        && let Some(project_name) = args.project.as_deref()
+        && tasks_cc_backup.exists()
+    {
+        let tasks_cc_dst = home_dir.join(".claude/tasks").join(project_name);
+        task_count += copy_task_directory(&tasks_cc_backup, &tasks_cc_dst)?;
+        recompute_highwatermark(&tasks_cc_dst)?;
     }
 
     emit_event_best_effort(EventFields {
@@ -3204,6 +3442,7 @@ mod tests {
         let args = ResumeArgs {
             team: "nonexistent-team".to_string(),
             message: None,
+            project: None,
             force: false,
             kill: false,
             session_id: None,
@@ -3251,6 +3490,7 @@ mod tests {
         let args = ResumeArgs {
             team: "atm-dev".to_string(),
             message: None,
+            project: None,
             force: false,
             kill: false,
             session_id: None,
@@ -3688,6 +3928,7 @@ mod tests {
         let args = ResumeArgs {
             team: "atm-dev".to_string(),
             message: None,
+            project: None,
             force: false,
             kill: false,
             session_id: None,
@@ -3744,6 +3985,7 @@ mod tests {
 
         let args = BackupArgs {
             team: "atm-dev".to_string(),
+            project: None,
             json: false,
         };
         let result = backup(args);
@@ -3797,11 +4039,13 @@ mod tests {
 
         backup(BackupArgs {
             team: "atm-dev".to_string(),
+            project: None,
             json: false,
         })
         .unwrap();
         backup(BackupArgs {
             team: "atm-dev".to_string(),
+            project: None,
             json: false,
         })
         .unwrap();
@@ -3840,6 +4084,7 @@ mod tests {
 
         let args = BackupArgs {
             team: "nonexistent".to_string(),
+            project: None,
             json: false,
         };
         let result = backup(args);
@@ -3879,6 +4124,7 @@ mod tests {
         // Create a backup first
         let backup_args = BackupArgs {
             team: "atm-dev".to_string(),
+            project: None,
             json: false,
         };
         backup(backup_args).unwrap();
@@ -3903,6 +4149,7 @@ mod tests {
         let restore_args = RestoreArgs {
             team: "atm-dev".to_string(),
             from: None,
+            project: None,
             dry_run: false,
             skip_tasks: false,
             json: false,
@@ -3960,6 +4207,7 @@ mod tests {
         // Create backup
         backup(BackupArgs {
             team: "atm-dev".to_string(),
+            project: None,
             json: false,
         })
         .unwrap();
@@ -3979,6 +4227,7 @@ mod tests {
         let restore_args = RestoreArgs {
             team: "atm-dev".to_string(),
             from: None,
+            project: None,
             dry_run: true,
             skip_tasks: false,
             json: false,
@@ -4028,6 +4277,7 @@ mod tests {
         // Create a backup
         backup(BackupArgs {
             team: "atm-dev".to_string(),
+            project: None,
             json: false,
         })
         .unwrap();
@@ -4035,6 +4285,7 @@ mod tests {
         let restore_args = RestoreArgs {
             team: "atm-dev".to_string(),
             from: None,
+            project: None,
             dry_run: false,
             skip_tasks: false,
             json: false,
@@ -4081,6 +4332,7 @@ mod tests {
         // Backup (captures "old-session-id-1234" from create_test_team)
         backup(BackupArgs {
             team: "atm-dev".to_string(),
+            project: None,
             json: false,
         })
         .unwrap();
@@ -4099,6 +4351,7 @@ mod tests {
         let restore_args = RestoreArgs {
             team: "atm-dev".to_string(),
             from: None,
+            project: None,
             dry_run: false,
             skip_tasks: false,
             json: false,
@@ -4233,6 +4486,7 @@ mod tests {
         let args = ResumeArgs {
             team: "atm-dev".to_string(),
             message: None,
+            project: None,
             force: true, // --force bypasses alive-session check
             kill: false,
             session_id: None,
@@ -4452,6 +4706,7 @@ mod tests {
         let args = ResumeArgs {
             team: "atm-dev".to_string(),
             message: None,
+            project: None,
             force: false,
             kill: false,
             session_id: None,
@@ -4505,6 +4760,7 @@ mod tests {
         let args = ResumeArgs {
             team: "atm-dev".to_string(),
             message: None,
+            project: None,
             force: false,
             kill: false,
             session_id: None,
@@ -4555,6 +4811,7 @@ mod tests {
         let args = ResumeArgs {
             team: "atm-dev".to_string(),
             message: None,
+            project: None,
             force: false,
             kill: false,
             session_id: Some(explicit_id.to_string()),
@@ -4609,6 +4866,7 @@ mod tests {
         let args = ResumeArgs {
             team: "atm-dev".to_string(),
             message: None,
+            project: None,
             force: false,
             kill: false,
             session_id: None, // no explicit flag
@@ -4660,6 +4918,19 @@ mod tests {
         tasks_dir
     }
 
+    fn create_numeric_task_files(temp_dir: &TempDir, scope: &str, ids: &[u64]) -> PathBuf {
+        let tasks_dir = temp_dir.path().join(".claude/tasks").join(scope);
+        fs::create_dir_all(&tasks_dir).unwrap();
+        for id in ids {
+            fs::write(
+                tasks_dir.join(format!("{id}.json")),
+                format!(r#"{{"id":"{id}","status":"pending"}}"#),
+            )
+            .unwrap();
+        }
+        tasks_dir
+    }
+
     #[test]
     #[serial]
     fn test_backup_includes_tasks() {
@@ -4677,6 +4948,7 @@ mod tests {
 
         let args = BackupArgs {
             team: "atm-dev".to_string(),
+            project: None,
             json: false,
         };
         backup(args).unwrap();
@@ -4712,6 +4984,48 @@ mod tests {
 
     #[test]
     #[serial]
+    fn test_backup_includes_project_tasks_when_requested() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = set_atm_home(&temp_dir);
+        create_test_team(&temp_dir, "atm-dev");
+        create_test_tasks(&temp_dir, "atm-dev");
+        let project_tasks = create_numeric_task_files(&temp_dir, "agent-team-mail", &[60, 61]);
+
+        let original = std::env::var("ATM_HOME").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        backup(BackupArgs {
+            team: "atm-dev".to_string(),
+            project: Some("agent-team-mail".to_string()),
+            json: false,
+        })
+        .unwrap();
+
+        let backups_root = temp_dir.path().join(".claude/teams/.backups/atm-dev");
+        let backup_dir = fs::read_dir(&backups_root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .next()
+            .expect("backup dir should exist")
+            .path();
+        let tasks_cc = backup_dir.join("tasks-cc");
+        assert!(tasks_cc.exists(), "tasks-cc/ should exist in backup");
+        assert!(tasks_cc.join("60.json").exists());
+        assert!(tasks_cc.join("61.json").exists());
+        assert!(project_tasks.exists());
+
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
     fn test_restore_includes_tasks_by_default() {
         // Restore without --skip-tasks should copy task files back.
         let temp_dir = TempDir::new().unwrap();
@@ -4728,6 +5042,7 @@ mod tests {
         // Create backup (includes tasks)
         backup(BackupArgs {
             team: "atm-dev".to_string(),
+            project: None,
             json: false,
         })
         .unwrap();
@@ -4743,6 +5058,7 @@ mod tests {
         let restore_args = RestoreArgs {
             team: "atm-dev".to_string(),
             from: None,
+            project: None,
             dry_run: false,
             skip_tasks: false,
             json: false,
@@ -4769,6 +5085,144 @@ mod tests {
 
     #[test]
     #[serial]
+    fn test_restore_includes_project_tasks_when_requested() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = set_atm_home(&temp_dir);
+        create_test_team(&temp_dir, "atm-dev");
+        create_numeric_task_files(&temp_dir, "agent-team-mail", &[76, 82]);
+
+        let original = std::env::var("ATM_HOME").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        backup(BackupArgs {
+            team: "atm-dev".to_string(),
+            project: Some("agent-team-mail".to_string()),
+            json: false,
+        })
+        .unwrap();
+
+        let project_tasks_dir = temp_dir.path().join(".claude/tasks/agent-team-mail");
+        fs::remove_dir_all(&project_tasks_dir).unwrap();
+
+        restore(RestoreArgs {
+            team: "atm-dev".to_string(),
+            from: None,
+            project: Some("agent-team-mail".to_string()),
+            dry_run: false,
+            skip_tasks: false,
+            json: false,
+        })
+        .unwrap();
+
+        assert!(project_tasks_dir.join("76.json").exists());
+        assert!(project_tasks_dir.join("82.json").exists());
+        let highwatermark = fs::read_to_string(project_tasks_dir.join(".highwatermark")).unwrap();
+        assert_eq!(highwatermark.trim(), "82");
+
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_backup_project_tasks_omitted_when_project_scope_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = set_atm_home(&temp_dir);
+        create_test_team(&temp_dir, "atm-dev");
+        create_test_tasks(&temp_dir, "atm-dev");
+
+        let original = std::env::var("ATM_HOME").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        backup(BackupArgs {
+            team: "atm-dev".to_string(),
+            project: Some("missing-project".to_string()),
+            json: false,
+        })
+        .unwrap();
+
+        let backups_root = temp_dir.path().join(".claude/teams/.backups/atm-dev");
+        let backup_dir = fs::read_dir(&backups_root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .next()
+            .expect("backup dir should exist")
+            .path();
+        assert!(!backup_dir.join("tasks-cc").exists());
+
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_resume_with_project_backs_up_project_tasks() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = set_atm_home(&temp_dir);
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        create_numeric_task_files(&temp_dir, "agent-team-mail", &[90, 91]);
+
+        let original_home = std::env::var("ATM_HOME").ok();
+        let original_id = std::env::var("ATM_IDENTITY").ok();
+        let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
+
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("ATM_IDENTITY", "team-lead");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        resume(ResumeArgs {
+            team: "atm-dev".to_string(),
+            message: None,
+            project: Some("agent-team-mail".to_string()),
+            force: false,
+            kill: false,
+            session_id: None,
+        })
+        .unwrap();
+
+        assert!(!team_dir.exists());
+        let backups_root = temp_dir.path().join(".claude/teams/.backups/atm-dev");
+        let backup_dir = fs::read_dir(&backups_root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .max()
+            .expect("backup dir should exist");
+        assert!(backup_dir.join("tasks-cc/90.json").exists());
+        assert!(backup_dir.join("tasks-cc/91.json").exists());
+
+        unsafe {
+            match original_home {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+            match original_id {
+                Some(v) => std::env::set_var("ATM_IDENTITY", v),
+                None => std::env::remove_var("ATM_IDENTITY"),
+            }
+            match original_session {
+                Some(v) => std::env::set_var("CLAUDE_SESSION_ID", v),
+                None => std::env::remove_var("CLAUDE_SESSION_ID"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
     fn test_restore_skip_tasks_flag() {
         // When --skip-tasks is set, tasks should NOT be restored even if present in backup.
         let temp_dir = TempDir::new().unwrap();
@@ -4785,6 +5239,7 @@ mod tests {
         // Create backup (includes tasks)
         backup(BackupArgs {
             team: "atm-dev".to_string(),
+            project: None,
             json: false,
         })
         .unwrap();
@@ -4796,6 +5251,7 @@ mod tests {
         let restore_args = RestoreArgs {
             team: "atm-dev".to_string(),
             from: None,
+            project: None,
             dry_run: false,
             skip_tasks: true,
             json: false,
@@ -4809,6 +5265,340 @@ mod tests {
         );
 
         // SAFETY: test-only cleanup
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_restore_skip_tasks_suppresses_project_tasks() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = set_atm_home(&temp_dir);
+        create_test_team(&temp_dir, "atm-dev");
+        create_numeric_task_files(&temp_dir, "agent-team-mail", &[76, 82]);
+
+        let original = std::env::var("ATM_HOME").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        backup(BackupArgs {
+            team: "atm-dev".to_string(),
+            project: Some("agent-team-mail".to_string()),
+            json: false,
+        })
+        .unwrap();
+
+        let project_tasks_dir = temp_dir.path().join(".claude/tasks/agent-team-mail");
+        fs::remove_dir_all(&project_tasks_dir).unwrap();
+
+        restore(RestoreArgs {
+            team: "atm-dev".to_string(),
+            from: None,
+            project: Some("agent-team-mail".to_string()),
+            dry_run: false,
+            skip_tasks: true,
+            json: false,
+        })
+        .unwrap();
+
+        assert!(!project_tasks_dir.exists());
+
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_restore_recomputes_team_task_highwatermark_to_max_numeric_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = set_atm_home(&temp_dir);
+        create_test_team(&temp_dir, "atm-dev");
+        let tasks_dir = create_numeric_task_files(&temp_dir, "atm-dev", &[76, 82]);
+        fs::write(tasks_dir.join(".highwatermark"), "75\n").unwrap();
+
+        let original = std::env::var("ATM_HOME").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        backup(BackupArgs {
+            team: "atm-dev".to_string(),
+            project: None,
+            json: false,
+        })
+        .unwrap();
+
+        fs::remove_dir_all(&tasks_dir).unwrap();
+
+        restore(RestoreArgs {
+            team: "atm-dev".to_string(),
+            from: None,
+            project: None,
+            dry_run: false,
+            skip_tasks: false,
+            json: false,
+        })
+        .unwrap();
+
+        let highwatermark = fs::read_to_string(tasks_dir.join(".highwatermark")).unwrap();
+        assert_eq!(highwatermark.trim(), "82");
+
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_restore_sets_highwatermark_to_zero_when_no_numeric_task_files_exist() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = set_atm_home(&temp_dir);
+        create_test_team(&temp_dir, "atm-dev");
+        let tasks_dir = temp_dir.path().join(".claude/tasks/atm-dev");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        fs::write(tasks_dir.join(".lock"), "").unwrap();
+        fs::write(tasks_dir.join(".highwatermark"), "99\n").unwrap();
+
+        let original = std::env::var("ATM_HOME").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        backup(BackupArgs {
+            team: "atm-dev".to_string(),
+            project: None,
+            json: false,
+        })
+        .unwrap();
+
+        fs::remove_dir_all(&tasks_dir).unwrap();
+
+        restore(RestoreArgs {
+            team: "atm-dev".to_string(),
+            from: None,
+            project: None,
+            dry_run: false,
+            skip_tasks: false,
+            json: false,
+        })
+        .unwrap();
+
+        let highwatermark = fs::read_to_string(tasks_dir.join(".highwatermark")).unwrap();
+        assert_eq!(highwatermark.trim(), "0");
+
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_restore_clears_restored_tmux_pane_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = set_atm_home(&temp_dir);
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+
+        let original = std::env::var("ATM_HOME").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        backup(BackupArgs {
+            team: "atm-dev".to_string(),
+            project: None,
+            json: false,
+        })
+        .unwrap();
+
+        let config_path = team_dir.join("config.json");
+        let mut config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        config.members.retain(|m| m.name == "team-lead");
+        fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        restore(RestoreArgs {
+            team: "atm-dev".to_string(),
+            from: None,
+            project: None,
+            dry_run: false,
+            skip_tasks: false,
+            json: false,
+        })
+        .unwrap();
+
+        let config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        let publisher = config
+            .members
+            .iter()
+            .find(|m| m.name == "publisher")
+            .expect("publisher restored");
+        assert!(publisher.tmux_pane_id.is_none());
+
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_remove_member_force_archives_inbox_and_removes_roster_entry() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+        let inbox = team_dir.join("inboxes/publisher.json");
+        fs::write(&inbox, "[]").unwrap();
+
+        let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        remove_member(RemoveMemberArgs {
+            team: "atm-dev".to_string(),
+            agent: "publisher".to_string(),
+            archive_inbox: true,
+            force: true,
+        })
+        .unwrap();
+
+        let config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(team_dir.join("config.json")).unwrap())
+                .unwrap();
+        assert!(!config.members.iter().any(|m| m.name == "publisher"));
+        assert!(!inbox.exists());
+
+        let archives_root = temp_dir.path().join(".claude/teams/.archives/atm-dev");
+        let archived = fs::read_dir(&archives_root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().join("inboxes/publisher.json"))
+            .find(|p| p.exists());
+        assert!(archived.is_some(), "archived inbox should exist");
+
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+        restore_autostart_env(original_autostart);
+    }
+
+    #[test]
+    #[serial]
+    fn test_remove_member_refuses_when_liveness_cannot_be_confirmed_without_force() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        create_test_team(&temp_dir, "atm-dev");
+
+        let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let err = remove_member(RemoveMemberArgs {
+            team: "atm-dev".to_string(),
+            agent: "publisher".to_string(),
+            archive_inbox: false,
+            force: false,
+        })
+        .expect_err("remove-member should refuse when daemon is unavailable");
+        assert!(format!("{err}").contains("Use --force to override"));
+
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+        restore_autostart_env(original_autostart);
+    }
+
+    #[test]
+    #[serial]
+    fn test_remove_member_refuses_external_member_without_session_id_without_force() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        let team_dir = create_test_team(&temp_dir, "atm-dev");
+
+        let config_path = team_dir.join("config.json");
+        let mut config: TeamConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        let publisher = config
+            .members
+            .iter_mut()
+            .find(|m| m.name == "publisher")
+            .expect("publisher exists");
+        publisher.external_backend_type = Some(BackendType::Codex);
+        publisher.session_id = None;
+        fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        let original = std::env::var("ATM_HOME").ok();
+        let original_autostart = set_autostart_disabled_for_test();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let err = remove_member(RemoveMemberArgs {
+            team: "atm-dev".to_string(),
+            agent: "publisher".to_string(),
+            archive_inbox: false,
+            force: false,
+        })
+        .expect_err("remove-member should refuse external member without session_id");
+        assert!(format!("{err}").contains("has no session_id"));
+
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("ATM_HOME", v),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+        restore_autostart_env(original_autostart);
+    }
+
+    #[test]
+    #[serial]
+    fn test_remove_member_refuses_team_lead() {
+        let temp_dir = TempDir::new().unwrap();
+        let home_env = temp_dir.path().to_str().unwrap().to_string();
+        create_test_team(&temp_dir, "atm-dev");
+
+        let original = std::env::var("ATM_HOME").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", &home_env);
+        }
+
+        let err = remove_member(RemoveMemberArgs {
+            team: "atm-dev".to_string(),
+            agent: "team-lead".to_string(),
+            archive_inbox: false,
+            force: true,
+        })
+        .expect_err("team-lead should remain protected");
+        assert!(format!("{err}").contains("team-lead is protected"));
+
         unsafe {
             match original {
                 Some(v) => std::env::set_var("ATM_HOME", v),

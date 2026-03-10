@@ -1,7 +1,7 @@
 # Agent Team API - Complete Reference
 
 **API Version**: 0.1
-**Date**: 2026-02-11
+**Date**: 2026-03-10
 **Status**: Pre-Release (Experimental)
 
 > **Reference Scope**
@@ -9,6 +9,9 @@
 > This document mirrors the current Anthropic Agent Teams API/schema as observed today.
 > It is a reference baseline for design, even if some content is not directly used in the
 > current MVP scope.
+
+> `API Version` tracks the observed upstream Claude Code/Anthropic schema generation.
+> `Document Version` tracks ATM-local documentation revisions in this reference.
 
 > **Schema Baseline: Claude Code 2.1.39**
 >
@@ -34,6 +37,7 @@ The Agent Team API provides programmatic access to create and manage teams of Cl
 ## Table of Contents
 
 1. [Team Management](#team-management)
+   - [Member Removal (`remove-member`)](#atm-teams-remove-member-team-agent)
 2. [Agent Spawning](#agent-spawning)
 3. [Task Management](#task-management)
 4. [Message System](#message-system)
@@ -179,13 +183,21 @@ Creates a timestamped snapshot of team state at `~/.claude/teams/.backups/<team>
 ├── config.json        ← copy of ~/.claude/teams/<team>/config.json
 ├── inboxes/           ← copy of all inbox files
 │   └── <agent>.json
-└── tasks/             ← copy of ~/.claude/tasks/<team>/ (if present)
+├── tasks/             ← copy of ~/.claude/tasks/<team>/ (if present)
+│   └── <task-id>.json
+└── tasks-cc/          ← copy of ~/.claude/tasks/<project>/ (optional; when --project is used)
     └── <task-id>.json
 ```
 
-- Timestamp format: `YYYYMMDDTHHMMSSz` (ISO 8601 compact UTC)
+- `--project <name>`: include Claude Code project-scoped task files from
+  `~/.claude/tasks/<project>/` as `tasks-cc/`
+- If `~/.claude/tasks/<project>/` does not exist, `tasks-cc/` is omitted and backup
+  continues without error
+- Timestamp format: `YYYYMMDDTHHMMSSfffffffffZ` (compact UTC with 9-digit fractional
+  seconds; chosen so immediate successive backups remain lexicographically sortable and
+  collision-resistant)
 - Auto-prunes to the last 5 backups per team (oldest removed first)
-- Also triggered automatically at the start of `atm teams resume` (non-fatal: a backup failure does not abort the resume)
+- Also triggered automatically at the start of `atm teams resume` (non-fatal: a backup failure does not abort the resume); when resume is invoked with `--project <name>`, the same project-scoped `tasks-cc/` handling applies
 
 #### `atm teams restore <team>`
 
@@ -193,15 +205,39 @@ Restores team state from a backup:
 
 - **Default**: restores from the latest backup (lexicographic sort of timestamp dirs)
 - `--from <path>`: restore from a specific backup directory
+- `--project <name>`: restore `tasks-cc/` into `~/.claude/tasks/<project>/` when present
 - `--dry-run`: show what would be restored without writing any files
-- `--skip-tasks`: restore config + inboxes only, skip task list restoration
+- `--skip-tasks`: restore config + inboxes only, skip all task restoration (`tasks/`
+  and `tasks-cc/`) even when `--project <name>` is also provided
+- When `atm teams resume --project <name>` triggers a restore, `--project` is
+  automatically forwarded so `tasks-cc/` is restored into `~/.claude/tasks/<project>/`
 
 **Invariants**:
 - `leadSessionId` in `config.json` is **never** overwritten — the current session's lead ID is always preserved
 - `team-lead` member entry is **never** restored from backup — only non-leader members are restored
 - Restore is **idempotent**: members already present in the current config are not duplicated
+- Restored members are detached from stale runtime session state before being written back:
+  `isActive=false`, `lastActive=null`, `sessionId=null`, `tmuxPaneId=null`
+- After restoring task files into any task directory, `.highwatermark` is recomputed from the highest numeric task id present; if no numeric task files exist, `.highwatermark` is set to `0`
 
 **Relationship to TeamDelete**: `TeamDelete` permanently destroys all team data. Creating a backup before `TeamDelete` and restoring afterward is the supported recovery path.
+
+#### `atm teams remove-member <team> <agent>`
+
+Removes a non-lead member from the team roster and cleans up mailbox artifacts.
+
+- Command form: `atm teams remove-member <team> <agent> [--archive-inbox] [--force]`
+- `--archive-inbox`: preserve the inbox at
+  `~/.claude/teams/.archives/<team>/removed-<agent>-<timestamp>/inboxes/<agent>.json`
+  before removing the live mailbox
+- Liveness behavior follows daemon shutdown/liveness semantics from the ATM
+  requirements: the command checks active state before mutation and refuses by default
+  when the member appears active or liveness is unknown
+- For external members without a tracked `session_id`, liveness is treated as unknown
+  and the command requires `--force`
+- `--force`: explicit operator override for manual recovery that bypasses the default
+  liveness refusal and removes roster/mailbox state anyway
+- `team-lead` is protected and must not be removed through this command
 
 ---
 
@@ -1418,6 +1454,16 @@ Reference in dependencies as strings, not integers.
 
 ## Changelog
 
+### Version 1.1 (2026-03-10)
+- Documented `--project <name>` for `atm teams backup` / `atm teams restore`
+- Added `tasks-cc/` to the backup bundle structure for Claude Code project task lists
+- Added `.highwatermark` recomputation invariant for restored task directories
+- Clarified absent source-path behavior: missing `~/.claude/tasks/<project>/` omits
+  `tasks-cc/` without error
+- Added `atm teams remove-member <team> <agent> [--archive-inbox] [--force]`
+  with archive path, liveness-check-before-mutation behavior, and `--force`
+  operator override semantics (issue #649)
+
 ### Version 1.0 (2026-02-11)
 - Initial API documentation
 - All core methods documented
@@ -1426,6 +1472,6 @@ Reference in dependencies as strings, not integers.
 
 ---
 
-**Document Version**: 1.0
-**Last Updated**: 2026-02-11
+**Document Version**: 1.1
+**Last Updated**: 2026-03-10
 **Maintained By**: Claude

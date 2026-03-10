@@ -1,7 +1,7 @@
 # agent-team-mail (`atm`) — Requirements Document
 
-**Version**: 0.4
-**Date**: 2026-03-03
+**Version**: 0.5
+**Date**: 2026-03-10
 **Status**: Draft
 
 ---
@@ -361,12 +361,13 @@ Spawn subcommands:
 
 Teams subcommands:
   teams add-member <team> <agent> [--agent-type <type>] [--model <model>] [--cwd <path>] [--inactive]
+  teams remove-member <team> <agent> [--archive-inbox] [--force]
   teams join <agent> [--team <team>] [--agent-type <type>] [--model <model>] [--folder <path>]
   teams spawn --agent <name> --team <team> --runtime <claude|codex|gemini|opencode> [...]
-  teams resume <team> [message] [--force] [--kill] [--session-id <id>]
+  teams resume <team> [message] [--project <name>] [--force] [--kill] [--session-id <id>]
   teams cleanup <team> [agent] [--force] [--dry-run]
-  teams backup <team> [--json]
-  teams restore <team> [--from <path>] [--dry-run] [--skip-tasks] [--json]
+  teams backup <team> [--project <name>] [--json]
+  teams restore <team> [--from <path>] [--project <name>] [--dry-run] [--skip-tasks] [--json]
 
 MCP subcommands:
   mcp install <client> [scope] [--binary <path>]
@@ -633,6 +634,83 @@ atm teams add-member <team> <agent> [--agent-type <type>] [--model <model>] [--c
 - Immediately after add-member returns success, `inboxes/<agent>.json` exists.
 - First `atm send <agent>@<team>` succeeds without requiring a bootstrap side effect.
 - `atm doctor` reports no roster/mailbox drift for a newly added member.
+
+#### `atm teams remove-member`
+
+Remove a non-lead member from a team roster and clean up mailbox artifacts.
+
+```
+atm teams remove-member <team> <agent> [--archive-inbox] [--force]
+```
+
+**Required behavior**:
+- Refuse removal when `<agent>` is `team-lead`.
+- Fail with an actionable error when `<agent>` is not present in team `config.json`.
+- Query daemon/PID-backed liveness before mutation. If the target appears active, or
+  liveness cannot be confirmed, the command must refuse by default.
+- `--force` is an explicit operator override for manual recovery. When present, the
+  command may bypass shutdown-first semantics and remove roster/mailbox state even if
+  liveness is active or unknown.
+- Remove the member entry from `config.json`.
+- Remove or archive mailbox artifacts for the member as part of the same command path.
+- Default behavior deletes mailbox artifacts. `--archive-inbox` preserves prior inbox
+  contents at `~/.claude/teams/.archives/<team>/removed-<agent>-<timestamp>/inboxes/<agent>.json`
+  before removal.
+- For external members that have no `session_id`, remove-member must treat liveness as
+  unknown and require `--force` rather than assuming the daemon is not tracking them.
+
+**Acceptance checks**:
+- After successful removal, `<agent>` is absent from `config.json`.
+- After successful removal, `inboxes/<agent>.json` no longer exists in the live team folder.
+- `atm doctor` reports no roster/mailbox drift for the removed member.
+
+#### `atm teams backup` / `atm teams restore`
+
+Backup and restore must preserve both ATM team state and Claude Code task-list state
+when explicitly requested.
+
+**Required behavior**:
+- `atm teams backup <team>` must continue to snapshot `config.json`, `inboxes/`, and
+  team-scoped task files from `~/.claude/tasks/<team>/`.
+- When `--project <name>` is provided, backup must also snapshot Claude Code
+  project-scoped task files from `~/.claude/tasks/<project>/` into `tasks-cc/` in the
+  backup bundle.
+- Backup directory names must use compact UTC timestamps with a 9-digit fractional
+  suffix (`YYYYMMDDTHHMMSSfffffffffZ`) so lexicographic sort still tracks chronology
+  while allowing immediate successive snapshots without collisions.
+- If `~/.claude/tasks/<project>/` does not exist, backup must omit `tasks-cc/` and
+  continue without error.
+- `atm teams restore <team>` must restore team-scoped task files back into
+  `~/.claude/tasks/<team>/`.
+- When `--project <name>` is provided and `tasks-cc/` exists in the backup bundle,
+  restore must restore those files into `~/.claude/tasks/<project>/`.
+- `--skip-tasks` must suppress all task restoration (`tasks/` and `tasks-cc/`) and
+  keep restore semantics at "config + inboxes only" even when `--project <name>` is
+  also provided.
+- Restore must preserve the existing team restore safety invariants defined in
+  `docs/agent-team-api.md`: `leadSessionId` is never overwritten and `team-lead`
+  is never restored from backup.
+- Restore must clear restored runtime-only member fields before writing them back:
+  `isActive=false`, `lastActive=null`, `sessionId=null`, and `tmuxPaneId=null`.
+- After restoring task files into any destination task directory, restore must recompute
+  `.highwatermark` from the highest numeric `<task-id>.json` filename present in that
+  destination. Restore must not blindly preserve a stale or lower watermark from backup.
+- If no numeric task files are present in a restored task directory, restore must set
+  `.highwatermark` to `0`.
+- When `atm teams resume` is invoked with `--project <name>`, the automatic pre-resume
+  backup and subsequent restore path must pass that same project scope through so
+  `tasks-cc/` is handled consistently during handoff.
+
+**Acceptance checks**:
+- A backup created with `--project <name>` contains `tasks-cc/` with the corresponding
+  Claude Code project task files.
+- A backup created with `--project <name>` where `~/.claude/tasks/<project>/` is absent
+  succeeds without creating `tasks-cc/`.
+- Restoring a backup with team task files `76.json` through `82.json` leaves
+  `.highwatermark` set to `82`.
+- Restoring a task directory with no numeric task files leaves `.highwatermark` set to `0`.
+- Restoring a backup with `tasks-cc/` repopulates `~/.claude/tasks/<project>/` when the
+  same `--project <name>` is provided on restore.
 
 ### 4.3.1 Lifecycle Teardown and Cleanup Semantics
 
@@ -3068,6 +3146,6 @@ Follow [Pragmatic Rust Guidelines](../.claude/skills/rust-development/guidelines
 
 ---
 
-**Document Version**: 0.4
-**Last Updated**: 2026-03-03
+**Document Version**: 0.5
+**Last Updated**: 2026-03-10
 **Maintained By**: Claude
