@@ -65,6 +65,15 @@ If required routing values are unavailable, relay exits `0` and emits nothing.
 - `session_id` should come from Gemini hook payload (`session_id`).
 - Daemon remains authoritative for liveness checks and stale-PID handling.
 
+### Session Source Clarification
+
+- `~/.claude/projects/.../<session_id>.jsonl` files are Claude Code transcript
+  logs, not Gemini-native session logs.
+- For Gemini runtime identity, ATM must treat Gemini hook payload `session_id`
+  (and daemon `runtime_session_id`) as authoritative.
+- Gemini runtime state/log roots should be resolved from `GEMINI_CLI_HOME`
+  (or Gemini defaults when unset), not from `.claude/projects`.
+
 ## Hook Outcome Policy for ATM Relays
 
 - ATM relay hooks should return success (`exit 0`) even on relay errors.
