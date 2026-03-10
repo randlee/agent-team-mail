@@ -1,0 +1,366 @@
+#!/usr/bin/env python3
+"""dev-install: Build and install ATM binaries to the dev channel.
+
+Builds all ATM binaries from source, creates a versioned immutable install
+prefix, atomically switches the active version, restarts the daemon, and
+runs post-install verification.
+
+Usage:
+    dev-install [--repo <path>] [--allow-dirty]
+
+Options:
+    --repo <path>     Path to the repository root (default: parent of scripts/)
+    --allow-dirty     Skip the dirty-worktree check
+    -h, --help        Show this help message
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+BINARIES = [
+    "atm",
+    "atm-daemon",
+    "atm-agent-mcp",
+    "atm-tui",
+    "sc-compose",
+]
+
+CARGO_PACKAGES = [
+    "agent-team-mail",
+    "agent-team-mail-daemon",
+    "agent-team-mail-mcp",
+    "agent-team-mail-tui",
+    "sc-compose",
+]
+
+ATM_DEV_ROOT = Path.home() / ".local" / "atm-dev"
+ATM_HOME = Path.home() / ".local" / "share" / "atm-dev" / "home"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def die(msg: str) -> None:
+    """Print an error message and exit with code 1."""
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def run(cmd: list[str], *, cwd: Path | None = None, capture: bool = False,
+        env: dict | None = None) -> subprocess.CompletedProcess:
+    """Run a command, printing it first. Raise on non-zero exit."""
+    display = " ".join(str(c) for c in cmd)
+    print(f"  $ {display}")
+    try:
+        return subprocess.run(
+            cmd,
+            check=True,
+            cwd=cwd,
+            capture_output=capture,
+            text=True,
+            env=env,
+        )
+    except subprocess.CalledProcessError as exc:
+        msg = f"command failed (exit {exc.returncode}): {display}"
+        if capture and exc.stderr:
+            msg += f"\n{exc.stderr.strip()}"
+        die(msg)
+
+
+def run_capture(cmd: list[str], *, cwd: Path | None = None) -> str:
+    """Run a command and return stdout, stripped."""
+    result = run(cmd, cwd=cwd, capture=True)
+    return result.stdout.strip()
+
+
+def sha256_file(path: Path) -> str:
+    """Return the hex SHA-256 digest of a file."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def dev_env(path_prefix: Path) -> dict:
+    """Build the subprocess environment for ATM dev channel commands."""
+    env = os.environ.copy()
+    env["ATM_HOME"] = str(ATM_HOME)
+    env["ATM_DAEMON_BIN"] = str(path_prefix / "bin" / "atm-daemon")
+    env["ATM_CHANNEL"] = "dev"
+    env["PATH"] = str(path_prefix / "bin") + os.pathsep + env.get("PATH", "")
+    return env
+
+
+def write_env_sh() -> None:
+    """Write ~/.local/atm-dev/env.sh with the canonical dev environment."""
+    ATM_DEV_ROOT.mkdir(parents=True, exist_ok=True)
+    env_sh = ATM_DEV_ROOT / "env.sh"
+    content = (
+        '# ATM dev channel environment — source this file or add to your shell profile\n'
+        'export ATM_DEV_ROOT="$HOME/.local/atm-dev"\n'
+        'export ATM_HOME="$HOME/.local/share/atm-dev/home"\n'
+        'export PATH="$ATM_DEV_ROOT/current/bin:$PATH"\n'
+        'export ATM_DAEMON_BIN="$ATM_DEV_ROOT/current/bin/atm-daemon"\n'
+        'export ATM_CHANNEL=dev\n'
+    )
+    env_sh.write_text(content)
+    print(f"  wrote {env_sh}")
+
+
+def switch_current(new_prefix: Path) -> None:
+    """Atomically move current -> previous, then set current -> new_prefix."""
+    current = ATM_DEV_ROOT / "current"
+    previous = ATM_DEV_ROOT / "previous"
+
+    if current.is_symlink() or current.exists():
+        if previous.is_symlink() or previous.exists():
+            previous.unlink()
+        # Rename resolves as rename of the symlink itself on macOS/Linux.
+        os.rename(current, previous)
+        print(f"  moved current -> previous ({os.readlink(previous)})")
+
+    os.symlink(new_prefix, current)
+    print(f"  current -> {new_prefix}")
+
+
+def restart_daemon(current_prefix: Path) -> None:
+    """Restart the ATM daemon using the dev environment."""
+    print("\n[restart daemon]")
+    atm_bin = current_prefix / "bin" / "atm"
+    if not atm_bin.exists():
+        die(f"atm binary not found at {atm_bin}")
+    env = dev_env(current_prefix)
+    try:
+        run([str(atm_bin), "daemon", "restart"], env=env)
+    except SystemExit:
+        # daemon restart may report non-zero if no daemon was running; continue.
+        print("  note: daemon restart returned non-zero (may be first-time start)")
+
+
+def verify_install(current_prefix: Path) -> bool:
+    """Run post-install verification checks. Returns True if all pass."""
+    print("\n[post-install verification]")
+    atm_bin = current_prefix / "bin" / "atm"
+    env = dev_env(current_prefix)
+    checks = [
+        ([str(atm_bin), "daemon", "status"], "daemon status"),
+        ([str(atm_bin), "--version"], "atm --version"),
+        ([str(current_prefix / "bin" / "atm-daemon"), "--version"], "atm-daemon --version"),
+        ([str(current_prefix / "bin" / "sc-compose"), "--version"], "sc-compose --version"),
+    ]
+    all_pass = True
+    for cmd, label in checks:
+        try:
+            result = subprocess.run(
+                cmd, check=True, capture_output=True, text=True, env=env
+            )
+            version_line = (result.stdout or result.stderr).strip().splitlines()[0]
+            print(f"  [PASS] {label}: {version_line}")
+        except (subprocess.CalledProcessError, FileNotFoundError, IndexError) as exc:
+            print(f"  [FAIL] {label}: {exc}")
+            all_pass = False
+    return all_pass
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Build and install ATM binaries to the dev channel.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    scripts_dir = Path(__file__).resolve().parent
+    default_repo = scripts_dir.parent
+    parser.add_argument(
+        "--repo",
+        type=Path,
+        default=default_repo,
+        metavar="PATH",
+        help=f"repository root (default: {default_repo})",
+    )
+    parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="skip the dirty-worktree check",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    repo = args.repo.resolve()
+
+    if not (repo / "Cargo.toml").exists():
+        die(f"no Cargo.toml found in repo root: {repo}")
+
+    print(f"[dev-install] repo: {repo}")
+
+    # ------------------------------------------------------------------
+    # 1. Dirty check (before any build work)
+    # ------------------------------------------------------------------
+    print("\n[dirty check]")
+    if args.allow_dirty:
+        print("  --allow-dirty passed, skipping dirty check")
+        dirty = True
+    else:
+        status_output = run_capture(["git", "status", "--porcelain"], cwd=repo)
+        if status_output:
+            die(
+                "working tree is dirty. Commit or stash changes, or pass --allow-dirty.\n"
+                + status_output
+            )
+        dirty = False
+        print("  working tree is clean")
+
+    # ------------------------------------------------------------------
+    # 2. Gather git metadata
+    # ------------------------------------------------------------------
+    print("\n[git metadata]")
+    git_sha = run_capture(["git", "rev-parse", "HEAD"], cwd=repo)
+    short_sha = git_sha[:7]
+    git_branch = run_capture(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo
+    )
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    label = f"{today}-{short_sha}"
+    print(f"  label:  {label}")
+    print(f"  branch: {git_branch}")
+    print(f"  sha:    {git_sha}")
+
+    # ------------------------------------------------------------------
+    # 3. Build
+    # ------------------------------------------------------------------
+    print("\n[cargo build --release]")
+    cargo_args = ["cargo", "build", "--release"]
+    for pkg in CARGO_PACKAGES:
+        cargo_args += ["-p", pkg]
+    run(cargo_args, cwd=repo)
+
+    # ------------------------------------------------------------------
+    # 4. Verify built binaries exist
+    # ------------------------------------------------------------------
+    print("\n[verify binaries]")
+    release_dir = repo / "target" / "release"
+    for name in BINARIES:
+        binary = release_dir / name
+        if not binary.exists():
+            die(f"expected binary not found after build: {binary}")
+        print(f"  found {name}")
+
+    # ------------------------------------------------------------------
+    # 5. Gather toolchain info
+    # ------------------------------------------------------------------
+    rust_toolchain = run_capture(["rustc", "--version"], cwd=repo)
+
+    # ------------------------------------------------------------------
+    # 6. Create immutable prefix and copy binaries
+    # ------------------------------------------------------------------
+    print("\n[install binaries]")
+    prefix = ATM_DEV_ROOT / "installs" / label
+    bin_dir = prefix / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+
+    binary_entries = []
+    for name in BINARIES:
+        src = release_dir / name
+        dst = bin_dir / name
+        shutil.copy2(src, dst)
+        # Make executable
+        dst.chmod(0o755)
+        checksum = sha256_file(dst)
+        binary_entries.append({"name": name, "sha256": checksum})
+        print(f"  installed {name}  ({checksum[:16]}...)")
+
+    # ------------------------------------------------------------------
+    # 7. Write manifest.json
+    # ------------------------------------------------------------------
+    print("\n[write manifest]")
+    build_timestamp = datetime.now(timezone.utc).isoformat()
+    manifest = {
+        "label": label,
+        "git_sha": git_sha,
+        "git_branch": git_branch,
+        "build_timestamp": build_timestamp,
+        "dirty": dirty,
+        "rust_toolchain": rust_toolchain,
+        "binaries": binary_entries,
+    }
+    manifest_path = prefix / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    print(f"  wrote {manifest_path}")
+
+    # ------------------------------------------------------------------
+    # 8. Write source.txt
+    # ------------------------------------------------------------------
+    source_path = prefix / "source.txt"
+    source_path.write_text(str(repo) + "\n")
+    print(f"  wrote {source_path}")
+
+    # ------------------------------------------------------------------
+    # 9. Create ATM_HOME directory
+    # ------------------------------------------------------------------
+    ATM_HOME.mkdir(parents=True, exist_ok=True)
+    print(f"\n[ATM_HOME] {ATM_HOME}")
+
+    # ------------------------------------------------------------------
+    # 10. Write env.sh
+    # ------------------------------------------------------------------
+    print("\n[write env.sh]")
+    write_env_sh()
+
+    # ------------------------------------------------------------------
+    # 11. Switch current -> new prefix (atomic)
+    # ------------------------------------------------------------------
+    print("\n[switch current]")
+    switch_current(prefix)
+
+    # Resolve the live current symlink for subsequent operations
+    current_prefix = ATM_DEV_ROOT / "current"
+
+    # ------------------------------------------------------------------
+    # 12. Restart daemon
+    # ------------------------------------------------------------------
+    restart_daemon(prefix)
+
+    # ------------------------------------------------------------------
+    # 13. Post-install verification
+    # ------------------------------------------------------------------
+    all_pass = verify_install(prefix)
+
+    # ------------------------------------------------------------------
+    # 14. Summary
+    # ------------------------------------------------------------------
+    print("\n" + "=" * 60)
+    print(f"dev-install complete")
+    print(f"  label:   {label}")
+    print(f"  prefix:  {prefix}")
+    print(f"  current: {current_prefix} -> {prefix}")
+    print(f"  ATM_HOME: {ATM_HOME}")
+    binaries_list = ", ".join(BINARIES)
+    print(f"  binaries: {binaries_list}")
+    print(f"  verification: {'ALL PASS' if all_pass else 'SOME CHECKS FAILED'}")
+    print()
+    if not all_pass:
+        print("One or more verification checks failed.")
+        print(f"To rollback: scripts/dev-rollback")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
