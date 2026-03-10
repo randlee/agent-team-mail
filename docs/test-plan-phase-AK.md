@@ -64,7 +64,11 @@ non-blocking local structured logging and canonical observability schema rules.
 ## AK.4 — Diagnostics and Runbook
 
 - `atm doctor --json` and `atm status --json` parity tests:
-  - identical `logging_health` key names and semantics.
+  - identical `logging_health` key names and semantics:
+    - `status`
+    - `otel_exporter`
+    - `local_structured`
+    - `last_export_error`
 - Human-output tests:
   - degraded/unavailable state includes actionable remediation text.
 

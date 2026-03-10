@@ -608,5 +608,25 @@ mod tests {
                 "compose".to_string()
             ]
         );
+        for record in &exported {
+            assert_eq!(record.trace_id.as_deref(), Some("trace-123"));
+            assert!(record.span_id.is_some(), "span_id should be present");
+            assert_eq!(
+                record.attributes.get("team").and_then(|v| v.as_str()),
+                Some("atm-dev")
+            );
+            assert_eq!(
+                record.attributes.get("agent").and_then(|v| v.as_str()),
+                Some("arch-ctm")
+            );
+            assert_eq!(
+                record.attributes.get("runtime").and_then(|v| v.as_str()),
+                Some("codex")
+            );
+            assert_eq!(
+                record.attributes.get("session_id").and_then(|v| v.as_str()),
+                Some("sess-123")
+            );
+        }
     }
 }
