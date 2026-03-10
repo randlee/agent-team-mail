@@ -51,6 +51,30 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+  manifest-validation:
+    name: manifest-validation (ubuntu)
+    needs: [clippy]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Validate manifest completeness
+        run: |
+          python3 scripts/release_artifacts.py validate-manifest \
+            --manifest release/publish-artifacts.toml \
+            --workspace-toml Cargo.toml
+
+      - name: Validate preflight_check assignments
+        run: |
+          python3 scripts/release_artifacts.py validate-preflight-checks \
+            --manifest release/publish-artifacts.toml \
+            --workspace-toml Cargo.toml
+
   parity-contract:
     name: parity-contract (${{ matrix.os }})
     needs: [clippy]
@@ -222,7 +246,7 @@ jobs:
   test:
     # `cli-publishability` is intentionally skipped in regular PR/push CI; keep
     # test matrix independent so integration tests still run on every PR.
-    needs: [clippy, parity-contract, parity-adapter, parity-render, mcp-inspector-smoke]
+    needs: [clippy, manifest-validation, parity-contract, parity-adapter, parity-render, mcp-inspector-smoke]
     strategy:
       fail-fast: false
       matrix:

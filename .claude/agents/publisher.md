@@ -47,6 +47,44 @@ Publisher does not invent alternate flows.
 >
 > **DO NOT use the `sc-delay-tasks` skill** — it creates named teammates. Use `gh run watch`, `gh pr checks --watch`, or `sleep` loops for waiting.
 
+## Pre-Release Validation (automated gates)
+
+Three automated checks run in CI on every PR and catch common release mistakes
+before they reach the publish step.  These gates do not require manual action;
+they fail CI automatically when violated.
+
+**Gate 1 — Stale Cargo.lock (build.rs in atm-core)**
+`crates/atm-core/build.rs` reads the workspace `Cargo.lock` at build time and
+panics if the `agent-team-mail-core` entry does not match `CARGO_PKG_VERSION`.
+Fix: run `cargo generate-lockfile` then commit the updated lockfile.
+
+**Gate 2 — Missing crate from publish manifest (CI: `validate-manifest`)**
+```bash
+python3 scripts/release_artifacts.py validate-manifest \
+  --manifest release/publish-artifacts.toml \
+  --workspace-toml Cargo.toml
+```
+Fails CI (exit 1) and prints `MISSING: <crate-name>` for every publishable
+workspace crate absent from `release/publish-artifacts.toml`.
+Fix: add a `[[crates]]` entry to the manifest for the missing crate.
+
+**Gate 3 — Wrong preflight_check for a chained crate (CI: `validate-preflight-checks`)**
+```bash
+python3 scripts/release_artifacts.py validate-preflight-checks \
+  --manifest release/publish-artifacts.toml \
+  --workspace-toml Cargo.toml
+```
+Fails CI (exit 1) and prints an error for each crate with
+`preflight_check = "full"` that has workspace path dependencies.
+Such crates depend on local (unpublished) code and must use
+`preflight_check = "locked"` instead.
+Fix: change `preflight_check` to `"locked"` for the flagged crate(s).
+
+When all three gates pass, `validate-manifest` and `validate-preflight-checks`
+print `ok:` lines confirming the manifest and preflight assignments are valid.
+
+---
+
 ## Standard Release Flow
 1. **Step 0 — Tag gate (must pass before any PR/workflow action):**
    - Determine release version from `develop` (workspace/crate version already in source).
@@ -63,6 +101,7 @@ Publisher does not invent alternate flows.
    Check for merge conflicts first: if `atm gh monitor pr` returns `merge_conflict`, stop and report to team-lead before proceeding.
    Treat preflight + PR CI as parallel tracks (no serial waiting unless one fails).
 7. If the inline audit or preflight finds gaps, immediately report to `team-lead` and pause release progression.
+   Note: `validate-manifest` and `validate-preflight-checks` will have already passed in CI before you reach this step (Gate 2 and Gate 3 above). If PR CI is green, the manifest and preflight assignments are already confirmed valid; you do not need to re-run them manually.
 8. Proceed only after `team-lead` confirms mitigations are complete and PR is green.
 9. Merge `develop` -> `main`.
 10. Run **Release** workflow via `workflow_dispatch` with version input (`X.Y.Z` or `vX.Y.Z`).
