@@ -772,6 +772,66 @@ mod tests {
     }
 
     #[test]
+    fn test_stale_cleanup_selection_preserves_active_and_removes_only_stale_records() {
+        let mut reg = SessionRegistry::new();
+        let active_pid = std::process::id();
+        let stale_pid = i32::MAX as u32;
+        reg.upsert_for_team("atm-dev", "active-member", "sess-active", active_pid);
+        reg.upsert_for_team("atm-dev", "stale-member", "sess-stale", stale_pid);
+
+        // Force stale PID cache to expire so cleanup selection re-probes liveness.
+        if let Some(entry) = reg.liveness_cache.get_mut(&stale_pid) {
+            entry.checked_at = chrono::Utc::now()
+                - chrono::Duration::from_std(SessionRegistry::PID_LIVENESS_TTL).unwrap()
+                - chrono::Duration::milliseconds(10);
+        }
+
+        // Simulate cleanup selection logic: remove only sessions that converge to Dead.
+        let sessions = reg.sessions_for_team_with_liveness("atm-dev");
+        for session in sessions
+            .into_iter()
+            .filter(|session| session.state == SessionState::Dead)
+        {
+            reg.remove_for_team("atm-dev", &session.agent_name);
+        }
+
+        assert!(
+            reg.query_for_team("atm-dev", "active-member").is_some(),
+            "cleanup must preserve active/living sessions"
+        );
+        assert!(
+            reg.query_for_team("atm-dev", "stale-member").is_none(),
+            "cleanup must remove stale dead sessions only"
+        );
+    }
+
+    #[test]
+    fn test_load_or_new_upsert_same_team_agent_replaces_without_duplication() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude/daemon/session-registry.json");
+
+        let mut initial = SessionRegistry::with_persist_path(path.clone());
+        initial.upsert_for_team("atm-dev", "arch-ctm", "sess-initial", 111);
+        drop(initial);
+
+        let mut loaded = SessionRegistry::load_or_new(path);
+        loaded.upsert_for_team("atm-dev", "arch-ctm", "sess-restarted", 222);
+
+        let members = loaded.sessions_for_team("atm-dev");
+        assert_eq!(
+            members.len(),
+            1,
+            "reload + upsert for same (team,agent) must not duplicate rows"
+        );
+        let record = loaded
+            .query_for_team("atm-dev", "arch-ctm")
+            .expect("member should remain queryable");
+        assert_eq!(record.session_id, "sess-restarted");
+        assert_eq!(record.process_id, 222);
+        assert_eq!(record.state, SessionState::Active);
+    }
+
+    #[test]
     fn test_query_for_team_with_liveness_marks_dead_when_pid_is_not_alive() {
         let mut reg = SessionRegistry::new();
         let pid = i32::MAX as u32;
