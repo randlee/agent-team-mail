@@ -132,6 +132,7 @@ fn doctor_json_includes_extended_logging_fields() {
     assert!(logging_health["otel_exporter"].is_string());
     assert_eq!(logging_health["local_structured"], true);
     assert!(
-        logging_health["last_export_error"].is_string() || logging_health["last_export_error"].is_null()
+        logging_health["last_export_error"].is_string()
+            || logging_health["last_export_error"].is_null()
     );
 }

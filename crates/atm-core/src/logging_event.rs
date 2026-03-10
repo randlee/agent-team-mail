@@ -24,7 +24,7 @@
 //!
 //! When the daemon is unavailable, callers may use [`write_to_spool`] as a
 //! best-effort fallback. Spool files are written to
-//! `{home_dir}/.config/atm/log-spool/{source_binary}-{pid}-{millis}.jsonl`.
+//! `{home_dir}/.config/atm/logs/{source_binary}/spool/{source_binary}-{pid}-{millis}.jsonl`.
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -51,6 +51,14 @@ pub enum ValidationError {
     /// The serialized event exceeds the 64 KiB size limit.
     #[error("event exceeds maximum serialized size of 65536 bytes ({size} bytes)")]
     EventTooLarge { size: usize },
+
+    /// A span is missing a required identifier.
+    #[error("span[{index}] missing required field '{field}'")]
+    SpanRequiredFieldEmpty { index: usize, field: &'static str },
+
+    /// Span chain violates root->leaf parent linkage or trace consistency.
+    #[error("invalid span chain at index {index}: {reason}")]
+    InvalidSpanChain { index: usize, reason: String },
 }
 
 /// Maximum allowed serialized size of a [`LogEventV1`] in bytes (64 KiB).
@@ -67,6 +75,13 @@ pub const MAX_EVENT_BYTES: usize = 64 * 1024;
 pub struct SpanRefV1 {
     /// Span name (e.g. `"daemon_dispatch"`).
     pub name: String,
+    /// Distributed trace ID for this span.
+    pub trace_id: String,
+    /// Span ID.
+    pub span_id: String,
+    /// Parent span ID (`None` for root span).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_span_id: Option<String>,
     /// Span fields recorded at capture time.
     #[serde(default)]
     pub fields: serde_json::Map<String, serde_json::Value>,
@@ -245,6 +260,80 @@ impl LogEventV1 {
         let size = serialized.len();
         if size > MAX_EVENT_BYTES {
             return Err(ValidationError::EventTooLarge { size });
+        }
+
+        self.validate_spans()?;
+
+        Ok(())
+    }
+
+    /// Validate root->leaf span chain invariants.
+    ///
+    /// Invariants:
+    /// - every span has non-empty `trace_id` and `span_id`
+    /// - all spans share the same `trace_id`
+    /// - root span (index 0) has no `parent_span_id`
+    /// - each subsequent span parent links to previous span `span_id`
+    pub fn validate_spans(&self) -> Result<(), ValidationError> {
+        if self.spans.is_empty() {
+            return Ok(());
+        }
+
+        let root_trace_id = self.spans[0].trace_id.as_str();
+        if root_trace_id.trim().is_empty() {
+            return Err(ValidationError::SpanRequiredFieldEmpty {
+                index: 0,
+                field: "trace_id",
+            });
+        }
+        if self.spans[0].span_id.trim().is_empty() {
+            return Err(ValidationError::SpanRequiredFieldEmpty {
+                index: 0,
+                field: "span_id",
+            });
+        }
+        if self.spans[0].parent_span_id.is_some() {
+            return Err(ValidationError::InvalidSpanChain {
+                index: 0,
+                reason: "root span must not declare parent_span_id".to_string(),
+            });
+        }
+
+        for (idx, span) in self.spans.iter().enumerate().skip(1) {
+            if span.trace_id.trim().is_empty() {
+                return Err(ValidationError::SpanRequiredFieldEmpty {
+                    index: idx,
+                    field: "trace_id",
+                });
+            }
+            if span.span_id.trim().is_empty() {
+                return Err(ValidationError::SpanRequiredFieldEmpty {
+                    index: idx,
+                    field: "span_id",
+                });
+            }
+            if span.trace_id != root_trace_id {
+                return Err(ValidationError::InvalidSpanChain {
+                    index: idx,
+                    reason: "span trace_id must match root trace_id".to_string(),
+                });
+            }
+            let expected_parent = &self.spans[idx - 1].span_id;
+            match span.parent_span_id.as_deref() {
+                Some(parent) if parent == expected_parent => {}
+                Some(_) => {
+                    return Err(ValidationError::InvalidSpanChain {
+                        index: idx,
+                        reason: "parent_span_id must match previous span_id".to_string(),
+                    });
+                }
+                None => {
+                    return Err(ValidationError::InvalidSpanChain {
+                        index: idx,
+                        reason: "non-root span must declare parent_span_id".to_string(),
+                    });
+                }
+            }
         }
 
         Ok(())
@@ -504,9 +593,38 @@ pub fn new_log_event(source_binary: &str, action: &str, target: &str, level: &st
 
 // ── Fallback spool ────────────────────────────────────────────────────────────
 
-/// Return the spool directory path: `{home_dir}/.config/atm/log-spool`.
+fn normalize_tool_name(tool: &str) -> String {
+    let trimmed = tool.trim();
+    if trimmed.is_empty() {
+        return "atm".to_string();
+    }
+    trimmed
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Return the canonical spool directory path:
+/// `{home_dir}/.config/atm/logs/<tool>/spool`.
+pub fn spool_dir_for_tool(home_dir: &Path, tool: &str) -> PathBuf {
+    let tool = normalize_tool_name(tool);
+    home_dir
+        .join(".config")
+        .join("atm")
+        .join("logs")
+        .join(tool)
+        .join("spool")
+}
+
+/// Backward-compatible convenience wrapper for the `atm` tool.
 pub fn spool_dir(home_dir: &Path) -> PathBuf {
-    home_dir.join(".config/atm/log-spool")
+    spool_dir_for_tool(home_dir, "atm")
 }
 
 /// Return the canonical log file path with environment override support.
@@ -514,40 +632,45 @@ pub fn spool_dir(home_dir: &Path) -> PathBuf {
 /// Resolution order:
 /// 1. `ATM_LOG_FILE`
 /// 2. `ATM_LOG_PATH` (compat alias)
-/// 3. `{home_dir}/.config/atm/atm.log.jsonl`
-pub fn configured_log_path(home_dir: &Path) -> PathBuf {
+/// 3. `{home_dir}/.config/atm/logs/<tool>/<tool>.log.jsonl`
+pub fn configured_log_path_for_tool(home_dir: &Path, tool: &str) -> PathBuf {
+    let tool = normalize_tool_name(tool);
     std::env::var("ATM_LOG_FILE")
         .or_else(|_| std::env::var("ATM_LOG_PATH"))
         .ok()
         .filter(|v| !v.trim().is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir.join(".config/atm/atm.log.jsonl"))
+        .unwrap_or_else(|| {
+            home_dir
+                .join(".config")
+                .join("atm")
+                .join("logs")
+                .join(&tool)
+                .join(format!("{tool}.log.jsonl"))
+        })
 }
 
-/// Derive the spool directory from the canonical log file path.
+/// Backward-compatible convenience wrapper for the `atm` tool.
+pub fn configured_log_path(home_dir: &Path) -> PathBuf {
+    configured_log_path_for_tool(home_dir, "atm")
+}
+
+/// Derive the spool directory from a log file path.
 ///
-/// If the log path parent ends with `logs/`, spool is a sibling at
-/// `../log-spool`; otherwise spool is `<log_parent>/log-spool`.
+/// Spool is always `<log_parent>/spool`.
 pub fn spool_dir_from_log_path(log_path: &Path) -> PathBuf {
     let parent = log_path.parent().unwrap_or_else(|| Path::new("."));
-    if parent
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(|s| s.eq_ignore_ascii_case("logs"))
-        .unwrap_or(false)
-    {
-        parent
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("log-spool")
-    } else {
-        parent.join("log-spool")
-    }
+    parent.join("spool")
 }
 
 /// Return the configured spool directory based on canonical log-path resolution.
+pub fn configured_spool_dir_for_tool(home_dir: &Path, tool: &str) -> PathBuf {
+    spool_dir_from_log_path(&configured_log_path_for_tool(home_dir, tool))
+}
+
+/// Backward-compatible convenience wrapper for the `atm` tool.
 pub fn configured_spool_dir(home_dir: &Path) -> PathBuf {
-    spool_dir_from_log_path(&configured_log_path(home_dir))
+    configured_spool_dir_for_tool(home_dir, "atm")
 }
 
 /// Return the default spool directory by resolving the home directory via
@@ -558,7 +681,7 @@ pub fn configured_spool_dir(home_dir: &Path) -> PathBuf {
 /// Returns an error if the home directory cannot be determined.
 pub fn default_spool_dir() -> anyhow::Result<PathBuf> {
     let home = crate::home::get_home_dir()?;
-    Ok(configured_spool_dir(&home))
+    Ok(configured_spool_dir_for_tool(&home, "atm"))
 }
 
 /// Write `event` to an explicit spool `dir` (does not resolve home directory).
@@ -597,7 +720,7 @@ pub fn write_to_spool_dir(event: &LogEventV1, dir: &Path) {
 /// Write `event` to the fallback spool directory as a best-effort operation.
 ///
 /// Spool files are written to:
-/// `{home_dir}/.config/atm/log-spool/{source_binary}-{pid}-{unix_millis}.jsonl`
+/// `{home_dir}/.config/atm/logs/<source_binary>/spool/{source_binary}-{pid}-{unix_millis}.jsonl`
 ///
 /// Any error during directory creation or file writing is silently ignored
 /// (fail-open). This function is intentionally infallible.
@@ -617,7 +740,7 @@ pub fn write_to_spool(event: &LogEventV1, home_dir: &Path) {
     use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let dir = spool_dir(home_dir);
+    let dir = spool_dir_for_tool(home_dir, &event.source_binary);
     let _ = create_dir_all(&dir);
 
     let millis = SystemTime::now()
@@ -666,6 +789,9 @@ mod tests {
             .field("iteration", serde_json::Value::Number(42.into()))
             .span(SpanRefV1 {
                 name: "daemon_dispatch".to_string(),
+                trace_id: "trace-1".to_string(),
+                span_id: "span-root".to_string(),
+                parent_span_id: None,
                 fields: {
                     let mut m = serde_json::Map::new();
                     m.insert(
@@ -880,6 +1006,9 @@ mod tests {
         );
         event.spans.push(SpanRefV1 {
             name: "some_span".to_string(),
+            trace_id: "trace-1".to_string(),
+            span_id: "span-1".to_string(),
+            parent_span_id: None,
             fields: span_fields,
         });
 
@@ -980,7 +1109,7 @@ mod tests {
         let event = make_valid_event();
         write_to_spool(&event, dir.path());
 
-        let spool = spool_dir(dir.path());
+        let spool = spool_dir_for_tool(dir.path(), "atm");
         let entries: Vec<_> = std::fs::read_dir(&spool)
             .expect("read spool dir")
             .flatten()
@@ -997,8 +1126,19 @@ mod tests {
     fn test_spool_dir_path() {
         // Use a TempDir as the home path so the path is platform-native.
         let home = TempDir::new().expect("temp dir");
-        let expected = home.path().join(".config/atm/log-spool");
+        let expected = home.path().join(".config/atm/logs/atm/spool");
         assert_eq!(spool_dir(home.path()), expected);
+    }
+
+    #[test]
+    fn test_configured_log_path_defaults_to_tool_scoped_formula() {
+        let home = TempDir::new().expect("temp dir");
+        let path = configured_log_path_for_tool(home.path(), "atm-daemon");
+        assert_eq!(
+            path,
+            home.path()
+                .join(".config/atm/logs/atm-daemon/atm-daemon.log.jsonl")
+        );
     }
 
     #[test]
@@ -1012,11 +1152,83 @@ mod tests {
             std::env::remove_var("ATM_LOG_PATH");
         }
         let spool = configured_spool_dir(home.path());
-        assert_eq!(spool, home.path().join("custom/log-spool"));
+        assert_eq!(spool, home.path().join("custom/logs/spool"));
         // SAFETY: cleanup after test.
         unsafe {
             std::env::remove_var("ATM_LOG_FILE");
         }
+    }
+
+    #[test]
+    fn test_validate_spans_accepts_root_to_leaf_chain() {
+        let event = LogEventV1::builder("atm", "send", "atm::send")
+            .span(SpanRefV1 {
+                name: "root".to_string(),
+                trace_id: "trace-a".to_string(),
+                span_id: "span-root".to_string(),
+                parent_span_id: None,
+                fields: serde_json::Map::new(),
+            })
+            .span(SpanRefV1 {
+                name: "leaf".to_string(),
+                trace_id: "trace-a".to_string(),
+                span_id: "span-leaf".to_string(),
+                parent_span_id: Some("span-root".to_string()),
+                fields: serde_json::Map::new(),
+            })
+            .build();
+
+        assert!(event.validate_spans().is_ok());
+    }
+
+    #[test]
+    fn test_validate_spans_rejects_trace_mismatch() {
+        let event = LogEventV1::builder("atm", "send", "atm::send")
+            .span(SpanRefV1 {
+                name: "root".to_string(),
+                trace_id: "trace-a".to_string(),
+                span_id: "span-root".to_string(),
+                parent_span_id: None,
+                fields: serde_json::Map::new(),
+            })
+            .span(SpanRefV1 {
+                name: "leaf".to_string(),
+                trace_id: "trace-b".to_string(),
+                span_id: "span-leaf".to_string(),
+                parent_span_id: Some("span-root".to_string()),
+                fields: serde_json::Map::new(),
+            })
+            .build();
+
+        assert!(matches!(
+            event.validate_spans().unwrap_err(),
+            ValidationError::InvalidSpanChain { index: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn test_validate_spans_rejects_broken_parent_link() {
+        let event = LogEventV1::builder("atm", "send", "atm::send")
+            .span(SpanRefV1 {
+                name: "root".to_string(),
+                trace_id: "trace-a".to_string(),
+                span_id: "span-root".to_string(),
+                parent_span_id: None,
+                fields: serde_json::Map::new(),
+            })
+            .span(SpanRefV1 {
+                name: "leaf".to_string(),
+                trace_id: "trace-a".to_string(),
+                span_id: "span-leaf".to_string(),
+                parent_span_id: Some("span-other".to_string()),
+                fields: serde_json::Map::new(),
+            })
+            .build();
+
+        assert!(matches!(
+            event.validate_spans().unwrap_err(),
+            ValidationError::InvalidSpanChain { index: 1, .. }
+        ));
     }
 
     #[test]
