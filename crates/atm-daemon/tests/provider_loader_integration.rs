@@ -18,7 +18,7 @@ fn provider_stub_dir() -> PathBuf {
 }
 
 fn provider_stub_lib_path() -> PathBuf {
-    let dir = provider_stub_dir().join("target").join("release");
+    let dir = provider_stub_dir().join("target").join("debug");
     let prefix = if cfg!(windows) { "" } else { "lib" };
     let suffix = std::env::consts::DLL_SUFFIX.trim_start_matches('.');
     let name = format!("{prefix}atm_provider_stub.{suffix}");
@@ -26,15 +26,13 @@ fn provider_stub_lib_path() -> PathBuf {
 }
 
 #[test]
-#[ignore = "provider-stub workspace path is not portable across worktree layouts"]
 fn test_provider_loader_loads_stub_library() {
     let stub_dir = provider_stub_dir();
     assert!(stub_dir.exists(), "provider-stub directory not found");
 
-    // Build the stub provider as a shared library
+    // Build the stub provider as a shared library from the worktree-relative path.
     let status = Command::new("cargo")
         .arg("build")
-        .arg("--release")
         .current_dir(&stub_dir)
         .status()
         .expect("Failed to run cargo build for provider-stub");
