@@ -83,10 +83,6 @@ fn daemon_resolution_enabled() -> bool {
 }
 
 fn explicit_session_override() -> Option<String> {
-    // Unit tests should not pick up ambient shell session variables.
-    if running_test_harness() {
-        return None;
-    }
     env_var_nonempty("ATM_SESSION_ID")
 }
 
@@ -331,7 +327,11 @@ fn resolve_unknown_runtime_session(
 }
 
 fn resolve_gemini_session_from_cli() -> Result<Option<String>> {
-    if cfg!(test) {
+    if let Ok(stdout_override) = std::env::var("ATM_TEST_GEMINI_LIST_SESSIONS_STDOUT") {
+        return Ok(parse_gemini_list_sessions_output(&stdout_override));
+    }
+
+    if running_test_harness() && env_var_nonempty("ATM_TEST_ENABLE_GEMINI_CLI").is_none() {
         return Ok(None);
     }
 
@@ -371,6 +371,63 @@ fn parse_gemini_list_sessions_output(output: &str) -> Option<String> {
     }
 
     None
+}
+
+#[cfg(test)]
+fn session_from_daemon(info: &SessionQueryResult) -> Option<String> {
+    info.runtime_session_id
+        .as_deref()
+        .and_then(normalize_session_id)
+        .or_else(|| normalize_session_id(&info.session_id))
+}
+
+#[cfg(test)]
+pub(crate) fn resolve_caller_session_id_optional_with_query<F>(
+    team: Option<&str>,
+    identity: Option<&str>,
+    mut query_daemon_session: F,
+) -> Result<Option<String>>
+where
+    F: FnMut(&str, &str) -> Result<Option<SessionQueryResult>>,
+{
+    if let Some(v) = explicit_session_override() {
+        return Ok(Some(v));
+    }
+
+    if let (Some(t), Some(id)) = (team, identity) {
+        match query_daemon_session(t, id) {
+            Ok(Some(info)) if info.alive => {
+                if let Some(sid) = session_from_daemon(&info) {
+                    return Ok(Some(sid));
+                }
+            }
+            Ok(_) => {}
+            Err(e) => classify_ambiguity_error(team, identity, e)?,
+        }
+    }
+
+    if let Ok(Some(hook)) = read_hook_file()
+        && let Some(sid) = normalize_session_id(&hook.session_id)
+    {
+        return Ok(Some(sid));
+    }
+
+    if let Some(v) = env_var_nonempty("CLAUDE_SESSION_ID") {
+        return Ok(Some(v));
+    }
+    if let Some(v) = env_var_nonempty("CODEX_THREAD_ID") {
+        return Ok(Some(v));
+    }
+
+    if let (Some(t), Some(id)) = (team, identity) {
+        match read_session_file(t, id) {
+            Ok(Some(v)) => return Ok(normalize_session_id(&v)),
+            Ok(None) => {}
+            Err(e) => classify_ambiguity_error(team, identity, e)?,
+        }
+    }
+
+    Ok(None)
 }
 
 fn resolve_gemini_session_from_files() -> Result<Option<String>> {
@@ -769,6 +826,7 @@ mod tests {
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("ATM_SESSION_ID");
             std::env::remove_var("CLAUDE_SESSION_ID");
             std::env::remove_var("CODEX_THREAD_ID");
             std::env::remove_var("ATM_GEMINI_TMP_DIR");
@@ -781,6 +839,7 @@ mod tests {
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("ATM_SESSION_ID");
             std::env::remove_var("CLAUDE_SESSION_ID");
             std::env::remove_var("CODEX_THREAD_ID");
             std::env::remove_var("ATM_GEMINI_TMP_DIR");
@@ -803,6 +862,7 @@ mod tests {
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("ATM_SESSION_ID");
             std::env::remove_var("CLAUDE_SESSION_ID");
             std::env::remove_var("CODEX_THREAD_ID");
         }
@@ -814,6 +874,7 @@ mod tests {
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("ATM_SESSION_ID");
             std::env::remove_var("CLAUDE_SESSION_ID");
             std::env::remove_var("CODEX_THREAD_ID");
         }
@@ -854,6 +915,35 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn codex_runtime_without_thread_id_returns_none() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+
+        unsafe {
+            std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("ATM_TEST_HOME", temp.path());
+            std::env::set_var("ATM_RUNTIME", "codex");
+            std::env::remove_var("CODEX_THREAD_ID");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        let resolved =
+            resolve_caller_session_id_optional(Some("atm-dev"), Some("arch-ctm")).expect("resolve");
+
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("ATM_TEST_HOME");
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("CODEX_THREAD_ID");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        assert!(resolved.is_none());
+    }
+
+    #[test]
     fn parse_gemini_list_sessions_extracts_uuid_first() {
         let output = r#"
 Index Summary Last Active Session ID
@@ -861,6 +951,88 @@ Index Summary Last Active Session ID
 2 Older item 3h ago 93cbf813-b25a-4c3e-a3e0-1597417f7222
 "#;
         let resolved = parse_gemini_list_sessions_output(output).expect("uuid expected");
+        assert_eq!(resolved, "d98410cc-6d6a-41ac-ac39-a2ce39b9e503");
+    }
+
+    #[test]
+    fn parse_gemini_list_sessions_empty_or_malformed_returns_none() {
+        assert!(parse_gemini_list_sessions_output("").is_none());
+        assert!(parse_gemini_list_sessions_output("no sessions available").is_none());
+        assert!(parse_gemini_list_sessions_output("session-id: ???").is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn gemini_runtime_uses_hook_session_payload_when_present() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = current_ppid_hook_path();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let hook = serde_json::json!({
+            "pid": crate::util::hook_identity::get_parent_pid(),
+            "session_id": "gemini-hook-session-123",
+            "agent_name": "arch-gtm",
+            "created_at": now
+        });
+        std::fs::write(&hook_path, serde_json::to_string(&hook).unwrap()).unwrap();
+
+        unsafe {
+            std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("ATM_TEST_HOME", temp.path());
+            std::env::set_var("ATM_RUNTIME", "gemini");
+            std::env::set_var("ATM_TEST_ENABLE_HOOK_RESOLUTION", "1");
+            std::env::remove_var("ATM_TEST_GEMINI_LIST_SESSIONS_STDOUT");
+            std::env::remove_var("ATM_GEMINI_TMP_DIR");
+            std::env::remove_var("ATM_PROJECT_DIR");
+        }
+
+        let resolved = resolve_caller_session_id_optional(Some("atm-dev"), Some("arch-gtm"))
+            .expect("resolve")
+            .expect("session id");
+
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("ATM_TEST_HOME");
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("ATM_TEST_ENABLE_HOOK_RESOLUTION");
+            std::env::remove_var("ATM_TEST_GEMINI_LIST_SESSIONS_STDOUT");
+            std::env::remove_var("ATM_GEMINI_TMP_DIR");
+            std::env::remove_var("ATM_PROJECT_DIR");
+        }
+        let _ = std::fs::remove_file(&hook_path);
+
+        assert_eq!(resolved, "gemini-hook-session-123");
+    }
+
+    #[test]
+    #[serial]
+    fn gemini_cli_resolution_uses_test_stdout_override() {
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+        let output = "1 Fix auth bug 2m ago d98410cc-6d6a-41ac-ac39-a2ce39b9e503";
+
+        unsafe {
+            std::env::set_var("ATM_RUNTIME", "gemini");
+            std::env::set_var("ATM_TEST_GEMINI_LIST_SESSIONS_STDOUT", output);
+            std::env::remove_var("ATM_TEST_ENABLE_HOOK_RESOLUTION");
+            std::env::remove_var("ATM_GEMINI_TMP_DIR");
+            std::env::remove_var("ATM_PROJECT_DIR");
+        }
+
+        let resolved = resolve_caller_session_id_optional(Some("atm-dev"), Some("arch-gtm"))
+            .expect("resolve")
+            .expect("session id");
+
+        unsafe {
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("ATM_TEST_GEMINI_LIST_SESSIONS_STDOUT");
+            std::env::remove_var("ATM_TEST_ENABLE_HOOK_RESOLUTION");
+            std::env::remove_var("ATM_GEMINI_TMP_DIR");
+            std::env::remove_var("ATM_PROJECT_DIR");
+        }
+
         assert_eq!(resolved, "d98410cc-6d6a-41ac-ac39-a2ce39b9e503");
     }
 
