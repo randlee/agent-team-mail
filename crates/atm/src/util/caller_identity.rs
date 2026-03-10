@@ -318,6 +318,7 @@ fn parse_gemini_list_sessions_output(output: &str) -> Option<String> {
     None
 }
 
+#[cfg(test)]
 fn session_from_daemon(info: &SessionQueryResult) -> Option<String> {
     info.runtime_session_id
         .as_deref()
@@ -325,10 +326,7 @@ fn session_from_daemon(info: &SessionQueryResult) -> Option<String> {
         .or_else(|| normalize_session_id(&info.session_id))
 }
 
-fn default_query_daemon_session(team: &str, identity: &str) -> Result<Option<SessionQueryResult>> {
-    agent_team_mail_core::daemon_client::query_session_for_team(team, identity)
-}
-
+#[cfg(test)]
 pub(crate) fn resolve_caller_session_id_optional_with_query<F>(
     team: Option<&str>,
     identity: Option<&str>,
