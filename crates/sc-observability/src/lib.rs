@@ -7,7 +7,6 @@
 //! - socket error-code constants for the `log-event` contract
 
 use agent_team_mail_core::logging_event::{LogEventV1, ValidationError};
-use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -24,12 +23,7 @@ pub const SOCKET_ERROR_VERSION_MISMATCH: &str = "VERSION_MISMATCH";
 pub const SOCKET_ERROR_INVALID_PAYLOAD: &str = "INVALID_PAYLOAD";
 pub const SOCKET_ERROR_INTERNAL_ERROR: &str = "INTERNAL_ERROR";
 
-/// Minimal span reference contract shared by observability producers.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SpanRefV1 {
-    pub trace_id: String,
-    pub span_id: String,
-}
+pub use agent_team_mail_core::logging_event::SpanRefV1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
@@ -552,8 +546,11 @@ mod tests {
     #[test]
     fn span_ref_v1_round_trip_serialization() {
         let span = SpanRefV1 {
+            name: "compose".to_string(),
             trace_id: "trace-123".to_string(),
             span_id: "span-456".to_string(),
+            parent_span_id: None,
+            fields: serde_json::Map::new(),
         };
         let json = serde_json::to_string(&span).expect("serialize span");
         let decoded: SpanRefV1 = serde_json::from_str(&json).expect("deserialize span");
@@ -563,8 +560,11 @@ mod tests {
     #[test]
     fn span_ref_v1_fields_are_non_empty_after_construction() {
         let span = SpanRefV1 {
+            name: "compose".to_string(),
             trace_id: "trace-abc".to_string(),
             span_id: "span-def".to_string(),
+            parent_span_id: None,
+            fields: serde_json::Map::new(),
         };
         assert!(!span.trace_id.is_empty());
         assert!(!span.span_id.is_empty());
