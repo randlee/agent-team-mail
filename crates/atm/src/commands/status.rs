@@ -565,12 +565,15 @@ mod tests {
         unsafe {
             std::env::remove_var("ATM_OTEL_ENABLED");
         }
+        let sys_tmp = std::env::temp_dir();
+        let spool_path = sys_tmp.join("spool").to_string_lossy().into_owned();
+        let log_path = sys_tmp.join("atm.log.jsonl").to_string_lossy().into_owned();
         let contract = build_logging_health_contract(&LoggingHealth {
             state: "degraded_spooling".to_string(),
             dropped_counter: 1,
-            spool_path: "/tmp/spool".to_string(),
+            spool_path,
             last_error: Some("events are queued in spool awaiting merge".to_string()),
-            canonical_log_path: "/tmp/atm.log.jsonl".to_string(),
+            canonical_log_path: log_path,
             spool_count: 2,
             oldest_spool_age: Some(10),
         });
