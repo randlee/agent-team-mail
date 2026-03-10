@@ -911,7 +911,10 @@ mod tests {
         }
 
         assert_eq!(resolved.as_deref(), Some("codex-env-123"));
-        assert!(!query_called, "daemon query should not run when CODEX_THREAD_ID is set");
+        assert!(
+            !query_called,
+            "daemon query should not run when CODEX_THREAD_ID is set"
+        );
     }
 
     #[test]
@@ -955,7 +958,10 @@ mod tests {
         }
 
         assert_eq!(resolved.as_deref(), Some("claude-env-abc"));
-        assert!(!query_called, "daemon query should not run when CLAUDE_SESSION_ID is set");
+        assert!(
+            !query_called,
+            "daemon query should not run when CLAUDE_SESSION_ID is set"
+        );
     }
 
     #[test]
