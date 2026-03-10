@@ -524,6 +524,29 @@ pub fn configured_log_path(home_dir: &Path) -> PathBuf {
         .unwrap_or_else(|| home_dir.join(".config/atm/atm.log.jsonl"))
 }
 
+/// Return the canonical per-tool log file path with environment override support.
+///
+/// Resolution order:
+/// 1. `ATM_LOG_FILE`
+/// 2. `ATM_LOG_PATH` (compat alias)
+/// 3. `{home_dir}/.config/atm/logs/<tool>/<tool>.log.jsonl`
+pub fn configured_log_path_for_tool(home_dir: &Path, tool: &str) -> PathBuf {
+    std::env::var("ATM_LOG_FILE")
+        .or_else(|_| std::env::var("ATM_LOG_PATH"))
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let tool = sanitize_tool_name(tool);
+            home_dir
+                .join(".config")
+                .join("atm")
+                .join("logs")
+                .join(&tool)
+                .join(format!("{tool}.log.jsonl"))
+        })
+}
+
 /// Derive the spool directory from the canonical log file path.
 ///
 /// If the log path parent ends with `logs/`, spool is a sibling at
@@ -548,6 +571,49 @@ pub fn spool_dir_from_log_path(log_path: &Path) -> PathBuf {
 /// Return the configured spool directory based on canonical log-path resolution.
 pub fn configured_spool_dir(home_dir: &Path) -> PathBuf {
     spool_dir_from_log_path(&configured_log_path(home_dir))
+}
+
+/// Return the canonical per-tool spool directory with environment override support.
+///
+/// Resolution order:
+/// 1. If `ATM_LOG_FILE`/`ATM_LOG_PATH` is set, derive spool path from that log path.
+/// 2. `{home_dir}/.config/atm/logs/<tool>/spool`
+pub fn spool_dir_for_tool(home_dir: &Path, tool: &str) -> PathBuf {
+    if std::env::var("ATM_LOG_FILE")
+        .or_else(|_| std::env::var("ATM_LOG_PATH"))
+        .ok()
+        .is_some_and(|v| !v.trim().is_empty())
+    {
+        return spool_dir_from_log_path(&configured_log_path_for_tool(home_dir, tool));
+    }
+
+    let tool = sanitize_tool_name(tool);
+    home_dir
+        .join(".config")
+        .join("atm")
+        .join("logs")
+        .join(tool)
+        .join("spool")
+}
+
+fn sanitize_tool_name(tool: &str) -> String {
+    let trimmed = tool.trim();
+    if trimmed.is_empty() {
+        return "atm".to_string();
+    }
+    let mut out = String::with_capacity(trimmed.len());
+    for ch in trimmed.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "atm".to_string()
+    } else {
+        out
+    }
 }
 
 /// Return the default spool directory by resolving the home directory via
@@ -1017,6 +1083,36 @@ mod tests {
         unsafe {
             std::env::remove_var("ATM_LOG_FILE");
         }
+    }
+
+    #[test]
+    #[serial]
+    fn test_configured_log_path_for_tool_default_profile() {
+        let home = TempDir::new().expect("temp dir");
+        // SAFETY: test-scoped cleanup.
+        unsafe {
+            std::env::remove_var("ATM_LOG_FILE");
+            std::env::remove_var("ATM_LOG_PATH");
+        }
+        let path = configured_log_path_for_tool(home.path(), "atm-daemon");
+        assert_eq!(
+            path,
+            home.path()
+                .join(".config/atm/logs/atm-daemon/atm-daemon.log.jsonl")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_spool_dir_for_tool_default_profile() {
+        let home = TempDir::new().expect("temp dir");
+        // SAFETY: test-scoped cleanup.
+        unsafe {
+            std::env::remove_var("ATM_LOG_FILE");
+            std::env::remove_var("ATM_LOG_PATH");
+        }
+        let path = spool_dir_for_tool(home.path(), "atm-daemon");
+        assert_eq!(path, home.path().join(".config/atm/logs/atm-daemon/spool"));
     }
 
     #[test]
