@@ -1,6 +1,6 @@
 # Logging Troubleshooting Runbook
 
-Last updated: 2026-02-28
+Last updated: 2026-03-10
 
 ## Purpose
 
@@ -89,6 +89,61 @@ Remediation:
 3. Run:
    - `atm doctor --json`
 4. If still unavailable, capture diagnostics and escalate.
+
+## OpenTelemetry Exporter Diagnostics
+
+### Fail-open contract
+
+OTel export is best-effort and must never block canonical logging writes.
+
+Expected behavior during exporter outages:
+- canonical log writes continue (`atm.log`)
+- command flow remains non-failing (`atm doctor`, `atm status`)
+- OTel health reports degraded/unavailable until exporter path recovers
+
+### OTel sidecar output path
+
+By default, OTel sidecar output is derived from canonical log path:
+- canonical: `.../atm.log`
+- sidecar: `.../atm.log.otel.jsonl`
+
+If sidecar path is unreachable (permissions, path conflict, directory at file path),
+OTel health degrades but canonical logging remains available.
+
+### Environment toggles
+
+`ATM_OTEL_ENABLED` controls exporter enablement:
+- unset or truthy value: exporter enabled
+- `false|0|off|disabled|no`: exporter disabled by design
+
+When disabled:
+- `otel_status`/`logging_health.otel_exporter` should report `unavailable`
+- `otel_last_error`/`last_export_error` should explain exporter was disabled by
+  `ATM_OTEL_ENABLED`
+
+### Operator checks
+
+```bash
+atm doctor
+atm doctor --json
+atm status
+atm status --json
+```
+
+Look for:
+- `otel_status` in text output
+- `logging_health.otel_exporter` in JSON output
+- `otel_last_error`/`last_export_error` when exporter is disabled or degraded
+
+### Remediation
+
+1. Verify exporter is intentionally enabled:
+   - `unset ATM_OTEL_ENABLED` or set to a truthy value.
+2. Check sidecar path availability and permissions:
+   - same parent as canonical log path.
+3. Re-run `atm doctor --json` and confirm `logging_health.otel_exporter`.
+4. If exporter stays degraded while canonical logging is healthy, capture
+   diagnostics and escalate as exporter-path-specific incident.
 
 ## PID Logging Semantics
 
