@@ -1150,7 +1150,9 @@ mod tests {
 
         unsafe {
             std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
+            std::env::set_var("ATM_TEST_ENABLE_HOOK_RESOLUTION", "1");
         }
 
         let actual =
@@ -1158,7 +1160,9 @@ mod tests {
 
         unsafe {
             std::env::remove_var("ATM_HOME");
+            std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("CLAUDE_SESSION_ID");
+            std::env::remove_var("ATM_TEST_ENABLE_HOOK_RESOLUTION");
         }
         let _ = std::fs::remove_file(&hook_path);
 
@@ -1176,6 +1180,7 @@ mod tests {
 
         unsafe {
             std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
         }
 
@@ -1184,6 +1189,7 @@ mod tests {
 
         unsafe {
             std::env::remove_var("ATM_HOME");
+            std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
@@ -1201,6 +1207,7 @@ mod tests {
 
         unsafe {
             std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
@@ -1209,6 +1216,7 @@ mod tests {
 
         unsafe {
             std::env::remove_var("ATM_HOME");
+            std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
@@ -1224,6 +1232,7 @@ mod tests {
 
         unsafe {
             std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
         }
 
@@ -1232,6 +1241,7 @@ mod tests {
 
         unsafe {
             std::env::remove_var("ATM_HOME");
+            std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
@@ -1250,6 +1260,7 @@ mod tests {
 
         unsafe {
             std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
@@ -1258,6 +1269,7 @@ mod tests {
 
         unsafe {
             std::env::remove_var("ATM_HOME");
+            std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
