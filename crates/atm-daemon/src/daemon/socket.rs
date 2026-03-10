@@ -9247,8 +9247,7 @@ exit 1
 
         let temp_dir = tempfile::TempDir::new().unwrap();
         let home_dir = temp_dir.path().to_path_buf();
-        // SAFETY: serialized test; env var scoped by process.
-        unsafe { std::env::set_var("ATM_HOME", &home_dir) };
+        let _home_guard = EnvGuard::set("ATM_HOME", &home_dir.to_string_lossy());
         let cancel = CancellationToken::new();
         let daemon_lock = {
             let path = home_dir.join(".config/atm/daemon.lock");

@@ -2,8 +2,8 @@
 
 This document defines the default testing strategy for the `agent-team-mail`
 workspace. The goal is to keep required CI tests deterministic, fast enough to
- run on every PR, and explicit about the small set of checks that are allowed to
- remain manual smoke coverage.
+run on every PR, and explicit about the small set of checks that are allowed to
+remain manual smoke coverage.
 
 ## Goals
 
@@ -137,7 +137,10 @@ If a code path must read environment variables in-process:
 
 - isolate the test
 - serialize it with `serial_test` when necessary
-- restore the previous environment explicitly
+- use an RAII guard to restore the previous environment explicitly
+
+Process-global `std::env::set_var` / `remove_var` calls are prohibited in tests
+unless they are wrapped by a restore guard and the test is serialized.
 
 ## Cross-Platform Requirements
 
@@ -181,6 +184,8 @@ Every ignored test should have:
 Required PR validation should center on:
 
 - `cargo test`
+- `cargo test -- --test-threads=8` for env-sensitive or parallel-stability
+  coverage when a change affects global state assumptions
 - targeted parity/golden tests
 - `cargo clippy -- -D warnings`
 - `cargo fmt --check`

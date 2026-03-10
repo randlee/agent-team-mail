@@ -179,6 +179,12 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 
 ---
 
+## Testing Backlog
+
+- Issue [#655](https://github.com/randlee/agent-team-mail/issues/655) tracks the
+  comprehensive workspace testing strategy and ignored-test cleanup effort.
+  Initial deliverable PR: [#657](https://github.com/randlee/agent-team-mail/pull/657).
+
 ## 3. Phase 1: Foundation (`atm-core`) — COMPLETE
 
 **Branch prefix**: `feature/p1-*`

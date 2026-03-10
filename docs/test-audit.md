@@ -38,8 +38,10 @@ Categories used in this audit:
 
 - Status: fixed and unignored
 - Change: update `test_socket_server_control_stdin_roundtrip` to serialize a
-  real `ControlRequest` using the current schema
-- Reason: the test was broken by payload schema drift, not by infrastructure
+  real `ControlRequest` using the current schema and restore `ATM_HOME` through
+  the existing `EnvGuard` helper
+- Reason: the test was broken by payload schema drift, not by infrastructure;
+  once unignored it also needed the standard global env restore guard
 
 ## Remaining Ignored Tests
 
