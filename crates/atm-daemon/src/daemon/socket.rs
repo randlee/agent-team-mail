@@ -1526,46 +1526,6 @@ async fn handle_hook_event_command_with_dedup(
                 let validation = validate_pid_backend(&member, agent_pid);
                 if validation.is_alive_mismatch() {
                     emit_pid_process_mismatch(&team, &agent, &validation, "registration");
-                    {
-                        let mut tracker = state_store.lock().unwrap();
-                        if tracker.get_state(&agent).is_none() {
-                            tracker.register_agent(&agent);
-                        }
-                        tracker.set_state_with_context(
-                            &agent,
-                            AgentState::Offline,
-                            &format!(
-                                "pid/backend mismatch: backend='{}' expected='{}' actual='{}' pid={}",
-                                validation.backend,
-                                validation.expected_display(),
-                                validation.actual_display(),
-                                validation.pid
-                            ),
-                            "pid_backend_validation",
-                        );
-                    }
-                    let reason = format!(
-                        "pid/backend mismatch: backend='{}' expected='{}' actual='{}' pid={}",
-                        validation.backend,
-                        validation.expected_display(),
-                        validation.actual_display(),
-                        validation.pid
-                    );
-                    emit_hook_failure(
-                        Some(event_type.as_str()),
-                        Some(team.as_str()),
-                        Some(agent.as_str()),
-                        Some(session_id.as_str()),
-                        process_id,
-                        &reason,
-                    );
-                    return make_ok_response(
-                        &request.request_id,
-                        serde_json::json!({
-                            "processed": false,
-                            "reason": reason
-                        }),
-                    );
                 }
             }
             session_registry
@@ -5273,17 +5233,6 @@ fn handle_register_hint(
     let validation = validate_pid_backend(&member, process_id);
     if validation.is_alive_mismatch() {
         emit_pid_process_mismatch(&team, &agent, &validation, "register_hint");
-        return make_error_response(
-            &request.request_id,
-            "PID_PROCESS_MISMATCH",
-            &format!(
-                "backend='{}' expected='{}' actual='{}' pid={}",
-                validation.backend,
-                validation.expected_display(),
-                validation.actual_display(),
-                validation.pid
-            ),
-        );
     }
 
     let runtime_session = runtime_session_id.clone().or_else(|| {
@@ -5606,7 +5555,6 @@ fn bootstrap_session_from_member_hint(
     let validation = validate_pid_backend(member, pid);
     if validation.is_alive_mismatch() {
         emit_pid_process_mismatch(team, &member.name, &validation, "bootstrap");
-        return;
     }
 
     let Some(session_id) = member.session_id.clone().filter(|s| !s.trim().is_empty()) else {
@@ -5652,9 +5600,10 @@ fn derive_canonical_member_state(
                 in_config: true,
             };
         }
+        let mut mismatch_reason: Option<String> = None;
         let validation = validate_pid_backend(member, session.process_id);
         if validation.is_alive_mismatch() {
-            let mismatch_reason = format!(
+            let reason = format!(
                 "pid/backend mismatch: backend='{}' expected='{}' actual='{}' pid={}",
                 validation.backend,
                 validation.expected_display(),
@@ -5662,30 +5611,29 @@ fn derive_canonical_member_state(
                 validation.pid
             );
             let already_reported = tracker_meta.is_some_and(|meta| {
-                meta.source == "pid_backend_validation" && meta.reason == mismatch_reason
+                meta.source == "pid_backend_validation" && meta.reason == reason
             });
             if !already_reported {
                 emit_pid_process_mismatch(team, agent, &validation, "liveness");
             }
-            return CanonicalMemberState {
-                agent: agent.to_string(),
-                state: "offline".to_string(),
-                activity: "unknown".to_string(),
-                session_id: Some(session.session_id.clone()),
-                process_id: Some(session.process_id),
-                last_alive_at: session.last_alive_at.clone(),
-                reason: mismatch_reason,
-                source: "pid_backend_validation".to_string(),
-                in_config: true,
-            };
+            mismatch_reason = Some(reason);
         }
         if matches!(tracker_state, Some(AgentState::Idle)) {
-            let reason = tracker_meta
+            let base_reason = tracker_meta
                 .map(|m| m.reason.clone())
                 .unwrap_or_else(|| "idle lifecycle signal".to_string());
-            let source = tracker_meta
+            let reason = mismatch_reason
+                .as_ref()
+                .map(|mismatch| format!("{base_reason}; {mismatch}"))
+                .unwrap_or(base_reason);
+            let base_source = tracker_meta
                 .map(|m| m.source.clone())
                 .unwrap_or_else(|| "hook_event".to_string());
+            let source = if mismatch_reason.is_some() {
+                "pid_backend_validation".to_string()
+            } else {
+                base_source
+            };
             return CanonicalMemberState {
                 agent: agent.to_string(),
                 state: "idle".to_string(),
@@ -5698,6 +5646,7 @@ fn derive_canonical_member_state(
                 in_config: true,
             };
         }
+        let has_mismatch = mismatch_reason.is_some();
         return CanonicalMemberState {
             agent: agent.to_string(),
             state: "active".to_string(),
@@ -5705,8 +5654,15 @@ fn derive_canonical_member_state(
             session_id: Some(session.session_id.clone()),
             process_id: Some(session.process_id),
             last_alive_at: session.last_alive_at.clone(),
-            reason: "session active with live pid".to_string(),
-            source: "session_registry".to_string(),
+            reason: mismatch_reason
+                .as_ref()
+                .map(|mismatch| format!("session active with live pid; {mismatch}"))
+                .unwrap_or_else(|| "session active with live pid".to_string()),
+            source: if has_mismatch {
+                "pid_backend_validation".to_string()
+            } else {
+                "session_registry".to_string()
+            },
             in_config: true,
         };
     }
@@ -5813,34 +5769,25 @@ fn derive_unregistered_member_state(
         };
     }
 
+    let mut mismatch_reason: Option<String> = None;
     let validation = validate_pid_runtime(session.runtime.as_deref(), session.process_id);
     if validation.is_alive_mismatch() {
-        let mismatch_reason = format!(
+        let reason = format!(
             "pid/backend mismatch: backend='{}' expected='{}' actual='{}' pid={}",
             validation.backend,
             validation.expected_display(),
             validation.actual_display(),
             validation.pid
         );
-        let already_reported = tracker_meta.is_some_and(|meta| {
-            meta.source == "pid_backend_validation" && meta.reason == mismatch_reason
-        });
+        let already_reported = tracker_meta
+            .is_some_and(|meta| meta.source == "pid_backend_validation" && meta.reason == reason);
         if !already_reported {
             emit_pid_process_mismatch(team, &session.agent_name, &validation, "liveness");
         }
-        return CanonicalMemberState {
-            agent: session.agent_name.clone(),
-            state: "offline".to_string(),
-            activity: "unknown".to_string(),
-            session_id: Some(session.session_id.clone()),
-            process_id: Some(session.process_id),
-            last_alive_at: session.last_alive_at.clone(),
-            reason: mismatch_reason,
-            source: "pid_backend_validation".to_string(),
-            in_config: false,
-        };
+        mismatch_reason = Some(reason);
     }
 
+    let has_mismatch = mismatch_reason.is_some();
     CanonicalMemberState {
         agent: session.agent_name.clone(),
         state: "active".to_string(),
@@ -5848,8 +5795,15 @@ fn derive_unregistered_member_state(
         session_id: Some(session.session_id.clone()),
         process_id: Some(session.process_id),
         last_alive_at: session.last_alive_at.clone(),
-        reason: "session tracked but member missing from config".to_string(),
-        source: "session_registry".to_string(),
+        reason: mismatch_reason
+            .as_ref()
+            .map(|mismatch| format!("session tracked but member missing from config; {mismatch}"))
+            .unwrap_or_else(|| "session tracked but member missing from config".to_string()),
+        source: if has_mismatch {
+            "pid_backend_validation".to_string()
+        } else {
+            "session_registry".to_string()
+        },
         in_config: false,
     }
 }
@@ -6697,6 +6651,26 @@ notify_target = "team-lead"
         assert_eq!(state.source, "session_registry");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_derive_canonical_member_state_runtime_pid_mismatch_keeps_non_offline_state() {
+        let member = test_member("arch-ctm", "codex");
+        let session = test_active_session("atm-dev", "arch-ctm", Some("codex"));
+
+        let state = derive_canonical_member_state(
+            "atm-dev",
+            &member,
+            Some(AgentState::Active),
+            Some(&session),
+            None,
+        );
+
+        assert_ne!(state.state, "offline");
+        assert_eq!(state.state, "active");
+        assert_eq!(state.activity, "busy");
+        assert!(state.reason.contains("pid/backend mismatch"));
+    }
+
     #[test]
     fn test_derive_canonical_member_state_active_tracker_without_session_stays_active() {
         let member = test_member("arch-ctm", "external");
@@ -6720,11 +6694,12 @@ notify_target = "team-lead"
 
     #[cfg(unix)]
     #[test]
-    fn test_derive_unregistered_member_state_runtime_pid_mismatch_marks_offline() {
+    fn test_derive_unregistered_member_state_runtime_pid_mismatch_keeps_active() {
         let session = test_active_session("atm-dev", "ghost-codex", Some("codex"));
         let state =
             derive_unregistered_member_state("atm-dev", &session, Some(AgentState::Active), None);
-        assert_eq!(state.state, "offline");
+        assert_eq!(state.state, "active");
+        assert_eq!(state.activity, "busy");
         assert_eq!(state.source, "pid_backend_validation");
         assert!(state.reason.contains("backend='codex'"));
         assert!(!state.in_config);
@@ -8151,14 +8126,20 @@ exit 1
             }),
         );
         let resp = handle_register_hint(&req, &store, &sr);
-        assert_eq!(resp.status, "error");
-        let err = resp.error.expect("error payload");
-        assert_eq!(err.code, "PID_PROCESS_MISMATCH");
-        assert!(err.message.contains("backend='codex'"));
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.expect("payload required");
+        assert_eq!(payload["processed"].as_bool(), Some(true));
 
         let logs = capture.contents();
         assert!(logs.contains("pid/backend mismatch at register_hint"));
         assert!(logs.contains("backend='codex'"));
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
+                .is_some(),
+            "mismatch must not block register-hint upsert"
+        );
     }
 
     #[cfg(unix)]
@@ -8196,14 +8177,20 @@ exit 1
             }),
         );
         let resp = handle_register_hint(&req, &store, &sr);
-        assert_eq!(resp.status, "error");
-        let err = resp.error.expect("error payload");
-        assert_eq!(err.code, "PID_PROCESS_MISMATCH");
-        assert!(err.message.contains("backend='claude-code'"));
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.expect("payload required");
+        assert_eq!(payload["processed"].as_bool(), Some(true));
 
         let logs = capture.contents();
         assert!(logs.contains("pid/backend mismatch at register_hint"));
         assert!(logs.contains("backend='claude-code'"));
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "team-lead-2")
+                .is_some(),
+            "mismatch must not block register-hint upsert"
+        );
     }
 
     #[test]
@@ -8291,6 +8278,67 @@ exit 1
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_handle_register_hint_stale_session_reregistration_mismatch_updates_last_alive_at() {
+        let fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        set_member_backend(fixture._temp.path(), "atm-dev", "arch-ctm", "codex");
+        let store = make_store();
+        let sr = make_sr();
+
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert_runtime_for_team(
+                "atm-dev",
+                "arch-ctm",
+                "stale-sess",
+                u32::MAX - 17,
+                Some("codex".to_string()),
+                Some("stale-sess".to_string()),
+                None,
+                None,
+            );
+        }
+
+        let before_last_alive = sr
+            .lock()
+            .unwrap()
+            .query_for_team("atm-dev", "arch-ctm")
+            .and_then(|rec| rec.last_alive_at.clone());
+        assert!(
+            before_last_alive.is_none(),
+            "stale dead pid seed should not have last_alive_at before re-register"
+        );
+
+        let req = make_request(
+            "register-hint",
+            serde_json::json!({
+                "team": "atm-dev",
+                "agent": "arch-ctm",
+                "session_id": "fresh-sess",
+                "process_id": std::process::id(),
+                "runtime": "codex",
+                "runtime_session_id": "fresh-sess"
+            }),
+        );
+        let resp = handle_register_hint(&req, &store, &sr);
+        assert_eq!(resp.status, "ok");
+
+        let session = sr
+            .lock()
+            .unwrap()
+            .query_for_team("atm-dev", "arch-ctm")
+            .cloned()
+            .expect("session must be present after re-registration");
+        assert_eq!(session.session_id, "fresh-sess");
+        assert_eq!(session.process_id, std::process::id());
+        assert!(
+            session.last_alive_at.is_some(),
+            "successful re-registration should refresh last_alive_at"
+        );
+    }
+
     #[test]
     #[serial]
     fn test_handle_register_hint_rejects_cross_identity_session_write() {
@@ -8350,6 +8398,39 @@ exit 1
                 .query_for_team("atm-dev", "arch-ctm")
                 .is_none(),
             "cross-identity register-hint must not write session record"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_handle_register_hint_cross_identity_still_denied_under_pid_mismatch() {
+        let fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        set_member_backend(fixture._temp.path(), "atm-dev", "arch-ctm", "codex");
+        let store = make_store();
+        let sr = make_sr();
+
+        let req = make_request(
+            "register-hint",
+            serde_json::json!({
+                "team": "atm-dev",
+                "agent": "arch-ctm",
+                "identity": "team-lead",
+                "session_id": "codex:sess-cross",
+                "process_id": std::process::id(),
+                "runtime": "codex",
+            }),
+        );
+        let resp = handle_register_hint(&req, &store, &sr);
+        assert_eq!(resp.status, "error");
+        let err = resp.error.expect("error payload required");
+        assert_eq!(err.code, "PERMISSION_DENIED");
+        assert!(
+            sr.lock()
+                .unwrap()
+                .query_for_team("atm-dev", "arch-ctm")
+                .is_none(),
+            "cross-identity guard must block writes even when pid/backend mismatches"
         );
     }
 
@@ -10176,7 +10257,7 @@ exit 1
     #[cfg(unix)]
     #[tokio::test]
     #[serial]
-    async fn test_hook_event_session_start_rejects_backend_pid_mismatch() {
+    async fn test_hook_event_session_start_treats_backend_pid_mismatch_as_advisory() {
         let fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
 
         // Mark arch-ctm as codex backend in team config.
@@ -10211,19 +10292,13 @@ exit 1
         let resp = handle_hook_event_with_transient_retry(&req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
-        assert!(!payload["processed"].as_bool().unwrap());
-        assert!(
-            payload["reason"]
-                .as_str()
-                .unwrap()
-                .contains("pid/backend mismatch")
-        );
+        assert!(payload["processed"].as_bool().unwrap());
 
         let reg = sr.lock().unwrap();
-        assert!(
-            reg.query_for_team("atm-dev", "arch-ctm").is_none(),
-            "mismatched pid/backend must not upsert session registry"
-        );
+        let session = reg
+            .query_for_team("atm-dev", "arch-ctm")
+            .expect("mismatch must not block session upsert");
+        assert_eq!(session.session_id, "sess-mismatch");
     }
 
     #[cfg(unix)]
