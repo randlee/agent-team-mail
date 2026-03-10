@@ -77,11 +77,6 @@ fn find_lockfile_version<'a>(lockfile_contents: &'a str, package_name: &str) -> 
     // from the lines that follow until the next blank line or [[package]].
     let mut in_target_block = false;
     let mut found_name = false;
-    let mut version_start: Option<usize> = None;
-
-    let mut line_start = 0;
-    // We work over the raw string using byte offsets so we can return a &str
-    // slice pointing into the original content.
     for line in lockfile_contents.lines() {
         let trimmed = line.trim();
 
@@ -89,8 +84,6 @@ fn find_lockfile_version<'a>(lockfile_contents: &'a str, package_name: &str) -> 
             // Start a new package block. Reset per-block state.
             in_target_block = false;
             found_name = false;
-            version_start = None;
-            line_start += line.len() + 1; // +1 for '\n'
             continue;
         }
 
@@ -101,9 +94,7 @@ fn find_lockfile_version<'a>(lockfile_contents: &'a str, package_name: &str) -> 
                 // happen in a well-formed lockfile, but handle gracefully.
                 in_target_block = false;
                 found_name = false;
-                version_start = None;
             }
-            line_start += line.len() + 1;
             continue;
         }
 
@@ -115,29 +106,16 @@ fn find_lockfile_version<'a>(lockfile_contents: &'a str, package_name: &str) -> 
                 // Different name — wrong block.
                 in_target_block = false;
                 found_name = false;
-                version_start = None;
             }
         }
 
         if in_target_block && found_name {
             if let Some(ver_val) = extract_toml_string(trimmed, "version") {
-                // Find the offset of ver_val inside lockfile_contents to return a
-                // slice with the original lifetime.
-                let line_offset = line_start;
-                // Find "version" key offset within this line.
-                if let Some(rel) = line.find(ver_val) {
-                    let abs_start = line_offset + rel;
-                    let abs_end = abs_start + ver_val.len();
-                    return Some(&lockfile_contents[abs_start..abs_end]);
-                }
-                // Fallback: version_start couldn't be computed; this branch
-                // should not be reachable for a well-formed lockfile.
-                let _ = version_start;
+                // Return the extracted value directly. This avoids byte-offset
+                // reconstruction bugs on CRLF lockfiles (Windows).
                 return Some(ver_val);
             }
         }
-
-        line_start += line.len() + 1;
     }
 
     None
@@ -203,6 +181,17 @@ version = "1.0.0"
         assert_eq!(
             find_lockfile_version(lockfile, "agent-team-mail-core"),
             None
+        );
+    }
+
+    #[test]
+    fn finds_correct_version_with_crlf_line_endings() {
+        let lockfile = "[[package]]\r\nname = \"agent-team-mail\"\r\nversion = \"0.43.0\"\r\n\r\n\
+[[package]]\r\nname = \"agent-team-mail-core\"\r\nversion = \"0.43.1\"\r\n";
+
+        assert_eq!(
+            find_lockfile_version(lockfile, "agent-team-mail-core"),
+            Some("0.43.1")
         );
     }
 
