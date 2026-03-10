@@ -33,6 +33,15 @@ local structured logging always-on, canonical, and fail-open.
 3. Runtime-specific names (`thread-id`, `session-id`) are adapter internals.
 4. OTel exporter failures must never block command execution.
 5. Local structured logging remains available regardless of OTel backend state.
+6. Correlation field requirements are scope-bound:
+   - runtime events: `team`, `agent`, `runtime`, `session_id`
+   - trace events: `trace_id`, `span_id`
+   - sub-agent events: runtime + trace fields + `subagent_id`
+7. `spans` chain semantics are root→leaf, same-trace, parent-linked.
+8. `doctor --json` and `status --json` share one locked `logging_health` key contract.
+9. Path contract is dual-profile and explicit:
+   - ATM-managed: `${home_dir}/.config/atm/logs/<tool>/...`
+   - standalone: `${home_dir}/.config/<tool>/logs/...`
 
 ## Phase Scope
 
