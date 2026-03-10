@@ -634,6 +634,9 @@ fn reconcile_team_member_activity_with_mode(
                 (None, Some(_), Some(_)) => true,
                 _ => false,
             };
+            let existing_record_is_dead = record.as_ref().is_some_and(|rec| {
+                rec.state == crate::daemon::session_registry::SessionState::Dead
+            });
 
             if needs_registration
                 && let (Some(sess), Some(pid)) = (session_hint.as_deref(), pid_hint)
@@ -661,15 +664,17 @@ fn reconcile_team_member_activity_with_mode(
                         ..Default::default()
                     });
                 }
-                session_registry
-                    .lock()
-                    .unwrap()
-                    .upsert_for_team(&team_name, &member.name, sess, pid);
-                record = session_registry
-                    .lock()
-                    .unwrap()
-                    .query_for_team(&team_name, &member.name)
-                    .cloned();
+                if !existing_record_is_dead {
+                    session_registry
+                        .lock()
+                        .unwrap()
+                        .upsert_for_team(&team_name, &member.name, sess, pid);
+                    record = session_registry
+                        .lock()
+                        .unwrap()
+                        .query_for_team(&team_name, &member.name)
+                        .cloned();
+                }
             }
 
             let alive = if let Some(ref record) = record {
@@ -2128,7 +2133,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reconcile_does_not_auto_promote_dead_session_with_live_pid() {
+    fn test_reconcile_does_not_auto_promote_dead_session_with_live_pid_hints() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
         let cwd = home.display().to_string();
@@ -2151,12 +2156,15 @@ mod tests {
                 {
                     "agentId": "arch-ctm@atm-dev",
                     "name": "arch-ctm",
-                    "agentType": "general-purpose",
+                    "agentType": "codex",
                     "model": "unknown",
                     "joinedAt": 1,
                     "cwd": cwd,
                     "subscriptions": [],
-                    "isActive": true
+                    "isActive": true,
+                    "sessionId": "hint-session",
+                    "processId": live_pid,
+                    "externalBackendType": "codex"
                 }
             ]),
         );
@@ -2164,7 +2172,7 @@ mod tests {
         let sr = new_session_registry();
         {
             let mut reg = sr.lock().unwrap();
-            reg.upsert_for_team("atm-dev", "arch-ctm", "dead-live-pid", live_pid);
+            reg.upsert_for_team("atm-dev", "arch-ctm", "dead-session", live_pid);
             reg.mark_dead_for_team("atm-dev", "arch-ctm");
         }
 
@@ -2195,6 +2203,8 @@ mod tests {
 
         let reg = sr.lock().unwrap();
         let record = reg.query_for_team("atm-dev", "arch-ctm").unwrap();
+        assert_eq!(record.session_id, "dead-session");
+        assert_eq!(record.process_id, live_pid);
         assert_eq!(
             record.state,
             crate::daemon::session_registry::SessionState::Dead

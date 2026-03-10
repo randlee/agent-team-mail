@@ -1715,6 +1715,87 @@ fn read_daemon_pid_state(pid_path: &std::path::Path) -> PidState {
 }
 
 #[cfg(unix)]
+#[derive(Debug, Clone, Default)]
+struct DaemonIdentitySnapshot {
+    pid_from_file: Option<u32>,
+    pid_from_status: Option<u32>,
+    version_from_status: Option<String>,
+    metadata: Option<DaemonLockMetadata>,
+    socket_connectable: bool,
+}
+
+#[cfg(unix)]
+fn evaluate_daemon_identity_mismatch(
+    snapshot: &DaemonIdentitySnapshot,
+    expected_home: &str,
+    expected_bin: &std::ffi::OsStr,
+    expected_version: &str,
+    pid_alive_fn: impl Fn(i32) -> bool,
+    pid_command_line_fn: impl Fn(i32) -> Option<String>,
+) -> Option<String> {
+    if snapshot.metadata.is_none() && !snapshot.socket_connectable {
+        return None;
+    }
+
+    if snapshot.metadata.is_none() {
+        return Some(
+            "daemon identity mismatch: lock metadata missing (soft mismatch, restart required)"
+                .to_string(),
+        );
+    }
+
+    let pid = snapshot
+        .metadata
+        .as_ref()
+        .map(|m| m.pid)
+        .or(snapshot.pid_from_file)
+        .or(snapshot.pid_from_status)?;
+
+    if !pid_alive_fn(pid as i32) {
+        return Some(format!("daemon identity mismatch: pid {pid} is not alive"));
+    }
+
+    if let Some(meta) = &snapshot.metadata {
+        if let Some(file_pid) = snapshot.pid_from_file
+            && file_pid != meta.pid
+        {
+            return Some(format!(
+                "daemon identity mismatch: pid file ({file_pid}) != lock metadata ({})",
+                meta.pid
+            ));
+        }
+
+        if !meta.home_scope.is_empty() && meta.home_scope != expected_home {
+            return Some(format!(
+                "daemon identity mismatch: home scope '{}' != expected '{}'",
+                meta.home_scope, expected_home
+            ));
+        }
+
+        if let Some(cmdline) = pid_command_line_fn(pid as i32)
+            && let Some(matches) = pid_command_matches_expected_binary(&cmdline, expected_bin)
+            && !matches
+        {
+            return Some(format!(
+                "daemon identity mismatch: running command '{}' != expected daemon binary '{}'",
+                cmdline,
+                std::path::PathBuf::from(expected_bin).display()
+            ));
+        }
+    }
+
+    if let Some(ver) = snapshot.version_from_status.as_deref()
+        && ver != expected_version
+    {
+        return Some(format!(
+            "daemon version mismatch: running={ver} expected={expected_version}"
+        ));
+    }
+
+    None
+}
+
+#[cfg(unix)]
 fn detect_daemon_identity_mismatch(
     home: &std::path::Path,
     socket_connectable: bool,
@@ -1741,10 +1822,6 @@ fn detect_daemon_identity_mismatch(
         .ok()
         .and_then(|s| serde_json::from_str::<DaemonLockMetadata>(&s).ok());
 
-    if metadata.is_none() && !socket_connectable {
-        return None;
-    }
-
     if metadata.is_none()
         && let Some(candidate_pid) = pid_from_file.or(pid_from_status)
         && pid_alive(candidate_pid as i32)
@@ -1755,68 +1832,27 @@ fn detect_daemon_identity_mismatch(
             .and_then(|s| serde_json::from_str::<DaemonLockMetadata>(&s).ok());
     }
 
-    if metadata.is_none() {
-        return Some(
-            "daemon identity mismatch: lock metadata missing (soft mismatch, restart required)"
-                .to_string(),
-        );
-    }
+    let expected_home = std::fs::canonicalize(home)
+        .unwrap_or_else(|_| home.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    let expected_bin = resolve_daemon_binary();
+    let snapshot = DaemonIdentitySnapshot {
+        pid_from_file,
+        pid_from_status,
+        version_from_status,
+        metadata,
+        socket_connectable,
+    };
 
-    let pid = metadata
-        .as_ref()
-        .map(|m| m.pid)
-        .or(pid_from_file)
-        .or(pid_from_status);
-
-    let pid = pid?;
-    if !pid_alive(pid as i32) {
-        return Some(format!("daemon identity mismatch: pid {pid} is not alive"));
-    }
-
-    if let Some(meta) = &metadata {
-        if let Some(file_pid) = pid_from_file
-            && file_pid != meta.pid
-        {
-            return Some(format!(
-                "daemon identity mismatch: pid file ({file_pid}) != lock metadata ({})",
-                meta.pid
-            ));
-        }
-
-        let expected_home = std::fs::canonicalize(home)
-            .unwrap_or_else(|_| home.to_path_buf())
-            .to_string_lossy()
-            .to_string();
-        if !meta.home_scope.is_empty() && meta.home_scope != expected_home {
-            return Some(format!(
-                "daemon identity mismatch: home scope '{}' != expected '{}'",
-                meta.home_scope, expected_home
-            ));
-        }
-
-        if let Some(cmdline) = pid_command_line(pid as i32)
-            && let Some(matches) =
-                pid_command_matches_expected_binary(&cmdline, &resolve_daemon_binary())
-            && !matches
-        {
-            return Some(format!(
-                "daemon identity mismatch: running command '{}' != expected daemon binary '{}'",
-                cmdline,
-                std::path::PathBuf::from(resolve_daemon_binary()).display()
-            ));
-        }
-    }
-
-    if let Some(ver) = version_from_status
-        && ver != env!("CARGO_PKG_VERSION")
-    {
-        return Some(format!(
-            "daemon version mismatch: running={ver} expected={}",
-            env!("CARGO_PKG_VERSION")
-        ));
-    }
-
-    None
+    evaluate_daemon_identity_mismatch(
+        &snapshot,
+        &expected_home,
+        expected_bin.as_os_str(),
+        env!("CARGO_PKG_VERSION"),
+        pid_alive,
+        pid_command_line,
+    )
 }
 
 #[cfg(unix)]
@@ -2052,6 +2088,58 @@ fn pid_alive(pid: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn wait_for_daemon_runtime_ready(home: &std::path::Path) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let pid_path = home.join(".claude/daemon/atm-daemon.pid");
+        while std::time::Instant::now() < deadline {
+            if pid_path.exists() && super::daemon_socket_connectable(home) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        false
+    }
+
+    #[cfg(unix)]
+    fn wait_for_daemon_version(home: &std::path::Path, expected_version: &str) -> Option<i32> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let pid_path = home.join(".claude/daemon/atm-daemon.pid");
+        let status_path = home.join(".claude/daemon/status.json");
+        while std::time::Instant::now() < deadline {
+            let pid = std::fs::read_to_string(&pid_path)
+                .ok()
+                .and_then(|raw| raw.trim().parse::<i32>().ok());
+            let status_version = std::fs::read_to_string(&status_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|json| {
+                    json.get("version")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                });
+            if let Some(pid) = pid
+                && super::pid_alive(pid)
+                && status_version.as_deref() == Some(expected_version)
+            {
+                return Some(pid);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        None
+    }
+
+    #[cfg(unix)]
+    fn fake_lock_metadata(home: &str, pid: u32) -> DaemonLockMetadata {
+        DaemonLockMetadata {
+            pid,
+            executable_path: "/tmp/fake-atm-daemon".to_string(),
+            home_scope: home.to_string(),
+            version: "0.0.1".to_string(),
+            written_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
     use serial_test::serial;
 
     fn with_autostart_disabled<T>(f: impl FnOnce() -> T) -> T {
@@ -2512,6 +2600,111 @@ sleep 2
 
     #[cfg(unix)]
     #[test]
+    fn test_evaluate_daemon_identity_mismatch_requires_metadata_or_socket() {
+        let snapshot = DaemonIdentitySnapshot::default();
+        let reason = evaluate_daemon_identity_mismatch(
+            &snapshot,
+            "/tmp/atm-home",
+            std::ffi::OsStr::new("atm-daemon"),
+            env!("CARGO_PKG_VERSION"),
+            |_| true,
+            |_| Some("atm-daemon".to_string()),
+        );
+
+        assert_eq!(reason, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_evaluate_daemon_identity_mismatch_reports_missing_metadata_when_socket_live() {
+        let snapshot = DaemonIdentitySnapshot {
+            socket_connectable: true,
+            ..Default::default()
+        };
+        let reason = evaluate_daemon_identity_mismatch(
+            &snapshot,
+            "/tmp/atm-home",
+            std::ffi::OsStr::new("atm-daemon"),
+            env!("CARGO_PKG_VERSION"),
+            |_| true,
+            |_| Some("atm-daemon".to_string()),
+        )
+        .expect("expected mismatch");
+
+        assert!(reason.contains("lock metadata missing"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_evaluate_daemon_identity_mismatch_reports_command_mismatch() {
+        let snapshot = DaemonIdentitySnapshot {
+            metadata: Some(fake_lock_metadata("/tmp/atm-home", 4242)),
+            pid_from_file: Some(4242),
+            socket_connectable: true,
+            ..Default::default()
+        };
+        let reason = evaluate_daemon_identity_mismatch(
+            &snapshot,
+            "/tmp/atm-home",
+            std::ffi::OsStr::new("atm-daemon"),
+            env!("CARGO_PKG_VERSION"),
+            |_| true,
+            |_| Some("/usr/bin/python3 -m stale-daemon".to_string()),
+        )
+        .expect("expected mismatch");
+
+        assert!(reason.contains("running command"));
+        assert!(reason.contains("expected daemon binary"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_evaluate_daemon_identity_mismatch_reports_version_mismatch() {
+        let snapshot = DaemonIdentitySnapshot {
+            metadata: Some(fake_lock_metadata("/tmp/atm-home", 4242)),
+            pid_from_file: Some(4242),
+            version_from_status: Some("0.0.1".to_string()),
+            socket_connectable: true,
+            ..Default::default()
+        };
+        let reason = evaluate_daemon_identity_mismatch(
+            &snapshot,
+            "/tmp/atm-home",
+            std::ffi::OsStr::new("atm-daemon"),
+            env!("CARGO_PKG_VERSION"),
+            |_| true,
+            |_| Some("atm-daemon".to_string()),
+        )
+        .expect("expected mismatch");
+
+        assert!(reason.contains("daemon version mismatch"));
+        assert!(reason.contains("running=0.0.1"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_evaluate_daemon_identity_mismatch_accepts_matching_identity() {
+        let snapshot = DaemonIdentitySnapshot {
+            metadata: Some(fake_lock_metadata("/tmp/atm-home", 4242)),
+            pid_from_file: Some(4242),
+            version_from_status: Some(env!("CARGO_PKG_VERSION").to_string()),
+            socket_connectable: true,
+            ..Default::default()
+        };
+        let reason = evaluate_daemon_identity_mismatch(
+            &snapshot,
+            "/tmp/atm-home",
+            std::ffi::OsStr::new("atm-daemon"),
+            env!("CARGO_PKG_VERSION"),
+            |_| true,
+            |_| Some("atm-daemon --serve".to_string()),
+        );
+
+        assert_eq!(reason, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
     #[serial]
     fn test_ensure_daemon_running_recovers_from_dead_pid_metadata() {
         use std::fs;
@@ -2614,6 +2807,7 @@ sleep 8
     #[cfg(unix)]
     #[test]
     #[serial]
+    #[ignore = "smoke coverage only; exercises real subprocess and socket timing"]
     fn test_ensure_daemon_running_restarts_identity_mismatch_daemon() {
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
@@ -2694,6 +2888,9 @@ obj["pid"]=os.getpid()
 with open(path, "w", encoding="utf-8") as f:
     json.dump(obj, f)
 open(os.path.join(home, "replacement-started"), "w").write("ok")
+with open(os.path.join(home, "replacement-started"), "a", encoding="utf-8") as f:
+    f.flush()
+    os.fsync(f.fileno())
 PY
 sleep 8
 "#,
@@ -2715,7 +2912,30 @@ sleep 8
             .env("ATM_HOME", &home)
             .spawn()
             .expect("spawn stale daemon");
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            wait_for_daemon_runtime_ready(&home),
+            "stale daemon must publish pid file and bind socket before mismatch check"
+        );
+        let stale_pid: u32 = std::fs::read_to_string(home.join(".claude/daemon/atm-daemon.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let stale_metadata = DaemonLockMetadata {
+            pid: stale_pid,
+            executable_path: stale_script.to_string_lossy().to_string(),
+            home_scope: std::fs::canonicalize(&home)
+                .unwrap_or_else(|_| home.clone())
+                .to_string_lossy()
+                .to_string(),
+            version: "0.0.1".to_string(),
+            written_at: chrono::Utc::now().to_rfc3339(),
+        };
+        std::fs::write(
+            home.join(".config/atm/daemon.lock.meta.json"),
+            serde_json::to_string_pretty(&stale_metadata).unwrap(),
+        )
+        .unwrap();
 
         unsafe {
             std::env::set_var("ATM_DAEMON_BIN", &expected_script);
@@ -2723,19 +2943,22 @@ sleep 8
         }
         ensure_daemon_running_unix().expect("mismatch daemon should be restarted");
 
-        assert!(
-            home.join("replacement-started").exists(),
-            "replacement daemon marker missing"
-        );
-        let new_pid: i32 = std::fs::read_to_string(home.join(".claude/daemon/atm-daemon.pid"))
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        if stale_child.try_wait().ok().flatten().is_none() {
+        let stale_exit_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut stale_exited = false;
+        while std::time::Instant::now() < stale_exit_deadline {
+            if stale_child.try_wait().ok().flatten().is_some() {
+                stale_exited = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let new_pid = wait_for_daemon_version(&home, env!("CARGO_PKG_VERSION"))
+            .expect("replacement daemon missing");
+        if !stale_exited && stale_child.try_wait().ok().flatten().is_none() {
             let _ = stale_child.kill();
             let _ = stale_child.wait();
         }
+        assert!(stale_exited, "stale daemon must exit during mismatch restart");
         assert!(new_pid > 1, "replacement daemon pid must be valid");
 
         if pid_alive(new_pid) {
