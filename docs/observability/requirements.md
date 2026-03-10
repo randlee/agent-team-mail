@@ -146,7 +146,7 @@ Diagnostics surface:
   actionable remediation.
 - `atm status --json` must expose logging health state.
 - Runbook mapping of health states to remediation commands must exist in
-  `docs/logging-troubleshooting.md`.
+  `docs/observability/troubleshooting.md`.
 
 Compatibility:
 - Logging-health JSON schema is versioned and stable.
