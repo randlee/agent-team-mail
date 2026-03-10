@@ -2120,13 +2120,19 @@ mod tests {
     #[test]
     fn logging_health_contract_matches_canonical_schema() {
         let tmp = tempfile::tempdir().expect("temp dir");
+        let temp_root = std::env::temp_dir();
+        let spool_path = temp_root.join("spool").to_string_lossy().to_string();
+        let canonical_log_path = temp_root
+            .join("atm.log.jsonl")
+            .to_string_lossy()
+            .to_string();
         let value = serde_json::to_value(build_logging_health_contract(
             &LoggingHealthSnapshot {
                 state: "degraded_spooling".to_string(),
                 dropped_counter: 0,
-                spool_path: "/tmp/spool".to_string(),
+                spool_path: spool_path.clone(),
                 last_error: Some("events are queued in spool awaiting merge".to_string()),
-                canonical_log_path: "/tmp/atm.log.jsonl".to_string(),
+                canonical_log_path: canonical_log_path.clone(),
                 spool_count: 1,
                 oldest_spool_age: Some(5),
             },
@@ -2136,8 +2142,8 @@ mod tests {
 
         assert_eq!(value["schema_version"], "v1");
         assert_eq!(value["state"], "degraded_spooling");
-        assert_eq!(value["canonical_log_path"], "/tmp/atm.log.jsonl");
-        assert_eq!(value["spool_path"], "/tmp/spool");
+        assert_eq!(value["canonical_log_path"], canonical_log_path);
+        assert_eq!(value["spool_path"], spool_path);
         assert_eq!(value["dropped_events_total"], 0);
         assert_eq!(value["spool_file_count"], 1);
         assert_eq!(value["oldest_spool_age_seconds"], 5);
