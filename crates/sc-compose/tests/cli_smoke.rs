@@ -456,15 +456,13 @@ fn sc_compose_log_format_human_writes_human_readable_lines() {
 fn sc_compose_config_prefers_atm_home_for_default_log_path() {
     let tmp = TempDir::new().expect("tempdir");
     let atm_home = tmp.path().join("atm-home");
-    let fake_home = tmp.path().join("fake-home");
-    let fake_userprofile = tmp.path().join("fake-userprofile");
     let template = tmp.path().join("template.md.j2");
     fs::write(&template, "hello {{ name }}").expect("write");
 
     run_sc_compose()
         .env("ATM_HOME", &atm_home)
-        .env("HOME", &fake_home)
-        .env("USERPROFILE", &fake_userprofile)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
         .arg("--root")
         .arg(tmp.path())
         .arg("--var")
@@ -480,4 +478,45 @@ fn sc_compose_config_prefers_atm_home_for_default_log_path() {
         "ATM_HOME-derived log path should exist: {}",
         expected.display()
     );
+}
+
+#[test]
+fn var_file_dash_reads_json_from_stdin() {
+    let tmp = TempDir::new().expect("tempdir");
+    let template = tmp.path().join("template.md.j2");
+    fs::write(&template, "hello {{ name }}").expect("write");
+
+    // Use assert_cmd::Command (wraps std::process::Command) so that write_stdin
+    // is available.  The cargo_bin! macro resolves the binary path at compile
+    // time; Command::new avoids the deprecated cargo_bin associated function.
+    let mut cmd = assert_cmd::Command::new(cargo::cargo_bin!("sc-compose"));
+    cmd.arg("--root")
+        .arg(tmp.path())
+        .arg("--var-file")
+        .arg("-")
+        .arg("render")
+        .arg(&template)
+        .write_stdin(r#"{"name": "Stdin"}"#)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hello Stdin"));
+}
+
+#[test]
+fn var_file_dash_reads_yaml_from_stdin() {
+    let tmp = TempDir::new().expect("tempdir");
+    let template = tmp.path().join("template.md.j2");
+    fs::write(&template, "hello {{ name }}").expect("write");
+
+    let mut cmd = assert_cmd::Command::new(cargo::cargo_bin!("sc-compose"));
+    cmd.arg("--root")
+        .arg(tmp.path())
+        .arg("--var-file")
+        .arg("-")
+        .arg("render")
+        .arg(&template)
+        .write_stdin("name: Stdin\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hello Stdin"));
 }

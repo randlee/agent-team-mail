@@ -1,5 +1,8 @@
 # Phase AH Planning — Observability Unification + AG Deferred Closure
 
+> Historical planning record. OTel optionality described here is superseded by
+> Phase AK (`docs/phase-ak-planning.md`), where OTel rollout is mandatory.
+
 ## Goal
 
 Close AG deferred issues by extracting a shared observability crate and aligning logging/diagnostics behavior across `atm` and `sc-compose` with one implementation surface.
@@ -100,6 +103,10 @@ Schema, redaction, truncation, and envelope rules remain consistent across tools
 
 ### AH-OBS-5: OpenTelemetry (optional)
 
+> NOTE: AH-OBS-5 optional/default-off OTel language is historical. It is
+> superseded by Phase AK mandatory OTel rollout. See
+> `docs/phase-ak-planning.md` and `docs/observability/requirements.md` §9.
+
 - OTel support is required as an optional capability in `sc-observability`.
 - OTel must be feature-gated (default off) to avoid mandatory dependency overhead.
 - `atm` and `scmux` are first adopters for OTel emission once AH integration lands.
@@ -148,7 +155,7 @@ OTel rollout in AH is intentionally scoped to a short baseline set:
 | AH.1 | `sc-observability` crate skeleton + contracts | #556 | New workspace crate, stable event schema/types, sink trait; `docs/logging-l1a-spec.md` authoring/update; socket contract error codes (`VERSION_MISMATCH`, `INVALID_PAYLOAD`, `INTERNAL_ERROR`); size guard (`64 KiB`); queue/rotation defaults; spool semantics (filename format, ordering, delete-after-merge); unit tests |
 | AH.2 | `sc-compose` migration to shared observability | #556 | Remove local logger duplication, add level/output controls, integration tests |
 | AH.3 | Diagnostics + render behavior closure | #555, #557 | Missing-var diagnostic enrichment and output derivation behavior with tests |
-| AH.4 | ATM ecosystem integration + health surfaces + OTel baseline | #556 | Integrate `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `scmux`, and `schook` with shared crate; deliver `atm doctor --json` / `atm status --json` logging-health fields (state, dropped counter, spool path, last error); wire runtime env controls (`ATM_LOG`, `ATM_LOG_MSG`, `ATM_LOG_FILE`); optional OTel baseline traces/metrics |
+| AH.4 | ATM ecosystem integration + health surfaces | #556 | Integrate `atm`, `atm-daemon`, `atm-tui`, and `atm-agent-mcp` with shared crate; deliver `atm doctor --json` / `atm status --json` logging-health fields (state, dropped counter, spool path, last error); wire runtime env controls (`ATM_LOG`, `ATM_LOG_MSG`, `ATM_LOG_FILE`) |
 | AH.5 | Docs + runbook + release/install closure | #558 | README/quickstart/PUBLISHING updates; `docs/logging-troubleshooting.md` runbook alignment to health states/remediations; final QA checklist |
 
 ## Sprint Dependency Graph
@@ -167,7 +174,7 @@ OTel rollout in AH is intentionally scoped to a short baseline set:
 5. Output-path derivation behavior is deterministic and covered by tests.
 6. End-user docs explicitly cover `sc-compose` install/use flows.
 7. `atm doctor --json` and `atm status --json` expose logging health state and required diagnostics fields (`state`, canonical log path, spool path, dropped counter, oldest spool age/count, last error).
-8. OTel baseline export is available behind feature/config toggle and does not block local file logging.
+8. OTel/scmux/schook integration was deferred beyond AH and tracked in later planning phases.
 
 ## Test Plan (Phase AH)
 
@@ -194,8 +201,7 @@ OTel rollout in AH is intentionally scoped to a short baseline set:
   - `doctor --json` and `status --json` logging-health payload presence and schema consistency
   - runtime env control behavior: `ATM_LOG`, `ATM_LOG_MSG`, `ATM_LOG_FILE`
 - SCMUX integration tests:
-  - shared schema parity checks for status/message operations
-  - sub-agent trace correlation (`subagent_id`) propagation checks
+  - deferred beyond AH; moved to AJ/AK scope for mandatory OTel + producer rollout
 - CI gates:
   - `cargo fmt --check --all`
   - `cargo clippy --workspace -- -D warnings`

@@ -1,22 +1,27 @@
 # Observability Architecture
 
-**Status**: Draft (Phase AH)
+**Status**: Active (Phase AH baseline; AJ/AK updates in planning)
 **Primary crate**: `sc-observability`
+**See also**:
+- `docs/observability/requirements.md`
+- `docs/observability/troubleshooting.md`
+- `docs/project-plan.md` (Phase AJ and Phase AK sections)
 
 ## 1. Architecture Goals
 
 - One shared observability implementation for ATM ecosystem tools.
 - Deterministic, structured event schema.
 - Default-on logging with fail-open behavior.
-- Optional OpenTelemetry export with local file logging always available.
+- Mandatory OpenTelemetry export with local file logging always available.
 
 ## 2. Components
 
 - `sc-observability` (library): event model, validators, redaction, sink traits,
   health evaluator, default init path.
-- Producers: `atm`, `atm-tui`, `atm-agent-mcp`, `sc-compose`, `scmux`, `schook`.
+- Producers: `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `sc-compose`,
+  `sc-composer`, `scmux`, `schook`.
 - Daemon writer path: `atm-daemon` canonical sink for ATM producer traffic.
-- Optional OTel exporter path: pluggable sink enabled by feature/config.
+- Mandatory OTel exporter path for in-scope tools (non-optional AK rollout).
 
 ## 3. Data Flow
 
@@ -25,7 +30,7 @@
 3. ATM producers send `log-event` to daemon.
 4. Daemon validates, redacts, queues, and writes canonical JSONL.
 5. If daemon unavailable, producer writes spool event; daemon merges on startup.
-6. If OTel is enabled, a mirrored exporter sink emits selected traces/metrics.
+6. A mirrored OTel exporter sink emits selected traces/metrics.
 
 ## 4. Canonical State and Health Computation
 
@@ -53,8 +58,13 @@ Health evaluator is implemented once and reused by `atm doctor` and `atm status`
 ## 6. Pathing and Namespacing
 
 - Shared schema, per-tool namespace in output pathing.
-- ATM canonical sink path remains daemon-owned (`~/.config/atm/atm.log.jsonl` by default).
-- Companion tools maintain their own default root while preserving schema compatibility.
+- Path profile A (ATM-managed default): `${home_dir}/.config/atm/logs/<tool>/...`
+  (`<tool>.log.jsonl` sink + `spool/`).
+- Path profile B (standalone default): `${home_dir}/.config/<tool>/logs/...`
+  (`<tool>.log.jsonl` sink + `spool/`).
+- Profile selection is deterministic by runtime mode; explicit operator override
+  can replace root, but sink/spool derivation pattern stays profile-consistent.
+- Companion tools preserve schema compatibility in either profile.
 
 ## 7. Failure Semantics
 
@@ -69,13 +79,29 @@ Health evaluator is implemented once and reused by `atm doctor` and `atm status`
 
 ## 9. OpenTelemetry Baseline
 
-> **Status**: Deferred to Phase AJ. OTel support is not implemented in Phase AH.
-> The architecture below describes the planned Phase AJ design.
-
-When enabled:
+Required baseline:
 - Traces: `subagent.run`, `atm.send`, `atm.read`, `daemon.request`.
 - Metrics: `subagent_runs_total`, `subagent_run_duration_ms`,
   `subagent_active_count`, `atm_messages_total`, `log_events_total`,
   `warnings_total`, `errors_total`.
+- Correlation attributes for agent/runtime-scoped telemetry are mandatory:
+  `team`, `agent`, `runtime`, `session_id`.
+- Runtime-specific naming differences (`thread-id` vs `session-id`) are adapter
+  internals only; export uses canonical `session_id` attribute.
+- `trace_id`/`span_id` are required for traces; `subagent_id` is required for
+  sub-agent telemetry.
+- `spans` chain semantics are root→leaf ordered, same-trace constrained, and
+  must parent-link each consecutive span (`parent_span_id == previous span_id`).
+- When top-level `trace_id`/`span_id` are present, the final `spans` item must
+  match those values.
 
-OTel support is optional, but its schema and naming must stay aligned with local structured events.
+OTel export failures must never block core command execution; local structured
+logging remains continuously available.
+
+## 10. Diagnostics JSON Contract Lock
+
+`atm doctor --json` and `atm status --json` share one locked `logging_health`
+object contract:
+- `status`, `otel_exporter`, `local_structured`, `last_export_error`.
+
+No drift is allowed across these two command surfaces for shared keys.

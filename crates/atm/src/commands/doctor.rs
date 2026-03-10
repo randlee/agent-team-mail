@@ -18,7 +18,11 @@ use agent_team_mail_core::schema::TeamConfig;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::util::hook_identity::read_hook_file;
+use crate::commands::logging_health::{
+    LoggingHealthContract, LoggingHealthSnapshot, build_logging_health_contract,
+    logging_remediation,
+};
+use crate::util::caller_identity::resolve_caller_session_id_optional;
 use crate::util::member_labels::UNREGISTERED_MARKER;
 use crate::util::settings::get_home_dir;
 
@@ -114,7 +118,9 @@ struct DoctorReport {
     log_window: LogWindow,
     env_overrides: EnvOverrides,
     #[serde(default)]
-    logging: LoggingHealthSnapshot,
+    logging_health: LoggingHealthContract,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    members: Vec<MemberSnapshot>,
     #[serde(skip_serializing, skip_deserializing, default)]
     member_snapshot: Vec<MemberSnapshot>,
 }
@@ -142,32 +148,6 @@ struct DaemonStatusSnapshot {
     plugins: Vec<PluginStatusSnapshot>,
     #[serde(default)]
     logging: LoggingHealthSnapshot,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-struct LoggingHealthSnapshot {
-    state: String,
-    dropped_counter: u64,
-    spool_path: String,
-    last_error: Option<String>,
-    canonical_log_path: String,
-    spool_count: u64,
-    oldest_spool_age: Option<u64>,
-}
-
-impl Default for LoggingHealthSnapshot {
-    fn default() -> Self {
-        Self {
-            state: "unavailable".to_string(),
-            dropped_counter: 0,
-            spool_path: String::new(),
-            last_error: None,
-            canonical_log_path: String::new(),
-            spool_count: 0,
-            oldest_spool_age: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -198,6 +178,10 @@ pub fn execute(args: DoctorArgs) -> Result<()> {
         &home_dir,
     )?;
     let team = config.core.default_team.clone();
+    let caller_session_id =
+        resolve_caller_session_id_optional(Some(&team), Some(&config.core.identity))
+            .ok()
+            .flatten();
 
     let report = build_report(&home_dir, &team, &args)?;
 
@@ -206,7 +190,7 @@ pub fn execute(args: DoctorArgs) -> Result<()> {
         source: "atm",
         action: "doctor",
         team: Some(team.clone()),
-        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+        session_id: caller_session_id,
         agent_id: Some(config.core.identity.clone()),
         agent_name: Some(config.core.identity.clone()),
         result: Some(
@@ -326,7 +310,11 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
         has_critical: counts.critical > 0,
         counts,
     };
+    let daemon_status = read_daemon_status(home_dir);
+    let logging = daemon_status.logging;
+    let logging_health = build_logging_health_contract(&logging, home_dir);
 
+    let member_snapshot = build_member_snapshot(team_config.as_ref(), &daemon_states_by_agent);
     Ok(DoctorReport {
         summary,
         findings,
@@ -341,8 +329,9 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
                 .max(0) as u64,
         },
         env_overrides: active_env_overrides(),
-        logging: read_daemon_status(home_dir).logging,
-        member_snapshot: build_member_snapshot(team_config.as_ref(), &daemon_states_by_agent),
+        logging_health,
+        members: member_snapshot.clone(),
+        member_snapshot,
     })
 }
 
@@ -1092,16 +1081,10 @@ fn count_findings(findings: &[Finding]) -> FindingCounts {
 }
 
 fn has_register_session_context() -> bool {
-    if let Ok(session_id) = std::env::var("CLAUDE_SESSION_ID")
-        && !session_id.trim().is_empty()
-    {
-        return true;
-    }
-    read_hook_file()
+    resolve_caller_session_id_optional(None, None)
         .ok()
         .flatten()
-        .map(|d| !d.session_id.trim().is_empty())
-        .unwrap_or(false)
+        .is_some()
 }
 
 fn build_recommendations(
@@ -1145,7 +1128,7 @@ fn build_recommendations(
         } else {
             recs.push(Recommendation {
                 command: format!("atm --as team-lead register {team}"),
-                reason: "No session context detected. Run from a managed Claude session (or set CLAUDE_SESSION_ID) before retrying register.".to_string(),
+                reason: "No session context detected. Run from a managed session (or set ATM_SESSION_ID) before retrying register.".to_string(),
             });
         }
     }
@@ -1161,32 +1144,7 @@ fn format_session_short(session_id: Option<&str>) -> String {
     let Some(session) = session_id.map(str::trim).filter(|s| !s.is_empty()) else {
         return "-".to_string();
     };
-
-    if looks_like_uuid(session) {
-        return session.chars().take(8).collect();
-    }
-
-    if let Some(rest) = session.strip_prefix("local:")
-        && let Some(name) = rest.split(':').next()
-        && !name.is_empty()
-    {
-        return format!("local:{name}");
-    }
-
-    session.to_string()
-}
-
-fn looks_like_uuid(value: &str) -> bool {
-    let mut parts = value.split('-');
-    for expected_len in [8usize, 4, 4, 4, 12] {
-        let Some(part) = parts.next() else {
-            return false;
-        };
-        if part.len() != expected_len || !part.chars().all(|c| c.is_ascii_hexdigit()) {
-            return false;
-        }
-    }
-    parts.next().is_none()
+    session.chars().take(8).collect()
 }
 
 fn render_human(report: &DoctorReport) -> String {
@@ -1203,24 +1161,46 @@ fn render_human(report: &DoctorReport) -> String {
         render_log_window_human(&report.log_window)
     ));
     out.push_str("Logging health:\n");
-    out.push_str(&format!("  state: {}\n", report.logging.state));
     out.push_str(&format!(
-        "  dropped_counter: {}\n",
-        report.logging.dropped_counter
+        "  schema_version: {}\n",
+        report.logging_health.schema_version
     ));
-    out.push_str(&format!("  spool_path: {}\n", report.logging.spool_path));
+    out.push_str(&format!("  state: {}\n", report.logging_health.state));
+    out.push_str(&format!("  log_root: {}\n", report.logging_health.log_root));
     out.push_str(&format!(
         "  canonical_log_path: {}\n",
-        report.logging.canonical_log_path
+        report.logging_health.canonical_log_path
     ));
-    out.push_str(&format!("  spool_count: {}\n", report.logging.spool_count));
-    if let Some(oldest_spool_age) = report.logging.oldest_spool_age {
-        out.push_str(&format!("  oldest_spool_age: {oldest_spool_age}s\n"));
+    out.push_str(&format!(
+        "  spool_path: {}\n",
+        report.logging_health.spool_path
+    ));
+    out.push_str(&format!(
+        "  dropped_events_total: {}\n",
+        report.logging_health.dropped_events_total
+    ));
+    out.push_str(&format!(
+        "  spool_file_count: {}\n",
+        report.logging_health.spool_file_count
+    ));
+    out.push_str(&format!(
+        "  oldest_spool_age_seconds: {}\n",
+        report
+            .logging_health
+            .oldest_spool_age_seconds
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string())
+    ));
+    if let Some(code) = &report.logging_health.last_error.code {
+        out.push_str(&format!("  last_error.code: {code}\n"));
     }
-    if let Some(last_error) = &report.logging.last_error {
-        out.push_str(&format!("  last_error: {last_error}\n"));
+    if let Some(message) = &report.logging_health.last_error.message {
+        out.push_str(&format!("  last_error.message: {message}\n"));
     }
-    if let Some(remediation) = logging_remediation(&report.logging.state) {
+    if let Some(at) = &report.logging_health.last_error.at {
+        out.push_str(&format!("  last_error.at: {at}\n"));
+    }
+    if let Some(remediation) = logging_remediation(&report.logging_health.state) {
         out.push_str(&format!("  remediation: {remediation}\n"));
     }
     out.push('\n');
@@ -1303,21 +1283,6 @@ fn render_log_window_human(window: &LogWindow) -> String {
             .unwrap_or_else(|| fallback_log_window_human(window)),
         "full" => format!("since session start ({elapsed})"),
         _ => fallback_log_window_human(window),
-    }
-}
-
-fn logging_remediation(state: &str) -> Option<&'static str> {
-    match state {
-        "degraded_dropping" => {
-            Some("queue is dropping events; verify daemon health and reduce log burst load")
-        }
-        "degraded_spooling" => Some(
-            "events are spooling locally; verify daemon socket/path and allow merge to catch up",
-        ),
-        "unavailable" => Some(
-            "logging unavailable; check ATM_LOG value, daemon status, and log path permissions",
-        ),
-        _ => None,
     }
 }
 
@@ -1442,15 +1407,16 @@ mod tests {
     }
 
     #[test]
-    fn format_session_short_formats_uuid_and_local_ids() {
+    fn format_session_short_always_uses_8_char_prefix() {
         assert_eq!(
             format_session_short(Some("123e4567-e89b-12d3-a456-426614174000")),
             "123e4567"
         );
         assert_eq!(
             format_session_short(Some("local:team-lead:1772608955543:20111")),
-            "local:team-lead"
+            "local:te"
         );
+        assert_eq!(format_session_short(Some("sess-123456789")), "sess-123");
         assert_eq!(format_session_short(Some("sess-1")), "sess-1");
         assert_eq!(format_session_short(None), "-");
         assert_eq!(format_session_short(Some("   ")), "-");
@@ -1815,6 +1781,7 @@ mod tests {
             session_id: "lead-session".to_string(),
             process_id: 4242,
             alive: false,
+            last_seen_at: None,
             runtime: None,
             runtime_session_id: None,
             pane_id: None,
@@ -1860,6 +1827,7 @@ mod tests {
             session_id: "member-session".to_string(),
             process_id: 4243,
             alive: false,
+            last_seen_at: None,
             runtime: None,
             runtime_session_id: None,
             pane_id: None,
@@ -2127,6 +2095,45 @@ mod tests {
     }
 
     #[test]
+    fn logging_health_contract_matches_canonical_schema() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let temp_root = std::env::temp_dir();
+        let spool_path = temp_root.join("spool").to_string_lossy().to_string();
+        let canonical_log_path = temp_root
+            .join("atm.log.jsonl")
+            .to_string_lossy()
+            .to_string();
+        let value = serde_json::to_value(build_logging_health_contract(
+            &LoggingHealthSnapshot {
+                state: "degraded_spooling".to_string(),
+                dropped_counter: 0,
+                spool_path: spool_path.clone(),
+                last_error: Some("events are queued in spool awaiting merge".to_string()),
+                canonical_log_path: canonical_log_path.clone(),
+                spool_count: 1,
+                oldest_spool_age: Some(5),
+            },
+            tmp.path(),
+        ))
+        .expect("serialize logging_health");
+
+        assert_eq!(value["schema_version"], "v1");
+        assert_eq!(value["state"], "degraded_spooling");
+        assert_eq!(value["canonical_log_path"], canonical_log_path);
+        assert_eq!(value["spool_path"], spool_path);
+        assert_eq!(value["dropped_events_total"], 0);
+        assert_eq!(value["spool_file_count"], 1);
+        assert_eq!(value["oldest_spool_age_seconds"], 5);
+        assert!(value["log_root"].is_string());
+        assert_eq!(value["last_error"]["code"], "DEGRADED_SPOOLING");
+        assert_eq!(
+            value["last_error"]["message"],
+            "events are queued in spool awaiting merge"
+        );
+        assert!(value["last_error"]["at"].is_string());
+    }
+
+    #[test]
     fn render_human_places_member_snapshot_before_findings() {
         let report = DoctorReport {
             summary: Summary {
@@ -2153,7 +2160,16 @@ mod tests {
                 elapsed_secs: 60,
             },
             env_overrides: EnvOverrides::default(),
-            logging: LoggingHealthSnapshot::default(),
+            logging_health: LoggingHealthContract::default(),
+            members: vec![MemberSnapshot {
+                name: "team-lead".to_string(),
+                agent_type: "team-lead".to_string(),
+                model: "claude".to_string(),
+                status: "Online".to_string(),
+                activity: "Busy".to_string(),
+                session_id: Some("sess-1".to_string()),
+                process_id: Some(4242),
+            }],
             member_snapshot: vec![MemberSnapshot {
                 name: "team-lead".to_string(),
                 agent_type: "team-lead".to_string(),
@@ -2206,11 +2222,12 @@ mod tests {
     }
 
     #[test]
-    fn doctor_json_schema_excludes_member_snapshot() {
+    fn doctor_json_schema_includes_members_and_excludes_member_snapshot() {
         let atm_home = std::env::temp_dir()
             .join("atm-home")
             .to_string_lossy()
             .into_owned();
+        let full_session = "123e4567-e89b-12d3-a456-426614174000".to_string();
         let report = DoctorReport {
             summary: Summary {
                 team: "atm-dev".to_string(),
@@ -2244,11 +2261,24 @@ mod tests {
                     value: "arch-ctm".to_string(),
                 }),
             },
-            logging: LoggingHealthSnapshot::default(),
+            logging_health: LoggingHealthContract::default(),
+            members: vec![MemberSnapshot {
+                name: "arch-ctm".to_string(),
+                agent_type: "codex".to_string(),
+                model: "custom:codex".to_string(),
+                status: "Online".to_string(),
+                activity: "Busy".to_string(),
+                session_id: Some(full_session.clone()),
+                process_id: Some(4242),
+            }],
             member_snapshot: vec![MemberSnapshot::default()],
         };
         let value = serde_json::to_value(report).unwrap();
         assert!(value.get("member_snapshot").is_none());
+        assert_eq!(
+            value["members"][0]["session_id"],
+            serde_json::Value::String(full_session)
+        );
         assert_eq!(
             value["env_overrides"]["atm_home"]["source"],
             serde_json::Value::String("env".to_string())
@@ -2269,13 +2299,30 @@ mod tests {
             value["log_window"]["elapsed_secs"],
             serde_json::Value::Number(60u64.into())
         );
+        assert!(
+            value.get("logging").is_none(),
+            "legacy logging key must not be serialized"
+        );
         assert_eq!(
-            value["logging"]["state"],
+            value["logging_health"]["schema_version"],
+            serde_json::Value::String("v1".to_string())
+        );
+        assert_eq!(
+            value["logging_health"]["state"],
             serde_json::Value::String("unavailable".to_string())
         );
-        assert!(value["logging"]["canonical_log_path"].is_string());
-        assert!(value["logging"]["spool_count"].is_u64());
-        assert!(value["logging"]["oldest_spool_age"].is_null());
+        assert!(value["logging_health"]["log_root"].is_string());
+        assert!(value["logging_health"]["canonical_log_path"].is_string());
+        assert!(value["logging_health"]["spool_path"].is_string());
+        assert_eq!(
+            value["logging_health"]["dropped_events_total"],
+            serde_json::Value::Number(0u64.into())
+        );
+        assert!(value["logging_health"]["spool_file_count"].is_u64());
+        assert!(value["logging_health"]["oldest_spool_age_seconds"].is_null());
+        assert!(value["logging_health"]["last_error"]["code"].is_null());
+        assert!(value["logging_health"]["last_error"]["message"].is_null());
+        assert!(value["logging_health"]["last_error"]["at"].is_null());
     }
 
     #[test]
@@ -2340,7 +2387,8 @@ mod tests {
                     value: "arch-ctm".to_string(),
                 }),
             },
-            logging: LoggingHealthSnapshot::default(),
+            logging_health: LoggingHealthContract::default(),
+            members: vec![],
             member_snapshot: vec![],
         };
 
@@ -2349,5 +2397,61 @@ mod tests {
         assert!(rendered.contains(&format!("ATM_HOME={home} (source=env)")));
         assert!(rendered.contains("ATM_TEAM=atm-dev"));
         assert!(rendered.contains("ATM_IDENTITY=arch-ctm"));
+    }
+
+    #[test]
+    fn render_human_members_use_short_session_ids_while_snapshot_keeps_full() {
+        let full_session = "123e4567-e89b-12d3-a456-426614174000";
+        let report = DoctorReport {
+            summary: Summary {
+                team: "atm-dev".to_string(),
+                generated_at: "2026-03-02T00:00:00Z".to_string(),
+                has_critical: false,
+                counts: FindingCounts {
+                    critical: 0,
+                    warn: 0,
+                    info: 0,
+                },
+            },
+            findings: vec![],
+            recommendations: vec![],
+            log_window: LogWindow {
+                mode: "default_incremental".to_string(),
+                start: "2026-03-02T00:00:00Z".to_string(),
+                end: "2026-03-02T00:01:00Z".to_string(),
+                elapsed_secs: 60,
+            },
+            env_overrides: EnvOverrides::default(),
+            logging_health: LoggingHealthContract::default(),
+            members: vec![MemberSnapshot {
+                name: "arch-ctm".to_string(),
+                agent_type: "codex".to_string(),
+                model: "custom:codex".to_string(),
+                status: "Online".to_string(),
+                activity: "Busy".to_string(),
+                session_id: Some(full_session.to_string()),
+                process_id: Some(1234),
+            }],
+            member_snapshot: vec![MemberSnapshot {
+                name: "arch-ctm".to_string(),
+                agent_type: "codex".to_string(),
+                model: "custom:codex".to_string(),
+                status: "Online".to_string(),
+                activity: "Busy".to_string(),
+                session_id: Some(full_session.to_string()),
+                process_id: Some(1234),
+            }],
+        };
+
+        let rendered = render_human(&report);
+        assert!(rendered.contains("123e4567"));
+        assert!(!rendered.contains(full_session));
+
+        let json_value = serde_json::to_value(report).unwrap();
+        assert!(json_value.get("member_snapshot").is_none());
+        assert_eq!(
+            json_value["members"][0]["session_id"],
+            serde_json::Value::String(full_session.to_string())
+        );
     }
 }

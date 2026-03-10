@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 
+use crate::commands::logging_health::LoggingHealthSnapshot;
 use crate::util::settings::get_home_dir;
 
 /// Daemon management commands
@@ -505,7 +506,7 @@ struct DaemonStatus {
     plugins: Vec<PluginStatus>,
     teams: Vec<String>,
     #[serde(default)]
-    logging: LoggingHealth,
+    logging: LoggingHealthSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -525,32 +526,6 @@ enum PluginStatusKind {
     Disabled,
     #[serde(rename = "disabled_init_error")]
     DisabledInitError,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-struct LoggingHealth {
-    state: String,
-    dropped_counter: u64,
-    spool_path: String,
-    last_error: Option<String>,
-    canonical_log_path: String,
-    spool_count: u64,
-    oldest_spool_age: Option<u64>,
-}
-
-impl Default for LoggingHealth {
-    fn default() -> Self {
-        Self {
-            state: "unavailable".to_string(),
-            dropped_counter: 0,
-            spool_path: String::new(),
-            last_error: None,
-            canonical_log_path: String::new(),
-            spool_count: 0,
-            oldest_spool_age: None,
-        }
-    }
 }
 
 #[cfg(test)]

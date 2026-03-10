@@ -1,3 +1,19 @@
+---
+name: qa-task
+version: 1.0.0
+description: quality-mgr QA assignment template for codex-orchestration phases.
+format: xml
+required_variables:
+  - task_id
+  - sprint
+  - description
+  - pr_number
+  - branch
+  - worktree_path
+  - commits
+  - deliverables
+  - references
+---
 <atm-qa-task id="{{ task_id }}" sprint="{{ sprint }}" assignee="quality-mgr">
   <description>{{ description }}</description>
 
@@ -7,15 +23,11 @@
   <commits>{{ commits }}</commits>
 
   <deliverables>
-    {% for item in deliverables %}
-    <item>{{ item }}</item>
-    {% endfor %}
+{{ deliverables }}
   </deliverables>
 
   <references>
-    {% for ref in references %}
-    <doc>{{ ref }}</doc>
-    {% endfor %}
+{{ references }}
   </references>
 
   <workflow>
@@ -37,8 +49,8 @@
         subagent_type: atm-qa-agent
         run_in_background: true
         prompt: Validate sprint {{ sprint }} implementation against requirements and sprint spec.
-                Worktree: {{ worktree_path }}. Deliverables: {{ deliverables | join(', ') }}.
-                Reference docs: {{ references | join(', ') }}.
+                Worktree: {{ worktree_path }}. Deliverables: {{ deliverables }}.
+                Reference docs: {{ references }}.
                 Report findings as BLOCKING or NON-BLOCKING with file:line references.
     </step>
     <step id="c">

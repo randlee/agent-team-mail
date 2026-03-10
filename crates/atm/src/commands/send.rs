@@ -21,8 +21,9 @@ use agent_team_mail_core::text::{
 };
 
 use crate::util::addressing::parse_address;
+use crate::util::caller_identity::resolve_caller_session_id_optional;
 use crate::util::file_policy::check_file_reference;
-use crate::util::hook_identity::{read_hook_file, read_hook_file_identity, read_session_file};
+use crate::util::hook_identity::{read_hook_file, read_hook_file_identity};
 use crate::util::settings::get_home_dir;
 
 /// Send a message to a specific agent
@@ -163,7 +164,6 @@ pub fn execute(args: SendArgs) -> Result<()> {
         let session_id = sender_session_id
             .as_deref()
             .map(str::to_string)
-            .or_else(|| std::env::var("CLAUDE_SESSION_ID").ok())
             .unwrap_or_else(|| "unknown".to_string());
         let session_short = &session_id[..8.min(session_id.len())];
         let warning = format!(
@@ -243,7 +243,7 @@ pub fn execute(args: SendArgs) -> Result<()> {
             source: "atm",
             action: "send_dry_run",
             team: Some(team_name.clone()),
-            session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+            session_id: sender_session_id.clone(),
             agent_id: Some(config.core.identity.clone()),
             agent_name: Some(config.core.identity.clone()),
             target: Some(destination),
@@ -299,7 +299,7 @@ pub fn execute(args: SendArgs) -> Result<()> {
         source: "atm",
         action: "send",
         team: Some(team_name.clone()),
-        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+        session_id: sender_session_id.clone(),
         agent_id: Some(config.core.identity.clone()),
         agent_name: Some(config.core.identity.clone()),
         target: Some(destination),
@@ -319,6 +319,16 @@ pub fn execute(args: SendArgs) -> Result<()> {
         "send outcome: team={} agent={} result={}",
         team_name, agent_name, result_text
     );
+
+    // Best-effort daemon heartbeat when message delivery reaches inbox write
+    // success path so session last_seen_at updates are not limited to explicit
+    // session-query commands.
+    if matches!(
+        outcome,
+        WriteOutcome::Success | WriteOutcome::ConflictResolved { .. }
+    ) {
+        let _ = touch_sender_session_heartbeat(&team_name, &config.core.identity);
+    }
 
     // Auto-subscribe the sender to the target agent's idle event (upsert — refreshes TTL
     // if a subscription already exists). This is best-effort: errors are silently ignored
@@ -481,11 +491,10 @@ fn register_sender_hint(
         return Ok(());
     }
 
-    let session_id = sender_session_id
-        .map(str::to_string)
-        // Non-hook shells (Codex/Gemini CLI) still need a stable daemon session
-        // key. Keep this stable for the life of the detected PID.
-        .unwrap_or_else(|| format!("local:{sender}:pid:{process_id}"));
+    let Some(session_id) = sender_session_id.map(str::to_string) else {
+        // Never fabricate synthetic session IDs in command paths.
+        return Ok(());
+    };
 
     let runtime = member.effective_backend_type().and_then(|bt| match bt {
         BackendType::ClaudeCode => Some("claude"),
@@ -614,28 +623,21 @@ fn resolve_sender_session_id_with_context(
     team: Option<&str>,
     identity: Option<&str>,
 ) -> Result<Option<String>> {
-    // 1. PID-based hook file (fastest, most precise — set by PreToolUse Bash hook).
-    if let Ok(Some(hook)) = read_hook_file() {
-        let trimmed = hook.session_id.trim();
-        if !trimmed.is_empty() {
-            return Ok(Some(trimmed.to_string()));
-        }
-    }
-    // 2. Explicit environment override.
-    if let Some(env_session) = std::env::var("CLAUDE_SESSION_ID")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        return Ok(Some(env_session));
-    }
-    // 3. Session file written by SessionStart hook (survives bash subshell env loss).
-    if let (Some(t), Some(id)) = (team, identity) {
-        if let Some(session_id) = read_session_file(t, id)? {
-            return Ok(Some(session_id));
-        }
-    }
-    Ok(None)
+    resolve_caller_session_id_optional(team, identity)
+}
+
+fn touch_sender_session_heartbeat(team: &str, sender: &str) -> Result<()> {
+    touch_sender_session_heartbeat_with_query(team, sender, |team, sender| {
+        agent_team_mail_core::daemon_client::query_session_for_team(team, sender)
+    })
+}
+
+fn touch_sender_session_heartbeat_with_query<F>(team: &str, sender: &str, query: F) -> Result<()>
+where
+    F: Fn(&str, &str) -> anyhow::Result<Option<SessionQueryResult>>,
+{
+    let _ = query(team, sender)?;
+    Ok(())
 }
 
 fn should_warn_self_send(
@@ -1028,6 +1030,7 @@ mod tests {
                 session_id: "s".to_string(),
                 process_id: 123,
                 alive: false,
+                last_seen_at: None,
                 runtime: None,
                 runtime_session_id: None,
                 pane_id: None,
@@ -1044,6 +1047,7 @@ mod tests {
                 session_id: "s".to_string(),
                 process_id: 123,
                 alive: true,
+                last_seen_at: None,
                 runtime: None,
                 runtime_session_id: None,
                 pane_id: None,
@@ -1074,6 +1078,28 @@ mod tests {
             destination_target("team-lead", "atm-dev"),
             "team-lead@atm-dev"
         );
+    }
+
+    #[test]
+    fn test_touch_sender_session_heartbeat_invokes_query() {
+        let called = std::cell::Cell::new(false);
+        let result =
+            touch_sender_session_heartbeat_with_query("atm-dev", "arch-ctm", |team, name| {
+                called.set(true);
+                assert_eq!(team, "atm-dev");
+                assert_eq!(name, "arch-ctm");
+                Ok(None)
+            });
+        assert!(result.is_ok());
+        assert!(called.get(), "heartbeat query should be invoked");
+    }
+
+    #[test]
+    fn test_touch_sender_session_heartbeat_propagates_query_error() {
+        let result = touch_sender_session_heartbeat_with_query("atm-dev", "arch-ctm", |_, _| {
+            Err(anyhow!("daemon unavailable"))
+        });
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1172,7 +1198,9 @@ mod tests {
 
         unsafe {
             std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
+            std::env::set_var("ATM_TEST_ENABLE_HOOK_RESOLUTION", "1");
         }
 
         let actual =
@@ -1180,7 +1208,9 @@ mod tests {
 
         unsafe {
             std::env::remove_var("ATM_HOME");
+            std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("CLAUDE_SESSION_ID");
+            std::env::remove_var("ATM_TEST_ENABLE_HOOK_RESOLUTION");
         }
         let _ = std::fs::remove_file(&hook_path);
 
@@ -1198,6 +1228,7 @@ mod tests {
 
         unsafe {
             std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
         }
 
@@ -1206,6 +1237,7 @@ mod tests {
 
         unsafe {
             std::env::remove_var("ATM_HOME");
+            std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
@@ -1223,6 +1255,7 @@ mod tests {
 
         unsafe {
             std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
@@ -1231,6 +1264,7 @@ mod tests {
 
         unsafe {
             std::env::remove_var("ATM_HOME");
+            std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
@@ -1246,6 +1280,7 @@ mod tests {
 
         unsafe {
             std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
         }
 
@@ -1254,6 +1289,7 @@ mod tests {
 
         unsafe {
             std::env::remove_var("ATM_HOME");
+            std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
@@ -1272,6 +1308,7 @@ mod tests {
 
         unsafe {
             std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
@@ -1280,11 +1317,12 @@ mod tests {
 
         unsafe {
             std::env::remove_var("ATM_HOME");
+            std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
-        assert!(err.to_string().contains("Ambiguous:"));
-        assert!(err.to_string().contains("Export CLAUDE_SESSION_ID"));
+        assert!(err.to_string().contains("CALLER_AMBIGUOUS"));
+        assert!(err.to_string().contains("ATM_SESSION_ID"));
     }
 
     #[test]
@@ -1300,6 +1338,7 @@ mod tests {
                     session_id: "sid-123".to_string(),
                     process_id: 100,
                     alive: true,
+                    last_seen_at: None,
                     runtime: None,
                     runtime_session_id: None,
                     pane_id: None,
@@ -1323,6 +1362,7 @@ mod tests {
                     session_id: "sid-remote".to_string(),
                     process_id: 101,
                     alive: true,
+                    last_seen_at: None,
                     runtime: None,
                     runtime_session_id: None,
                     pane_id: None,

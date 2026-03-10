@@ -1,8 +1,8 @@
 # agent-team-mail (`atm`) — Project Plan
 
 **Version**: 0.7
-**Date**: 2026-03-09
-**Status**: Phases AH and AI complete (v0.43.0). Phase AJ planning next.
+**Date**: 2026-03-10
+**Status**: Phase AJ planning in progress. Phase AK queued.
 
 ---
 
@@ -172,9 +172,10 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AE | GH Monitor Reliability + Daemon Logging | Stabilize gh-monitor status/lifecycle contracts and daemon observability behavior | COMPLETE |
 | AF | External Agent Lifecycle Hardening | Close lifecycle, cleanup, transient registration, and reliability/documentation hardening | COMPLETE |
 | AG | sc-composer Full Implementation + CLI | Deliver `sc-composer` library + `sc-compose` CLI and integrate with `atm teams spawn` via direct library APIs | COMPLETE |
-| AH | sc-observability Unification + ATM Ecosystem Logging | Unified JSONL logging pipeline via `sc-observability` crate; extended logging health schema in `atm status`/`atm doctor` | COMPLETE |
-| AI | GH Monitor Dashboard + Detailed PR Reporting | `atm gh pr list`, `atm gh pr report`, `--template` rendering, `init-report`; CI rollup neutral/skipped fix | COMPLETE |
-| AJ | OpenTelemetry Baseline + Observability API Completion | OTel feature gate, sc_observability::init() API, log injection for library calls, scmux/schook integration | PLANNED |
+| AH | Observability Unification + AG Deferred Closure | Unified JSONL logging pipeline via `sc-observability` crate and baseline observability contracts (OTel/scmux/schook deferred) | COMPLETE |
+| AI | GH Monitor Dashboard + Detailed PR Reporting | `atm gh pr list`, `atm gh pr report`, `--template` rendering, `init-report`; CI rollup neutral/skipped fix | IN-PROGRESS |
+| AJ | Session-ID SSoT Normalization | Canonical `session_id` naming, shared caller resolver, runtime session resolution closure, doctor/session consistency | PLANNED |
+| AK | Mandatory OTel Rollout | Non-optional OTel across in-scope tools with canonical correlation and health/reporting contracts | PLANNED |
 
 ---
 
@@ -534,7 +535,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 - Remove `emit_event_best_effort` dual-write path and `ATM_LOG_BRIDGE` env var support from all crates.
 - Remove legacy `events.jsonl` sink code from CLI, daemon, MCP proxy, and TUI.
 - Remove legacy bridge log surface (surface 6) from `.claude/agents/log-monitor.md`.
-- Update `docs/logging-l1a-spec.md` and `docs/requirements.md` to mark bridge as removed.
+- Update `docs/logging-l1a-spec.md` and `docs/observability/requirements.md` to mark bridge as removed.
 - Verify no external consumers depend on the old format before removal.
 
 **M.2-M.7 scope (Codex parity)**:
@@ -821,6 +822,7 @@ Acceptance criteria:
 
 **CLI flag semantics in handoff mode**:
 - `message`: optional status text shown with refusal/re-establish guidance.
+- `--project <name>`: include Claude Code project-scoped task files in the automatic backup/restore handoff path as `tasks-cc/`.
 - `--session-id <id>`: target only the specified lead session. If it does not match the daemon's active lead session, refuse.
 - `--force`: bypass soft refusal checks only when no active lead session is confirmed; never steals an active lead identity.
 - `--kill`: explicitly terminate stale daemon-tracked lead process before handoff.
@@ -831,6 +833,7 @@ Acceptance criteria:
 3. **If NO** (no active team-lead):
    - Ensure backup destination exists at `.backups/<team>/<timestamp>/` (agent-team-api backup convention).
    - Create a flat backup snapshot compatible with `atm teams restore`: `config.json`, `inboxes/`, and `tasks/` directly under `.backups/<team>/<timestamp>/`.
+   - When `--project <name>` is supplied, include Claude Code project task-list files as `tasks-cc/` sourced from `~/.claude/tasks/<project>/`. If that source path is absent, omit `tasks-cc/` without error.
    - Remove the active `<team>/` directory only after successful snapshot write.
    - Output: `"Call TeamCreate(<team>) to re-establish as team-lead"`.
 4. Team-lead calls `TeamCreate(<team>)`; this succeeds because the active team directory is absent.
@@ -838,6 +841,8 @@ Acceptance criteria:
 6. Daemon restores non-Claude members from backup (pane IDs, agent types, inbox history).
 7. Preserve the new `leadSessionId` from TeamCreate; restore never overwrites it. `team-lead` member is never restored from backup.
 8. Daemon injects status into team-lead session: `"<team> re-established. Active members: <name> (<type>, pane <id>), ..."`.
+9. Restore recomputes `.highwatermark` for each restored task directory from the highest numeric task id present after file copy; when no numeric task files are present, it sets `.highwatermark` to `0`.
+10. `atm teams remove-member --archive-inbox` archives mail to `.claude/teams/.archives/<team>/removed-<agent>-<timestamp>/` so retention pruning for `.backups/` cannot delete archived mail unexpectedly.
 
 **Failure-mode acceptance criteria**:
 - Stale PID/session mismatch is detected and does not cause identity theft.
@@ -1466,18 +1471,20 @@ the current tranche focused on onboarding contract closure.
 | | AG.3 | `sc-compose` Binary + Logging Baseline | COMPLETE | [#552](https://github.com/randlee/agent-team-mail/pull/552) |
 | | AG.4 | ATM Spawn Integration (`--system-prompt .j2`) | COMPLETE | [#553](https://github.com/randlee/agent-team-mail/pull/553) |
 
-**Completed**: 138+ sprints across 31 phases (CI green)
-**Current version**: v0.43.0
-**Current phase**: Phase AI (COMPLETE)
-**Next planned phase**: Phase AJ (OTel baseline + observability API completion)
+**Completed**: 133+ sprints across 29 phases (CI green)
+**Current version**: v0.42.0
+**Current planning phase**: Phase AJ
+**Next planned phase**: Phase AK (mandatory OTel rollout)
 
 ---
 
-## 17.17 Phase AH: Observability Unification + OTel Baseline
+## 17.17 Phase AH: Observability Unification + AG Deferred Closure (Historical)
+
+_Historical record: AH delivered logging unification baseline. OTel/scmux/schook
+rollout is deferred and planned in AJ/AK._
 
 **Goal**: Extract `sc-observability` as a shared logging platform across ATM
-tools, close deferred AG observability/render/docs gaps, and ship a safe
-optional OpenTelemetry baseline with sub-agent-first trace coverage.
+tools and close deferred AG observability/render/docs gaps.
 
 **Planning doc**: `docs/phase-ah-planning.md`
 **Requirements doc**: `docs/observability/requirements.md`
@@ -1489,7 +1496,7 @@ optional OpenTelemetry baseline with sub-agent-first trace coverage.
 | AH.1 | Shared crate foundation (`sc-observability`) + spool/size-guard/socket-error/L1a contracts | #556 | COMPLETE |
 | AH.2 | `sc-compose` migration to shared logging | #556 | COMPLETE |
 | AH.3 | Diagnostics + output derivation closure | #555, #557 | COMPLETE |
-| AH.4 | ATM/daemon/tui/mcp/scmux/schook integration + doctor/status health surfaces | #556 | COMPLETE |
+| AH.4 | ATM/daemon/tui/mcp integration + doctor/status health surfaces | #556 | COMPLETE |
 | AH.5 | Runbook + install/release docs closeout | #558 | COMPLETE |
 
 ---
@@ -1512,29 +1519,45 @@ observability scope.
 
 ---
 
-## 17.19 Phase AJ: OpenTelemetry Baseline + Observability API Completion
+## 17.19 Phase AJ: Session-ID SSoT Normalization
 
-**Goal**: Deliver the OTel feature gate deferred from AH, complete the `sc_observability::init()`
-zero-config API, define and implement log injection for library calls, and integrate
-`scmux`/`schook` with `sc-observability`.
+**Goal**: Make daemon registry the canonical session authority and eliminate
+identity/session ambiguity by standardizing on `session_id` across ATM surfaces.
+**Prerequisites**: Phase AH baseline complete.
 
-**Planning doc**: `docs/phase-aj-planning.md` _(planning session pending)_
-**Requirements doc**: `docs/observability/requirements.md` (§9 OTel — deferred from AH)
-**Architecture doc**: `docs/observability/architecture.md` (§9 OTel — deferred from AH)
-
-### Deferred inputs from Phase AH
-- AH-OBS-5/5a/5b: OTel optional feature gate, trace/metric baseline, sub-agent-first instrumentation
-- AH-OBS-1: scmux and schook `sc-observability` adoption
-- AH-OBS-2: `sc_observability::init("<tool>")` zero-config API
-- Log injection contract: library calls from ATM tools must route logs to host tool's log file
+**Planning doc**: `docs/phase-aj-planning.md`  
+**Test plan**: `docs/test-plan-phase-AJ.md`
 
 ### Planned Sprint Map
-| Sprint | Focus | Issues | Status |
+| Sprint | Focus | Primary Issues | Status |
 |---|---|---|---|
-| AJ.1 | `sc_observability::init()` API + log injection contract | TBD | PLANNED |
-| AJ.2 | OTel feature gate + trace/metric baseline | TBD | PLANNED |
-| AJ.3 | scmux/schook sc-observability adoption | TBD | PLANNED |
-| AJ.4 | Integration hardening + docs | TBD | PLANNED |
+| AJ.1 | Shared resolver SSoT for `send/read/register/doctor` | #593, #595 | PLANNED |
+| AJ.2 | Codex/Gemini runtime session resolution closure | #597 | PLANNED |
+| AJ.3 | Stale session lifecycle + cleanup reliability | #594 | PLANNED |
+| AJ.4 | Doctor/members session display consistency | #596 | PLANNED |
+| AJ.5 | Spawn env normalization + resume/continue semantics | #593, #597 | PLANNED |
+
+---
+
+## 17.20 Phase AK: Mandatory OTel Rollout
+
+**Goal**: Ship non-optional OpenTelemetry across in-scope tools while keeping
+local structured logging always-on and fail-open.
+**Prerequisites**: Phase AH and Phase AJ complete.
+
+**Planning doc**: `docs/phase-ak-planning.md`  
+**Requirements**: `docs/observability/requirements.md`  
+**Architecture**: `docs/observability/architecture.md`  
+**Test plan**: `docs/test-plan-phase-AK.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Issues | Status |
+|---|---|---|---|
+| AK.1 | Contract reconciliation + schema hardening (`trace_id/span_id/subagent_id`, paths, health JSON keys) | ATM-QA-004, ATM-QA-008, ATM-QA-007, ATM-QA-009 | PLANNED |
+| AK.2 | `sc-observability` mandatory OTel core (`default-on`, retry/fail-open, correlation contract) | OTel baseline | PLANNED |
+| AK.3 | Producer integration (`atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `scmux`, `schook`, `sc-compose`, `sc-composer`) | OTel rollout | PLANNED |
+| AK.4 | Doctor/status observability health + runbook finalization | health/reporting | PLANNED |
+| AK.5 | End-to-end QA, release gates, and cross-platform validation | release confidence | PLANNED |
 
 ---
 
@@ -2070,9 +2093,21 @@ Key commits:
 | [#372](https://github.com/randlee/agent-team-mail/issues/372) | macOS CI hang in `test_concurrent_sends_no_data_loss` | AA.3 | Root-cause gate required before mitigation path |
 | [#373](https://github.com/randlee/agent-team-mail/issues/373) | Add `--dry-run` preview mode to `atm teams cleanup` | AA.4 | Non-mutating table with reasons/totals + empty-state messaging |
 | [#424](https://github.com/randlee/agent-team-mail/issues/424) | Improve `atm teams spawn --help` with generated launch-command reference | AA.4 | Always-show copy/paste launch reference with placeholders when config absent |
+| [#649](https://github.com/randlee/agent-team-mail/issues/649) | Add `atm teams remove-member` command | BF.1 | Promoted to active fix sprint BF.1 |
+| [#650](https://github.com/randlee/agent-team-mail/issues/650) | Backup/restore should capture Claude Code project task list (`~/.claude/tasks/<project>/`) | BF.1 | Promoted to active fix sprint BF.1 |
+| [#651](https://github.com/randlee/agent-team-mail/issues/651) | Restore sets highwatermark off-by-one | BF.1 | Promoted to active fix sprint BF.1 |
+| [#652](https://github.com/randlee/agent-team-mail/issues/652) | `ux(gh pr list)`: make merge conflicts and CI-blocked-by-merge visually prominent | AI follow-on | Explicitly out of BF.1 scope; unrelated to backup/restore hardening |
 | [#287](https://github.com/randlee/agent-team-mail/issues/287) | `parse_since_input` accepts `0m` and negative durations | X.4 (deferred) | Deferred follow-on from Phase X onboarding tranche |
 | [#337](https://github.com/randlee/agent-team-mail/issues/337) | Missing `#[serial]` on env-mutating daemon tests (`ATM_HOME`) | X.5 (deferred) | Deferred CI-debt cleanup in Phase X follow-on |
 | [#338](https://github.com/randlee/agent-team-mail/issues/338) | `add-member` does not create inbox atomically | X.6 (deferred) | Deferred follow-on after onboarding contract closure |
+
+---
+
+### Active Fix Work
+
+| Sprint | Name | PR | Branch | Issues | Status |
+|---|---|---|---|---|---|
+| BF.1 | Backup/Restore Hardening | - | `fix/backup-restore-hardening` | #649, #650, #651 | IN PROGRESS |
 
 ---
 
@@ -2174,6 +2209,6 @@ You are the Scrum Master for the agent-team-mail (atm) project.
 
 ---
 
-**Document Version**: 0.6
-**Last Updated**: 2026-03-05
+**Document Version**: 0.7
+**Last Updated**: 2026-03-10
 **Maintained By**: Claude (ARCH-ATM)

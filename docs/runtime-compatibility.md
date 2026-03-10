@@ -12,7 +12,7 @@ Goals:
 - tmux-pane launch parity with current Codex workflow
 - steerability during turns (or explicit limits if runtime does not support it)
 - controlled teardown (request first, force-kill fallback)
-- resume-by-agent-id semantics for ATM
+- resume-by-agent semantics for ATM
 - clean identity mapping between ATM agent identity and Gemini session identity
 
 Note: `../gemini` path was requested, but local repo path is `../gemini-cli` in this environment.
@@ -22,7 +22,7 @@ Note: `../gemini` path was requested, but local repo path is `../gemini-cli` in 
 ### 2.1 Binary and CLI flags
 
 Verified locally:
-- `gemini --version` => `0.29.0`
+- `gemini --version` => `0.32.1`
 - `gemini --help` supports:
   - `--model/-m`
   - `--prompt/-p` (headless)
@@ -45,6 +45,10 @@ Source refs:
 - Session storage path: `~/.gemini/tmp/<project_hash>/chats/`.
 - Resume supports `--resume` with `latest`, index, or session UUID.
 - CLI supports `--list-sessions` and `--delete-session`.
+- `gemini --list-sessions` is project-scoped to current working directory and
+  returns full session UUIDs in bracketed output (text mode).
+- Chat files are `session-<timestamp>-<short>.json` with full `sessionId`
+  stored inside JSON payload; `logs.json` also stores full `sessionId`.
 
 Source refs:
 - `../gemini-cli/docs/cli/session-management.md`
@@ -103,9 +107,9 @@ Source refs:
 
 ### 3.1 Identity model (ATM first, runtime second)
 
-Use two IDs:
-- `atm_agent_id` (canonical ATM identity): `<agent>@<team>`
-- `runtime_session_id` (Gemini session UUID)
+Use two identifiers:
+- `agent` (canonical ATM identity key): `<agent>@<team>`
+- `session_id` (ATM canonical session field; stores Gemini session UUID)
 
 Daemon registry record proposal:
 - `team`
@@ -113,7 +117,7 @@ Daemon registry record proposal:
 - `runtime = "gemini"`
 - `process_id`
 - `pane_id`
-- `runtime_session_id` (Gemini UUID)
+- `session_id` (Gemini UUID normalized into ATM field naming)
 - `runtime_home` (agent-isolated `GEMINI_CLI_HOME`)
 - `state`
 - `updated_at`
@@ -131,10 +135,10 @@ Fresh spawn (interactive pane baseline):
 - `GEMINI_CLI_HOME=... GEMINI_SYSTEM_MD=<path-or-1> gemini --model <model> [--sandbox] [--approval-mode <mode>]`
 
 Resume spawn:
-- `GEMINI_CLI_HOME=... GEMINI_SYSTEM_MD=<path-or-1> gemini --resume <runtime_session_id> --model <model> [--sandbox] [--approval-mode <mode>]`
+- `GEMINI_CLI_HOME=... GEMINI_SYSTEM_MD=<path-or-1> gemini --resume <session_id> --model <model> [--sandbox] [--approval-mode <mode>]`
 
 Proposed `atm teams spawn` signature (runtime-agnostic baseline):
-- `atm teams spawn --agent <name> --team <team> --runtime <claude|codex|gemini|opencode> [--model <model>] [--folder <path>|--cwd <path>] [--system-prompt <path>] [--sandbox <on|off>] [--approval-mode <mode>] [--include-directories <paths>] [--env KEY=VALUE ...] [--resume] [--resume-session-id <runtime_session_id>]`
+- `atm teams spawn --agent <name> --team <team> --runtime <claude|codex|gemini|opencode> [--model <model>] [--folder <path>|--cwd <path>] [--system-prompt <path>] [--sandbox <on|off>] [--approval-mode <mode>] [--include-directories <paths>] [--env KEY=VALUE ...] [--resume <session_id>|--continue]`
 
 ### 3.3 Steer model
 
@@ -174,22 +178,25 @@ Clarification: `teammate_idle` is an existing canonical ATM lifecycle event
 already defined in requirements section 4.5 (not a new event type introduced by
 this doc).
 
-## 4. Proposed Requirements Deltas (Draft)
+## 4. Implemented Requirements (Phase S.1 Complete + AJ Naming Alignment)
 
-These are proposed requirement additions/changes for review. No code in this pass.
+These requirements were implemented in Phase S.1 and are retained here as the
+runtime compatibility reference, with AJ naming alignment to canonical
+`session_id`.
 
 ### R-GEM-1 Spawn Contract
 
 ATM must support runtime-aware teammate spawn for Gemini with:
 - fresh mode (system prompt enabled)
-- resume mode (`--resume <runtime_session_id>`)
+- resume mode (`--resume <session_id>`)
+- runtime-native continue mode (`--continue`, equivalent to Gemini `--resume latest`)
 - per-agent `GEMINI_CLI_HOME` isolation
 
 ### R-GEM-2 Identity Contract
 
 ATM session registry must store:
 - canonical ATM identity (`team`, `agent`)
-- runtime identity (`runtime_session_id`)
+- runtime identity (`session_id`)
 - runtime metadata (`runtime`, `runtime_home`, `pane_id`, `process_id`)
 
 ### R-GEM-3 Teardown Contract
@@ -216,7 +223,7 @@ Gemini hook/lifecycle events must map into existing ATM unified lifecycle envelo
 
 Unified logging (`4.6`) must include runtime adapter fields for Gemini operations:
 - `runtime=gemini`
-- `runtime_session_id`
+- `session_id`
 - `teardown_stage` (`request|sigint|sigterm|sigkill`)
 - `spawn_mode` (`fresh|resume`)
 
@@ -231,7 +238,7 @@ Implementation resolves runtime session ID from ATM registry/state, not from use
 
 1. Should Gemini default spawn mode be `--sandbox` on, matching conservative policy, or follow current ATM/Codex defaults?
 2. Should ACP be gated behind a feature flag until we validate reliability for steer/control parity?
-3. Do we want to allow explicit user override of runtime session id for emergency resume (`--resume-session-id <uuid>`) in addition to agent-based default?
+3. Do we want to allow explicit user override of `session_id` for emergency resume (`--resume <session_id>`) in addition to agent-based default?
 
 ## 6. Suggested Next Step (Still Docs-Only)
 

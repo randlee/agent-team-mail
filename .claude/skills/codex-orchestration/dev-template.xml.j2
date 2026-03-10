@@ -1,3 +1,19 @@
+---
+name: dev-task
+version: 1.0.0
+description: arch-ctm sprint assignment template for codex-orchestration phases.
+format: xml
+required_variables:
+  - task_id
+  - sprint
+  - description
+  - worktree_path
+  - branch
+  - pr_target
+  - deliverables
+  - acceptance_criteria
+  - references
+---
 <atm-task id="{{ task_id }}" sprint="{{ sprint }}" assignee="arch-ctm">
   <description>{{ description }}</description>
 
@@ -6,21 +22,15 @@
   <pr-target>{{ pr_target }}</pr-target>
 
   <deliverables>
-    {% for item in deliverables %}
-    <item>{{ item }}</item>
-    {% endfor %}
+{{ deliverables }}
   </deliverables>
 
   <acceptance-criteria>
-    {% for criterion in acceptance_criteria %}
-    <item>{{ criterion }}</item>
-    {% endfor %}
+{{ acceptance_criteria }}
   </acceptance-criteria>
 
   <references>
-    {% for ref in references %}
-    <doc>{{ ref }}</doc>
-    {% endfor %}
+{{ references }}
   </references>
 
   <workflow>

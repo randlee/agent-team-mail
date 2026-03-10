@@ -1,7 +1,7 @@
 # agent-team-mail (`atm`) — Requirements Document
 
-**Version**: 0.4
-**Date**: 2026-03-03
+**Version**: 0.5
+**Date**: 2026-03-10
 **Status**: Draft
 
 ---
@@ -361,12 +361,13 @@ Spawn subcommands:
 
 Teams subcommands:
   teams add-member <team> <agent> [--agent-type <type>] [--model <model>] [--cwd <path>] [--inactive]
+  teams remove-member <team> <agent> [--archive-inbox] [--force]
   teams join <agent> [--team <team>] [--agent-type <type>] [--model <model>] [--folder <path>]
   teams spawn --agent <name> --team <team> --runtime <claude|codex|gemini|opencode> [...]
-  teams resume <team> [message] [--force] [--kill] [--session-id <id>]
+  teams resume <team> [message] [--project <name>] [--force] [--kill] [--session-id <id>]
   teams cleanup <team> [agent] [--force] [--dry-run]
-  teams backup <team> [--json]
-  teams restore <team> [--from <path>] [--dry-run] [--skip-tasks] [--json]
+  teams backup <team> [--project <name>] [--json]
+  teams restore <team> [--from <path>] [--project <name>] [--dry-run] [--skip-tasks] [--json]
 
 MCP subcommands:
   mcp install <client> [scope] [--binary <path>]
@@ -440,11 +441,11 @@ Before writing to the inbox, `atm send` queries daemon session state (`query_ses
   self-send warning behavior must be session-aware (not identity-only).
 - Sender session resolution order for this check:
   1. Hook file session id (`atm-hook-<ppid>.json`)
-  2. `CLAUDE_SESSION_ID` environment variable (explicit disambiguation)
+  2. `ATM_SESSION_ID` environment variable (explicit disambiguation)
   3. Session file fallback (`.claude/teams/<team>/sessions/*.json`)
 - If session file fallback finds multiple active sessions for the same
   `team+identity` and no explicit session id is provided, `atm send` must fail
-  with an actionable ambiguity error (`Export CLAUDE_SESSION_ID=<session-id> ...`).
+  with an actionable ambiguity error (`export ATM_SESSION_ID=<session-id> ...`).
 - When daemon session query reports the identity is currently owned by a
   different active session id than the sender session id, `atm send` must treat
   this as cross-session same-identity routing and must not prepend the self-send warning.
@@ -633,6 +634,83 @@ atm teams add-member <team> <agent> [--agent-type <type>] [--model <model>] [--c
 - Immediately after add-member returns success, `inboxes/<agent>.json` exists.
 - First `atm send <agent>@<team>` succeeds without requiring a bootstrap side effect.
 - `atm doctor` reports no roster/mailbox drift for a newly added member.
+
+#### `atm teams remove-member`
+
+Remove a non-lead member from a team roster and clean up mailbox artifacts.
+
+```
+atm teams remove-member <team> <agent> [--archive-inbox] [--force]
+```
+
+**Required behavior**:
+- Refuse removal when `<agent>` is `team-lead`.
+- Fail with an actionable error when `<agent>` is not present in team `config.json`.
+- Query daemon/PID-backed liveness before mutation. If the target appears active, or
+  liveness cannot be confirmed, the command must refuse by default.
+- `--force` is an explicit operator override for manual recovery. When present, the
+  command may bypass shutdown-first semantics and remove roster/mailbox state even if
+  liveness is active or unknown.
+- Remove the member entry from `config.json`.
+- Remove or archive mailbox artifacts for the member as part of the same command path.
+- Default behavior deletes mailbox artifacts. `--archive-inbox` preserves prior inbox
+  contents at `~/.claude/teams/.archives/<team>/removed-<agent>-<timestamp>/inboxes/<agent>.json`
+  before removal.
+- For external members that have no `session_id`, remove-member must treat liveness as
+  unknown and require `--force` rather than assuming the daemon is not tracking them.
+
+**Acceptance checks**:
+- After successful removal, `<agent>` is absent from `config.json`.
+- After successful removal, `inboxes/<agent>.json` no longer exists in the live team folder.
+- `atm doctor` reports no roster/mailbox drift for the removed member.
+
+#### `atm teams backup` / `atm teams restore`
+
+Backup and restore must preserve both ATM team state and Claude Code task-list state
+when explicitly requested.
+
+**Required behavior**:
+- `atm teams backup <team>` must continue to snapshot `config.json`, `inboxes/`, and
+  team-scoped task files from `~/.claude/tasks/<team>/`.
+- When `--project <name>` is provided, backup must also snapshot Claude Code
+  project-scoped task files from `~/.claude/tasks/<project>/` into `tasks-cc/` in the
+  backup bundle.
+- Backup directory names must use compact UTC timestamps with a 9-digit fractional
+  suffix (`YYYYMMDDTHHMMSSfffffffffZ`) so lexicographic sort still tracks chronology
+  while allowing immediate successive snapshots without collisions.
+- If `~/.claude/tasks/<project>/` does not exist, backup must omit `tasks-cc/` and
+  continue without error.
+- `atm teams restore <team>` must restore team-scoped task files back into
+  `~/.claude/tasks/<team>/`.
+- When `--project <name>` is provided and `tasks-cc/` exists in the backup bundle,
+  restore must restore those files into `~/.claude/tasks/<project>/`.
+- `--skip-tasks` must suppress all task restoration (`tasks/` and `tasks-cc/`) and
+  keep restore semantics at "config + inboxes only" even when `--project <name>` is
+  also provided.
+- Restore must preserve the existing team restore safety invariants defined in
+  `docs/agent-team-api.md`: `leadSessionId` is never overwritten and `team-lead`
+  is never restored from backup.
+- Restore must clear restored runtime-only member fields before writing them back:
+  `isActive=false`, `lastActive=null`, `sessionId=null`, and `tmuxPaneId=null`.
+- After restoring task files into any destination task directory, restore must recompute
+  `.highwatermark` from the highest numeric `<task-id>.json` filename present in that
+  destination. Restore must not blindly preserve a stale or lower watermark from backup.
+- If no numeric task files are present in a restored task directory, restore must set
+  `.highwatermark` to `0`.
+- When `atm teams resume` is invoked with `--project <name>`, the automatic pre-resume
+  backup and subsequent restore path must pass that same project scope through so
+  `tasks-cc/` is handled consistently during handoff.
+
+**Acceptance checks**:
+- A backup created with `--project <name>` contains `tasks-cc/` with the corresponding
+  Claude Code project task files.
+- A backup created with `--project <name>` where `~/.claude/tasks/<project>/` is absent
+  succeeds without creating `tasks-cc/`.
+- Restoring a backup with team task files `76.json` through `82.json` leaves
+  `.highwatermark` set to `82`.
+- Restoring a task directory with no numeric task files leaves `.highwatermark` set to `0`.
+- Restoring a backup with `tasks-cc/` repopulates `~/.claude/tasks/<project>/` when the
+  same `--project <name>` is provided on restore.
 
 ### 4.3.1 Lifecycle Teardown and Cleanup Semantics
 
@@ -995,19 +1073,12 @@ Current required `DoctorReport` shape:
   - `value`: resolved non-empty value
 
 Logging-health expansion contract:
-- Target shape adds `logging` object with at least:
-  - `health_state` (`healthy|degraded_spooling|degraded_dropping|unavailable`)
-  - `log_path`
-  - `spool_path`
-  - `dropped_count`
-  - `spool_file_count`
-  - `oldest_spool_age_secs`
-  - `last_error` (nullable)
-- Until this object is implemented, diagnostics may infer logging state from
-  findings/recommendations. This is temporary and must be replaced by explicit
-  `logging` fields once available.
-- Field additions must be backward-compatible (additive-only); existing fields
-  above are required and must not be removed or repurposed.
+- Canonical `logging` field names, value semantics, and backward-compatibility
+  rules are defined in:
+  - `docs/observability/requirements.md`
+  - `docs/observability/architecture.md`
+- This primary ATM requirements document references that contract and must not
+  duplicate or drift from it.
 
 **Last-doctor-call persistence**:
 - Path: `~/.config/atm/doctor-state.json`.
@@ -1042,7 +1113,8 @@ backend:
 | Gemini | `node` AND full args contain `gemini` |
 
 If the process name does not match, the daemon MUST:
-1. Reject the registration (mark PID as invalid in the session registry).
+1. Treat the mismatch as advisory/diagnostic only (MUST NOT reject registration writes
+   solely for PID/backend mismatch).
 2. Emit a WARN log including: agent name, backend type, expected process name, actual
    process name, and PID.
 
@@ -1104,8 +1176,8 @@ To prevent stale lifecycle events from incorrectly dead-marking live sessions:
 - If `session_end` is replayed for a record already marked `state=dead`, daemon
   must treat it as a no-op and MUST NOT re-trigger teardown/cleanup/reconcile.
 - If a member is marked dead/offline and PID appears alive but backend/session
-  validation is mismatched, daemon MUST NOT auto-promote to active/idle. Clearing
-  this state requires explicit re-registration (`session_start` or `register-hint`).
+  validation is mismatched, daemon must emit mismatch diagnostics and then use
+  normal liveness/activity derivation. Mismatch alone must not force dead/offline.
 
 #### Logging Level Requirements for PID/Process Events (REQUIRED)
 
@@ -1203,16 +1275,17 @@ Required behavior:
   session registry.
 - On daemon cold start (or when no live registry record exists for a configured
   member), daemon may bootstrap a session-registry record from roster hints only
-  when `processId` is present, alive, and backend validation does not report a
-  mismatch.
+  when `processId` is present and alive. Backend validation mismatch is
+  diagnostic-only and must not block bootstrap registration.
 - `atm send` PID fallback detection must use the same strict backend rules as the
   daemon validator (`claude=basename(comm):claude`,
   `codex=basename(comm):codex`, `gemini=basename(comm):node+args~gemini`) and
   must not stamp unmatched fallback PIDs.
 - If registry state says `Dead` but PID/backend validation indicates the tracked
-  process is alive and validation is mismatched, daemon must keep dead/offline
-  status and require explicit re-registration to clear mismatch.
-  Auto-reconcile is allowed only when PID/backend/session validation is consistent.
+  process is alive and validation is mismatched, daemon must emit
+  `PID_PROCESS_MISMATCH` diagnostics and then fall through to normal
+  liveness/activity-based state derivation. PID/backend mismatch alone must not
+  force offline/unknown presentation.
 
 #### Operational State Variable Inventory
 
@@ -1233,7 +1306,7 @@ must register session/process hints through a daemon command:
 
 - Socket command: `register-hint`
 - Required payload: `team`, `agent`, `session_id`, `process_id`
-- Optional payload: `runtime`, `runtime_session_id`, `pane_id`, `runtime_home`
+- Optional payload: `runtime`, `pane_id`, `runtime_home`
 
 Required behavior:
 - Daemon validates team membership before accepting the hint.
@@ -1243,6 +1316,55 @@ Required behavior:
 Compatibility behavior:
 - If daemon is unreachable, caller treats registration as best-effort skip.
 - If daemon responds `UNKNOWN_COMMAND`, caller must fail with daemon-upgrade guidance.
+
+### 4.3.3f Caller Identity and Runtime Session Resolution (Daemon SSoT)
+
+Caller identity/session resolution for `atm send`, `atm read`, `atm register`,
+and `atm doctor` must be centralized in one shared resolver implementation
+(`caller_identity.rs`) with daemon-backed authority.
+
+Required behavior:
+- Daemon session registry is the single source of truth for active
+  `(team, agent, runtime, session_id, process_id)` identity state.
+- CLI commands must query daemon state first for caller/session ownership; they
+  must not use ad-hoc per-command fallback chains.
+- Synthetic session identifiers are prohibited. No command may fabricate values
+  such as `local:<agent>:...` for session identity.
+- Session-file scans (`.claude/teams/<team>/sessions/*.json`) are Claude
+  bootstrap aids only and must not be used as authoritative resolution when
+  daemon state is available.
+- Ambiguous resolution must fail hard with stable error code
+  `CALLER_AMBIGUOUS`.
+- Unresolved resolution must fail hard with stable error code
+  `CALLER_UNRESOLVED`.
+
+Runtime-aware resolution contract:
+- Canonical resolver inputs:
+  - `ATM_TEAM` (or explicit team flag)
+  - `ATM_IDENTITY` (or explicit `--as/--from`)
+  - `ATM_RUNTIME`
+  - `ATM_PROJECT_DIR`
+  - optional `ATM_SESSION_ID`
+- Resolution precedence:
+  1. Explicit full `ATM_SESSION_ID` (or explicit `--resume <session_id>`)
+  2. Runtime-native env:
+     - Claude: `CLAUDE_SESSION_ID`
+     - Codex: `CODEX_THREAD_ID`
+  3. Runtime-native discovery:
+     - Gemini: `gemini --list-sessions` in `ATM_PROJECT_DIR`
+  4. Runtime file fallback (Gemini chat/log files under resolved Gemini home)
+  5. Hard error (`CALLER_UNRESOLVED`)
+- Prefix session IDs are accepted only when they resolve uniquely to a full ID;
+  zero/multiple matches must fail with stable errors
+  `SESSION_ID_NOT_FOUND` or `SESSION_ID_AMBIGUOUS`.
+
+Spawn/resume contract:
+- `atm teams spawn` must set `ATM_TEAM`, `ATM_IDENTITY`, `ATM_RUNTIME`, and
+  `ATM_PROJECT_DIR` for all spawned runtimes.
+- `ATM_SESSION_ID` is set only when known; value must always be full.
+- `atm teams spawn --resume <session_id>` resumes explicit session ID.
+- `atm teams spawn --continue` follows runtime-native latest-session behavior in
+  project scope and must resolve to a non-running session record before launch.
 
 ### 4.3.4 Runtime-Agnostic Teammate Spawn Contract
 
@@ -1254,10 +1376,11 @@ Required baseline:
 - `atm teams spawn` accepts an explicit runtime selector (initially `claude`,
   `codex`, `gemini` where supported).
 - Proposed baseline command surface:
-  - `atm teams spawn --agent <name> --team <team> --runtime <claude|codex|gemini|opencode> [--model <model>] [--folder <path>|--cwd <path>] [--system-prompt <path>] [--sandbox <on|off>] [--approval-mode <mode>] [--include-directories <paths>] [--env KEY=VALUE ...] [--resume] [--resume-session-id <runtime_session_id>]`
+  - `atm teams spawn --agent <name> --team <team> --runtime <claude|codex|gemini|opencode> [--model <model>] [--folder <path>|--cwd <path>] [--system-prompt <path>] [--sandbox <on|off>] [--approval-mode <mode>] [--include-directories <paths>] [--env KEY=VALUE ...] [--resume <session_id>|--continue]`
 - Spawn supports two modes:
   - **fresh**: start a new runtime session with a system prompt/bootstrap prompt.
-  - **resume**: continue an existing runtime session bound to the ATM agent.
+  - **resume**: continue an existing runtime session bound to the ATM agent
+    (`--resume <session_id>` or runtime-native `--continue`).
 - User-facing control remains agent-centric (`team`, `agent`) rather than runtime
   session-centric for normal usage.
 - Before launch, `atm teams spawn` must persist roster metadata for target member:
@@ -1296,13 +1419,13 @@ Notes:
 - Team/member placeholders may be concretized using resolved team context.
 - Command examples must match actual ATM CLI syntax.
 
-### 4.3.5 Runtime Session and Identity Mapping
+### 4.3.5 Session and Identity Mapping (ATM Canonical Naming)
 
 Daemon/session registry must store both ATM identity and runtime identity:
 - canonical ATM identity: `team`, `agent`
 - runtime metadata:
   - `runtime` (e.g., `gemini`)
-  - `runtime_session_id` (runtime-native session/thread identifier)
+  - `session_id` (ATM canonical field; maps runtime-native `session-id`/`thread-id`)
   - `process_id`
   - `pane_id` (for tmux-based workers)
   - `runtime_home` (runtime state root when isolated per agent)
@@ -1311,8 +1434,10 @@ Daemon/session registry must store both ATM identity and runtime identity:
 Invariants:
 - ATM identity (`team`, `agent`) is stable and is the authoritative routing key
   for ATM mail semantics.
-- Runtime session identifiers are adapter-specific and may change between fresh
-  and resumed launches.
+- Runtime-native names are adapter-specific (`session-id`, `thread-id`, etc.),
+  but ATM always normalizes to `session_id`.
+- `agent_id` is identity/routing metadata and must never be used as session
+  identity in ATM state or APIs.
 - Resume-by-agent is the default UX. Runtime session IDs are resolved from ATM
   registry/state in normal flow.
 
@@ -1361,9 +1486,9 @@ Required Gemini behavior:
   defined in section 4.5 (not a new event type).
 
 Gemini-specific acceptance checks:
-- Fresh spawn persists `runtime=gemini` and a non-empty `runtime_session_id`
+- Fresh spawn persists `runtime=gemini` and a non-empty `session_id`
   when the runtime provides one.
-- Resume spawn binds to the previously persisted `runtime_session_id` for the
+- Resume spawn binds to the previously persisted `session_id` for the
   same `(team, agent)` unless an explicit override is provided.
 - Registry/query surfaces must return consistent runtime metadata before and
   after resume operations.
@@ -1375,10 +1500,10 @@ OpenCode is the next runtime baseline after Gemini for this contract.
 Required OpenCode behavior:
 - Launch options must support OpenCode-native resume controls:
   - latest-root resume (`--continue`),
-  - explicit session resume (`--session <runtime_session_id>`),
+  - explicit session resume (`--session <session_id>`),
   - optional `--fork` on resume flows where requested.
 - Runtime identity mapping must persist OpenCode session IDs (`ses_*`) as
-  `runtime_session_id` in ATM registry/state.
+  `session_id` in ATM registry/state.
 - System prompt integration must use OpenCode-supported instruction surfaces
   (instruction files/config), since no single CLI `--system-prompt` flag exists
   in the current runtime.
@@ -1388,7 +1513,7 @@ Required OpenCode behavior:
   before process signal escalation.
 - Lifecycle and observability events must continue to flow through existing ATM
   unified envelope and logging requirements (sections 4.5 and 4.6), including
-  runtime adapter fields (`runtime=opencode`, `runtime_session_id`,
+  runtime adapter fields (`runtime=opencode`, `session_id`,
   teardown stage, spawn/resume mode).
 
 ### 4.3.10 Availability Signaling Contract
@@ -1518,19 +1643,26 @@ co_leaders = ["arch-atm", "quality-mgr"]
 | `ATM_HOME` | Home-root override used by canonical path resolution (`{ATM_HOME}/.config/atm`, `{ATM_HOME}/.claude`, etc.) |
 | `ATM_TEAM` | Default team name |
 | `ATM_IDENTITY` | Sender identity |
+| `ATM_RUNTIME` | Runtime identity (`claude|codex|gemini|opencode`) set by `atm teams spawn` |
+| `ATM_PROJECT_DIR` | Canonical project root used for runtime-scoped session lookup |
+| `ATM_SESSION_ID` | Full session identifier when known (never prefix; runtime-native IDs normalize here) |
 | `ATM_CONFIG` | Path to config file override |
 | `ATM_NO_COLOR` | Disable colored output |
 | `ATM_DAEMON_AUTOSTART` | Daemon autostart toggle (`1/true/yes` enables, `0/false/no` disables); defaults to enabled when unset |
 | `ATM_DAEMON_BIN` | Optional daemon binary override for test/ops harnesses |
-| `ATM_LOG` | Stderr log level (`trace|debug|info|warn|error`), default `info` |
-| `ATM_LOG_MSG` | Message preview toggle: `1` enables 20-char preview; unset/other values disable preview |
-| `ATM_LOG_FILE` | Canonical unified log file path override for test/ops |
 
 Environment value rules:
 - Empty/whitespace-only values for `ATM_TEAM` and `ATM_IDENTITY` are ignored
   and must not erase config/default values.
+- `ATM_SESSION_ID` must be a full runtime identifier; prefix-only values
+  must be resolved to a unique full value before use.
+- `ATM_RUNTIME` and `ATM_PROJECT_DIR` are required spawn/runtime context values
+  for runtime-aware caller/session resolution.
 - `ATM_DAEMON_BIN` and `ATM_DAEMON_AUTOSTART` are operational/test controls and
   must not be required for normal production usage.
+- Observability environment controls (`ATM_LOG`, `ATM_LOG_MSG`, `ATM_LOG_FILE`)
+  are defined in `docs/observability/requirements.md` and are not duplicated
+  in this primary ATM requirements document.
 
 ### 4.5 Recommended Hooks (Agent Teams)
 
@@ -1839,7 +1971,8 @@ identity and liveness.
     incoming `(team, agent, session_id)` matches the currently tracked session
   - daemon liveness sweeps may mark stale PIDs dead when process no longer exists
   - successful liveness checks refresh `last_alive_at`
-  - mismatch-marked dead records must not auto-promote from PID aliveness alone
+  - PID/backend mismatch emits diagnostics but does not block normal
+    liveness/activity-based state derivation
 - **Lookup semantics**:
   - Team-scoped lead check must resolve by `(team, agent=team-lead)`
   - CLI `teams resume` refusal logic must use this team-scoped daemon result, not bare-name process lookup
@@ -3013,6 +3146,6 @@ Follow [Pragmatic Rust Guidelines](../.claude/skills/rust-development/guidelines
 
 ---
 
-**Document Version**: 0.4
-**Last Updated**: 2026-03-03
+**Document Version**: 0.5
+**Last Updated**: 2026-03-10
 **Maintained By**: Claude

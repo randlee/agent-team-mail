@@ -192,15 +192,21 @@ tmux send-keys -t <pane-id> -l "You have unread ATM messages. Run: atm read --te
 ---
 
 ## Initialization Process
-1. Run: `atm teams resume <team>` where `<team>` is the `default_team` value from `.atm.toml` (e.g. `atm teams resume $(grep default_team .atm.toml | cut -d'"' -f2)`).
-   Follow the output to call TeamCreate if needed.
-   If the session ID cannot be resolved automatically, pass it explicitly:
-   `atm teams resume $(grep default_team .atm.toml | cut -d'"' -f2) --session-id <uuid>`
-   (The UUID appears in the SessionStart hook output at the top of the context, or can be provided via `CLAUDE_SESSION_ID`.)
-2. Run: `atm teams cleanup <team>` (same team name as above).
-   Removes stale members and their inboxes.
-3. Read project plan (`docs/project-plan.md`)
-4. Check current status (branches, PRs, worktrees)
-5. Output concise project summary and status to user
-6. Identify the next sprint(s) ready to execute
-7. Be prepared to begin the next sprint upon user approval
+
+**If `ATM_IDENTITY=team-lead`**: Run the `/team-lead` skill.
+It confirms identity, detects whether a restore is needed, and either proceeds
+directly to project status (fast path) or invokes the full restore procedure.
+See `.claude/skills/team-lead/SKILL.md` for the startup steps and
+`.claude/skills/team-lead/backup-and-restore-team.md` for the restore procedure.
+
+**If `ATM_IDENTITY` is any other value**: Skip team restore — you are not the team lead.
+
+> ⚠️ Do NOT use `atm teams resume` — it archives the team directory. The startup skill
+> uses the correct restore procedure (backup → TeamDelete → TeamCreate → restore).
+
+After startup completes:
+1. Read project plan (`docs/project-plan.md`)
+2. Check current status (branches, PRs, worktrees) via `atm gh pr list`
+3. Output concise project summary and status to user
+4. Identify the next sprint(s) ready to execute
+5. Be prepared to begin the next sprint upon user approval

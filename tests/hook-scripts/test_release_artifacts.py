@@ -108,7 +108,7 @@ def test_check_version_unpublished_detects_existing_versions(tmp_path, monkeypat
     manifest = _write_manifest(tmp_path)
     monkeypatch.setattr(
         mod,
-        "_cratesio_version_exists",
+        "_cargo_search_version_exists",
         lambda crate, version: crate == "a-crate" and version == "1.2.3",
     )
     published = mod.check_version_unpublished(manifest, "1.2.3")
@@ -118,7 +118,7 @@ def test_check_version_unpublished_detects_existing_versions(tmp_path, monkeypat
 def test_check_version_unpublished_command_success(tmp_path, monkeypatch, capsys):
     mod = _load_module()
     manifest = _write_manifest(tmp_path)
-    monkeypatch.setattr(mod, "_cratesio_version_exists", lambda crate, version: False)
+    monkeypatch.setattr(mod, "_cargo_search_version_exists", lambda crate, version: False)
     args = argparse.Namespace(manifest=str(manifest), version="9.9.9")
     assert mod._cmd_check_version_unpublished(args) == 0
     assert "ok: no publishable artifacts found at version 9.9.9" in capsys.readouterr().out
