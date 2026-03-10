@@ -115,6 +115,8 @@ struct DoctorReport {
     env_overrides: EnvOverrides,
     #[serde(default)]
     logging: LoggingHealthSnapshot,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    members: Vec<MemberSnapshot>,
     #[serde(skip_serializing, skip_deserializing, default)]
     member_snapshot: Vec<MemberSnapshot>,
 }
@@ -331,6 +333,7 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
         counts,
     };
 
+    let member_snapshot = build_member_snapshot(team_config.as_ref(), &daemon_states_by_agent);
     Ok(DoctorReport {
         summary,
         findings,
@@ -346,7 +349,8 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
         },
         env_overrides: active_env_overrides(),
         logging: read_daemon_status(home_dir).logging,
-        member_snapshot: build_member_snapshot(team_config.as_ref(), &daemon_states_by_agent),
+        members: member_snapshot.clone(),
+        member_snapshot,
     })
 }
 
@@ -2128,6 +2132,15 @@ mod tests {
             },
             env_overrides: EnvOverrides::default(),
             logging: LoggingHealthSnapshot::default(),
+            members: vec![MemberSnapshot {
+                name: "team-lead".to_string(),
+                agent_type: "team-lead".to_string(),
+                model: "claude".to_string(),
+                status: "Online".to_string(),
+                activity: "Busy".to_string(),
+                session_id: Some("sess-1".to_string()),
+                process_id: Some(4242),
+            }],
             member_snapshot: vec![MemberSnapshot {
                 name: "team-lead".to_string(),
                 agent_type: "team-lead".to_string(),
@@ -2180,11 +2193,12 @@ mod tests {
     }
 
     #[test]
-    fn doctor_json_schema_excludes_member_snapshot() {
+    fn doctor_json_schema_includes_members_and_excludes_member_snapshot() {
         let atm_home = std::env::temp_dir()
             .join("atm-home")
             .to_string_lossy()
             .into_owned();
+        let full_session = "123e4567-e89b-12d3-a456-426614174000".to_string();
         let report = DoctorReport {
             summary: Summary {
                 team: "atm-dev".to_string(),
@@ -2219,10 +2233,23 @@ mod tests {
                 }),
             },
             logging: LoggingHealthSnapshot::default(),
+            members: vec![MemberSnapshot {
+                name: "arch-ctm".to_string(),
+                agent_type: "codex".to_string(),
+                model: "custom:codex".to_string(),
+                status: "Online".to_string(),
+                activity: "Busy".to_string(),
+                session_id: Some(full_session.clone()),
+                process_id: Some(4242),
+            }],
             member_snapshot: vec![MemberSnapshot::default()],
         };
         let value = serde_json::to_value(report).unwrap();
         assert!(value.get("member_snapshot").is_none());
+        assert_eq!(
+            value["members"][0]["session_id"],
+            serde_json::Value::String(full_session)
+        );
         assert_eq!(
             value["env_overrides"]["atm_home"]["source"],
             serde_json::Value::String("env".to_string())
@@ -2315,6 +2342,7 @@ mod tests {
                 }),
             },
             logging: LoggingHealthSnapshot::default(),
+            members: vec![],
             member_snapshot: vec![],
         };
 
@@ -2349,6 +2377,15 @@ mod tests {
             },
             env_overrides: EnvOverrides::default(),
             logging: LoggingHealthSnapshot::default(),
+            members: vec![MemberSnapshot {
+                name: "arch-ctm".to_string(),
+                agent_type: "codex".to_string(),
+                model: "custom:codex".to_string(),
+                status: "Online".to_string(),
+                activity: "Busy".to_string(),
+                session_id: Some(full_session.to_string()),
+                process_id: Some(1234),
+            }],
             member_snapshot: vec![MemberSnapshot {
                 name: "arch-ctm".to_string(),
                 agent_type: "codex".to_string(),
@@ -2366,5 +2403,9 @@ mod tests {
 
         let json_value = serde_json::to_value(report).unwrap();
         assert!(json_value.get("member_snapshot").is_none());
+        assert_eq!(
+            json_value["members"][0]["session_id"],
+            serde_json::Value::String(full_session.to_string())
+        );
     }
 }
