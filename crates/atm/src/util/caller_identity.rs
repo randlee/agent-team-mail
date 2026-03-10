@@ -871,6 +871,94 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn codex_runtime_env_wins_over_live_daemon_session() {
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+
+        unsafe {
+            std::env::set_var("ATM_RUNTIME", "codex");
+            std::env::set_var("CODEX_THREAD_ID", "codex-env-123");
+            std::env::remove_var("ATM_SESSION_ID");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        let mut query_called = false;
+        let resolved = resolve_caller_session_id_optional_with_query(
+            Some("atm-dev"),
+            Some("arch-ctm"),
+            |_team, _identity| {
+                query_called = true;
+                Ok(Some(SessionQueryResult {
+                    session_id: "session_id:daemon-should-not-win".to_string(),
+                    process_id: std::process::id(),
+                    alive: true,
+                    last_seen_at: None,
+                    runtime: Some("codex".to_string()),
+                    runtime_session_id: Some("thread-id:daemon-thread-999".to_string()),
+                    pane_id: None,
+                    runtime_home: None,
+                }))
+            },
+        )
+        .expect("resolve");
+
+        unsafe {
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("CODEX_THREAD_ID");
+            std::env::remove_var("ATM_SESSION_ID");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        assert_eq!(resolved.as_deref(), Some("codex-env-123"));
+        assert!(!query_called, "daemon query should not run when CODEX_THREAD_ID is set");
+    }
+
+    #[test]
+    #[serial]
+    fn claude_runtime_env_wins_over_live_daemon_session() {
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+
+        unsafe {
+            std::env::set_var("ATM_RUNTIME", "claude");
+            std::env::set_var("CLAUDE_SESSION_ID", "claude-env-abc");
+            std::env::remove_var("ATM_SESSION_ID");
+            std::env::remove_var("CODEX_THREAD_ID");
+        }
+
+        let mut query_called = false;
+        let resolved = resolve_caller_session_id_optional_with_query(
+            Some("atm-dev"),
+            Some("team-lead"),
+            |_team, _identity| {
+                query_called = true;
+                Ok(Some(SessionQueryResult {
+                    session_id: "session_id:daemon-should-not-win".to_string(),
+                    process_id: std::process::id(),
+                    alive: true,
+                    last_seen_at: None,
+                    runtime: Some("claude".to_string()),
+                    runtime_session_id: Some("session_id:daemon-claude-999".to_string()),
+                    pane_id: None,
+                    runtime_home: None,
+                }))
+            },
+        )
+        .expect("resolve");
+
+        unsafe {
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+            std::env::remove_var("ATM_SESSION_ID");
+            std::env::remove_var("CODEX_THREAD_ID");
+        }
+
+        assert_eq!(resolved.as_deref(), Some("claude-env-abc"));
+        assert!(!query_called, "daemon query should not run when CLAUDE_SESSION_ID is set");
+    }
+
+    #[test]
     fn parse_gemini_list_sessions_extracts_uuid_first() {
         let output = r#"
 Index Summary Last Active Session ID
