@@ -52,6 +52,14 @@ fn wait_for_child_with_timeout(
     }
 }
 
+fn provider_build_timeout() -> Duration {
+    if cfg!(windows) {
+        Duration::from_secs(180)
+    } else {
+        Duration::from_secs(60)
+    }
+}
+
 #[test]
 fn test_provider_loader_loads_stub_library() {
     let stub_dir = provider_stub_dir();
@@ -66,7 +74,7 @@ fn test_provider_loader_loads_stub_library() {
         .expect("Failed to run cargo build for provider-stub");
     let status = wait_for_child_with_timeout(
         &mut child,
-        Duration::from_secs(60),
+        provider_build_timeout(),
         Duration::from_millis(100),
     );
 
