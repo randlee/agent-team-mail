@@ -67,14 +67,16 @@ After initialization, the team-lead uses these skills to coordinate the team:
 
 **After every session start or context compaction**, if a phase is in progress:
 
-1. Identify the active phase and which skill governs it (`/codex-orchestration`
-   or `/phase-orchestration`).
-2. **Re-read that skill's `SKILL.md` in full** before taking any coordination
-   action.
+1. Identify which **one** skill governs the active phase — either
+   `/codex-orchestration` or `/phase-orchestration`. **Read only that one.**
+2. If unsure which applies, **ask the user immediately** and read the correct
+   skill before taking any coordination action.
 3. Resume execution from the last documented state — do not rely on memory
    alone.
 
-Skipping this re-read is the primary cause of process drift between sessions.
+> Do not read both skills. Do not guess. If unsure — ask first, read immediately.
+>
+> Skipping this re-read is the primary cause of process drift between sessions.
 
 ---
 
