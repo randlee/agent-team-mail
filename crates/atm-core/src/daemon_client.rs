@@ -2838,28 +2838,47 @@ sleep 8
 
             let listener = UnixListener::bind(&socket_path).expect("bind socket");
             let handle = std::thread::spawn(move || {
-                let (mut stream, _) = listener.accept().expect("accept");
-                let mut request_line = String::new();
-                let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
-                reader.read_line(&mut request_line).expect("read request");
-                assert!(
-                    request_line.contains("\"command\":\"list-agents\""),
-                    "expected list-agents request, got: {request_line}"
-                );
+                // Other concurrently running tests can occasionally hit this temporary
+                // socket while ATM_HOME is overridden. Ignore non-target requests and
+                // keep waiting until we receive the expected list-agents query.
+                for _ in 0..32 {
+                    let (mut stream, _) = listener.accept().expect("accept");
+                    let mut request_line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+                    reader.read_line(&mut request_line).expect("read request");
 
-                let response = SocketResponse {
-                    version: PROTOCOL_VERSION,
-                    request_id: "req-test".to_string(),
-                    status: "ok".to_string(),
-                    payload: Some(serde_json::json!({
-                        "agent": "arch-ctm",
-                        "state": "active"
-                    })),
-                    error: None,
-                };
-                let line = serde_json::to_string(&response).expect("serialize response");
-                stream.write_all(line.as_bytes()).expect("write response");
-                stream.write_all(b"\n").expect("write newline");
+                    if request_line.contains("\"command\":\"list-agents\"") {
+                        let response = SocketResponse {
+                            version: PROTOCOL_VERSION,
+                            request_id: "req-test".to_string(),
+                            status: "ok".to_string(),
+                            payload: Some(serde_json::json!({
+                                "agent": "arch-ctm",
+                                "state": "active"
+                            })),
+                            error: None,
+                        };
+                        let line = serde_json::to_string(&response).expect("serialize response");
+                        stream.write_all(line.as_bytes()).expect("write response");
+                        stream.write_all(b"\n").expect("write newline");
+                        return;
+                    }
+
+                    let ignored = SocketResponse {
+                        version: PROTOCOL_VERSION,
+                        request_id: "req-ignored".to_string(),
+                        status: "error".to_string(),
+                        payload: None,
+                        error: Some(SocketError {
+                            code: "IGNORED_FOR_TEST".to_string(),
+                            message: "ignored non-list-agents request".to_string(),
+                        }),
+                    };
+                    let line = serde_json::to_string(&ignored).expect("serialize ignored");
+                    stream.write_all(line.as_bytes()).expect("write ignored");
+                    stream.write_all(b"\n").expect("write newline");
+                }
+                panic!("expected list-agents request within retry budget");
             });
 
             let old_home = std::env::var("ATM_HOME").ok();
