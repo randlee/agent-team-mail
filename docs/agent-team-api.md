@@ -10,6 +10,9 @@
 > It is a reference baseline for design, even if some content is not directly used in the
 > current MVP scope.
 
+> `API Version` tracks the observed upstream Claude Code/Anthropic schema generation.
+> `Document Version` tracks ATM-local documentation revisions in this reference.
+
 > **Schema Baseline: Claude Code 2.1.39**
 >
 > All JSON schemas in this document were captured from Claude Code **v2.1.39**.
@@ -34,6 +37,7 @@ The Agent Team API provides programmatic access to create and manage teams of Cl
 ## Table of Contents
 
 1. [Team Management](#team-management)
+   - [Member Removal (`remove-member`)](#atm-teams-remove-member-team-agent)
 2. [Agent Spawning](#agent-spawning)
 3. [Task Management](#task-management)
 4. [Message System](#message-system)
@@ -203,6 +207,8 @@ Restores team state from a backup:
 - `--dry-run`: show what would be restored without writing any files
 - `--skip-tasks`: restore config + inboxes only, skip all task restoration (`tasks/`
   and `tasks-cc/`) even when `--project <name>` is also provided
+- When `atm teams resume --project <name>` triggers a restore, `--project` is
+  automatically forwarded so `tasks-cc/` is restored into `~/.claude/tasks/<project>/`
 
 **Invariants**:
 - `leadSessionId` in `config.json` is **never** overwritten — the current session's lead ID is always preserved
@@ -1448,6 +1454,9 @@ Reference in dependencies as strings, not integers.
 - Added `.highwatermark` recomputation invariant for restored task directories
 - Clarified absent source-path behavior: missing `~/.claude/tasks/<project>/` omits
   `tasks-cc/` without error
+- Added `atm teams remove-member <team> <agent> [--archive-inbox] [--force]`
+  with archive path, liveness-check-before-mutation behavior, and `--force`
+  operator override semantics (issue #649)
 
 ### Version 1.0 (2026-02-11)
 - Initial API documentation
