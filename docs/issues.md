@@ -1,6 +1,12 @@
 # Known Issues
 
-Last updated: 2026-03-08
+Last updated: 2026-03-10
+
+## Active Critical Fixes (Current)
+
+| Issue | Summary | Type | Status | Priority | Planned Sprint | Notes |
+|---|---|---|---|---|---|---|
+| [#636](https://github.com/randlee/agent-team-mail/issues/636) | `register-hint` blocked by `validate_pid_backend` gate; members remain `Unknown` | Bug | Open (active fix branch) | Critical | `fix/636` | Write-path must be non-blocking; mismatch remains advisory. Implementation plan: `docs/adr/issue-636-registration-gate-fix-plan.md` |
 
 ## Phase AD Dogfood Blockers (GH Monitor Setup Session 2026-03-07)
 
