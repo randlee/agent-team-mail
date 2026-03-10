@@ -21,8 +21,13 @@ fn configure_cmd(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     cmd.env("ATM_HOME", temp_dir.path())
         .env_remove("ATM_TEAM")
         .env_remove("ATM_IDENTITY")
+        .env_remove("ATM_SESSION_ID")
         .env_remove("ATM_CONFIG")
         .env_remove("CLAUDE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env("TMPDIR", temp_dir.path())
+        .env("TMP", temp_dir.path())
+        .env("TEMP", temp_dir.path())
         .current_dir(&workdir);
 }
 
@@ -113,8 +118,7 @@ fn test_register_team_lead_with_session_id_env() {
         .success()
         .stdout(predicate::str::contains("Registered as team-lead"))
         .stdout(predicate::str::contains("my-team"))
-        .stdout(predicate::str::contains("test-session-lead-001"))
-        .stderr(predicate::str::contains("WARNING: hook file not found"));
+        .stdout(predicate::str::contains("test-session-lead-001"));
 
     // Verify leadSessionId was updated in config.json.
     let config_path = temp_dir.path().join(".claude/teams/my-team/config.json");
@@ -149,8 +153,7 @@ fn test_register_teammate_with_session_id_env() {
         .success()
         .stdout(predicate::str::contains("Registered as 'alice'"))
         .stdout(predicate::str::contains("my-team"))
-        .stdout(predicate::str::contains("test-session-alice-001"))
-        .stderr(predicate::str::contains("WARNING: hook file not found"));
+        .stdout(predicate::str::contains("test-session-alice-001"));
 
     // Verify sessionId was written on the alice member.
     let config: serde_json::Value =
@@ -181,7 +184,6 @@ fn test_register_unknown_name_fails() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("WARNING: hook file not found"))
         .stderr(predicate::str::contains("not found in team"));
 }
 
@@ -199,8 +201,7 @@ fn test_register_warns_when_lead_not_registered() {
 
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("WARNING"))
-        .stderr(predicate::str::contains("WARNING: hook file not found"));
+        .stdout(predicate::str::contains("WARNING"));
 }
 
 #[test]
@@ -224,7 +225,6 @@ fn test_register_team_lead_wrong_identity_fails() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("WARNING: hook file not found"))
         .stderr(predicate::str::contains("Only team-lead may call"));
 }
 
@@ -261,13 +261,12 @@ fn test_register_requires_session_id() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("Cannot determine session_id"));
+        .stderr(predicate::str::contains("CALLER_UNRESOLVED"))
+        .stderr(predicate::str::contains("ATM_SESSION_ID"));
 }
 
-/// A stale/invalid hook file must emit a warning but still allow registration
-/// by falling through to the session file or CLAUDE_SESSION_ID fallback.
-/// (The previous behavior was `bail!` on hook file errors; the new behavior
-/// warns and continues so that Claude Code's subprocess model is supported.)
+/// A stale/invalid hook file must still allow registration by falling through
+/// to the session file or CLAUDE_SESSION_ID fallback.
 #[test]
 fn test_register_invalid_hook_file_falls_through_to_env() {
     let temp_dir = TempDir::new().unwrap();
@@ -299,11 +298,10 @@ fn test_register_invalid_hook_file_falls_through_to_env() {
         .current_dir(temp_dir.path().join("workdir"))
         .args(["register", "my-team"]);
 
-    // Hook file validation fails → warning emitted → falls through to
-    // CLAUDE_SESSION_ID → registration succeeds with the env var session.
+    // Hook file validation fails and resolver falls through to
+    // CLAUDE_SESSION_ID, so registration succeeds with the env var session.
     cmd.assert()
         .success()
-        .stderr(predicate::str::contains("hook file validation failed"))
         .stdout(predicate::str::contains("env-session-fallback"));
 }
 

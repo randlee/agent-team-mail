@@ -10,10 +10,14 @@ rust-version.workspace = true
 description = "Prompt/template composition engine for AI agent pipelines"
 
 [dependencies]
+agent-team-mail-core.workspace = true
 thiserror.workspace = true
 minijinja.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+sc-observability.workspace = true
 serde_yaml = "0.9"
 
 [dev-dependencies]
+serial_test = "3"
 tempfile = "3"

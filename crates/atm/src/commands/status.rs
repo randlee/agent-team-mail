@@ -8,11 +8,13 @@ use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
 use anyhow::Result;
 use clap::Args;
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 
+use crate::commands::logging_health::{
+    build_logging_health_contract, logging_remediation, read_daemon_logging_health,
+};
 use crate::util::member_labels::{GHOST_SUFFIX, UNREGISTERED_MARKER};
 use crate::util::settings::get_home_dir;
 
@@ -73,6 +75,7 @@ pub fn execute(args: StatusArgs) -> Result<()> {
 
     let member_rows = build_status_member_rows(&team_config, &daemon_states);
     let logging = read_daemon_logging_health(&home_dir);
+    let logging_health = build_logging_health_contract(&logging, &home_dir);
 
     // Count unread messages for each member
     let inbox_counts = count_inbox_messages(&team_dir, &member_rows)?;
@@ -110,15 +113,8 @@ pub fn execute(args: StatusArgs) -> Result<()> {
                 "pending": pending_tasks,
                 "completed": completed_tasks,
             },
-            "logging": json!({
-                "state": logging.state,
-                "dropped_counter": logging.dropped_counter,
-                "spool_path": logging.spool_path,
-                "last_error": logging.last_error,
-                "canonical_log_path": logging.canonical_log_path,
-                "spool_count": logging.spool_count,
-                "oldest_spool_age": logging.oldest_spool_age,
-            }),
+            "logging_health": serde_json::to_value(&logging_health)
+                .expect("logging_health should serialize"),
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
@@ -164,6 +160,22 @@ pub fn execute(args: StatusArgs) -> Result<()> {
         }
         if let Some(last_error) = &logging.last_error {
             println!("  last_error:      {last_error}");
+        }
+        println!("  schema_version:  {}", logging_health.schema_version);
+        println!("  log_root:        {}", logging_health.log_root);
+        println!(
+            "  dropped_events_total: {}",
+            logging_health.dropped_events_total
+        );
+        println!("  spool_file_count: {}", logging_health.spool_file_count);
+        if let Some(last_code) = &logging_health.last_error.code {
+            println!("  last_error.code: {last_code}");
+        }
+        if let Some(last_message) = &logging_health.last_error.message {
+            println!("  last_error.message: {last_message}");
+        }
+        if let Some(last_at) = &logging_health.last_error.at {
+            println!("  last_error.at:   {last_at}");
         }
         if let Some(remediation) = logging_remediation(&logging.state) {
             println!("  remediation:     {remediation}");
@@ -282,63 +294,6 @@ fn count_tasks(tasks_dir: &std::path::Path) -> Result<(usize, usize)> {
     }
 
     Ok((pending, completed))
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-struct LoggingHealth {
-    state: String,
-    dropped_counter: u64,
-    spool_path: String,
-    last_error: Option<String>,
-    canonical_log_path: String,
-    spool_count: u64,
-    oldest_spool_age: Option<u64>,
-}
-
-impl Default for LoggingHealth {
-    fn default() -> Self {
-        Self {
-            state: "unavailable".to_string(),
-            dropped_counter: 0,
-            spool_path: String::new(),
-            last_error: None,
-            canonical_log_path: String::new(),
-            spool_count: 0,
-            oldest_spool_age: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-struct DaemonStatusSnapshot {
-    #[serde(default)]
-    logging: LoggingHealth,
-}
-
-fn read_daemon_logging_health(home_dir: &std::path::Path) -> LoggingHealth {
-    let status_path = home_dir.join(".claude/daemon/status.json");
-    let Ok(content) = fs::read_to_string(status_path) else {
-        return LoggingHealth::default();
-    };
-    serde_json::from_str::<DaemonStatusSnapshot>(&content)
-        .map(|status| status.logging)
-        .unwrap_or_default()
-}
-
-fn logging_remediation(state: &str) -> Option<&'static str> {
-    match state {
-        "degraded_dropping" => {
-            Some("queue is dropping events; verify daemon health and reduce log burst load")
-        }
-        "degraded_spooling" => Some(
-            "events are spooling locally; verify daemon socket/path and allow merge to catch up",
-        ),
-        "unavailable" => Some(
-            "logging unavailable; check ATM_LOG value, daemon status, and log path permissions",
-        ),
-        _ => None,
-    }
 }
 
 /// Format age as human-readable string
@@ -484,5 +439,43 @@ mod tests {
         assert!(logging_remediation("degraded_spooling").is_some());
         assert!(logging_remediation("degraded_dropping").is_some());
         assert!(logging_remediation("unavailable").is_some());
+    }
+
+    #[test]
+    fn logging_health_contract_contains_required_json_keys() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let temp_root = std::env::temp_dir();
+        let spool_path = temp_root.join("spool").to_string_lossy().to_string();
+        let canonical_log_path = temp_root
+            .join("atm.log.jsonl")
+            .to_string_lossy()
+            .to_string();
+        let contract = build_logging_health_contract(
+            &crate::commands::logging_health::LoggingHealthSnapshot {
+                state: "degraded_spooling".to_string(),
+                dropped_counter: 1,
+                spool_path: spool_path.clone(),
+                last_error: Some("events are queued in spool awaiting merge".to_string()),
+                canonical_log_path: canonical_log_path.clone(),
+                spool_count: 2,
+                oldest_spool_age: Some(10),
+            },
+            tmp.path(),
+        );
+        let value = serde_json::to_value(contract).expect("serialize logging_health");
+        assert_eq!(value["schema_version"], "v1");
+        assert_eq!(value["state"], "degraded_spooling");
+        assert_eq!(value["canonical_log_path"], canonical_log_path);
+        assert_eq!(value["spool_path"], spool_path);
+        assert_eq!(value["dropped_events_total"], 1);
+        assert_eq!(value["spool_file_count"], 2);
+        assert_eq!(value["oldest_spool_age_seconds"], 10);
+        assert!(value["log_root"].is_string());
+        assert_eq!(value["last_error"]["code"], "DEGRADED_SPOOLING");
+        assert_eq!(
+            value["last_error"]["message"],
+            "events are queued in spool awaiting merge"
+        );
+        assert!(value["last_error"]["at"].is_string());
     }
 }

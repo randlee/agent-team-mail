@@ -17,6 +17,7 @@ dependencies = [
  "minijinja",
  "notify",
  "predicates",
+ "regex",
  "sc-composer",
  "sc-observability",
  "serde",
@@ -1604,9 +1605,13 @@ dependencies = [
 name = "sc-composer"
 version = "0.43.4"
 dependencies = [
+ "agent-team-mail-core",
  "minijinja",
+ "sc-observability",
  "serde",
+ "serde_json",
  "serde_yaml",
+ "serial_test",
  "tempfile",
  "thiserror 2.0.18",
 ]
@@ -1618,6 +1623,7 @@ dependencies = [
  "agent-team-mail-core",
  "anyhow",
  "chrono",
+ "serde",
  "serde_json",
  "serial_test",
  "tempfile",

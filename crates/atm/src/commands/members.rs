@@ -30,8 +30,52 @@ struct MemberRow {
     name: String,
     agent_type: String,
     model: String,
+    session_id: Option<String>,
     liveness: Option<bool>,
     in_config: bool,
+}
+
+fn format_session_short(session_id: Option<&str>) -> String {
+    let Some(session) = session_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return "-".to_string();
+    };
+    session.chars().take(8).collect()
+}
+
+fn render_members_human(team_name: &str, member_rows: &[MemberRow]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Team: {team_name}\n\n"));
+
+    if member_rows.is_empty() {
+        out.push_str("  No members\n");
+        return out;
+    }
+
+    out.push_str(&format!(
+        "  {:<20} {:<20} {:<25} {:<8} Status\n",
+        "Name", "Type", "Model", "Session"
+    ));
+    out.push_str(&format!("  {}\n", "─".repeat(84)));
+
+    for member in member_rows {
+        let active = match member.liveness {
+            Some(true) => "Online",
+            Some(false) => "Offline",
+            None => "Unknown",
+        };
+        let name = if member.in_config {
+            member.name.clone()
+        } else {
+            format!("{}{}", member.name, GHOST_SUFFIX)
+        };
+        let session = format_session_short(member.session_id.as_deref());
+        out.push_str(&format!(
+            "  {name:<20} {:<20} {:<25} {session:<8} {active}\n",
+            member.agent_type, member.model
+        ));
+    }
+
+    out
 }
 
 /// Execute the members command
@@ -80,6 +124,7 @@ pub fn execute(args: MembersArgs) -> Result<()> {
                 "name": m.name,
                 "type": m.agent_type,
                 "model": m.model,
+                "sessionId": m.session_id,
                 "liveness": m.liveness,
                 "inConfig": m.in_config,
                 "ghost": !m.in_config,
@@ -87,31 +132,7 @@ pub fn execute(args: MembersArgs) -> Result<()> {
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        println!("Team: {team_name}");
-        println!();
-
-        if team_config.members.is_empty() {
-            println!("  No members");
-        } else {
-            println!("  {:<20} {:<20} {:<25} Status", "Name", "Type", "Model");
-            println!("  {}", "─".repeat(72));
-
-            for member in &member_rows {
-                let active = match member.liveness {
-                    Some(true) => "Online",
-                    Some(false) => "Offline",
-                    None => "Unknown",
-                };
-                let name = if member.in_config {
-                    member.name.clone()
-                } else {
-                    format!("{}{}", member.name, GHOST_SUFFIX)
-                };
-                let agent_type = &member.agent_type;
-                let model = &member.model;
-                println!("  {name:<20} {agent_type:<20} {model:<25} {active}");
-            }
-        }
+        print!("{}", render_members_human(team_name, &member_rows));
     }
 
     Ok(())
@@ -142,6 +163,9 @@ fn build_member_rows(
                     name,
                     agent_type: member.agent_type.clone(),
                     model: member.model.clone(),
+                    session_id: daemon_states
+                        .get(member.name.as_str())
+                        .and_then(|s| s.session_id.clone()),
                     liveness: canonical_liveness_bool(daemon_states.get(member.name.as_str())),
                     in_config: true,
                 }
@@ -150,6 +174,9 @@ fn build_member_rows(
                     name: name.clone(),
                     agent_type: UNREGISTERED_MARKER.to_string(),
                     model: UNREGISTERED_MARKER.to_string(),
+                    session_id: daemon_states
+                        .get(name.as_str())
+                        .and_then(|s| s.session_id.clone()),
                     liveness: canonical_liveness_bool(daemon_states.get(name.as_str())),
                     in_config: false,
                 }
@@ -216,5 +243,27 @@ mod tests {
         let rows = build_member_rows(&cfg, &daemon_states);
         assert!(rows.iter().any(|r| r.name == "team-lead" && r.in_config));
         assert!(rows.iter().any(|r| r.name == "arch-ctm" && !r.in_config));
+        assert!(
+            rows.iter()
+                .find(|r| r.name == "arch-ctm")
+                .and_then(|r| r.session_id.as_deref())
+                == Some("sess-1")
+        );
+    }
+
+    #[test]
+    fn render_members_human_shows_short_session_ids() {
+        let rows = vec![MemberRow {
+            name: "arch-ctm".to_string(),
+            agent_type: "codex".to_string(),
+            model: "custom:codex".to_string(),
+            session_id: Some("123e4567-e89b-12d3-a456-426614174000".to_string()),
+            liveness: Some(true),
+            in_config: true,
+        }];
+
+        let rendered = render_members_human("atm-dev", &rows);
+        assert!(rendered.contains("123e4567"));
+        assert!(!rendered.contains("123e4567-e89b-12d3-a456-426614174000"));
     }
 }

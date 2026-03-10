@@ -22,7 +22,7 @@
 //! starts a fresh base file. The oldest rotation file (`.N`) is removed.
 
 use agent_team_mail_core::logging_event::LogEventV1;
-use sc_observability::DEFAULT_QUEUE_CAPACITY;
+use sc_observability::{DEFAULT_QUEUE_CAPACITY, export_otel_best_effort_from_path};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -268,6 +268,7 @@ fn write_events(config: &LogWriterConfig, events: &[LogEventV1]) {
                     warn!("log_writer: write error: {e}");
                     continue;
                 }
+                export_otel_best_effort_from_path(&config.log_path, event);
             }
             Err(e) => {
                 warn!("log_writer: failed to serialize event: {e}");
@@ -311,6 +312,7 @@ fn rotation_path(base: &Path, n: u32) -> PathBuf {
 mod tests {
     use super::*;
     use agent_team_mail_core::logging_event::new_log_event;
+    use sc_observability::OtelRecord;
     use serial_test::serial;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -555,5 +557,76 @@ mod tests {
 
         assert_eq!(rotation_path(&base, 1), expected_1);
         assert_eq!(rotation_path(&base, 5), expected_5);
+    }
+
+    #[test]
+    fn test_write_events_exports_otel_for_each_producer_source() {
+        let dir = TempDir::new().expect("temp dir");
+        let log_path = dir.path().join("atm.log.jsonl");
+        let config = LogWriterConfig {
+            log_path: log_path.clone(),
+            max_bytes: 50 * 1024 * 1024,
+            max_files: 5,
+            flush_interval_ms: 100,
+        };
+        let mut events = Vec::new();
+        for (idx, source, action) in [
+            (1u8, "atm", "send"),
+            (2u8, "atm-daemon", "register_hint"),
+            (3u8, "sc-composer", "compose"),
+        ] {
+            let mut event = new_log_event(source, action, "atm::test", "info");
+            event.team = Some("atm-dev".to_string());
+            event.agent = Some("arch-ctm".to_string());
+            event.runtime = Some("codex".to_string());
+            event.session_id = Some("sess-123".to_string());
+            event.trace_id = Some("trace-123".to_string());
+            event.span_id = Some(format!("span-{idx}"));
+            events.push(event);
+        }
+        write_events(&config, &events);
+
+        let otel_path = dir.path().join("atm.log.otel.jsonl");
+        let lines: Vec<String> = std::fs::read_to_string(&otel_path)
+            .expect("otel output should exist")
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(lines.len(), 3);
+        let exported: Vec<OtelRecord> = lines
+            .iter()
+            .map(|line| serde_json::from_str(line).expect("valid otel record json"))
+            .collect();
+        assert_eq!(
+            exported
+                .iter()
+                .map(|record| record.name.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                "send".to_string(),
+                "register_hint".to_string(),
+                "compose".to_string()
+            ]
+        );
+        for record in &exported {
+            assert_eq!(record.trace_id.as_deref(), Some("trace-123"));
+            assert!(record.span_id.is_some(), "span_id should be present");
+            assert_eq!(
+                record.attributes.get("team").and_then(|v| v.as_str()),
+                Some("atm-dev")
+            );
+            assert_eq!(
+                record.attributes.get("agent").and_then(|v| v.as_str()),
+                Some("arch-ctm")
+            );
+            assert_eq!(
+                record.attributes.get("runtime").and_then(|v| v.as_str()),
+                Some("codex")
+            );
+            assert_eq!(
+                record.attributes.get("session_id").and_then(|v| v.as_str()),
+                Some("sess-123")
+            );
+        }
     }
 }

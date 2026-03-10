@@ -770,6 +770,9 @@ pub struct SessionQueryResult {
     pub process_id: u32,
     /// Whether the OS process is currently running.
     pub alive: bool,
+    /// Most recent successful daemon heartbeat for this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<String>,
     /// Runtime kind (`codex`, `gemini`, etc.) when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
@@ -2999,6 +3002,7 @@ sleep 8
             session_id: "abc123".to_string(),
             process_id: 12345,
             alive: true,
+            last_seen_at: Some("2026-03-10T00:00:00Z".to_string()),
             runtime: None,
             runtime_session_id: None,
             pane_id: None,
@@ -3018,6 +3022,7 @@ sleep 8
         assert_eq!(result.session_id, "xyz789");
         assert_eq!(result.process_id, 99);
         assert!(!result.alive);
+        assert!(result.last_seen_at.is_none());
         assert!(result.runtime.is_none());
         assert!(result.runtime_session_id.is_none());
     }

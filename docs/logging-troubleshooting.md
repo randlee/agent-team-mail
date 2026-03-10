@@ -1,6 +1,6 @@
 # Logging Troubleshooting Runbook
 
-Last updated: 2026-02-28
+Last updated: 2026-03-10
 
 ## Purpose
 
@@ -19,9 +19,9 @@ Checks:
 - `atm status --json`
 
 Expected:
-- target schema: `logging.health_state = "healthy"`
-- until schema field lands: infer healthy from absence of degraded/unavailable
-  logging findings in `atm doctor` output.
+- target schema: `logging_health.state = "healthy"`
+- infer healthy from absence of degraded/unavailable logging findings in
+  `atm doctor` output.
 
 Action:
 - No remediation required.
@@ -33,7 +33,8 @@ Meaning:
 
 Checks:
 - `atm doctor --json`
-- Verify spool directory exists and grows: `${ATM_HOME:-$HOME}/.config/atm/log-spool`
+- Verify spool directory exists and grows:
+  `${ATM_HOME:-$HOME}/.config/atm/logs/atm/spool`
 
 Likely causes:
 - daemon not running
@@ -89,6 +90,73 @@ Remediation:
 3. Run:
    - `atm doctor --json`
 4. If still unavailable, capture diagnostics and escalate.
+
+## OpenTelemetry Exporter Diagnostics
+
+### Fail-open contract
+
+OTel export is best-effort and must never block canonical logging writes.
+
+Expected behavior during exporter outages:
+- canonical log writes continue (`atm.log`)
+- command flow remains non-failing (`atm doctor`, `atm status`)
+- OTel health reports degraded/unavailable until exporter path recovers
+
+### OTel sidecar output path
+
+By default, OTel sidecar output is derived from canonical log path:
+- canonical: `.../atm.log`
+- sidecar: `.../atm.log.otel.jsonl`
+
+If sidecar path is unreachable (permissions, path conflict, directory at file path),
+OTel health degrades but canonical logging remains available.
+
+### Environment toggles
+
+`ATM_OTEL_ENABLED` controls exporter enablement:
+- unset or truthy value: exporter enabled
+- `false|0|off|disabled|no`: exporter disabled by design
+
+When disabled:
+- canonical logging health remains available through `logging_health`
+- exporter disablement is reflected in diagnostics and warning/error events
+
+### Operator checks
+
+```bash
+atm doctor
+atm doctor --json
+atm status
+atm status --json
+```
+
+Look for:
+- `logging_health.state` in JSON output
+- `logging_health.last_error.code` and `logging_health.last_error.message`
+  when exporter or sink paths are degraded
+
+Canonical JSON keys referenced by this runbook:
+- `logging_health.schema_version`
+- `logging_health.state`
+- `logging_health.log_root`
+- `logging_health.canonical_log_path`
+- `logging_health.spool_path`
+- `logging_health.dropped_events_total`
+- `logging_health.spool_file_count`
+- `logging_health.oldest_spool_age_seconds`
+- `logging_health.last_error.code`
+- `logging_health.last_error.message`
+- `logging_health.last_error.at`
+
+### Remediation
+
+1. Verify exporter is intentionally enabled:
+   - `unset ATM_OTEL_ENABLED` or set to a truthy value.
+2. Check sidecar path availability and permissions:
+   - same parent as canonical log path.
+3. Re-run `atm doctor --json` and confirm `logging_health.state`.
+4. If exporter stays degraded while canonical logging is healthy, capture
+   diagnostics and escalate as exporter-path-specific incident.
 
 ## PID Logging Semantics
 
@@ -158,7 +226,8 @@ ATM_LOG=0 atm status --json
 ```
 
 Expected:
-- `logging.state` reports `unavailable` or a degraded state with explicit finding.
+- `logging_health.state` reports `unavailable` or a degraded state with explicit
+  finding.
 
 Remediation:
 1. Remove disable flag (`unset ATM_LOG` or set `ATM_LOG=info`).
@@ -168,7 +237,7 @@ Remediation:
 ### Queue full / dropped events
 
 Symptoms:
-- `logging.dropped_counter` increases over time.
+- `logging_health.dropped_events_total` increases over time.
 - doctor/status show `degraded_dropping`.
 
 Remediation:
@@ -186,7 +255,9 @@ ATM_LOG_FILE=/tmp/atm-custom.jsonl atm status --json
 ```
 
 Expected:
-- `logging.spool_path` resolves relative to active log path parent.
+- `logging_health.spool_path` resolves relative to active log path parent.
+- canonical ATM-managed spool path shape is
+  `${ATM_HOME:-$HOME}/.config/atm/logs/<tool>/spool`.
 
 `sc-compose` override:
 
@@ -196,7 +267,8 @@ SC_COMPOSE_LOG_FILE=/tmp/sc-compose.log sc-compose --help >/dev/null
 
 Expected:
 - `sc-compose` writes log to `/tmp/sc-compose.log`.
-- spool uses sibling `/tmp/log-spool` unless otherwise configured.
+- spool defaults to `${ATM_HOME:-$HOME}/.config/atm/logs/sc-compose/spool`
+  in ATM-managed profile.
 
 ### Level filtering
 

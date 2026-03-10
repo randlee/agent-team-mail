@@ -20,13 +20,26 @@ non-blocking local structured logging and canonical observability schema rules.
 ## AK.1 — Contract and Schema
 
 - `LogEventV1` schema tests:
-  - `trace_id`, `span_id`, `subagent_id` accepted and validated.
-  - `spans` semantic shape validation.
+  - Scope-based mandatory correlation fields:
+    - agent/runtime-scoped: `team`, `agent`, `runtime`, `session_id`
+    - trace events: `trace_id`, `span_id`
+    - sub-agent events: `subagent_id` plus all required runtime/trace keys
+  - `spans` semantic shape validation:
+    - root→leaf ordering
+    - same-trace invariant
+    - parent-chain invariant (`parent_span_id == previous span_id`)
+    - leaf matches top-level `trace_id`/`span_id` when provided
 - Pathing tests:
-  - canonical sink `${home_dir}/.config/atm/logs/<tool>/<tool>.log.jsonl`
-  - canonical spool `${home_dir}/.config/atm/logs/<tool>/spool`
+  - ATM-managed profile:
+    - sink `${home_dir}/.config/atm/logs/<tool>/<tool>.log.jsonl`
+    - spool `${home_dir}/.config/atm/logs/<tool>/spool`
+  - Standalone profile:
+    - sink `${home_dir}/.config/<tool>/logs/<tool>.log.jsonl`
+    - spool `${home_dir}/.config/<tool>/logs/spool`
 - Health JSON contract tests:
   - `logging_health` key set present for `doctor --json` and `status --json`.
+  - Shared keys are byte-for-byte identical across doctor/status outputs
+    (name, type, nullability expectations).
 
 ## AK.2 — Shared Crate OTel Core
 
@@ -51,7 +64,11 @@ non-blocking local structured logging and canonical observability schema rules.
 ## AK.4 — Diagnostics and Runbook
 
 - `atm doctor --json` and `atm status --json` parity tests:
-  - identical `logging_health` key names and semantics.
+  - identical `logging_health` key names and semantics:
+    - `status`
+    - `otel_exporter`
+    - `local_structured`
+    - `last_export_error`
 - Human-output tests:
   - degraded/unavailable state includes actionable remediation text.
 
