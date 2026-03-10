@@ -11,7 +11,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -688,6 +688,10 @@ impl Logger {
     }
 
     fn append_line_to_canonical(&self, line: &str) -> Result<(), LoggerError> {
+        static CANONICAL_APPEND_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock = CANONICAL_APPEND_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock.lock().expect("canonical append lock poisoned");
+
         if let Some(parent) = self.config.log_path.parent() {
             fs::create_dir_all(parent)?;
         }

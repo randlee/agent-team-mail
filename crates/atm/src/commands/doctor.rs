@@ -18,6 +18,10 @@ use agent_team_mail_core::schema::TeamConfig;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::commands::logging_health::{
+    LoggingHealthContract, LoggingHealthSnapshot, build_logging_health_contract,
+    logging_remediation,
+};
 use crate::util::hook_identity::read_hook_file;
 use crate::util::member_labels::UNREGISTERED_MARKER;
 use crate::util::settings::get_home_dir;
@@ -144,92 +148,6 @@ struct DaemonStatusSnapshot {
     plugins: Vec<PluginStatusSnapshot>,
     #[serde(default)]
     logging: LoggingHealthSnapshot,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-struct LoggingHealthSnapshot {
-    state: String,
-    dropped_counter: u64,
-    spool_path: String,
-    last_error: Option<String>,
-    canonical_log_path: String,
-    spool_count: u64,
-    oldest_spool_age: Option<u64>,
-}
-
-impl Default for LoggingHealthSnapshot {
-    fn default() -> Self {
-        Self {
-            state: "unavailable".to_string(),
-            dropped_counter: 0,
-            spool_path: String::new(),
-            last_error: None,
-            canonical_log_path: String::new(),
-            spool_count: 0,
-            oldest_spool_age: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct LoggingHealthContract {
-    status: String,
-    otel_exporter: String,
-    local_structured: bool,
-    last_export_error: Option<String>,
-}
-
-impl Default for LoggingHealthContract {
-    fn default() -> Self {
-        Self {
-            status: "unavailable".to_string(),
-            otel_exporter: "unavailable".to_string(),
-            local_structured: true,
-            last_export_error: None,
-        }
-    }
-}
-
-fn logging_status_bucket(state: &str) -> &'static str {
-    match state {
-        "healthy" => "ok",
-        "unavailable" => "unavailable",
-        _ => "degraded",
-    }
-}
-
-fn otel_enabled_from_env() -> bool {
-    !matches!(
-        std::env::var("ATM_OTEL_ENABLED")
-            .ok()
-            .map(|v| v.trim().to_ascii_lowercase()),
-        Some(ref v) if v == "0" || v == "false" || v == "off" || v == "disabled" || v == "no"
-    )
-}
-
-fn build_logging_health_contract(logging: &LoggingHealthSnapshot) -> LoggingHealthContract {
-    let status = logging_status_bucket(&logging.state).to_string();
-    let mut otel_exporter = status.clone();
-    let mut last_export_error = if otel_exporter == "ok" {
-        None
-    } else {
-        logging.last_error.clone()
-    };
-
-    if !otel_enabled_from_env() {
-        otel_exporter = "unavailable".to_string();
-        if last_export_error.is_none() {
-            last_export_error = Some("otel exporter disabled by ATM_OTEL_ENABLED".to_string());
-        }
-    }
-
-    LoggingHealthContract {
-        status,
-        otel_exporter,
-        local_structured: true,
-        last_export_error,
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -390,7 +308,7 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
     };
     let daemon_status = read_daemon_status(home_dir);
     let logging = daemon_status.logging;
-    let logging_health = build_logging_health_contract(&logging);
+    let logging_health = build_logging_health_contract(&logging, home_dir);
 
     Ok(DoctorReport {
         summary,
@@ -1269,31 +1187,47 @@ fn render_human(report: &DoctorReport) -> String {
         render_log_window_human(&report.log_window)
     ));
     out.push_str("Logging health:\n");
-    out.push_str(&format!("  state: {}\n", report.logging.state));
     out.push_str(&format!(
-        "  dropped_counter: {}\n",
-        report.logging.dropped_counter
+        "  schema_version: {}\n",
+        report.logging_health.schema_version
     ));
-    out.push_str(&format!("  spool_path: {}\n", report.logging.spool_path));
+    out.push_str(&format!("  state: {}\n", report.logging_health.state));
+    out.push_str(&format!("  log_root: {}\n", report.logging_health.log_root));
     out.push_str(&format!(
         "  canonical_log_path: {}\n",
-        report.logging.canonical_log_path
+        report.logging_health.canonical_log_path
     ));
-    out.push_str(&format!("  spool_count: {}\n", report.logging.spool_count));
-    if let Some(oldest_spool_age) = report.logging.oldest_spool_age {
-        out.push_str(&format!("  oldest_spool_age: {oldest_spool_age}s\n"));
+    out.push_str(&format!(
+        "  spool_path: {}\n",
+        report.logging_health.spool_path
+    ));
+    out.push_str(&format!(
+        "  dropped_events_total: {}\n",
+        report.logging_health.dropped_events_total
+    ));
+    out.push_str(&format!(
+        "  spool_file_count: {}\n",
+        report.logging_health.spool_file_count
+    ));
+    out.push_str(&format!(
+        "  oldest_spool_age_seconds: {}\n",
+        report
+            .logging_health
+            .oldest_spool_age_seconds
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string())
+    ));
+    if let Some(code) = &report.logging_health.last_error.code {
+        out.push_str(&format!("  last_error.code: {code}\n"));
     }
-    if let Some(last_error) = &report.logging.last_error {
-        out.push_str(&format!("  last_error: {last_error}\n"));
+    if let Some(message) = &report.logging_health.last_error.message {
+        out.push_str(&format!("  last_error.message: {message}\n"));
     }
-    if let Some(remediation) = logging_remediation(&report.logging.state) {
+    if let Some(at) = &report.logging_health.last_error.at {
+        out.push_str(&format!("  last_error.at: {at}\n"));
+    }
+    if let Some(remediation) = logging_remediation(&report.logging_health.state) {
         out.push_str(&format!("  remediation: {remediation}\n"));
-    }
-    out.push_str("  otel_status: ");
-    out.push_str(&report.logging_health.otel_exporter);
-    out.push('\n');
-    if let Some(last_export_error) = &report.logging_health.last_export_error {
-        out.push_str(&format!("  otel_last_error: {last_export_error}\n"));
     }
     out.push('\n');
 
@@ -1375,21 +1309,6 @@ fn render_log_window_human(window: &LogWindow) -> String {
             .unwrap_or_else(|| fallback_log_window_human(window)),
         "full" => format!("since session start ({elapsed})"),
         _ => fallback_log_window_human(window),
-    }
-}
-
-fn logging_remediation(state: &str) -> Option<&'static str> {
-    match state {
-        "degraded_dropping" => {
-            Some("queue is dropping events; verify daemon health and reduce log burst load")
-        }
-        "degraded_spooling" => Some(
-            "events are spooling locally; verify daemon socket/path and allow merge to catch up",
-        ),
-        "unavailable" => Some(
-            "logging unavailable; check ATM_LOG value, daemon status, and log path permissions",
-        ),
-        _ => None,
     }
 }
 
@@ -2199,49 +2118,36 @@ mod tests {
     }
 
     #[test]
-    #[serial]
-    fn logging_health_contract_maps_status_and_otel_state() {
-        // SAFETY: test-scoped env mutation.
-        unsafe {
-            std::env::remove_var("ATM_OTEL_ENABLED");
-        }
-        let sys_tmp = std::env::temp_dir();
-        let spool_path = sys_tmp.join("spool").to_string_lossy().into_owned();
-        let log_path = sys_tmp.join("atm.log.jsonl").to_string_lossy().into_owned();
-        let degraded = build_logging_health_contract(&LoggingHealthSnapshot {
-            state: "degraded_spooling".to_string(),
-            dropped_counter: 0,
-            spool_path,
-            last_error: Some("events are queued in spool awaiting merge".to_string()),
-            canonical_log_path: log_path,
-            spool_count: 1,
-            oldest_spool_age: Some(5),
-        });
-        assert_eq!(degraded.status, "degraded");
-        assert_eq!(degraded.otel_exporter, "degraded");
-        assert_eq!(
-            degraded.last_export_error.as_deref(),
-            Some("events are queued in spool awaiting merge")
-        );
+    fn logging_health_contract_matches_canonical_schema() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let value = serde_json::to_value(build_logging_health_contract(
+            &LoggingHealthSnapshot {
+                state: "degraded_spooling".to_string(),
+                dropped_counter: 0,
+                spool_path: "/tmp/spool".to_string(),
+                last_error: Some("events are queued in spool awaiting merge".to_string()),
+                canonical_log_path: "/tmp/atm.log.jsonl".to_string(),
+                spool_count: 1,
+                oldest_spool_age: Some(5),
+            },
+            tmp.path(),
+        ))
+        .expect("serialize logging_health");
 
-        // SAFETY: test-scoped env mutation.
-        unsafe {
-            std::env::set_var("ATM_OTEL_ENABLED", "false");
-        }
-        let disabled = build_logging_health_contract(&LoggingHealthSnapshot {
-            state: "healthy".to_string(),
-            ..LoggingHealthSnapshot::default()
-        });
-        assert_eq!(disabled.status, "ok");
-        assert_eq!(disabled.otel_exporter, "unavailable");
+        assert_eq!(value["schema_version"], "v1");
+        assert_eq!(value["state"], "degraded_spooling");
+        assert_eq!(value["canonical_log_path"], "/tmp/atm.log.jsonl");
+        assert_eq!(value["spool_path"], "/tmp/spool");
+        assert_eq!(value["dropped_events_total"], 0);
+        assert_eq!(value["spool_file_count"], 1);
+        assert_eq!(value["oldest_spool_age_seconds"], 5);
+        assert!(value["log_root"].is_string());
+        assert_eq!(value["last_error"]["code"], "DEGRADED_SPOOLING");
         assert_eq!(
-            disabled.last_export_error.as_deref(),
-            Some("otel exporter disabled by ATM_OTEL_ENABLED")
+            value["last_error"]["message"],
+            "events are queued in spool awaiting merge"
         );
-        // SAFETY: cleanup after test.
-        unsafe {
-            std::env::remove_var("ATM_OTEL_ENABLED");
-        }
+        assert!(value["last_error"]["at"].is_string());
     }
 
     #[test]
@@ -2397,18 +2303,25 @@ mod tests {
         assert!(value["logging"]["spool_count"].is_u64());
         assert!(value["logging"]["oldest_spool_age"].is_null());
         assert_eq!(
-            value["logging_health"]["status"],
-            serde_json::Value::String("unavailable".to_string())
+            value["logging_health"]["schema_version"],
+            serde_json::Value::String("v1".to_string())
         );
         assert_eq!(
-            value["logging_health"]["otel_exporter"],
+            value["logging_health"]["state"],
             serde_json::Value::String("unavailable".to_string())
         );
+        assert!(value["logging_health"]["log_root"].is_string());
+        assert!(value["logging_health"]["canonical_log_path"].is_string());
+        assert!(value["logging_health"]["spool_path"].is_string());
         assert_eq!(
-            value["logging_health"]["local_structured"],
-            serde_json::Value::Bool(true)
+            value["logging_health"]["dropped_events_total"],
+            serde_json::Value::Number(0u64.into())
         );
-        assert!(value["logging_health"]["last_export_error"].is_null());
+        assert!(value["logging_health"]["spool_file_count"].is_u64());
+        assert!(value["logging_health"]["oldest_spool_age_seconds"].is_null());
+        assert!(value["logging_health"]["last_error"]["code"].is_null());
+        assert!(value["logging_health"]["last_error"]["message"].is_null());
+        assert!(value["logging_health"]["last_error"]["at"].is_null());
     }
 
     #[test]
