@@ -665,10 +665,12 @@ fn reconcile_team_member_activity_with_mode(
                     });
                 }
                 if !existing_record_is_dead {
-                    session_registry
-                        .lock()
-                        .unwrap()
-                        .upsert_for_team(&team_name, &member.name, sess, pid);
+                    session_registry.lock().unwrap().upsert_for_team(
+                        &team_name,
+                        &member.name,
+                        sess,
+                        pid,
+                    );
                     record = session_registry
                         .lock()
                         .unwrap()

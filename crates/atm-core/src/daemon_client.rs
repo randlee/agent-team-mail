@@ -2958,7 +2958,10 @@ sleep 8
             let _ = stale_child.kill();
             let _ = stale_child.wait();
         }
-        assert!(stale_exited, "stale daemon must exit during mismatch restart");
+        assert!(
+            stale_exited,
+            "stale daemon must exit during mismatch restart"
+        );
         assert!(new_pid > 1, "replacement daemon pid must be valid");
 
         if pid_alive(new_pid) {
