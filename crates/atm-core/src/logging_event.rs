@@ -142,9 +142,25 @@ pub struct LogEventV1 {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
 
-    /// Claude session ID, if available.
+    /// Runtime identifier (`claude`, `codex`, `gemini`, `opencode`), if available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+
+    /// Canonical ATM session ID, if available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+
+    /// OpenTelemetry trace ID, if available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+
+    /// OpenTelemetry span ID, if available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span_id: Option<String>,
+
+    /// Sub-agent identifier for sub-agent scoped events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_id: Option<String>,
 
     /// Per-request correlation ID, if applicable.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -390,7 +406,11 @@ pub struct LogEventV1Builder {
     level: String,
     team: Option<String>,
     agent: Option<String>,
+    runtime: Option<String>,
     session_id: Option<String>,
+    trace_id: Option<String>,
+    span_id: Option<String>,
+    subagent_id: Option<String>,
     request_id: Option<String>,
     correlation_id: Option<String>,
     outcome: Option<String>,
@@ -408,7 +428,11 @@ impl LogEventV1Builder {
             level: "info".to_string(),
             team: None,
             agent: None,
+            runtime: None,
             session_id: None,
+            trace_id: None,
+            span_id: None,
+            subagent_id: None,
             request_id: None,
             correlation_id: None,
             outcome: None,
@@ -436,9 +460,33 @@ impl LogEventV1Builder {
         self
     }
 
-    /// Set the Claude session ID.
+    /// Set the runtime identifier.
+    pub fn runtime(mut self, runtime: impl Into<String>) -> Self {
+        self.runtime = Some(runtime.into());
+        self
+    }
+
+    /// Set the canonical ATM session ID.
     pub fn session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
+        self
+    }
+
+    /// Set the OpenTelemetry trace ID.
+    pub fn trace_id(mut self, trace_id: impl Into<String>) -> Self {
+        self.trace_id = Some(trace_id.into());
+        self
+    }
+
+    /// Set the OpenTelemetry span ID.
+    pub fn span_id(mut self, span_id: impl Into<String>) -> Self {
+        self.span_id = Some(span_id.into());
+        self
+    }
+
+    /// Set the sub-agent identifier.
+    pub fn subagent_id(mut self, subagent_id: impl Into<String>) -> Self {
+        self.subagent_id = Some(subagent_id.into());
         self
     }
 
@@ -507,7 +555,11 @@ impl LogEventV1Builder {
             action: self.action,
             team: self.team,
             agent: self.agent,
+            runtime: self.runtime,
             session_id: self.session_id,
+            trace_id: self.trace_id,
+            span_id: self.span_id,
+            subagent_id: self.subagent_id,
             request_id: self.request_id,
             correlation_id: self.correlation_id,
             outcome: self.outcome,
@@ -541,54 +593,20 @@ pub fn new_log_event(source_binary: &str, action: &str, target: &str, level: &st
 
 // ── Fallback spool ────────────────────────────────────────────────────────────
 
-fn normalize_tool_name(tool: &str) -> String {
-    let trimmed = tool.trim();
-    if trimmed.is_empty() {
-        return "atm".to_string();
-    }
-    trimmed
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-/// Return the canonical spool directory path:
-/// `{home_dir}/.config/atm/logs/<tool>/spool`.
-pub fn spool_dir_for_tool(home_dir: &Path, tool: &str) -> PathBuf {
-    let tool = normalize_tool_name(tool);
-    home_dir
-        .join(".config")
-        .join("atm")
-        .join("logs")
-        .join(tool)
-        .join("spool")
-}
-
-/// Backward-compatible convenience wrapper for the `atm` tool.
-pub fn spool_dir(home_dir: &Path) -> PathBuf {
-    spool_dir_for_tool(home_dir, "atm")
-}
-
-/// Return the canonical log file path with environment override support.
+/// Return the canonical per-tool log file path with environment override support.
 ///
 /// Resolution order:
 /// 1. `ATM_LOG_FILE`
 /// 2. `ATM_LOG_PATH` (compat alias)
 /// 3. `{home_dir}/.config/atm/logs/<tool>/<tool>.log.jsonl`
 pub fn configured_log_path_for_tool(home_dir: &Path, tool: &str) -> PathBuf {
-    let tool = normalize_tool_name(tool);
     std::env::var("ATM_LOG_FILE")
         .or_else(|_| std::env::var("ATM_LOG_PATH"))
         .ok()
         .filter(|v| !v.trim().is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| {
+            let tool = sanitize_tool_name(tool);
             home_dir
                 .join(".config")
                 .join("atm")
@@ -619,6 +637,54 @@ pub fn configured_spool_dir_for_tool(home_dir: &Path, tool: &str) -> PathBuf {
 /// Backward-compatible convenience wrapper for the `atm` tool.
 pub fn configured_spool_dir(home_dir: &Path) -> PathBuf {
     configured_spool_dir_for_tool(home_dir, "atm")
+}
+
+/// Return the canonical per-tool spool directory with environment override support.
+///
+/// Resolution order:
+/// 1. If `ATM_LOG_FILE`/`ATM_LOG_PATH` is set, derive spool path from that log path.
+/// 2. `{home_dir}/.config/atm/logs/<tool>/spool`
+pub fn spool_dir_for_tool(home_dir: &Path, tool: &str) -> PathBuf {
+    if std::env::var("ATM_LOG_FILE")
+        .or_else(|_| std::env::var("ATM_LOG_PATH"))
+        .ok()
+        .is_some_and(|v| !v.trim().is_empty())
+    {
+        return spool_dir_from_log_path(&configured_log_path_for_tool(home_dir, tool));
+    }
+
+    let tool = sanitize_tool_name(tool);
+    home_dir
+        .join(".config")
+        .join("atm")
+        .join("logs")
+        .join(tool)
+        .join("spool")
+}
+
+/// Backward-compatible convenience wrapper for the `atm` tool.
+pub fn spool_dir(home_dir: &Path) -> PathBuf {
+    spool_dir_for_tool(home_dir, "atm")
+}
+
+fn sanitize_tool_name(tool: &str) -> String {
+    let trimmed = tool.trim();
+    if trimmed.is_empty() {
+        return "atm".to_string();
+    }
+    let mut out = String::with_capacity(trimmed.len());
+    for ch in trimmed.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "atm".to_string()
+    } else {
+        out
+    }
 }
 
 /// Return the default spool directory by resolving the home directory via
@@ -728,7 +794,11 @@ mod tests {
             .level("info")
             .team("atm-dev")
             .agent("team-lead")
+            .runtime("claude")
             .session_id("sess-abc-123")
+            .trace_id("trace-123")
+            .span_id("span-456")
+            .subagent_id("subagent-789")
             .outcome("ok")
             .field("iteration", serde_json::Value::Number(42.into()))
             .span(SpanRefV1 {
@@ -757,7 +827,11 @@ mod tests {
         assert_eq!(deserialized.level, "info");
         assert_eq!(deserialized.team.as_deref(), Some("atm-dev"));
         assert_eq!(deserialized.agent.as_deref(), Some("team-lead"));
+        assert_eq!(deserialized.runtime.as_deref(), Some("claude"));
         assert_eq!(deserialized.session_id.as_deref(), Some("sess-abc-123"));
+        assert_eq!(deserialized.trace_id.as_deref(), Some("trace-123"));
+        assert_eq!(deserialized.span_id.as_deref(), Some("span-456"));
+        assert_eq!(deserialized.subagent_id.as_deref(), Some("subagent-789"));
         assert_eq!(deserialized.outcome.as_deref(), Some("ok"));
         assert_eq!(deserialized.spans.len(), 1);
         assert_eq!(deserialized.spans[0].name, "daemon_dispatch");
@@ -1097,6 +1171,36 @@ mod tests {
         unsafe {
             std::env::remove_var("ATM_LOG_FILE");
         }
+    }
+
+    #[test]
+    #[serial]
+    fn test_configured_log_path_for_tool_default_profile() {
+        let home = TempDir::new().expect("temp dir");
+        // SAFETY: test-scoped cleanup.
+        unsafe {
+            std::env::remove_var("ATM_LOG_FILE");
+            std::env::remove_var("ATM_LOG_PATH");
+        }
+        let path = configured_log_path_for_tool(home.path(), "atm-daemon");
+        assert_eq!(
+            path,
+            home.path()
+                .join(".config/atm/logs/atm-daemon/atm-daemon.log.jsonl")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_spool_dir_for_tool_default_profile() {
+        let home = TempDir::new().expect("temp dir");
+        // SAFETY: test-scoped cleanup.
+        unsafe {
+            std::env::remove_var("ATM_LOG_FILE");
+            std::env::remove_var("ATM_LOG_PATH");
+        }
+        let path = spool_dir_for_tool(home.path(), "atm-daemon");
+        assert_eq!(path, home.path().join(".config/atm/logs/atm-daemon/spool"));
     }
 
     #[test]
