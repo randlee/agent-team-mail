@@ -1,7 +1,7 @@
 # Agent Team API - Complete Reference
 
 **API Version**: 0.1
-**Date**: 2026-02-11
+**Date**: 2026-03-10
 **Status**: Pre-Release (Experimental)
 
 > **Reference Scope**
@@ -179,13 +179,19 @@ Creates a timestamped snapshot of team state at `~/.claude/teams/.backups/<team>
 ├── config.json        ← copy of ~/.claude/teams/<team>/config.json
 ├── inboxes/           ← copy of all inbox files
 │   └── <agent>.json
-└── tasks/             ← copy of ~/.claude/tasks/<team>/ (if present)
+├── tasks/             ← copy of ~/.claude/tasks/<team>/ (if present)
+│   └── <task-id>.json
+└── tasks-cc/          ← copy of ~/.claude/tasks/<project>/ (optional; when --project is used)
     └── <task-id>.json
 ```
 
+- `--project <name>`: include Claude Code project-scoped task files from
+  `~/.claude/tasks/<project>/` as `tasks-cc/`
+- If `~/.claude/tasks/<project>/` does not exist, `tasks-cc/` is omitted and backup
+  continues without error
 - Timestamp format: `YYYYMMDDTHHMMSSz` (ISO 8601 compact UTC)
 - Auto-prunes to the last 5 backups per team (oldest removed first)
-- Also triggered automatically at the start of `atm teams resume` (non-fatal: a backup failure does not abort the resume)
+- Also triggered automatically at the start of `atm teams resume` (non-fatal: a backup failure does not abort the resume); when resume is invoked with `--project <name>`, the same project-scoped `tasks-cc/` handling applies
 
 #### `atm teams restore <team>`
 
@@ -193,6 +199,7 @@ Restores team state from a backup:
 
 - **Default**: restores from the latest backup (lexicographic sort of timestamp dirs)
 - `--from <path>`: restore from a specific backup directory
+- `--project <name>`: restore `tasks-cc/` into `~/.claude/tasks/<project>/` when present
 - `--dry-run`: show what would be restored without writing any files
 - `--skip-tasks`: restore config + inboxes only, skip task list restoration
 
@@ -200,6 +207,7 @@ Restores team state from a backup:
 - `leadSessionId` in `config.json` is **never** overwritten — the current session's lead ID is always preserved
 - `team-lead` member entry is **never** restored from backup — only non-leader members are restored
 - Restore is **idempotent**: members already present in the current config are not duplicated
+- After restoring task files into any task directory, `.highwatermark` is recomputed from the highest numeric task id present; if no numeric task files exist, `.highwatermark` is set to `0`
 
 **Relationship to TeamDelete**: `TeamDelete` permanently destroys all team data. Creating a backup before `TeamDelete` and restoring afterward is the supported recovery path.
 
@@ -1426,6 +1434,6 @@ Reference in dependencies as strings, not integers.
 
 ---
 
-**Document Version**: 1.0
-**Last Updated**: 2026-02-11
+**Document Version**: 1.1
+**Last Updated**: 2026-03-10
 **Maintained By**: Claude

@@ -1,7 +1,7 @@
 # agent-team-mail (`atm`) — Project Plan
 
 **Version**: 0.7
-**Date**: 2026-03-09
+**Date**: 2026-03-10
 **Status**: Phase AJ planning in progress. Phase AK queued.
 
 ---
@@ -822,6 +822,7 @@ Acceptance criteria:
 
 **CLI flag semantics in handoff mode**:
 - `message`: optional status text shown with refusal/re-establish guidance.
+- `--project <name>`: include Claude Code project-scoped task files in the automatic backup/restore handoff path as `tasks-cc/`.
 - `--session-id <id>`: target only the specified lead session. If it does not match the daemon's active lead session, refuse.
 - `--force`: bypass soft refusal checks only when no active lead session is confirmed; never steals an active lead identity.
 - `--kill`: explicitly terminate stale daemon-tracked lead process before handoff.
@@ -832,7 +833,7 @@ Acceptance criteria:
 3. **If NO** (no active team-lead):
    - Ensure backup destination exists at `.backups/<team>/<timestamp>/` (agent-team-api backup convention).
    - Create a flat backup snapshot compatible with `atm teams restore`: `config.json`, `inboxes/`, and `tasks/` directly under `.backups/<team>/<timestamp>/`.
-   - When `--project <name>` is supplied, include Claude Code project task-list files as `tasks-cc/` sourced from `~/.claude/tasks/<project>/`.
+   - When `--project <name>` is supplied, include Claude Code project task-list files as `tasks-cc/` sourced from `~/.claude/tasks/<project>/`. If that source path is absent, omit `tasks-cc/` without error.
    - Remove the active `<team>/` directory only after successful snapshot write.
    - Output: `"Call TeamCreate(<team>) to re-establish as team-lead"`.
 4. Team-lead calls `TeamCreate(<team>)`; this succeeds because the active team directory is absent.
@@ -840,7 +841,7 @@ Acceptance criteria:
 6. Daemon restores non-Claude members from backup (pane IDs, agent types, inbox history).
 7. Preserve the new `leadSessionId` from TeamCreate; restore never overwrites it. `team-lead` member is never restored from backup.
 8. Daemon injects status into team-lead session: `"<team> re-established. Active members: <name> (<type>, pane <id>), ..."`.
-9. Restore recomputes `.highwatermark` for each restored task directory from the highest numeric task id present after file copy.
+9. Restore recomputes `.highwatermark` for each restored task directory from the highest numeric task id present after file copy; when no numeric task files are present, it sets `.highwatermark` to `0`.
 
 **Failure-mode acceptance criteria**:
 - Stale PID/session mismatch is detected and does not cause identity theft.
@@ -2126,6 +2127,14 @@ Key commits:
 
 ---
 
+### Active Fix Work
+
+| Sprint | Name | Branch | Issues | Status |
+|---|---|---|---|---|
+| BF.1 | Backup/Restore Hardening | `fix/backup-restore-hardening` | #649, #650, #651 | IN PROGRESS |
+
+---
+
 ## 22. Phase AE: GH Monitor Reliability + Daemon Logging Isolation
 
 **Goal**: complete GH monitor operational contracts and close daemon
@@ -2224,6 +2233,6 @@ You are the Scrum Master for the agent-team-mail (atm) project.
 
 ---
 
-**Document Version**: 0.6
-**Last Updated**: 2026-03-05
+**Document Version**: 0.7
+**Last Updated**: 2026-03-10
 **Maintained By**: Claude (ARCH-ATM)
