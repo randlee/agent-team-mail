@@ -50,7 +50,7 @@ After initialization, the team-lead uses these skills to coordinate the team:
 |-------|---------|
 | `/phase-orchestration` | Orchestrate a multi-sprint phase (sprint waves, scrum-master lifecycle, integration branch, arch-ctm reviews) |
 | `/codex-orchestration` | Run phases where arch-ctm (Codex) is sole dev, with pipelined QA via quality-mgr |
-| `/quality-management-gh` | Multi-pass QA on GitHub PRs; CI monitoring; findings/final quality reports |
+| `/quality-management-gh` | Multi-pass QA on GitHub PRs; CI monitoring; findings/final quality reports. **Simple fixes/small features only** — team-lead runs `atm-qa-agent` + `rust-qa-agent` directly in parallel. For multi-sprint phases use `/phase-orchestration` or `/codex-orchestration` instead. |
 | `/sprint-report` | Generate phase status table or detailed report |
 | `/atm-doctor` | Run ATM health diagnostics; escalate critical findings to atm-doctor agent |
 | `/named-teammate-launch` | Launch and verify named teammates (Claude/Codex/Gemini) with mailbox polling |
