@@ -201,7 +201,8 @@ Restores team state from a backup:
 - `--from <path>`: restore from a specific backup directory
 - `--project <name>`: restore `tasks-cc/` into `~/.claude/tasks/<project>/` when present
 - `--dry-run`: show what would be restored without writing any files
-- `--skip-tasks`: restore config + inboxes only, skip task list restoration
+- `--skip-tasks`: restore config + inboxes only, skip all task restoration (`tasks/`
+  and `tasks-cc/`) even when `--project <name>` is also provided
 
 **Invariants**:
 - `leadSessionId` in `config.json` is **never** overwritten — the current session's lead ID is always preserved
@@ -210,6 +211,21 @@ Restores team state from a backup:
 - After restoring task files into any task directory, `.highwatermark` is recomputed from the highest numeric task id present; if no numeric task files exist, `.highwatermark` is set to `0`
 
 **Relationship to TeamDelete**: `TeamDelete` permanently destroys all team data. Creating a backup before `TeamDelete` and restoring afterward is the supported recovery path.
+
+#### `atm teams remove-member <team> <agent>`
+
+Removes a non-lead member from the team roster and cleans up mailbox artifacts.
+
+- Command form: `atm teams remove-member <team> <agent> [--archive-inbox] [--force]`
+- `--archive-inbox`: preserve the inbox at
+  `~/.claude/teams/.backups/<team>/removed-<agent>-<timestamp>/inboxes/<agent>.json`
+  before removing the live mailbox
+- Liveness behavior follows daemon shutdown/liveness semantics from the ATM
+  requirements: the command checks active state before mutation and refuses by default
+  when the member appears active or liveness is unknown
+- `--force`: explicit operator override for manual recovery that bypasses the default
+  liveness refusal and removes roster/mailbox state anyway
+- `team-lead` is protected and must not be removed through this command
 
 ---
 
@@ -1425,6 +1441,13 @@ Reference in dependencies as strings, not integers.
 ---
 
 ## Changelog
+
+### Version 1.1 (2026-03-10)
+- Documented `--project <name>` for `atm teams backup` / `atm teams restore`
+- Added `tasks-cc/` to the backup bundle structure for Claude Code project task lists
+- Added `.highwatermark` recomputation invariant for restored task directories
+- Clarified absent source-path behavior: missing `~/.claude/tasks/<project>/` omits
+  `tasks-cc/` without error
 
 ### Version 1.0 (2026-02-11)
 - Initial API documentation

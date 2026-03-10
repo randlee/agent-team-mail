@@ -679,6 +679,9 @@ when explicitly requested.
   `~/.claude/tasks/<team>/`.
 - When `--project <name>` is provided and `tasks-cc/` exists in the backup bundle,
   restore must restore those files into `~/.claude/tasks/<project>/`.
+- `--skip-tasks` must suppress all task restoration (`tasks/` and `tasks-cc/`) and
+  keep restore semantics at "config + inboxes only" even when `--project <name>` is
+  also provided.
 - Restore must preserve the existing team restore safety invariants defined in
   `docs/agent-team-api.md`: `leadSessionId` is never overwritten and `team-lead`
   is never restored from backup.

@@ -2118,9 +2118,9 @@ Key commits:
 | [#372](https://github.com/randlee/agent-team-mail/issues/372) | macOS CI hang in `test_concurrent_sends_no_data_loss` | AA.3 | Root-cause gate required before mitigation path |
 | [#373](https://github.com/randlee/agent-team-mail/issues/373) | Add `--dry-run` preview mode to `atm teams cleanup` | AA.4 | Non-mutating table with reasons/totals + empty-state messaging |
 | [#424](https://github.com/randlee/agent-team-mail/issues/424) | Improve `atm teams spawn --help` with generated launch-command reference | AA.4 | Always-show copy/paste launch reference with placeholders when config absent |
-| [#649](https://github.com/randlee/agent-team-mail/issues/649) | Add `atm teams remove-member` command | AF follow-on | Team roster/mailbox removal contract hardening |
-| [#650](https://github.com/randlee/agent-team-mail/issues/650) | Backup/restore should capture Claude Code project task list (`~/.claude/tasks/<project>/`) | AF follow-on | Minimal path: explicit `--project <name>` plus `tasks-cc/` snapshot |
-| [#651](https://github.com/randlee/agent-team-mail/issues/651) | Restore sets highwatermark off-by-one | AF follow-on | Restore must recompute watermark from highest restored task id |
+| [#649](https://github.com/randlee/agent-team-mail/issues/649) | Add `atm teams remove-member` command | BF.1 | Promoted to active fix sprint BF.1 |
+| [#650](https://github.com/randlee/agent-team-mail/issues/650) | Backup/restore should capture Claude Code project task list (`~/.claude/tasks/<project>/`) | BF.1 | Promoted to active fix sprint BF.1 |
+| [#651](https://github.com/randlee/agent-team-mail/issues/651) | Restore sets highwatermark off-by-one | BF.1 | Promoted to active fix sprint BF.1 |
 | [#287](https://github.com/randlee/agent-team-mail/issues/287) | `parse_since_input` accepts `0m` and negative durations | X.4 (deferred) | Deferred follow-on from Phase X onboarding tranche |
 | [#337](https://github.com/randlee/agent-team-mail/issues/337) | Missing `#[serial]` on env-mutating daemon tests (`ATM_HOME`) | X.5 (deferred) | Deferred CI-debt cleanup in Phase X follow-on |
 | [#338](https://github.com/randlee/agent-team-mail/issues/338) | `add-member` does not create inbox atomically | X.6 (deferred) | Deferred follow-on after onboarding contract closure |
@@ -2129,9 +2129,9 @@ Key commits:
 
 ### Active Fix Work
 
-| Sprint | Name | Branch | Issues | Status |
-|---|---|---|---|---|
-| BF.1 | Backup/Restore Hardening | `fix/backup-restore-hardening` | #649, #650, #651 | IN PROGRESS |
+| Sprint | Name | PR | Branch | Issues | Status |
+|---|---|---|---|---|---|
+| BF.1 | Backup/Restore Hardening | - | `fix/backup-restore-hardening` | #649, #650, #651 | IN PROGRESS |
 
 ---
 
