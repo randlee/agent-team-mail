@@ -442,6 +442,59 @@ fn test_spawn_var_requires_key_value_format() {
 }
 
 #[test]
+fn test_spawn_resume_and_continue_are_mutually_exclusive() {
+    let temp_dir = TempDir::new().unwrap();
+    let folder = temp_dir.path().join("workdir").join("spawn-folder");
+    fs::create_dir_all(&folder).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.args([
+        "teams",
+        "spawn",
+        "agent-conflict",
+        "--team",
+        "atm-dev",
+        "--runtime",
+        "gemini",
+        "--folder",
+        folder.to_str().unwrap(),
+        "--resume",
+        "abc123",
+        "--continue",
+    ])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn test_spawn_continue_without_tracked_session_returns_stable_not_found_code() {
+    let temp_dir = TempDir::new().unwrap();
+    let folder = temp_dir.path().join("workdir").join("spawn-folder");
+    fs::create_dir_all(&folder).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_IDENTITY", "team-lead")
+        .args([
+            "teams",
+            "spawn",
+            "agent-missing-session",
+            "--team",
+            "atm-dev",
+            "--runtime",
+            "gemini",
+            "--folder",
+            folder.to_str().unwrap(),
+            "--continue",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("SESSION_ID_NOT_FOUND"));
+}
+
+#[test]
 fn test_spawn_env_team_mismatch_requires_override_team() {
     let temp_dir = TempDir::new().unwrap();
     let folder = temp_dir.path().join("spawn-folder");
