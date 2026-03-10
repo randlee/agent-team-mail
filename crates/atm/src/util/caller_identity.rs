@@ -182,11 +182,13 @@ fn resolve_from_session_file(team: Option<&str>, identity: Option<&str>) -> Resu
     Ok(None)
 }
 
+#[cfg(not(test))]
 fn read_session_file_scoped(team: &str, identity: &str) -> Result<Option<String>> {
-    if !running_test_harness() {
-        return read_session_file(team, identity);
-    }
+    read_session_file(team, identity)
+}
 
+#[cfg(test)]
+fn read_session_file_scoped(team: &str, identity: &str) -> Result<Option<String>> {
     let Some(test_home) = env_var_nonempty("ATM_TEST_HOME") else {
         return read_session_file(team, identity);
     };
@@ -205,6 +207,15 @@ fn read_session_file_scoped(team: &str, identity: &str) -> Result<Option<String>
         }
     }
     result
+}
+
+fn resolve_runtime_native_env(runtime: CallerRuntime) -> Option<String> {
+    match runtime {
+        CallerRuntime::Claude => env_var_nonempty("CLAUDE_SESSION_ID"),
+        CallerRuntime::Codex => env_var_nonempty("CODEX_THREAD_ID"),
+        CallerRuntime::Gemini | CallerRuntime::Opencode => None,
+        CallerRuntime::Unknown => None,
+    }
 }
 
 fn resolve_from_hook() -> Option<String> {
@@ -497,6 +508,22 @@ where
         return Ok(Some(v));
     }
 
+    let runtime = runtime_hint(None);
+    if let Some(sid) = resolve_runtime_native_env(runtime) {
+        return Ok(Some(sid));
+    }
+
+    let runtime_specific = match runtime {
+        CallerRuntime::Claude => resolve_claude_session(team, identity)?,
+        CallerRuntime::Codex => resolve_codex_session(team, identity)?,
+        CallerRuntime::Gemini => resolve_gemini_session(team, identity)?,
+        CallerRuntime::Opencode => None,
+        CallerRuntime::Unknown => resolve_unknown_runtime_session(team, identity)?,
+    };
+    if runtime_specific.is_some() {
+        return Ok(runtime_specific);
+    }
+
     if let (Some(t), Some(id)) = (team, identity) {
         match query_daemon_session(t, id) {
             Ok(Some(info)) if info.alive => {
@@ -514,27 +541,6 @@ where
         }
     }
 
-    if let Ok(Some(hook)) = read_hook_file()
-        && let Some(sid) = normalize_session_id(&hook.session_id)
-    {
-        return Ok(Some(sid));
-    }
-
-    if let Some(v) = env_var_nonempty("CLAUDE_SESSION_ID") {
-        return Ok(Some(v));
-    }
-    if let Some(v) = env_var_nonempty("CODEX_THREAD_ID") {
-        return Ok(Some(v));
-    }
-
-    if let (Some(t), Some(id)) = (team, identity) {
-        match read_session_file_scoped(t, id) {
-            Ok(Some(v)) => return Ok(normalize_session_id(&v)),
-            Ok(None) => {}
-            Err(e) => classify_ambiguity_error(team, identity, e)?,
-        }
-    }
-
     Ok(None)
 }
 
@@ -542,8 +548,9 @@ where
 ///
 /// Precedence:
 /// 1) `ATM_SESSION_ID`
-/// 2) daemon session registry (team+identity scoped, alive only)
+/// 2) runtime-native env (`CLAUDE_SESSION_ID` / `CODEX_THREAD_ID`)
 /// 3) runtime-specific resolution path
+/// 4) daemon session registry (team+identity scoped, alive only)
 pub fn resolve_caller_session_id_optional(
     team: Option<&str>,
     identity: Option<&str>,
@@ -552,22 +559,27 @@ pub fn resolve_caller_session_id_optional(
         return Ok(Some(v));
     }
 
-    let daemon_session = query_daemon_session(team, identity);
-    let runtime = runtime_hint(daemon_session.as_ref());
-
-    if runtime != CallerRuntime::Unknown
-        && let Some(sid) = resolve_from_daemon(daemon_session.as_ref(), runtime)
-    {
+    let runtime = runtime_hint(None);
+    if let Some(sid) = resolve_runtime_native_env(runtime) {
         return Ok(Some(sid));
     }
 
-    match runtime {
-        CallerRuntime::Claude => resolve_claude_session(team, identity),
-        CallerRuntime::Codex => resolve_codex_session(team, identity),
-        CallerRuntime::Gemini => resolve_gemini_session(team, identity),
-        CallerRuntime::Opencode => Ok(None),
-        CallerRuntime::Unknown => resolve_unknown_runtime_session(team, identity),
+    let runtime_specific = match runtime {
+        CallerRuntime::Claude => resolve_claude_session(team, identity)?,
+        CallerRuntime::Codex => resolve_codex_session(team, identity)?,
+        CallerRuntime::Gemini => resolve_gemini_session(team, identity)?,
+        CallerRuntime::Opencode => None,
+        CallerRuntime::Unknown => resolve_unknown_runtime_session(team, identity)?,
+    };
+    if runtime_specific.is_some() {
+        return Ok(runtime_specific);
     }
+
+    let daemon_session = query_daemon_session(team, identity);
+    if let Some(sid) = resolve_from_daemon(daemon_session.as_ref(), runtime) {
+        return Ok(Some(sid));
+    }
+    Ok(None)
 }
 
 /// Resolve caller session id and fail deterministically if unresolved.
@@ -708,6 +720,7 @@ mod tests {
         let hook_path = current_ppid_hook_path();
         let _ = std::fs::remove_file(&hook_path);
         unsafe {
+            std::env::set_var("ATM_RUNTIME", "opencode");
             std::env::remove_var("ATM_SESSION_ID");
             std::env::remove_var("CLAUDE_SESSION_ID");
             std::env::remove_var("CODEX_THREAD_ID");
@@ -730,6 +743,10 @@ mod tests {
             },
         )
         .unwrap();
+
+        unsafe {
+            std::env::remove_var("ATM_RUNTIME");
+        }
 
         assert_eq!(resolved.as_deref(), Some("codex-thread-1"));
     }
@@ -923,6 +940,7 @@ Index Summary Last Active Session ID
     }
 
     #[test]
+    #[serial]
     fn opencode_runtime_is_explicitly_unresolved() {
         // SAFETY: test-local environment mutation.
         unsafe {
