@@ -123,7 +123,11 @@ while running:
             "status": "ok",
             "payload": response_payload,
         }
-        conn.sendall((json.dumps(response) + "\n").encode())
+        try:
+            conn.sendall((json.dumps(response) + "\n").encode())
+        except BrokenPipeError:
+            # Client closed early; keep daemon running for subsequent requests.
+            continue
 
 try:
     srv.close()
@@ -425,6 +429,12 @@ fn test_doctor_no_daemon_not_running_after_status_autostart() {
         .arg("--json")
         .assert()
         .success();
+    wait_for_daemon_socket(home);
+    assert_eq!(
+        spawn_count(home),
+        1,
+        "status should auto-start exactly one daemon"
+    );
 
     let mut doctor_cmd = cargo::cargo_bin_cmd!("atm");
     let output = doctor_cmd

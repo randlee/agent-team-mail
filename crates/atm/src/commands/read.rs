@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use clap::{ArgAction, Args};
 
 use crate::util::addressing::parse_address;
+use crate::util::caller_identity::resolve_caller_session_id_optional;
 use crate::util::hook_identity::read_hook_file_identity;
 use crate::util::settings::get_home_dir;
 use crate::util::state::{get_last_seen, load_seen_state, save_seen_state, update_last_seen};
@@ -134,6 +135,10 @@ pub fn execute(args: ReadArgs) -> Result<()> {
             config.core.default_team.clone(),
         )
     };
+    let caller_session_id =
+        resolve_caller_session_id_optional(Some(&team_name), Some(&config.core.identity))
+            .ok()
+            .flatten();
 
     // Resolve team directory
     let team_dir = home_dir.join(".claude/teams").join(&team_name);
@@ -305,7 +310,7 @@ pub fn execute(args: ReadArgs) -> Result<()> {
                     source: "atm",
                     action: "read_timeout",
                     team: Some(team_name.clone()),
-                    session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+                    session_id: caller_session_id.clone(),
                     agent_id: Some(agent_name.clone()),
                     agent_name: Some(agent_name.clone()),
                     result: Some("timeout".to_string()),
@@ -380,7 +385,7 @@ pub fn execute(args: ReadArgs) -> Result<()> {
         source: "atm",
         action: "read",
         team: Some(team_name.clone()),
-        session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+        session_id: caller_session_id.clone(),
         agent_id: Some(agent_name.clone()),
         agent_name: Some(agent_name.clone()),
         result: Some("ok".to_string()),
@@ -393,7 +398,7 @@ pub fn execute(args: ReadArgs) -> Result<()> {
             source: "atm",
             action: "read_mark",
             team: Some(team_name.clone()),
-            session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+            session_id: caller_session_id,
             agent_id: Some(agent_name.clone()),
             agent_name: Some(agent_name.clone()),
             result: Some("ok".to_string()),
