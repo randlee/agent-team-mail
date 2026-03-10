@@ -161,27 +161,48 @@ impl OtelPipeline {
     }
 
     fn export_event(&self, event: &LogEventV1) -> Result<(), OtelError> {
-        if !self.config.enabled {
-            return Ok(());
-        }
-        let record = build_otel_record(event)?;
+        export_otel_with_retry(event, &self.config, self.exporter.as_ref(), self.sleeper)
+    }
+}
 
-        let mut attempt: u32 = 0;
-        let mut backoff = self.config.initial_backoff_ms;
-        loop {
-            match self.exporter.export(&record) {
-                Ok(()) => return Ok(()),
-                Err(err) => {
-                    if attempt >= self.config.max_retries {
-                        return Err(err);
-                    }
-                    (self.sleeper)(Duration::from_millis(backoff));
-                    backoff = backoff.saturating_mul(2).min(self.config.max_backoff_ms);
-                    attempt = attempt.saturating_add(1);
+fn export_otel_with_retry(
+    event: &LogEventV1,
+    config: &OtelConfig,
+    exporter: &dyn OtelExporter,
+    sleeper: fn(Duration),
+) -> Result<(), OtelError> {
+    if !config.enabled {
+        return Ok(());
+    }
+    let record = build_otel_record(event)?;
+
+    let mut attempt: u32 = 0;
+    let mut backoff = config.initial_backoff_ms;
+    loop {
+        match exporter.export(&record) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                if attempt >= config.max_retries {
+                    return Err(err);
                 }
+                sleeper(Duration::from_millis(backoff));
+                backoff = backoff.saturating_mul(2).min(config.max_backoff_ms);
+                attempt = attempt.saturating_add(1);
             }
         }
     }
+}
+
+/// Export to OTel without allowing exporter failures to fail the caller.
+///
+/// This is the public fail-open helper for producer-only code paths that do
+/// not own a full [`Logger`] instance.
+pub fn export_otel_best_effort(
+    event: &LogEventV1,
+    config: &OtelConfig,
+    exporter: &dyn OtelExporter,
+) {
+    let _ = export_otel_with_retry(event, config, exporter, std::thread::sleep);
 }
 
 fn build_otel_record(event: &LogEventV1) -> Result<OtelRecord, OtelError> {
@@ -696,8 +717,12 @@ impl Logger {
 /// Export a single event to OTel using default pipeline settings (fail-open).
 ///
 /// This helper is intended for producers that already own canonical JSONL
-/// writing and only need shared OTel export semantics.
-pub fn export_otel_best_effort(log_path: &Path, event: &LogEventV1) {
+/// writing and only need shared OTel export semantics. It creates an
+/// [`OtelPipeline`] from the given log path using default configuration.
+///
+/// For callers that already have an exporter, use [`export_otel_best_effort`]
+/// instead.
+pub fn export_otel_best_effort_from_path(log_path: &Path, event: &LogEventV1) {
     let pipeline = OtelPipeline::new_default(log_path);
     export_otel_best_effort_with_pipeline(&pipeline, event);
 }
@@ -774,6 +799,7 @@ mod tests {
     use agent_team_mail_core::logging_event::new_log_event;
     use serial_test::serial;
     use std::sync::Mutex;
+    use std::sync::OnceLock;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
@@ -815,6 +841,16 @@ mod tests {
         let mut event = new_log_event("atm", "test_action", "atm::test", "info");
         event.ts = ts.to_string();
         event
+    }
+
+    static BACKOFF_SLEEPS_MS: OnceLock<Mutex<Vec<u64>>> = OnceLock::new();
+
+    fn record_sleep(duration: Duration) {
+        BACKOFF_SLEEPS_MS
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .expect("backoff sleeps lock")
+            .push(duration.as_millis() as u64);
     }
 
     #[test]
@@ -1217,7 +1253,7 @@ mod tests {
     }
 
     #[test]
-    fn export_otel_best_effort_is_fail_open_when_export_fails() {
+    fn export_otel_best_effort_from_path_is_fail_open_when_export_fails() {
         let tmp = TempDir::new().expect("temp dir");
         let parent_file = tmp.path().join("not-a-directory");
         std::fs::write(&parent_file, "occupied").expect("create parent file");
@@ -1225,7 +1261,7 @@ mod tests {
         let event = new_log_event("atm-daemon", "register_hint", "atm_daemon::socket", "info");
 
         // Must not panic or propagate errors when exporter cannot create its output path.
-        export_otel_best_effort(&log_path, &event);
+        export_otel_best_effort_from_path(&log_path, &event);
     }
 
     #[test]
@@ -1326,6 +1362,57 @@ mod tests {
                 "register_hint".to_string(),
                 "compose".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn export_otel_best_effort_is_public_and_fail_open() {
+        let exporter = CountingExporter::with_failures(10);
+        let event = new_log_event("atm", "send_message", "atm::send", "info");
+        export_otel_best_effort(
+            &event,
+            &OtelConfig {
+                enabled: true,
+                max_retries: 2,
+                initial_backoff_ms: 0,
+                max_backoff_ms: 0,
+            },
+            &exporter,
+        );
+
+        assert_eq!(
+            exporter.attempts.load(Ordering::SeqCst),
+            3,
+            "initial attempt + 2 retries"
+        );
+    }
+
+    #[test]
+    fn otel_retry_backoff_is_bounded_by_max_backoff() {
+        let sleeps = BACKOFF_SLEEPS_MS.get_or_init(|| Mutex::new(Vec::new()));
+        sleeps.lock().expect("backoff sleeps lock").clear();
+
+        let exporter = CountingExporter::with_failures(10);
+        let event = new_log_event("atm", "send_message", "atm::send", "info");
+        let err = export_otel_with_retry(
+            &event,
+            &OtelConfig {
+                enabled: true,
+                max_retries: 4,
+                initial_backoff_ms: 5,
+                max_backoff_ms: 12,
+            },
+            &exporter,
+            record_sleep,
+        )
+        .expect_err("should return final export error");
+        assert!(matches!(err, OtelError::ExportFailed(_)));
+
+        let sleeps = sleeps.lock().expect("backoff sleeps lock").clone();
+        assert_eq!(sleeps, vec![5, 10, 12, 12]);
+        assert!(
+            sleeps.iter().all(|v| *v <= 12),
+            "sleep exceeded max_backoff"
         );
     }
 

@@ -22,7 +22,7 @@
 //! starts a fresh base file. The oldest rotation file (`.N`) is removed.
 
 use agent_team_mail_core::logging_event::LogEventV1;
-use sc_observability::{DEFAULT_QUEUE_CAPACITY, export_otel_best_effort};
+use sc_observability::{DEFAULT_QUEUE_CAPACITY, export_otel_best_effort_from_path};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -268,7 +268,7 @@ fn write_events(config: &LogWriterConfig, events: &[LogEventV1]) {
                     warn!("log_writer: write error: {e}");
                     continue;
                 }
-                export_otel_best_effort(&config.log_path, event);
+                export_otel_best_effort_from_path(&config.log_path, event);
             }
             Err(e) => {
                 warn!("log_writer: failed to serialize event: {e}");
