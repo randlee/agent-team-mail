@@ -585,7 +585,6 @@ fn reconcile_team_member_activity_with_mode(
         let mut terminal_non_lead_members: Vec<String> = Vec::new();
         for member in &mut config.members {
             desired_agent_names.insert(member.name.clone());
-            let mut pid_backend_mismatch_detected = false;
             let mut record = {
                 let reg = session_registry.lock().unwrap();
                 reg.query_for_team(&team_name, &member.name).cloned()
@@ -661,27 +660,16 @@ fn reconcile_team_member_activity_with_mode(
                         error: Some(mismatch_message.clone()),
                         ..Default::default()
                     });
-
-                    state_store.lock().unwrap().set_state_with_context(
-                        &member.name,
-                        AgentState::Offline,
-                        &mismatch_message,
-                        "pid_backend_validation",
-                    );
-                    pid_backend_mismatch_detected = true;
-                } else {
-                    session_registry.lock().unwrap().upsert_for_team(
-                        &team_name,
-                        &member.name,
-                        sess,
-                        pid,
-                    );
-                    record = session_registry
-                        .lock()
-                        .unwrap()
-                        .query_for_team(&team_name, &member.name)
-                        .cloned();
                 }
+                session_registry
+                    .lock()
+                    .unwrap()
+                    .upsert_for_team(&team_name, &member.name, sess, pid);
+                record = session_registry
+                    .lock()
+                    .unwrap()
+                    .query_for_team(&team_name, &member.name)
+                    .cloned();
             }
 
             let alive = if let Some(ref record) = record {
@@ -702,7 +690,7 @@ fn reconcile_team_member_activity_with_mode(
                 // No live session record means member is not active.
                 false
             };
-            let reconciled_alive = alive && !pid_backend_mismatch_detected;
+            let reconciled_alive = alive;
 
             if member.is_active != Some(reconciled_alive) {
                 let previous = member.is_active;
@@ -722,10 +710,7 @@ fn reconcile_team_member_activity_with_mode(
                     ..Default::default()
                 });
 
-                if pid_backend_mismatch_detected {
-                    // Keep mismatch-offline state sticky for this pass.
-                    // Re-registration must occur before Active is restored.
-                } else if reconciled_alive {
+                if reconciled_alive {
                     member.last_active = Some(now_ms);
                     state_store.lock().unwrap().set_state_with_context(
                         &member.name,
@@ -1986,7 +1971,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reconcile_keeps_pid_backend_mismatch_offline_within_same_pass() {
+    fn test_reconcile_upserts_hint_and_restores_active_state_under_pid_mismatch() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
         let cwd = home.display().to_string();
@@ -2036,12 +2021,21 @@ mod tests {
         )
         .unwrap();
 
+        let restored_session = sr
+            .lock()
+            .unwrap()
+            .query_for_team("atm-dev", "arch-ctm")
+            .cloned()
+            .expect("session should be upserted from hint even under mismatch");
+        assert_eq!(restored_session.session_id, "hint-session");
+        assert_eq!(restored_session.process_id, live_pid);
+
         let tracker = state_store.lock().unwrap();
-        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Offline));
+        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Active));
         let transition = tracker
             .transition_meta("arch-ctm")
             .expect("transition metadata should be present");
-        assert_eq!(transition.source, "pid_backend_validation");
+        assert_eq!(transition.source, "config_watcher");
 
         let cfg: agent_team_mail_core::schema::TeamConfig = serde_json::from_str(
             &stdfs::read_to_string(home.join(".claude/teams/atm-dev/config.json")).unwrap(),
@@ -2052,7 +2046,85 @@ mod tests {
             .iter()
             .find(|m| m.name == "arch-ctm")
             .expect("member present");
-        assert_eq!(member.is_active, Some(false));
+        assert_eq!(member.is_active, Some(true));
+        assert!(member.last_active.is_none());
+    }
+
+    #[test]
+    fn test_reconcile_bootstraps_missing_session_under_pid_mismatch() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let cwd = home.display().to_string();
+        let live_pid = std::process::id();
+
+        write_team_config(
+            home,
+            "atm-dev",
+            serde_json::json!([
+                {
+                    "agentId": "team-lead@atm-dev",
+                    "name": "team-lead",
+                    "agentType": "general-purpose",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": cwd.clone(),
+                    "subscriptions": [],
+                    "isActive": true
+                },
+                {
+                    "agentId": "arch-ctm@atm-dev",
+                    "name": "arch-ctm",
+                    "agentType": "codex",
+                    "model": "unknown",
+                    "joinedAt": 1,
+                    "cwd": cwd.clone(),
+                    "subscriptions": [],
+                    "isActive": false,
+                    "sessionId": "hint-session",
+                    "processId": live_pid,
+                    "externalBackendType": "codex"
+                }
+            ]),
+        );
+
+        let sr = new_session_registry();
+        let state_store = new_state_store();
+        let cycle_state = super::new_reconcile_cycle_state();
+        super::reconcile_team_member_activity(
+            &home.join(".claude"),
+            &sr,
+            &state_store,
+            &cycle_state,
+        )
+        .unwrap();
+
+        let restored_session = sr
+            .lock()
+            .unwrap()
+            .query_for_team("atm-dev", "arch-ctm")
+            .cloned()
+            .expect("session should be bootstrapped from hint");
+        assert_eq!(restored_session.session_id, "hint-session");
+        assert_eq!(restored_session.process_id, live_pid);
+
+        let tracker = state_store.lock().unwrap();
+        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Active));
+        let transition = tracker
+            .transition_meta("arch-ctm")
+            .expect("transition metadata should be present");
+        assert_eq!(transition.source, "session_reconcile");
+
+        let cfg: agent_team_mail_core::schema::TeamConfig = serde_json::from_str(
+            &stdfs::read_to_string(home.join(".claude/teams/atm-dev/config.json")).unwrap(),
+        )
+        .unwrap();
+        let member = cfg
+            .members
+            .iter()
+            .find(|m| m.name == "arch-ctm")
+            .expect("member present");
+        assert_eq!(member.is_active, Some(true));
+        assert!(member.last_active.is_some());
     }
 
     #[test]

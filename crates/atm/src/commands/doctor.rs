@@ -722,7 +722,7 @@ struct PidMismatchDetails {
 }
 
 fn parse_pid_backend_mismatch_reason(reason: &str) -> Option<PidMismatchDetails> {
-    let rest = reason.strip_prefix("pid/backend mismatch: backend='")?;
+    let (_, rest) = reason.split_once("pid/backend mismatch: backend='")?;
     let (backend, rest) = rest.split_once("' expected='")?;
     let (expected, rest) = rest.split_once("' actual='")?;
     let (actual, pid_part) = rest.rsplit_once("' pid=")?;
@@ -2027,6 +2027,59 @@ mod tests {
         assert_eq!(parsed.expected, "comm=codex");
         assert_eq!(parsed.actual, "zsh");
         assert_eq!(parsed.pid, 4242);
+    }
+
+    #[test]
+    fn parse_pid_backend_mismatch_reason_accepts_context_prefixed_formats() {
+        for reason in [
+            "session active with live pid; pid/backend mismatch: backend='codex' expected='comm=codex' actual='zsh' pid=4242",
+            "session tracked but member missing from config; pid/backend mismatch: backend='codex' expected='comm=codex' actual='zsh' pid=4242",
+            "idle lifecycle signal; pid/backend mismatch: backend='codex' expected='comm=codex' actual='zsh' pid=4242",
+        ] {
+            let parsed =
+                parse_pid_backend_mismatch_reason(reason).expect("valid mismatch reason");
+            assert_eq!(parsed.backend, "codex");
+            assert_eq!(parsed.expected, "comm=codex");
+            assert_eq!(parsed.actual, "zsh");
+            assert_eq!(parsed.pid, 4242);
+        }
+    }
+
+    #[test]
+    fn check_pid_session_reconciliation_parses_prefixed_pid_mismatch_reason() {
+        let cfg = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("worker-a", Some(true), 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
+            Ok(Some(vec![CanonicalMemberState {
+                agent: "worker-a".to_string(),
+                state: "active".to_string(),
+                activity: "busy".to_string(),
+                session_id: Some("sess-1".to_string()),
+                process_id: Some(4242),
+                last_alive_at: None,
+                reason: "session active with live pid; pid/backend mismatch: backend='codex' expected='comm=codex' actual='zsh' pid=4242"
+                    .to_string(),
+                source: "pid_backend_validation".to_string(),
+                in_config: true,
+            }]))
+        });
+
+        let finding = findings
+            .iter()
+            .find(|f| f.code == "PID_PROCESS_MISMATCH")
+            .expect("pid mismatch finding");
+        assert!(finding.message.contains("backend='codex'"));
+        assert!(finding.message.contains("expected='comm=codex'"));
+        assert!(finding.message.contains("actual='zsh'"));
+        assert!(finding.message.contains("pid=4242"));
     }
 
     #[test]
