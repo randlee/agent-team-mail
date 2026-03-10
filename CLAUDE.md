@@ -193,9 +193,11 @@ tmux send-keys -t <pane-id> -l "You have unread ATM messages. Run: atm read --te
 
 ## Initialization Process
 
-**If `ATM_IDENTITY=team-lead`**: Run the `/team-lead-startup` skill.
-It handles session detection, team restore, task list recovery, and teammate notification.
-See `.claude/skills/team-lead-startup/SKILL.md` for the full procedure.
+**If `ATM_IDENTITY=team-lead`**: Run the `/team-lead` skill.
+It confirms identity, detects whether a restore is needed, and either proceeds
+directly to project status (fast path) or invokes the full restore procedure.
+See `.claude/skills/team-lead/SKILL.md` for the startup steps and
+`.claude/skills/team-lead/backup-and-restore-team.md` for the restore procedure.
 
 **If `ATM_IDENTITY` is any other value**: Skip team restore — you are not the team lead.
 
