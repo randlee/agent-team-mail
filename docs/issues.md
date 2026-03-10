@@ -6,7 +6,7 @@ Last updated: 2026-03-10
 
 | Issue | Summary | Type | Status | Priority | Planned Sprint | Notes |
 |---|---|---|---|---|---|---|
-| [#636](https://github.com/randlee/agent-team-mail/issues/636) | `register-hint` blocked by `validate_pid_backend` gate; members remain `Unknown` | Bug | Open (active fix branch) | Critical | `fix/636` | Write-path must be non-blocking; mismatch remains advisory. Implementation plan: `docs/adr/issue-636-registration-gate-fix-plan.md` |
+| [#636](https://github.com/randlee/agent-team-mail/issues/636) | `register-hint` blocked by `validate_pid_backend` gate; members remain `Unknown` | Bug | In-Flight Fix | Critical | `fix/636` | Branch: `fix/636-pid-ssot-registration-gate`. Write-path must be non-blocking; mismatch remains advisory. ADR: `docs/adr/issue-636-registration-gate-fix-plan.md`. |
 
 ## Phase AD Dogfood Blockers (GH Monitor Setup Session 2026-03-07)
 

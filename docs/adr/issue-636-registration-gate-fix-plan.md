@@ -1,122 +1,141 @@
-# Issue #636 Fix Plan: Registration Gate vs PID Validation
+# Issue #636 Fix Plan: PID/Backend Mismatch as Diagnostic, Not Registration Gate
 
-Date: 2026-03-10
-Status: planned (implementation pending on `fix/636-pid-ssot-registration-gate`)
-Issue: https://github.com/randlee/agent-team-mail/issues/636
+Date: 2026-03-10  
+Status: planned (documentation revision for implementation kickoff)  
+Issue: https://github.com/randlee/agent-team-mail/issues/636  
+Branch: `fix/636-pid-ssot-registration-gate`
 
-## Problem
+## 1. Problem Statement
 
-`register-hint` currently uses `validate_pid_backend(...)` as a hard gate. When
-the PID/backend pattern does not match, daemon returns `PID_PROCESS_MISMATCH`
-before writing session state to the registry.
+Daemon registration/update paths currently use PID/backend mismatch checks as
+hard gates in multiple places. That blocks or short-circuits session upserts,
+which leaves daemon registry state incomplete and causes members to surface as
+`Unknown`/offline despite valid activity.
 
-This breaks daemon SSoT behavior and leaves members in `Unknown` state.
+Design intent remains:
+- daemon session registry is SSoT for runtime state
+- PID/backend mismatch is a diagnostic signal
+- mismatch must not block registration writes
 
-## Root Cause
+## 2. Write-Path Gates and Required Call-Site Fixes
 
-PID/backend validation is mixed into write-path authorization.
+This section enumerates the exact call sites identified by ATM-QA findings.
 
-Expected architecture:
-- registration writes are accepted when payload and ownership are valid
-- PID/backend mismatch is diagnostic-only
-- canonical member state is derived from daemon session registry
-
-Current architecture (bug):
-- registration write is blocked on backend process-name heuristics
-
-## Required Code Changes
-
-## 1) Remove blocking gate from `handle_register_hint`
-
-File:
-- `crates/atm-daemon/src/daemon/socket.rs`
+### 2.1 `socket.rs:1527` (processed=false early-ok path)
 
 Current behavior:
-- calls `validate_pid_backend(&member, process_id)`
-- returns `PID_PROCESS_MISMATCH` error on mismatch
+- returns `make_ok_response(processed=false)` early in a mismatch branch
+- write path silently exits before intended upsert/reconcile work
 
-Target behavior:
-- never reject registration due to backend mismatch
-- still emit mismatch diagnostics (`PID_PROCESS_MISMATCH`) as advisory
-- continue to `upsert_runtime_for_team(...)` and state update
+Required fix:
+- remove early-ok-return behavior in mismatch branch
+- continue through normal registration/upsert flow
+- preserve mismatch diagnostics as WARN logging/finding output
 
-## 2) Remove/soften other write-path blockers
+### 2.2 `socket.rs:5264-5278` (`handle_register_hint`)
 
-File:
-- `crates/atm-daemon/src/daemon/socket.rs`
+Current behavior:
+- returns `PID_PROCESS_MISMATCH` error on backend mismatch
+- blocks write path
 
-Call sites identified in scope:
-- session-start flow (`registration` stage)
-- bootstrap flow (`bootstrap` stage)
+Required fix:
+- remove mismatch gate from `handle_register_hint`
+- do not return mismatch as command error
+- continue to `upsert_runtime_for_team(...)`
+- keep WARN diagnostic emission
 
-Target behavior:
-- mismatch must not block session write paths
-- mismatch logging remains for observability
+### 2.3 `socket.rs:5598-5601` (bootstrap registration path)
 
-## 3) Keep display-time validation, but informational-only
+Current behavior:
+- mismatch path returns early before `upsert_runtime_for_team(...)`
+- bootstrap silently fails to register stale-but-recoverable members
 
-File:
-- `crates/atm-daemon/src/daemon/socket.rs` (`derive_canonical_member_state`)
+Required fix:
+- remove mismatch-driven early return
+- allow bootstrap upsert when ownership/payload checks pass
+- keep mismatch diagnostics (WARN + finding context)
 
-Target behavior:
-- retain validation check and warning emission for mismatch visibility
-- do not force member to `offline/unknown` solely due to backend mismatch
-- member state must still derive from session registry liveness and tracker
-  activity rules
+### 2.4 `socket.rs:5648` and `socket.rs:5809` (`derive_canonical_member_state`)
 
-## 4) Preserve ownership and payload guards
+Current behavior:
+- mismatch influences display-time state derivation as an effective gate
 
-This fix does **not** relax:
-- cross-identity ownership checks
-- missing/invalid payload field validation
-- session-id conflict handling
+Required fix:
+- treat these as display/diagnostic-only call sites
+- mismatch may emit `PID_PROCESS_MISMATCH` but must not force offline/unknown
+  by itself
+- state derivation must continue via normal liveness/activity logic
 
-Only backend comm-pattern mismatch transitions from blocking to advisory.
+## 3. Replacement State-Derivation Contract (`derive_canonical_member_state`)
 
-## Test Plan Updates
+Applies to line ranges:
+- `socket.rs:5648-5668`
+- `socket.rs:5809-5828`
 
-## A) Registration mismatch regression tests
+Required behavior:
+1. Evaluate PID liveness (`is_pid_alive`) and existing session/activity fields.
+2. Evaluate backend mismatch (`validate_pid_backend`) for diagnostics.
+3. If mismatch is detected, emit `PID_PROCESS_MISMATCH` (WARN/doctor context).
+4. Fall through to normal liveness-based derivation:
+   - if session is alive, result must be non-offline (`Active` or `Idle`
+     depending on activity metadata)
+   - if session is not alive, derive offline/dead as normal
+5. PID/backend mismatch alone must never force offline/unknown status.
 
-File:
-- `crates/atm-daemon/src/daemon/socket.rs` tests
+## 4. Requirements Updates (Documentation SSoT)
 
-Add/adjust tests:
-- `handle_register_hint` succeeds even when backend mismatch would previously
-  fail
-- response is success path (`registered`) and session registry entry exists
-- advisory mismatch event is emitted/logged
+`docs/requirements.md` updates required in this task:
+- §4.3.3d PID Registration Verification now states mismatch is advisory/diagnostic,
+  not a registration rejection gate.
+- Bootstrap guidance now states mismatch does not block bootstrap registration.
+- Reconciliation guidance now states mismatch emits diagnostics then falls through
+  to normal liveness/activity derivation.
 
-## B) Canonical member-state behavior
+## 5. Test Plan Updates (No Deletion, Convert Existing Coverage)
 
-Add/adjust tests:
-- live registered session with backend mismatch is not rendered as `Unknown`
-  solely due to mismatch
-- mismatch remains visible as diagnostic annotation/event
+### 5.1 Existing tests to convert (explicit names)
 
-## C) CLI-level integration guard
+In `crates/atm-daemon/src/daemon/socket.rs` tests:
+- `test_handle_register_hint_rejects_codex_backend_pid_mismatch_with_warn_log`
+- `test_handle_register_hint_rejects_claude_backend_pid_mismatch_with_warn_log`
 
-File:
-- `crates/atm/tests` integration coverage
+Convert expectations to:
+- status/result is success (registration proceeds)
+- WARN log/finding for mismatch is still asserted
+- registry upsert side-effect is asserted
 
-Add regression:
-- `atm status` after register-hint no longer shows all members `Unknown` in
-  mismatch scenario
+### 5.2 Missing edge cases to add
 
-## Acceptance Criteria
+1. Stale-session re-registration under mismatch:
+   - given stale session data and mismatch
+   - `upsert_runtime_for_team` still succeeds
+   - mismatch diagnostic remains visible
 
-- `handle_register_hint` no longer returns `PID_PROCESS_MISMATCH` as a write gate
-- session registry updates succeed under mismatch conditions
-- mismatch diagnostics still logged (`PID_PROCESS_MISMATCH`) for triage
-- canonical member state derives from daemon registry SSoT, not backend gate
-- targeted tests pass and prevent regression
+2. Cross-identity attempt with mismatch:
+   - after removing PID mismatch gate
+   - cross-identity write must still be blocked
+   - error remains `PERMISSION_DENIED`
 
-## Risk and Mitigation
+## 6. Acceptance Criteria
 
-Risk:
-- accepting mismatched PID/backend could register stale or wrong process hints
+- ATM-QA blocking findings ATM-QA-001 through ATM-QA-004 are resolved.
+- `docs/requirements.md` §4.3.3d reflects advisory mismatch behavior.
+- `docs/issues.md` includes issue #636 with in-flight branch/ADR tracking.
+- Section 2 documents all four call sites and distinct fixes.
+- Section 3 defines concrete replacement derivation behavior.
+- Acceptance test criterion exists: `derive_canonical_member_state` returns
+  non-offline state when `session.is_alive=true`, even with mismatch.
+- Existing mismatch tests are converted (not deleted) and retain WARN assertions.
+- Task remains documentation-only (no code changes in this ADR revision task).
 
-Mitigation:
-- keep ownership guard intact
-- keep PID liveness checks in canonical state derivation
-- keep mismatch diagnostics and doctor findings for operator action
-- do not treat backend mismatch as success signal; treat as advisory anomaly
+## 7. Risks and Mitigations
+
+Risk A: accepting mismatch writes may preserve stale/wrong PID hints.
+- Mitigation: keep mismatch diagnostics explicit and visible.
+- Mitigation: preserve ownership and payload validation gates.
+
+Risk B: PID reuse during bootstrap may attach a session hint to an unrelated
+process at the same PID.
+- Mitigation: bootstrap still records mismatch diagnostics.
+- Mitigation: state derivation remains liveness + activity driven; mismatch is
+  surfaced for operator action and follow-up registration correction.
