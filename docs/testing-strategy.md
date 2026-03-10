@@ -185,7 +185,7 @@ Required PR validation should center on:
 
 - `cargo test`
 - `cargo test -- --test-threads=8` for env-sensitive or parallel-stability
-  coverage when a change affects global state assumptions
+  coverage
 - targeted parity/golden tests
 - `cargo clippy -- -D warnings`
 - `cargo fmt --check`
