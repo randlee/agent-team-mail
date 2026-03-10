@@ -361,12 +361,13 @@ Spawn subcommands:
 
 Teams subcommands:
   teams add-member <team> <agent> [--agent-type <type>] [--model <model>] [--cwd <path>] [--inactive]
+  teams remove-member <team> <agent> [--archive-inbox]
   teams join <agent> [--team <team>] [--agent-type <type>] [--model <model>] [--folder <path>]
   teams spawn --agent <name> --team <team> --runtime <claude|codex|gemini|opencode> [...]
   teams resume <team> [message] [--force] [--kill] [--session-id <id>]
   teams cleanup <team> [agent] [--force] [--dry-run]
-  teams backup <team> [--json]
-  teams restore <team> [--from <path>] [--dry-run] [--skip-tasks] [--json]
+  teams backup <team> [--project <name>] [--json]
+  teams restore <team> [--from <path>] [--project <name>] [--dry-run] [--skip-tasks] [--json]
 
 MCP subcommands:
   mcp install <client> [scope] [--binary <path>]
@@ -633,6 +634,54 @@ atm teams add-member <team> <agent> [--agent-type <type>] [--model <model>] [--c
 - Immediately after add-member returns success, `inboxes/<agent>.json` exists.
 - First `atm send <agent>@<team>` succeeds without requiring a bootstrap side effect.
 - `atm doctor` reports no roster/mailbox drift for a newly added member.
+
+#### `atm teams remove-member`
+
+Remove a non-lead member from a team roster and clean up mailbox artifacts.
+
+```
+atm teams remove-member <team> <agent> [--archive-inbox]
+```
+
+**Required behavior**:
+- Refuse removal when `<agent>` is `team-lead`.
+- Fail with an actionable error when `<agent>` is not present in team `config.json`.
+- Remove the member entry from `config.json`.
+- Remove or archive mailbox artifacts for the member as part of the same command path.
+- Default behavior deletes inactive mailbox artifacts; `--archive-inbox` preserves prior inbox
+  contents under the team backup/archive location before removal.
+
+**Acceptance checks**:
+- After successful removal, `<agent>` is absent from `config.json`.
+- After successful removal, `inboxes/<agent>.json` no longer exists in the live team folder.
+- `atm doctor` reports no roster/mailbox drift for the removed member.
+
+#### `atm teams backup` / `atm teams restore`
+
+Backup and restore must preserve both ATM team state and Claude Code task-list state
+when explicitly requested.
+
+**Required behavior**:
+- `atm teams backup <team>` must continue to snapshot `config.json`, `inboxes/`, and
+  team-scoped task files from `~/.claude/tasks/<team>/`.
+- When `--project <name>` is provided, backup must also snapshot Claude Code
+  project-scoped task files from `~/.claude/tasks/<project>/` into `tasks-cc/` in the
+  backup bundle.
+- `atm teams restore <team>` must restore team-scoped task files back into
+  `~/.claude/tasks/<team>/`.
+- When `--project <name>` is provided and `tasks-cc/` exists in the backup bundle,
+  restore must restore those files into `~/.claude/tasks/<project>/`.
+- After restoring task files into any destination task directory, restore must recompute
+  `.highwatermark` from the highest numeric `<task-id>.json` filename present in that
+  destination. Restore must not blindly preserve a stale or lower watermark from backup.
+
+**Acceptance checks**:
+- A backup created with `--project <name>` contains `tasks-cc/` with the corresponding
+  Claude Code project task files.
+- Restoring a backup with team task files `76.json` through `82.json` leaves
+  `.highwatermark` set to `82`.
+- Restoring a backup with `tasks-cc/` repopulates `~/.claude/tasks/<project>/` when the
+  same `--project <name>` is provided on restore.
 
 ### 4.3.1 Lifecycle Teardown and Cleanup Semantics
 

@@ -832,6 +832,7 @@ Acceptance criteria:
 3. **If NO** (no active team-lead):
    - Ensure backup destination exists at `.backups/<team>/<timestamp>/` (agent-team-api backup convention).
    - Create a flat backup snapshot compatible with `atm teams restore`: `config.json`, `inboxes/`, and `tasks/` directly under `.backups/<team>/<timestamp>/`.
+   - When `--project <name>` is supplied, include Claude Code project task-list files as `tasks-cc/` sourced from `~/.claude/tasks/<project>/`.
    - Remove the active `<team>/` directory only after successful snapshot write.
    - Output: `"Call TeamCreate(<team>) to re-establish as team-lead"`.
 4. Team-lead calls `TeamCreate(<team>)`; this succeeds because the active team directory is absent.
@@ -839,6 +840,7 @@ Acceptance criteria:
 6. Daemon restores non-Claude members from backup (pane IDs, agent types, inbox history).
 7. Preserve the new `leadSessionId` from TeamCreate; restore never overwrites it. `team-lead` member is never restored from backup.
 8. Daemon injects status into team-lead session: `"<team> re-established. Active members: <name> (<type>, pane <id>), ..."`.
+9. Restore recomputes `.highwatermark` for each restored task directory from the highest numeric task id present after file copy.
 
 **Failure-mode acceptance criteria**:
 - Stale PID/session mismatch is detected and does not cause identity theft.
@@ -2115,6 +2117,9 @@ Key commits:
 | [#372](https://github.com/randlee/agent-team-mail/issues/372) | macOS CI hang in `test_concurrent_sends_no_data_loss` | AA.3 | Root-cause gate required before mitigation path |
 | [#373](https://github.com/randlee/agent-team-mail/issues/373) | Add `--dry-run` preview mode to `atm teams cleanup` | AA.4 | Non-mutating table with reasons/totals + empty-state messaging |
 | [#424](https://github.com/randlee/agent-team-mail/issues/424) | Improve `atm teams spawn --help` with generated launch-command reference | AA.4 | Always-show copy/paste launch reference with placeholders when config absent |
+| [#649](https://github.com/randlee/agent-team-mail/issues/649) | Add `atm teams remove-member` command | AF follow-on | Team roster/mailbox removal contract hardening |
+| [#650](https://github.com/randlee/agent-team-mail/issues/650) | Backup/restore should capture Claude Code project task list (`~/.claude/tasks/<project>/`) | AF follow-on | Minimal path: explicit `--project <name>` plus `tasks-cc/` snapshot |
+| [#651](https://github.com/randlee/agent-team-mail/issues/651) | Restore sets highwatermark off-by-one | AF follow-on | Restore must recompute watermark from highest restored task id |
 | [#287](https://github.com/randlee/agent-team-mail/issues/287) | `parse_since_input` accepts `0m` and negative durations | X.4 (deferred) | Deferred follow-on from Phase X onboarding tranche |
 | [#337](https://github.com/randlee/agent-team-mail/issues/337) | Missing `#[serial]` on env-mutating daemon tests (`ATM_HOME`) | X.5 (deferred) | Deferred CI-debt cleanup in Phase X follow-on |
 | [#338](https://github.com/randlee/agent-team-mail/issues/338) | `add-member` does not create inbox atomically | X.6 (deferred) | Deferred follow-on after onboarding contract closure |
