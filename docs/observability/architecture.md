@@ -102,8 +102,6 @@ logging remains continuously available.
 
 `atm doctor --json` and `atm status --json` share one locked `logging_health`
 object contract:
-- `schema_version`, `state`, `log_root`, `canonical_log_path`, `spool_path`,
-  `dropped_events_total`, `spool_file_count`, `oldest_spool_age_seconds`,
-  `last_error.code`, `last_error.message`, `last_error.at`.
+- `status`, `otel_exporter`, `local_structured`, `last_export_error`.
 
 No drift is allowed across these two command surfaces for shared keys.
