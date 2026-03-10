@@ -721,6 +721,7 @@ mod tests {
                     session_id: "session_id:daemon-session-1".to_string(),
                     process_id: std::process::id(),
                     alive: true,
+                    last_seen_at: None,
                     runtime: Some("codex".to_string()),
                     runtime_session_id: Some("thread-id:codex-thread-1".to_string()),
                     pane_id: None,

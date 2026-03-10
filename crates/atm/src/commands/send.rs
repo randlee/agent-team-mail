@@ -320,6 +320,16 @@ pub fn execute(args: SendArgs) -> Result<()> {
         team_name, agent_name, result_text
     );
 
+    // Best-effort daemon heartbeat when message delivery reaches inbox write
+    // success path so session last_seen_at updates are not limited to explicit
+    // session-query commands.
+    if matches!(
+        outcome,
+        WriteOutcome::Success | WriteOutcome::ConflictResolved { .. }
+    ) {
+        let _ = touch_sender_session_heartbeat(&team_name, &config.core.identity);
+    }
+
     // Auto-subscribe the sender to the target agent's idle event (upsert — refreshes TTL
     // if a subscription already exists). This is best-effort: errors are silently ignored
     // because the daemon may not be running.
@@ -614,6 +624,20 @@ fn resolve_sender_session_id_with_context(
     identity: Option<&str>,
 ) -> Result<Option<String>> {
     resolve_caller_session_id_optional(team, identity)
+}
+
+fn touch_sender_session_heartbeat(team: &str, sender: &str) -> Result<()> {
+    touch_sender_session_heartbeat_with_query(team, sender, |team, sender| {
+        agent_team_mail_core::daemon_client::query_session_for_team(team, sender)
+    })
+}
+
+fn touch_sender_session_heartbeat_with_query<F>(team: &str, sender: &str, query: F) -> Result<()>
+where
+    F: Fn(&str, &str) -> anyhow::Result<Option<SessionQueryResult>>,
+{
+    let _ = query(team, sender)?;
+    Ok(())
 }
 
 fn should_warn_self_send(
@@ -1006,6 +1030,7 @@ mod tests {
                 session_id: "s".to_string(),
                 process_id: 123,
                 alive: false,
+                last_seen_at: None,
                 runtime: None,
                 runtime_session_id: None,
                 pane_id: None,
@@ -1022,6 +1047,7 @@ mod tests {
                 session_id: "s".to_string(),
                 process_id: 123,
                 alive: true,
+                last_seen_at: None,
                 runtime: None,
                 runtime_session_id: None,
                 pane_id: None,
@@ -1052,6 +1078,28 @@ mod tests {
             destination_target("team-lead", "atm-dev"),
             "team-lead@atm-dev"
         );
+    }
+
+    #[test]
+    fn test_touch_sender_session_heartbeat_invokes_query() {
+        let called = std::cell::Cell::new(false);
+        let result =
+            touch_sender_session_heartbeat_with_query("atm-dev", "arch-ctm", |team, name| {
+                called.set(true);
+                assert_eq!(team, "atm-dev");
+                assert_eq!(name, "arch-ctm");
+                Ok(None)
+            });
+        assert!(result.is_ok());
+        assert!(called.get(), "heartbeat query should be invoked");
+    }
+
+    #[test]
+    fn test_touch_sender_session_heartbeat_propagates_query_error() {
+        let result = touch_sender_session_heartbeat_with_query("atm-dev", "arch-ctm", |_, _| {
+            Err(anyhow!("daemon unavailable"))
+        });
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1290,6 +1338,7 @@ mod tests {
                     session_id: "sid-123".to_string(),
                     process_id: 100,
                     alive: true,
+                    last_seen_at: None,
                     runtime: None,
                     runtime_session_id: None,
                     pane_id: None,
@@ -1313,6 +1362,7 @@ mod tests {
                     session_id: "sid-remote".to_string(),
                     process_id: 101,
                     alive: true,
+                    last_seen_at: None,
                     runtime: None,
                     runtime_session_id: None,
                     pane_id: None,

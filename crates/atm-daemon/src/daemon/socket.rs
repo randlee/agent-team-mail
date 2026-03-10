@@ -4512,7 +4512,11 @@ fn control_request_is_live(
 
     let tracker = state_store.lock().unwrap();
     match tracker.get_state(&control.agent_id) {
-        Some(AgentState::Idle) | Some(AgentState::Active) => ControlResult::Ok,
+        Some(AgentState::Idle) | Some(AgentState::Active) => {
+            drop(tracker);
+            registry.heartbeat_for_team(&record.team, &record.agent_name);
+            ControlResult::Ok
+        }
         Some(AgentState::Unknown) | Some(AgentState::Offline) | None => ControlResult::NotLive,
     }
 }
@@ -5024,6 +5028,7 @@ fn handle_session_query(
                     "session_id": record.session_id,
                     "process_id": record.process_id,
                     "alive": alive,
+                    "last_seen_at": record.last_seen_at,
                     "last_alive_at": record.last_alive_at,
                     "runtime": record.runtime,
                     "runtime_session_id": record.runtime_session_id,
@@ -5124,12 +5129,16 @@ fn handle_session_query_team(
     }
 
     let alive = record.state == crate::daemon::session_registry::SessionState::Active;
+    if alive {
+        let _ = registry.heartbeat_for_team(&team, &name);
+    }
     make_ok_response(
         &request.request_id,
         serde_json::json!({
             "session_id": record.session_id,
             "process_id": record.process_id,
             "alive": alive,
+            "last_seen_at": record.last_seen_at,
             "last_alive_at": record.last_alive_at,
             "runtime": record.runtime,
             "runtime_session_id": record.runtime_session_id,
@@ -6430,6 +6439,7 @@ notify_target = "team-lead"
             process_id: std::process::id(),
             state: crate::daemon::session_registry::SessionState::Active,
             updated_at: "2026-03-05T00:00:00Z".to_string(),
+            last_seen_at: Some("2026-03-05T00:00:00Z".to_string()),
             last_alive_at: Some("2026-03-05T00:00:00Z".to_string()),
             runtime: runtime.map(str::to_string),
             runtime_session_id: None,
@@ -8560,6 +8570,71 @@ exit 1
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn test_control_stdin_updates_session_heartbeat() {
+        use crate::plugins::worker_adapter::AgentState;
+        use uuid::Uuid;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state_store = make_store();
+        {
+            let mut tracker = state_store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Idle);
+        }
+        let sr = make_sr();
+        {
+            sr.lock()
+                .unwrap()
+                .upsert("arch-ctm", "sess-heartbeat", std::process::id());
+        }
+
+        let before = sr
+            .lock()
+            .unwrap()
+            .query("arch-ctm")
+            .expect("seeded session")
+            .updated_at
+            .clone();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        let req = ControlRequest {
+            v: CONTROL_SCHEMA_VERSION,
+            request_id: Uuid::new_v4().to_string(),
+            msg_type: "control.stdin.request".to_string(),
+            signal: None,
+            sent_at: chrono::Utc::now().to_rfc3339(),
+            team: "atm-dev".to_string(),
+            session_id: "sess-heartbeat".to_string(),
+            agent_id: "arch-ctm".to_string(),
+            sender: "team-lead".to_string(),
+            action: ControlAction::Stdin,
+            payload: Some("heartbeat".to_string()),
+            content_ref: None,
+            elicitation_id: None,
+            decision: None,
+        };
+        let dd = make_dd_in(&tmp);
+        let ack = process_control_request(req, tmp.path(), &state_store, &sr, &dd).await;
+        assert_eq!(ack.result, agent_team_mail_core::control::ControlResult::Ok);
+
+        let after = sr
+            .lock()
+            .unwrap()
+            .query("arch-ctm")
+            .expect("session still tracked")
+            .clone();
+        assert_ne!(
+            after.updated_at, before,
+            "control send should refresh updated_at"
+        );
+        assert!(
+            after.last_seen_at.is_some(),
+            "control send should refresh last_seen_at"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn test_control_elicitation_response_enqueues_payload() {
         use crate::plugins::worker_adapter::AgentState;
         use uuid::Uuid;
@@ -10484,6 +10559,10 @@ exit 1
             std::process::id() as u64
         );
         assert!(payload["alive"].as_bool().unwrap());
+        assert!(
+            payload["last_seen_at"].as_str().is_some(),
+            "live session-query responses should expose last_seen_at"
+        );
         assert!(
             payload["last_alive_at"].as_str().is_some(),
             "live session-query responses should expose last_alive_at"
