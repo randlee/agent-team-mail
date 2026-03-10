@@ -12,9 +12,15 @@ pub struct ContextMergeReport {
     pub errors: Vec<Diagnostic>,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "context merge needs explicit policy/config inputs for deterministic diagnostics"
+)]
 pub fn merge_context(
     template_path: &Path,
+    include_chain: &[std::path::PathBuf],
     required_variables: &[String],
+    required_variable_sources: &BTreeMap<String, std::path::PathBuf>,
     declared_variables: &BTreeSet<String>,
     defaults: &BTreeMap<String, String>,
     vars_env: &BTreeMap<String, String>,
@@ -46,10 +52,15 @@ pub fn merge_context(
             errors.push(Diagnostic {
                 code: "MISSING_VAR".to_string(),
                 message: format!("Required variable '{required}' is missing"),
-                path: Some(template_path.to_path_buf()),
+                path: Some(
+                    required_variable_sources
+                        .get(required)
+                        .cloned()
+                        .unwrap_or_else(|| template_path.to_path_buf()),
+                ),
                 line: None,
                 column: None,
-                include_chain: Vec::new(),
+                include_chain: include_chain.to_vec(),
             });
         }
     }
@@ -66,7 +77,7 @@ pub fn merge_context(
                 path: Some(template_path.to_path_buf()),
                 line: None,
                 column: None,
-                include_chain: Vec::new(),
+                include_chain: include_chain.to_vec(),
             };
 
             match unknown_policy {
@@ -103,7 +114,9 @@ mod tests {
 
         let report = merge_context(
             path,
+            &[],
             &required,
+            &BTreeMap::new(),
             &declared,
             &defaults,
             &env,

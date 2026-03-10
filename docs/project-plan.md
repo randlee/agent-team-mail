@@ -2,7 +2,7 @@
 
 **Version**: 0.7
 **Date**: 2026-03-09
-**Status**: Phases AH and AI complete (v0.43.0 pending). Phase AJ next.
+**Status**: Phase AJ planning in progress. Phase AK queued.
 
 ---
 
@@ -172,8 +172,10 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AE | GH Monitor Reliability + Daemon Logging | Stabilize gh-monitor status/lifecycle contracts and daemon observability behavior | COMPLETE |
 | AF | External Agent Lifecycle Hardening | Close lifecycle, cleanup, transient registration, and reliability/documentation hardening | COMPLETE |
 | AG | sc-composer Full Implementation + CLI | Deliver `sc-composer` library + `sc-compose` CLI and integrate with `atm teams spawn` via direct library APIs | COMPLETE |
-| AH | sc-observability Unification + ATM Ecosystem Logging | Unified JSONL logging pipeline via `sc-observability` crate; extended logging health schema in `atm status`/`atm doctor` | COMPLETE |
-| AI | GH Monitor Dashboard + Detailed PR Reporting | `atm gh pr list`, `atm gh pr report`, `--template` rendering, `init-report`; CI rollup neutral/skipped fix | COMPLETE |
+| AH | Observability Unification + AG Deferred Closure | Unified JSONL logging pipeline via `sc-observability` crate and baseline observability contracts (OTel/scmux/schook deferred) | COMPLETE |
+| AI | GH Monitor Dashboard + Detailed PR Reporting | `atm gh pr list`, `atm gh pr report`, `--template` rendering, `init-report`; CI rollup neutral/skipped fix | IN-PROGRESS |
+| AJ | Session-ID SSoT Normalization | Canonical `session_id` naming, shared caller resolver, runtime session resolution closure, doctor/session consistency | PLANNED |
+| AK | Mandatory OTel Rollout | Non-optional OTel across in-scope tools with canonical correlation and health/reporting contracts | PLANNED |
 
 ---
 
@@ -533,7 +535,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 - Remove `emit_event_best_effort` dual-write path and `ATM_LOG_BRIDGE` env var support from all crates.
 - Remove legacy `events.jsonl` sink code from CLI, daemon, MCP proxy, and TUI.
 - Remove legacy bridge log surface (surface 6) from `.claude/agents/log-monitor.md`.
-- Update `docs/logging-l1a-spec.md` and `docs/requirements.md` to mark bridge as removed.
+- Update `docs/logging-l1a-spec.md` and `docs/observability/requirements.md` to mark bridge as removed.
 - Verify no external consumers depend on the old format before removal.
 
 **M.2-M.7 scope (Codex parity)**:
@@ -1467,16 +1469,18 @@ the current tranche focused on onboarding contract closure.
 
 **Completed**: 133+ sprints across 29 phases (CI green)
 **Current version**: v0.42.0
-**Current phase**: Phase AG (COMPLETE)
-**Next planned phase**: Phase AH (observability unification + OTel baseline)
+**Current planning phase**: Phase AJ
+**Next planned phase**: Phase AK (mandatory OTel rollout)
 
 ---
 
-## 17.17 Phase AH: Observability Unification + OTel Baseline
+## 17.17 Phase AH: Observability Unification + AG Deferred Closure (Historical)
+
+_Historical record: AH delivered logging unification baseline. OTel/scmux/schook
+rollout is deferred and planned in AJ/AK._
 
 **Goal**: Extract `sc-observability` as a shared logging platform across ATM
-tools, close deferred AG observability/render/docs gaps, and ship a safe
-optional OpenTelemetry baseline with sub-agent-first trace coverage.
+tools and close deferred AG observability/render/docs gaps.
 
 **Planning doc**: `docs/phase-ah-planning.md`
 **Requirements doc**: `docs/observability/requirements.md`
@@ -1486,10 +1490,10 @@ optional OpenTelemetry baseline with sub-agent-first trace coverage.
 | Sprint | Focus | Issues | Status |
 |---|---|---|---|
 | AH.1 | Shared crate foundation (`sc-observability`) + spool/size-guard/socket-error/L1a contracts | #556 | COMPLETE |
-| AH.2 | `sc-compose` migration to shared logging | #556 | PLANNED |
-| AH.3 | Diagnostics + output derivation closure | #555, #557 | PLANNED |
-| AH.4 | ATM/daemon/tui/mcp/scmux/schook integration + doctor/status health surfaces + OTel baseline | #556 | PLANNED |
-| AH.5 | Runbook + install/release docs closeout | #558 | PLANNED |
+| AH.2 | `sc-compose` migration to shared logging | #556 | COMPLETE |
+| AH.3 | Diagnostics + output derivation closure | #555, #557 | COMPLETE |
+| AH.4 | ATM/daemon/tui/mcp integration + doctor/status health surfaces | #556 | COMPLETE |
+| AH.5 | Runbook + install/release docs closeout | #558 | COMPLETE |
 
 ---
 
@@ -1507,7 +1511,75 @@ observability scope.
 | AI.1 | `atm gh pr list` rollup dashboard + `--json` | #560 | COMPLETE |
 | AI.2 | `atm gh pr report <PR>` built-in report + `--json` | #561 | COMPLETE |
 | AI.3 | Template customization (`--template`) + optional `init-report` | #561 (follow-up) | COMPLETE |
-| AI.4 | Report semantics hardening (`skip` pass semantics, review none, mergeability retry, blocker/advisory split) | #582 | IN-PROGRESS |
+| AI.4 | Report semantics hardening (`skip` pass semantics, review none, mergeability retry, blocker/advisory split) | #582 | COMPLETE |
+
+---
+
+## 17.19 Phase AJ: OpenTelemetry Baseline + Observability API Completion
+
+**Goal**: Deliver the OTel feature gate deferred from AH, complete the `sc_observability::init()`
+zero-config API, define and implement log injection for library calls, and integrate
+`scmux`/`schook` with `sc-observability`.
+
+**Planning doc**: `docs/phase-aj-planning.md` _(planning session pending)_
+**Requirements doc**: `docs/observability/requirements.md` (§9 OTel — deferred from AH)
+**Architecture doc**: `docs/observability/architecture.md` (§9 OTel — deferred from AH)
+
+### Deferred inputs from Phase AH
+- AH-OBS-5/5a/5b: OTel optional feature gate, trace/metric baseline, sub-agent-first instrumentation
+- AH-OBS-1: scmux and schook `sc-observability` adoption
+- AH-OBS-2: `sc_observability::init("<tool>")` zero-config API
+- Log injection contract: library calls from ATM tools must route logs to host tool's log file
+
+### Planned Sprint Map
+| Sprint | Focus | Issues | Status |
+|---|---|---|---|
+| AJ.1 | `sc_observability::init()` API + log injection contract | TBD | PLANNED |
+| AJ.2 | OTel feature gate + trace/metric baseline | TBD | PLANNED |
+| AJ.3 | scmux/schook sc-observability adoption | TBD | PLANNED |
+| AJ.4 | Integration hardening + docs | TBD | PLANNED |
+
+---
+
+## 17.19 Phase AJ: Session-ID SSoT Normalization
+
+**Goal**: Make daemon registry the canonical session authority and eliminate
+identity/session ambiguity by standardizing on `session_id` across ATM surfaces.
+**Prerequisites**: Phase AH baseline complete.
+
+**Planning doc**: `docs/phase-aj-planning.md`  
+**Test plan**: `docs/test-plan-phase-AJ.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Issues | Status |
+|---|---|---|---|
+| AJ.1 | Shared resolver SSoT for `send/read/register/doctor` | #593, #595 | PLANNED |
+| AJ.2 | Codex/Gemini runtime session resolution closure | #597 | PLANNED |
+| AJ.3 | Stale session lifecycle + cleanup reliability | #594 | PLANNED |
+| AJ.4 | Doctor/members session display consistency | #596 | PLANNED |
+| AJ.5 | Spawn env normalization + resume/continue semantics | #593, #597 | PLANNED |
+
+---
+
+## 17.20 Phase AK: Mandatory OTel Rollout
+
+**Goal**: Ship non-optional OpenTelemetry across in-scope tools while keeping
+local structured logging always-on and fail-open.
+**Prerequisites**: Phase AH and Phase AJ complete.
+
+**Planning doc**: `docs/phase-ak-planning.md`  
+**Requirements**: `docs/observability/requirements.md`  
+**Architecture**: `docs/observability/architecture.md`  
+**Test plan**: `docs/test-plan-phase-AK.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Issues | Status |
+|---|---|---|---|
+| AK.1 | Contract reconciliation + schema hardening (`trace_id/span_id/subagent_id`, paths, health JSON keys) | ATM-QA-004, ATM-QA-008, ATM-QA-007, ATM-QA-009 | PLANNED |
+| AK.2 | `sc-observability` mandatory OTel core (`default-on`, retry/fail-open, correlation contract) | OTel baseline | PLANNED |
+| AK.3 | Producer integration (`atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `scmux`, `schook`, `sc-compose`, `sc-composer`) | OTel rollout | PLANNED |
+| AK.4 | Doctor/status observability health + runbook finalization | health/reporting | PLANNED |
+| AK.5 | End-to-end QA, release gates, and cross-platform validation | release confidence | PLANNED |
 
 ---
 

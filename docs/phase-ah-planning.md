@@ -1,5 +1,8 @@
 # Phase AH Planning — Observability Unification + AG Deferred Closure
 
+> Historical planning record. OTel optionality described here is superseded by
+> Phase AK (`docs/phase-ak-planning.md`), where OTel rollout is mandatory.
+
 ## Goal
 
 Close AG deferred issues by extracting a shared observability crate and aligning logging/diagnostics behavior across `atm` and `sc-compose` with one implementation surface.
@@ -100,6 +103,10 @@ Schema, redaction, truncation, and envelope rules remain consistent across tools
 
 ### AH-OBS-5: OpenTelemetry (optional)
 
+> NOTE: AH-OBS-5 optional/default-off OTel language is historical. It is
+> superseded by Phase AK mandatory OTel rollout. See
+> `docs/phase-ak-planning.md` and `docs/observability/requirements.md` §9.
+
 - OTel support is required as an optional capability in `sc-observability`.
 - OTel must be feature-gated (default off) to avoid mandatory dependency overhead.
 - `atm` and `scmux` are first adopters for OTel emission once AH integration lands.
@@ -148,7 +155,7 @@ OTel rollout in AH is intentionally scoped to a short baseline set:
 | AH.1 | `sc-observability` crate skeleton + contracts | #556 | New workspace crate, stable event schema/types, sink trait; `docs/logging-l1a-spec.md` authoring/update; socket contract error codes (`VERSION_MISMATCH`, `INVALID_PAYLOAD`, `INTERNAL_ERROR`); size guard (`64 KiB`); queue/rotation defaults; spool semantics (filename format, ordering, delete-after-merge); unit tests |
 | AH.2 | `sc-compose` migration to shared observability | #556 | Remove local logger duplication, add level/output controls, integration tests |
 | AH.3 | Diagnostics + render behavior closure | #555, #557 | Missing-var diagnostic enrichment and output derivation behavior with tests |
-| AH.4 | ATM ecosystem integration + health surfaces + OTel baseline | #556 | Integrate `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `scmux`, and `schook` with shared crate; deliver `atm doctor --json` / `atm status --json` logging-health fields (state, dropped counter, spool path, last error); wire runtime env controls (`ATM_LOG`, `ATM_LOG_MSG`, `ATM_LOG_FILE`); optional OTel baseline traces/metrics |
+| AH.4 | ATM ecosystem integration + health surfaces | #556 | Integrate `atm`, `atm-daemon`, `atm-tui`, and `atm-agent-mcp` with shared crate; deliver `atm doctor --json` / `atm status --json` logging-health fields (state, dropped counter, spool path, last error); wire runtime env controls (`ATM_LOG`, `ATM_LOG_MSG`, `ATM_LOG_FILE`) |
 | AH.5 | Docs + runbook + release/install closure | #558 | README/quickstart/PUBLISHING updates; `docs/logging-troubleshooting.md` runbook alignment to health states/remediations; final QA checklist |
 
 ## Sprint Dependency Graph
@@ -167,7 +174,7 @@ OTel rollout in AH is intentionally scoped to a short baseline set:
 5. Output-path derivation behavior is deterministic and covered by tests.
 6. End-user docs explicitly cover `sc-compose` install/use flows.
 7. `atm doctor --json` and `atm status --json` expose logging health state and required diagnostics fields (`state`, canonical log path, spool path, dropped counter, oldest spool age/count, last error).
-8. OTel baseline export is available behind feature/config toggle and does not block local file logging.
+8. OTel/scmux/schook integration was deferred beyond AH and tracked in later planning phases.
 
 ## Test Plan (Phase AH)
 
@@ -194,8 +201,7 @@ OTel rollout in AH is intentionally scoped to a short baseline set:
   - `doctor --json` and `status --json` logging-health payload presence and schema consistency
   - runtime env control behavior: `ATM_LOG`, `ATM_LOG_MSG`, `ATM_LOG_FILE`
 - SCMUX integration tests:
-  - shared schema parity checks for status/message operations
-  - sub-agent trace correlation (`subagent_id`) propagation checks
+  - deferred beyond AH; moved to AJ/AK scope for mandatory OTel + producer rollout
 - CI gates:
   - `cargo fmt --check --all`
   - `cargo clippy --workspace -- -D warnings`
@@ -206,3 +212,35 @@ OTel rollout in AH is intentionally scoped to a short baseline set:
 - Full line/column fidelity for missing variables may require parser-side instrumentation in addition to render-time strict undefined behavior.
 - Logging schema migration must preserve backward compatibility for existing log readers where required.
 - Keep release-artifact manifest as SSoT for publish/install artifacts while expanding docs for new CLI surface.
+
+## Team-lead Decision: QA-AH4-002 (sc_observability::init() wiring)
+DEFERRED to Phase AJ or later. atm_core::logging::init_unified() is ratified as the
+integration surface for ATM binaries in this phase. The sc-observability crate does not
+export init(). No action required for AH.4 merge.
+
+## Phase AH Formal Deferrals (Post-QA)
+
+### AH-OBS-1 deferral: scmux and schook integration
+AH-OBS-1 requires all tools (including `scmux` and `schook`) to use `sc-observability`.
+These binaries are not part of the current workspace. Their `sc-observability` adoption
+is formally deferred to a future phase after v0.43.0 publish.
+Tracking: deferred per user decision post-AH QA review.
+
+### AH-OBS-2 deferral: sc_observability::init() zero-config API
+AH-OBS-2 specifies a canonical zero-config `sc_observability::init("<tool-name>")` entry
+point. This API is not exported in Phase AH. The AJ planning session will define the
+exact API surface and migration path. Tracking: deferred to Phase AJ.
+
+### AH-OBS-5 deferral: OpenTelemetry baseline
+AH-OBS-5 (and AH-OBS-5a/5b) require optional OTel export with feature gate. OTel support
+is entirely absent from the AH implementation. This is formally deferred to Phase AJ.
+The `docs/observability/requirements.md` and `docs/observability/architecture.md` OTel
+sections are stubs — implementation is a Phase AJ deliverable.
+Tracking: deferred per user decision post-AH QA review.
+
+### AJ forward requirement: log injection for library calls
+When ATM calls sc-compose/sc-composer as a library (e.g. `atm teams spawn` calling
+compose APIs), the library's log events must route into the host tool's log file rather
+than the companion tool's default log file. This design contract must be specified in
+Phase AJ requirements before implementation.
+Tracking: added to AJ requirements backlog.

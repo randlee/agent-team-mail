@@ -1369,7 +1369,28 @@ fn query_daemon_unix(
                     }
                 }
             } else {
-                return Ok(None);
+                // Autostart is disabled; the daemon is managed externally.
+                // If the socket path already exists the daemon may be mid-startup
+                // (socket bound but not yet accepting). Retry briefly before giving up
+                // so we don't return Ok(None) during that narrow window.
+                if socket_path.exists() {
+                    let mut connected = None;
+                    for _ in 0..3 {
+                        match UnixStream::connect(&socket_path) {
+                            Ok(s) => {
+                                connected = Some(s);
+                                break;
+                            }
+                            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+                        }
+                    }
+                    match connected {
+                        Some(s) => s,
+                        None => return Ok(None),
+                    }
+                } else {
+                    return Ok(None);
+                }
             }
         }
     };
@@ -1449,6 +1470,12 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     use std::io::Read;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
+
+    // When autostart is disabled, the daemon lifecycle is managed externally.
+    // Skip identity validation and restart logic — trust the external daemon as-is.
+    if !daemon_autostart_enabled() {
+        return Ok(());
+    }
 
     let home = crate::home::get_home_dir()?;
     let daemon_running = daemon_is_running();

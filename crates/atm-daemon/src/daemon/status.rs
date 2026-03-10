@@ -23,6 +23,43 @@ pub struct DaemonStatus {
     pub plugins: Vec<PluginStatus>,
     /// Active teams being monitored
     pub teams: Vec<String>,
+    /// Logging pipeline health snapshot
+    #[serde(default)]
+    pub logging: LoggingHealth,
+}
+
+/// Logging pipeline health snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoggingHealth {
+    /// Logging health state (`healthy|degraded_spooling|degraded_dropping|unavailable`)
+    pub state: String,
+    /// Total dropped log events from daemon queue.
+    pub dropped_counter: u64,
+    /// Active spool path used for producer fallback.
+    pub spool_path: String,
+    /// Last logging error if known.
+    pub last_error: Option<String>,
+    /// Canonical JSONL sink path.
+    pub canonical_log_path: String,
+    /// Number of pending spool files.
+    pub spool_count: u64,
+    /// Oldest spool file age in seconds (if spool files exist).
+    pub oldest_spool_age: Option<u64>,
+}
+
+impl Default for LoggingHealth {
+    fn default() -> Self {
+        Self {
+            state: "unavailable".to_string(),
+            dropped_counter: 0,
+            spool_path: String::new(),
+            last_error: None,
+            canonical_log_path: String::new(),
+            spool_count: 0,
+            oldest_spool_age: None,
+        }
+    }
 }
 
 /// Plugin status entry
@@ -98,7 +135,12 @@ impl StatusWriter {
     /// - Parent directory cannot be created
     /// - Status file cannot be written
     /// - Atomic rename fails
-    pub fn write_status(&self, plugins: Vec<PluginStatus>, teams: Vec<String>) -> Result<()> {
+    pub fn write_status(
+        &self,
+        plugins: Vec<PluginStatus>,
+        teams: Vec<String>,
+        logging: LoggingHealth,
+    ) -> Result<()> {
         // Ensure parent directory exists
         if let Some(parent) = self.status_path.parent() {
             std::fs::create_dir_all(parent).context("Failed to create daemon status directory")?;
@@ -119,6 +161,7 @@ impl StatusWriter {
             uptime_secs,
             plugins,
             teams,
+            logging,
         };
 
         // Serialize to JSON
@@ -166,6 +209,18 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn logging_health() -> LoggingHealth {
+        LoggingHealth {
+            state: "healthy".to_string(),
+            dropped_counter: 0,
+            spool_path: "log-spool".to_string(),
+            last_error: None,
+            canonical_log_path: "atm.log.jsonl".to_string(),
+            spool_count: 0,
+            oldest_spool_age: None,
+        }
+    }
+
     #[test]
     fn test_status_writer_creates_file() {
         let temp_dir = TempDir::new().unwrap();
@@ -181,7 +236,9 @@ mod tests {
 
         let teams = vec!["test-team".to_string()];
 
-        writer.write_status(plugins, teams).unwrap();
+        writer
+            .write_status(plugins, teams, logging_health())
+            .unwrap();
 
         assert!(writer.status_path().exists());
     }
@@ -195,13 +252,17 @@ mod tests {
         let teams = vec![];
 
         // First write
-        writer.write_status(plugins.clone(), teams.clone()).unwrap();
+        writer
+            .write_status(plugins.clone(), teams.clone(), logging_health())
+            .unwrap();
         let first_content = std::fs::read_to_string(writer.status_path()).unwrap();
 
         // Second write (should overwrite atomically)
         // Sleep for more than 1 second to ensure timestamp changes
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        writer.write_status(plugins, teams).unwrap();
+        writer
+            .write_status(plugins, teams, logging_health())
+            .unwrap();
         let second_content = std::fs::read_to_string(writer.status_path()).unwrap();
 
         // Content should differ (timestamps changed)
@@ -232,7 +293,9 @@ mod tests {
 
         let teams = vec!["my-team".to_string()];
 
-        writer.write_status(plugins.clone(), teams.clone()).unwrap();
+        writer
+            .write_status(plugins.clone(), teams.clone(), logging_health())
+            .unwrap();
 
         // Read back and verify structure
         let content = std::fs::read_to_string(writer.status_path()).unwrap();
@@ -248,6 +311,9 @@ mod tests {
         assert_eq!(status.plugins[1].name, "issues");
         assert!(!status.plugins[1].enabled);
         assert_eq!(status.plugins[1].status, PluginStatusKind::Disabled);
+        assert_eq!(status.logging.state, "healthy");
+        assert_eq!(status.logging.spool_count, 0);
+        assert!(status.logging.canonical_log_path.contains("atm.log"));
     }
 
     #[test]
@@ -274,7 +340,9 @@ mod tests {
         let teams = vec![];
 
         // First write
-        writer.write_status(plugins.clone(), teams.clone()).unwrap();
+        writer
+            .write_status(plugins.clone(), teams.clone(), logging_health())
+            .unwrap();
         let first_content = std::fs::read_to_string(writer.status_path()).unwrap();
         let first_status: DaemonStatus = serde_json::from_str(&first_content).unwrap();
 
@@ -282,7 +350,9 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Second write
-        writer.write_status(plugins, teams).unwrap();
+        writer
+            .write_status(plugins, teams, logging_health())
+            .unwrap();
         let second_content = std::fs::read_to_string(writer.status_path()).unwrap();
         let second_status: DaemonStatus = serde_json::from_str(&second_content).unwrap();
 

@@ -81,6 +81,8 @@ enum CommandArg {
         template: Option<PathBuf>,
         #[arg(long)]
         output: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        write: bool,
     },
     Resolve {
         target: Option<String>,
@@ -138,9 +140,11 @@ fn main() -> ExitCode {
 
 fn run(cli: &Cli, logger: &observability::Logger) -> Result<()> {
     match &cli.command {
-        CommandArg::Render { template, output } => {
-            run_render(cli, template.clone(), output.clone(), logger)
-        }
+        CommandArg::Render {
+            template,
+            output,
+            write,
+        } => run_render(cli, template.clone(), output.clone(), *write, logger),
         CommandArg::Resolve { target } => run_resolve(cli, target.clone(), logger),
         CommandArg::Validate { template } => run_validate(cli, template.clone(), logger),
         CommandArg::FrontmatterInit { file, force } => run_frontmatter_init(cli, file, *force),
@@ -152,6 +156,7 @@ fn run_render(
     cli: &Cli,
     template: Option<PathBuf>,
     output: Option<PathBuf>,
+    write: bool,
     logger: &observability::Logger,
 ) -> Result<()> {
     let request = build_request(cli, template, None)?;
@@ -166,7 +171,7 @@ fn run_render(
     );
     let result = sc_composer::compose(&request)?;
     emit_include_expansion_success(logger, &result.resolved_files);
-    let output_path = output;
+    let output_path = resolve_render_output_path(cli, &request, &result, output, write);
 
     if cli.json {
         eprintln!(
@@ -217,6 +222,78 @@ fn run_render(
     println!("{}", result.rendered_text);
     logger.emit("render_outcome", "success", json!({"output": "stdout"}));
     Ok(())
+}
+
+fn resolve_render_output_path(
+    cli: &Cli,
+    request: &ComposeRequest,
+    result: &sc_composer::ComposeResult,
+    explicit_output: Option<PathBuf>,
+    write: bool,
+) -> Option<PathBuf> {
+    if let Some(path) = explicit_output {
+        return Some(path);
+    }
+    if !write {
+        return None;
+    }
+
+    let resolved_template = result
+        .resolved_files
+        .first()
+        .or(request.template_path.as_ref())?;
+    Some(match cli.mode {
+        ModeArg::File => derive_file_output_path(resolved_template),
+        ModeArg::Profile => derive_profile_output_path(cli, request, resolved_template),
+    })
+}
+
+fn derive_file_output_path(template_path: &Path) -> PathBuf {
+    let Some(file_name) = template_path.file_name().and_then(|n| n.to_str()) else {
+        return template_path.to_path_buf();
+    };
+    if let Some(stripped) = file_name.strip_suffix(".j2") {
+        return template_path.with_file_name(stripped);
+    }
+    template_path.to_path_buf()
+}
+
+fn derive_profile_output_path(
+    cli: &Cli,
+    request: &ComposeRequest,
+    resolved_template: &Path,
+) -> PathBuf {
+    let base = request
+        .agent
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(sanitize_prompt_name)
+        .unwrap_or_else(|| {
+            let fallback = resolved_template
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("prompt");
+            sanitize_prompt_name(fallback.trim_end_matches(".j2"))
+        });
+    let ulid = ulid::Ulid::new().to_string().to_ascii_lowercase();
+    cli.root.join(".prompts").join(format!("{base}-{ulid}.md"))
+}
+
+fn sanitize_prompt_name(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else if ch == '.' || ch.is_whitespace() {
+            out.push('-');
+        }
+    }
+    let normalized = out.trim_matches('-').to_string();
+    if normalized.is_empty() {
+        "prompt".to_string()
+    } else {
+        normalized
+    }
 }
 
 fn emit_include_expansion_success(logger: &observability::Logger, resolved_files: &[PathBuf]) {

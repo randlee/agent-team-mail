@@ -52,28 +52,17 @@ git push -u origin integrate/phase-{P}
 
 Spawn once per phase. The quality-mgr persists across all sprints.
 
-Use the Task tool with `name` parameter to spawn as a tmux teammate:
+Use the Task tool with `name` parameter to spawn as a named teammate:
 
 ```json
 {
-  "subagent_type": "general-purpose",
+  "subagent_type": "quality-mgr",
   "name": "quality-mgr",
   "team_name": "atm-dev",
   "model": "sonnet",
   "prompt": "You are quality-mgr for Phase {P}. You will receive QA assignments from team-lead for each sprint as they complete. Stand by for first assignment. Integration branch: integrate/phase-{P}. Phase docs: docs/project-plan.md, docs/atm-agent-mcp/requirements.md."
 }
 ```
-
-**Tmux teammate launch troubleshooting**: If the pane opens but the Claude process doesn't start, manually launch in the pane with all three required flags:
-
-```bash
-CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 /Users/randlee/.local/share/claude/versions/<VERSION> \
-  --agent-id quality-mgr@atm-dev \
-  --agent-name quality-mgr \
-  --team-name atm-dev
-```
-
-All three flags (`--agent-id`, `--agent-name`, `--team-name`) are required together — omitting any one causes an error.
 
 ### 4. Send O.1 Assignment to arch-ctm
 
@@ -90,7 +79,7 @@ Deliverables:
 Requirements: docs/atm-agent-mcp/requirements.md ({relevant FRs})
 Sprint plan: docs/project-plan.md (Phase {P} section)
 
-When complete: commit, push, create PR targeting integrate/phase-{P}, then notify me via atm send."
+When complete: commit, push, then notify me via atm send with branch + commit SHA. Do not create PR."
 ```
 
 ## Sprint Pipeline
@@ -106,21 +95,27 @@ Timeline:
 
 ### When arch-ctm Completes Sprint S
 
-1. **arch-ctm sends completion message** via ATM CLI with PR number
-2. **Team-lead creates worktree for S+1** based on sprint S branch:
+1. **arch-ctm sends completion message** via ATM CLI with branch + commit SHA after commit/push.
+2. **Team-lead creates PR** targeting `integrate/phase-{P}` and immediately starts CI monitoring:
+   ```bash
+   atm gh monitor pr <PR_NUMBER>
+   ```
+3. **Team-lead creates worktree for S+1** based on sprint S branch:
    ```
    /sc-git-worktree --create feature/p{P}-s{N+1}-{slug} feature/p{P}-s{N}-{slug}
    ```
    All worktrees chain: S+1 bases on S, so later sprints include earlier work.
-3. **Team-lead assigns QA to quality-mgr** via SendMessage:
+4. **Team-lead sends next sprint assignment** to arch-ctm (use Jinja2 task template + ATM send).
+5. **Team-lead assigns QA to quality-mgr** via SendMessage (use Jinja2 QA template):
    ```
    "Run QA on Sprint {P}.{S}. Worktree: {path}. Sprint deliverables: {summary}.
     Design docs: {list}. PR: #{N}."
    ```
-4. **Team-lead checks for outstanding findings** from earlier sprints:
-   - If findings exist for S-2 or S-1: send fix assignment to arch-ctm BEFORE S+1 assignment
-   - If no findings: send S+1 assignment immediately
-5. **arch-ctm addresses fixes first, then starts S+1**
+6. **If QA findings exist**, queue fixes ahead of new sprint dev tasks:
+   - If findings are on an active codex worktree, send ATM fix assignment to arch-ctm.
+   - Otherwise schedule merge/conflict remediation via a background agent.
+7. **Merge gate**: merge only when QA is PASS and CI is GREEN.
+8. **After merge**, verify remaining open PRs for merge conflicts and schedule fixes immediately.
 
 ### When arch-ctm Has Outstanding Findings
 
@@ -207,12 +202,11 @@ atm read
 ```
 
 ### Nudging (if no reply in 2+ minutes)
+Use ATM first:
 ```bash
-# Find arch-ctm's pane
-tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{pane_title} #{pane_current_command}'
-# Send nudge
-tmux send-keys -t <pane-id> -l "You have unread ATM messages. Run: atm read --team atm-dev" && sleep 0.5 && tmux send-keys -t <pane-id> Enter
+atm send arch-ctm "You have unread ATM messages. Run: atm read --team atm-dev"
 ```
+If your local runtime uses tmux pane orchestration, tmux nudges are optional and environment-specific.
 
 ### Advise arch-ctm to poll with timeout
 When arch-ctm is waiting for assignments, tell him:
