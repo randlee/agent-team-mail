@@ -161,27 +161,48 @@ impl OtelPipeline {
     }
 
     fn export_event(&self, event: &LogEventV1) -> Result<(), OtelError> {
-        if !self.config.enabled {
-            return Ok(());
-        }
-        let record = build_otel_record(event)?;
+        export_otel_with_retry(event, &self.config, self.exporter.as_ref(), self.sleeper)
+    }
+}
 
-        let mut attempt: u32 = 0;
-        let mut backoff = self.config.initial_backoff_ms;
-        loop {
-            match self.exporter.export(&record) {
-                Ok(()) => return Ok(()),
-                Err(err) => {
-                    if attempt >= self.config.max_retries {
-                        return Err(err);
-                    }
-                    (self.sleeper)(Duration::from_millis(backoff));
-                    backoff = backoff.saturating_mul(2).min(self.config.max_backoff_ms);
-                    attempt = attempt.saturating_add(1);
+fn export_otel_with_retry(
+    event: &LogEventV1,
+    config: &OtelConfig,
+    exporter: &dyn OtelExporter,
+    sleeper: fn(Duration),
+) -> Result<(), OtelError> {
+    if !config.enabled {
+        return Ok(());
+    }
+    let record = build_otel_record(event)?;
+
+    let mut attempt: u32 = 0;
+    let mut backoff = config.initial_backoff_ms;
+    loop {
+        match exporter.export(&record) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                if attempt >= config.max_retries {
+                    return Err(err);
                 }
+                sleeper(Duration::from_millis(backoff));
+                backoff = backoff.saturating_mul(2).min(config.max_backoff_ms);
+                attempt = attempt.saturating_add(1);
             }
         }
     }
+}
+
+/// Export to OTel without allowing exporter failures to fail the caller.
+///
+/// This is the public fail-open helper for producer-only code paths that do
+/// not own a full [`Logger`] instance.
+pub fn export_otel_best_effort(
+    event: &LogEventV1,
+    config: &OtelConfig,
+    exporter: &dyn OtelExporter,
+) {
+    let _ = export_otel_with_retry(event, config, exporter, std::thread::sleep);
 }
 
 fn build_otel_record(event: &LogEventV1) -> Result<OtelRecord, OtelError> {
@@ -693,19 +714,6 @@ impl Logger {
     }
 }
 
-/// Export a single event to OTel using default pipeline settings (fail-open).
-///
-/// This helper is intended for producers that already own canonical JSONL
-/// writing and only need shared OTel export semantics.
-pub fn export_otel_best_effort(log_path: &Path, event: &LogEventV1) {
-    let pipeline = OtelPipeline::new_default(log_path);
-    export_otel_best_effort_with_pipeline(&pipeline, event);
-}
-
-fn export_otel_best_effort_with_pipeline(pipeline: &OtelPipeline, event: &LogEventV1) {
-    let _ = pipeline.export_event(event);
-}
-
 pub fn spool_file_name(source_binary: &str, pid: u32, unix_millis: u128) -> String {
     let sanitized = sanitize_source_binary(source_binary);
     format!("{}-{}-{}.jsonl", sanitized, pid, unix_millis)
@@ -774,6 +782,7 @@ mod tests {
     use agent_team_mail_core::logging_event::new_log_event;
     use serial_test::serial;
     use std::sync::Mutex;
+    use std::sync::OnceLock;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
@@ -815,6 +824,16 @@ mod tests {
         let mut event = new_log_event("atm", "test_action", "atm::test", "info");
         event.ts = ts.to_string();
         event
+    }
+
+    static BACKOFF_SLEEPS_MS: OnceLock<Mutex<Vec<u64>>> = OnceLock::new();
+
+    fn record_sleep(duration: Duration) {
+        BACKOFF_SLEEPS_MS
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .expect("backoff sleeps lock")
+            .push(duration.as_millis() as u64);
     }
 
     #[test]
@@ -1217,18 +1236,6 @@ mod tests {
     }
 
     #[test]
-    fn export_otel_best_effort_is_fail_open_when_export_fails() {
-        let tmp = TempDir::new().expect("temp dir");
-        let parent_file = tmp.path().join("not-a-directory");
-        std::fs::write(&parent_file, "occupied").expect("create parent file");
-        let log_path = parent_file.join("atm.log.jsonl");
-        let event = new_log_event("atm-daemon", "register_hint", "atm_daemon::socket", "info");
-
-        // Must not panic or propagate errors when exporter cannot create its output path.
-        export_otel_best_effort(&log_path, &event);
-    }
-
-    #[test]
     fn otel_exporter_retries_then_succeeds() {
         let tmp = TempDir::new().expect("temp dir");
         let cfg = LogConfig {
@@ -1277,55 +1284,53 @@ mod tests {
     }
 
     #[test]
-    fn producer_events_export_through_pipeline_with_counting_exporter() {
-        let tmp = TempDir::new().expect("temp dir");
-        let cfg = LogConfig {
-            log_path: tmp.path().join("atm.log.jsonl"),
-            spool_dir: tmp.path().join("log-spool"),
-            level: LogLevel::Info,
-            message_preview_enabled: false,
-            max_bytes: DEFAULT_MAX_BYTES,
-            max_files: DEFAULT_MAX_FILES,
-            retention_days: DEFAULT_RETENTION_DAYS,
-            queue_capacity: DEFAULT_QUEUE_CAPACITY,
-            max_event_bytes: DEFAULT_MAX_EVENT_BYTES,
-        };
-        let exporter = Arc::new(CountingExporter::with_failures(0));
-        let logger = Logger::with_otel_exporter(
-            cfg,
-            OtelConfig {
+    fn export_otel_best_effort_is_public_and_fail_open() {
+        let exporter = CountingExporter::with_failures(10);
+        let event = new_log_event("atm", "send_message", "atm::send", "info");
+        export_otel_best_effort(
+            &event,
+            &OtelConfig {
                 enabled: true,
-                max_retries: 0,
+                max_retries: 2,
                 initial_backoff_ms: 0,
                 max_backoff_ms: 0,
             },
-            exporter.clone(),
+            &exporter,
         );
 
-        for (idx, source, action) in [
-            (1u8, "atm", "send"),
-            (2u8, "atm-daemon", "register_hint"),
-            (3u8, "sc-composer", "compose"),
-        ] {
-            let mut event = new_log_event(source, action, "atm::test", "info");
-            event.team = Some("atm-dev".to_string());
-            event.agent = Some("arch-ctm".to_string());
-            event.runtime = Some("codex".to_string());
-            event.session_id = Some("sess-123".to_string());
-            event.trace_id = Some("trace-123".to_string());
-            event.span_id = Some(format!("span-{idx}"));
-            logger.emit(&event).expect("emit should succeed");
-        }
-
-        let records = exporter.records.lock().expect("records lock");
-        assert_eq!(records.len(), 3, "all producer events should export");
         assert_eq!(
-            records.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
-            vec![
-                "send".to_string(),
-                "register_hint".to_string(),
-                "compose".to_string()
-            ]
+            exporter.attempts.load(Ordering::SeqCst),
+            3,
+            "initial attempt + 2 retries"
+        );
+    }
+
+    #[test]
+    fn otel_retry_backoff_is_bounded_by_max_backoff() {
+        let sleeps = BACKOFF_SLEEPS_MS.get_or_init(|| Mutex::new(Vec::new()));
+        sleeps.lock().expect("backoff sleeps lock").clear();
+
+        let exporter = CountingExporter::with_failures(10);
+        let event = new_log_event("atm", "send_message", "atm::send", "info");
+        let err = export_otel_with_retry(
+            &event,
+            &OtelConfig {
+                enabled: true,
+                max_retries: 4,
+                initial_backoff_ms: 5,
+                max_backoff_ms: 12,
+            },
+            &exporter,
+            record_sleep,
+        )
+        .expect_err("should return final export error");
+        assert!(matches!(err, OtelError::ExportFailed(_)));
+
+        let sleeps = sleeps.lock().expect("backoff sleeps lock").clone();
+        assert_eq!(sleeps, vec![5, 10, 12, 12]);
+        assert!(
+            sleeps.iter().all(|v| *v <= 12),
+            "sleep exceeded max_backoff"
         );
     }
 
