@@ -1,51 +1,13 @@
-{# Sprint Report Template — agent-team-mail #}
-{# Render with --detailed or --table flag #}
-
-{% if mode == "detailed" %}
-{% for sprint in sprints %}
-Sprint: {{ sprint.id }}  {{ sprint.description }}
-PR: #{{ sprint.pr }}
-{% if sprint.dev %}
-DEV: {{ sprint.dev.status }} [{{ sprint.dev.agent }}]
-{% endif %}
-QA: {% if sprint.qa.status == "PASS" %}PASS ✓{% if sprint.qa.deferred_issues %}  (deferred: {% for i in sprint.qa.deferred_issues %}#{{ i }}{% if not loop.last %}, {% endif %}{% endfor %}){% endif %}
-{%- elif sprint.qa.status == "IN_PROGRESS" %}In progress (iteration {{ sprint.qa.iteration }})
-{%- elif sprint.qa.status == "FAIL" %}FAIL — {{ sprint.qa.summary }}
-{%- else %}Pending
-{%- endif %}
-
-CI: {% if sprint.ci.status == "MERGED" %}Merged to {{ sprint.ci.target }} ✓
-{%- elif sprint.ci.status == "READY" %}Ready to Merge
-{%- elif sprint.ci.status == "GREEN" %}Green ✓
-{%- elif sprint.ci.status == "RUNNING" %}Running ({{ sprint.ci.pending }} pending)
-{%- elif sprint.ci.status == "FLAKE_RERUN" %}Flake rerun in progress
-{%- elif sprint.ci.status == "FAILING" %}Failing — {{ sprint.ci.failing_test }} [{{ sprint.ci.failing_platforms | join(", ") }}] — Fix assigned: {{ sprint.ci.fix_agent }}{% if sprint.ci.fix_acked %} (acked){% endif %}
-{%- endif %}
-
-{% if sprint.notes and sprint.ci.status != "MERGED" %}
-Notes: {{ sprint.notes }}
-{% endif %}
-────────────────────────────────────────
-{% endfor %}
-Integration: {{ integration.branch }} → develop
-PR: #{{ integration.pr }}
-CI: {% if integration.ci_status == "MERGED" %}Merged ✓
-{%- elif integration.ci_status == "READY" %}Ready to Merge
-{%- elif integration.ci_status == "GREEN" %}Green ✓
-{%- elif integration.ci_status == "RUNNING" %}Running ({{ integration.pending }} pending)
-{%- elif integration.ci_status == "FAILING" %}Failing
-{%- endif %}
-
-{% if integration.notes %}
-Notes: {{ integration.notes }}
-{% endif %}
-{% endif %}
-
-{% if mode == "table" %}
-| Sprint | Description | PR | DEV | QA | CI |
-|--------|-------------|----|-----|----|----|
-{% for sprint in sprints %}
-| {{ sprint.id }} | {{ sprint.description }} | #{{ sprint.pr }} | {% if sprint.dev %}{{ sprint.dev.status | truncate(20, true, '…') }} [{{ sprint.dev.agent }}]{% endif %} | {% if sprint.qa.status == "PASS" %}PASS ✓{% if sprint.qa.deferred_issues %} (deferred: #{{ sprint.qa.deferred_issues | join(', #') }}){% endif %}{% elif sprint.qa.status == "IN_PROGRESS" %}In progress ({{ sprint.qa.iteration }}){% elif sprint.qa.status == "FAIL" %}FAIL{% else %}Pending{% endif %} | {% if sprint.ci.status == "MERGED" %}Merged to {{ sprint.ci.target }} ✓{% elif sprint.ci.status == "READY" %}Ready to Merge{% elif sprint.ci.status == "GREEN" %}Green ✓{% elif sprint.ci.status == "RUNNING" %}Running ({{ sprint.ci.pending }} pending){% elif sprint.ci.status == "FLAKE_RERUN" %}Flake rerun{% elif sprint.ci.status == "FAILING" %}Failing ({{ sprint.ci.fix_agent }}{% if sprint.ci.fix_acked %}, acked{% endif %}){% endif %} |
-{% endfor %}
-| **integrate** | {{ integration.branch }} → develop | #{{ integration.pr }} | | — | {% if integration.ci_status == "MERGED" %}Merged ✓{% elif integration.ci_status == "READY" %}Ready to Merge{% elif integration.ci_status == "GREEN" %}Green ✓{% elif integration.ci_status == "RUNNING" %}Running{% elif integration.ci_status == "FAILING" %}Failing{% endif %} |
-{% endif %}
+---
+name: sprint-report
+version: 2.0.0
+description: Sprint status report for agent-team-mail phases.
+format: markdown
+required_variables:
+  - sprint_rows
+  - integration_row
+---
+| Sprint # | Dev | QA | CI | PR |
+|----------|-----|----|----|-----|
+{{ sprint_rows }}
+{{ integration_row }}
