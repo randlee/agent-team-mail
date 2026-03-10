@@ -585,6 +585,13 @@ mod tests {
     #[serial]
     fn emit_observability_includes_env_correlation_fields() {
         let tmp = TempDir::new().expect("tempdir");
+        let probe_id = format!(
+            "probe-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time before unix epoch")
+                .as_nanos()
+        );
         // SAFETY: test-scoped env overrides.
         unsafe {
             std::env::set_var("ATM_HOME", tmp.path());
@@ -594,19 +601,23 @@ mod tests {
             std::env::set_var("ATM_SESSION_ID", "sess-123");
         }
 
-        emit_observability("compose", "ok", serde_json::json!({"mode": "file"}));
+        emit_observability(
+            "compose",
+            "ok",
+            serde_json::json!({"mode": "file", "probe_id": probe_id}),
+        );
         let log_path = tmp
             .path()
             .join(".config/sc-composer/logs/sc-composer.log.jsonl");
-        let lines: Vec<String> = std::fs::read_to_string(&log_path)
-            .expect("log file should exist")
+        let raw = std::fs::read_to_string(&log_path).expect("log file should exist");
+        let event: LogEventV1 = raw
             .lines()
-            .filter(|l| !l.is_empty())
-            .map(str::to_string)
-            .collect();
-        let event: LogEventV1 =
-            serde_json::from_str(lines.last().expect("at least one log line should exist"))
-                .expect("parse event");
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(|line| serde_json::from_str::<LogEventV1>(line).ok())
+            .find(|event| {
+                event.fields.get("probe_id").and_then(|v| v.as_str()) == Some(probe_id.as_str())
+            })
+            .expect("probe event should be present");
         assert_eq!(event.team.as_deref(), Some("atm-dev"));
         assert_eq!(event.agent.as_deref(), Some("arch-ctm"));
         assert_eq!(event.runtime.as_deref(), Some("codex"));
