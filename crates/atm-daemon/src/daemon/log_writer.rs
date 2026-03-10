@@ -598,7 +598,10 @@ mod tests {
             .map(|line| serde_json::from_str(line).expect("valid otel record json"))
             .collect();
         assert_eq!(
-            exported.iter().map(|record| record.name.clone()).collect::<Vec<_>>(),
+            exported
+                .iter()
+                .map(|record| record.name.clone())
+                .collect::<Vec<_>>(),
             vec![
                 "send".to_string(),
                 "register_hint".to_string(),
