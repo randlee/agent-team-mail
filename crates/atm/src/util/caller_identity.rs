@@ -126,7 +126,6 @@ fn runtime_hint(daemon: Option<&SessionQueryResult>) -> CallerRuntime {
     CallerRuntime::Unknown
 }
 
-
 fn classify_ambiguity_error(
     team: Option<&str>,
     identity: Option<&str>,
