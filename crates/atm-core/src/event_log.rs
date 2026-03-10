@@ -21,6 +21,9 @@ pub struct EventFields {
     pub message_text: Option<String>,
     pub runtime: Option<String>,
     pub runtime_session_id: Option<String>,
+    pub trace_id: Option<String>,
+    pub span_id: Option<String>,
+    pub subagent_id: Option<String>,
     pub teardown_stage: Option<String>,
     pub spawn_mode: Option<String>,
     pub extra_fields: serde_json::Map<String, serde_json::Value>,
@@ -30,6 +33,37 @@ pub struct EventFields {
     pub recipient_agent: Option<String>,
     pub recipient_team: Option<String>,
     pub recipient_pid: Option<u32>,
+}
+
+fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key).ok().and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn generate_trace_id(seed_parts: &[&str]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for part in seed_parts {
+        hasher.update(part.as_bytes());
+        hasher.update(b"|");
+    }
+    let hex = hasher.finalize().to_hex().to_string();
+    hex.chars().take(32).collect()
+}
+
+fn generate_span_id(seed_parts: &[&str]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for part in seed_parts {
+        hasher.update(part.as_bytes());
+        hasher.update(b"|");
+    }
+    let hex = hasher.finalize().to_hex().to_string();
+    hex.chars().take(16).collect()
 }
 
 /// Forward `event` to the unified producer channel if a sender is registered.
@@ -58,6 +92,42 @@ fn fields_to_log_event(fields: &EventFields) -> crate::logging_event::LogEventV1
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
 
+    let team = fields.team.clone();
+    let agent = fields
+        .agent_id
+        .clone()
+        .or_else(|| fields.agent_name.clone());
+    let runtime = fields.runtime.clone();
+    let session_id = fields
+        .session_id
+        .clone()
+        .or_else(|| fields.runtime_session_id.clone());
+    let runtime_scoped =
+        team.is_some() || agent.is_some() || runtime.is_some() || session_id.is_some();
+
+    let trace_id = fields.trace_id.clone().or_else(|| {
+        if runtime_scoped {
+            Some(generate_trace_id(&[
+                fields.source,
+                fields.action,
+                session_id.as_deref().unwrap_or("no-session"),
+            ]))
+        } else {
+            None
+        }
+    });
+    let span_id = fields.span_id.clone().or_else(|| {
+        if runtime_scoped {
+            Some(generate_span_id(&[
+                fields.source,
+                fields.action,
+                trace_id.as_deref().unwrap_or("no-trace"),
+            ]))
+        } else {
+            None
+        }
+    });
+
     LogEventV1 {
         v: 1,
         ts: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -67,19 +137,13 @@ fn fields_to_log_event(fields: &EventFields) -> crate::logging_event::LogEventV1
         pid: std::process::id(),
         target: fields.target.clone().unwrap_or_default(),
         action: fields.action.to_string(),
-        team: fields.team.clone(),
-        agent: fields
-            .agent_id
-            .clone()
-            .or_else(|| fields.agent_name.clone()),
-        runtime: fields.runtime.clone(),
-        session_id: fields
-            .session_id
-            .clone()
-            .or_else(|| fields.runtime_session_id.clone()),
-        trace_id: None,
-        span_id: None,
-        subagent_id: None,
+        team,
+        agent,
+        runtime,
+        session_id,
+        trace_id,
+        span_id,
+        subagent_id: fields.subagent_id.clone(),
         request_id: fields.request_id.clone(),
         correlation_id: None,
         outcome: fields.result.clone(),
@@ -199,12 +263,20 @@ pub fn emit_event_best_effort(mut fields: EventFields) {
         return;
     }
 
-    // Pick up CLAUDE_SESSION_ID if the caller did not supply a session_id.
-    // If the env var is absent, leave session_id as None — do NOT fall back to
-    // a sentinel string like "unknown".  The LogEventV1 schema uses Option<String>
-    // to distinguish "no session" from a known session ID.
+    // Pick up runtime session IDs when the caller did not supply one.
     if fields.session_id.is_none() {
-        fields.session_id = std::env::var("CLAUDE_SESSION_ID").ok();
+        fields.session_id = env_nonempty("ATM_SESSION_ID")
+            .or_else(|| env_nonempty("CLAUDE_SESSION_ID"))
+            .or_else(|| env_nonempty("CODEX_THREAD_ID"));
+    }
+    if fields.team.is_none() {
+        fields.team = env_nonempty("ATM_TEAM");
+    }
+    if fields.agent_id.is_none() && fields.agent_name.is_none() {
+        fields.agent_name = env_nonempty("ATM_IDENTITY");
+    }
+    if fields.runtime.is_none() {
+        fields.runtime = env_nonempty("ATM_RUNTIME");
     }
 
     let event = fields_to_log_event(&fields);

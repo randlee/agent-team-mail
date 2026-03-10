@@ -1604,9 +1604,13 @@ dependencies = [
 name = "sc-composer"
 version = "0.43.4"
 dependencies = [
+ "agent-team-mail-core",
  "minijinja",
+ "sc-observability",
  "serde",
+ "serde_json",
  "serde_yaml",
+ "serial_test",
  "tempfile",
  "thiserror 2.0.18",
 ]

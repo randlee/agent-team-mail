@@ -15,8 +15,11 @@ mod validate;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use agent_team_mail_core::home::get_home_dir;
+use agent_team_mail_core::logging_event::LogEventV1;
 use pipeline::compose_blocks;
 use render::render_template;
+use sc_observability::{LogConfig as SharedLogConfig, Logger as SharedLogger};
 use validate::{evaluate_context, prepare_template, validate_request};
 
 pub use diagnostics::Diagnostic;
@@ -146,49 +149,176 @@ pub enum ComposerError {
     },
 }
 
+fn emit_observability(action: &str, outcome: &str, fields: serde_json::Value) {
+    let Some(home_dir) = get_home_dir().ok() else {
+        return;
+    };
+    let mut cfg = SharedLogConfig::from_home(&home_dir);
+    cfg.log_path = home_dir
+        .join(".config")
+        .join("sc-composer")
+        .join("logs")
+        .join("sc-composer.log.jsonl");
+    cfg.spool_dir = home_dir
+        .join(".config")
+        .join("sc-composer")
+        .join("logs")
+        .join("spool");
+    let logger = SharedLogger::new(cfg);
+    let mut event = LogEventV1::builder("sc-composer", action, "sc_composer::lib")
+        .level("info")
+        .build();
+    event.outcome = Some(outcome.to_string());
+    event.fields = json_to_map(fields);
+    if let Some(team) = env_nonempty("ATM_TEAM") {
+        event.team = Some(team);
+    }
+    if let Some(agent) = env_nonempty("ATM_IDENTITY") {
+        event.agent = Some(agent);
+    }
+    if let Some(runtime) = env_nonempty("ATM_RUNTIME") {
+        event.runtime = Some(runtime);
+    }
+    if let Some(session_id) = env_nonempty("ATM_SESSION_ID") {
+        event.session_id = Some(session_id);
+    }
+    let _ = logger.emit(&event);
+}
+
+fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key).ok().and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn json_to_map(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    match value {
+        serde_json::Value::Object(map) => map,
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("value".to_string(), other);
+            map
+        }
+    }
+}
+
 /// Compose a final prompt output.
 pub fn compose(request: &ComposeRequest) -> Result<ComposeResult, ComposerError> {
-    let prepared = prepare_template(request)?;
-    let merge = evaluate_context(request, &prepared);
+    let result = (|| {
+        let prepared = prepare_template(request)?;
+        let merge = evaluate_context(request, &prepared);
 
-    let mut warnings = prepared.warnings;
-    warnings.extend(merge.warnings);
-    if !merge.errors.is_empty() {
-        return Err(ComposerError::ValidationFailed {
-            error_count: merge.errors.len(),
-            errors: Box::new(merge.errors),
-            warnings: Box::new(warnings),
-        });
+        let mut warnings = prepared.warnings;
+        warnings.extend(merge.warnings);
+        if !merge.errors.is_empty() {
+            return Err(ComposerError::ValidationFailed {
+                error_count: merge.errors.len(),
+                errors: Box::new(merge.errors),
+                warnings: Box::new(warnings),
+            });
+        }
+
+        let profile_body = if frontmatter::is_template_file(&prepared.template_path) {
+            render_template(&prepared.template_path, &prepared.body, &merge.context)?
+        } else {
+            prepared.body
+        };
+        let rendered_text = compose_blocks(
+            &profile_body,
+            request.guidance_block.as_deref(),
+            request.user_prompt.as_deref(),
+        );
+
+        Ok(ComposeResult {
+            rendered_text,
+            resolved_files: prepared.resolved_files,
+            search_trace: prepared.search_trace,
+            variable_sources: merge.variable_sources,
+            warnings,
+        })
+    })();
+
+    match &result {
+        Ok(composed) => emit_observability(
+            "compose",
+            "ok",
+            serde_json::json!({
+                "mode": format!("{:?}", request.mode),
+                "runtime": format!("{:?}", request.runtime),
+                "resolved_files": composed.resolved_files.len(),
+                "warnings": composed.warnings.len(),
+            }),
+        ),
+        Err(err) => emit_observability(
+            "compose",
+            "err",
+            serde_json::json!({
+                "mode": format!("{:?}", request.mode),
+                "runtime": format!("{:?}", request.runtime),
+                "error": err.to_string(),
+            }),
+        ),
     }
 
-    let profile_body = if frontmatter::is_template_file(&prepared.template_path) {
-        render_template(&prepared.template_path, &prepared.body, &merge.context)?
-    } else {
-        prepared.body
-    };
-    let rendered_text = compose_blocks(
-        &profile_body,
-        request.guidance_block.as_deref(),
-        request.user_prompt.as_deref(),
-    );
-
-    Ok(ComposeResult {
-        rendered_text,
-        resolved_files: prepared.resolved_files,
-        search_trace: prepared.search_trace,
-        variable_sources: merge.variable_sources,
-        warnings,
-    })
+    result
 }
 
 /// Validate a compose request without producing output.
 pub fn validate(request: &ComposeRequest) -> Result<ValidationReport, ComposerError> {
-    validate_request(request)
+    let result = validate_request(request);
+    match &result {
+        Ok(report) => emit_observability(
+            "validate",
+            "ok",
+            serde_json::json!({
+                "mode": format!("{:?}", request.mode),
+                "runtime": format!("{:?}", request.runtime),
+                "errors": report.errors.len(),
+                "warnings": report.warnings.len(),
+            }),
+        ),
+        Err(err) => emit_observability(
+            "validate",
+            "err",
+            serde_json::json!({
+                "mode": format!("{:?}", request.mode),
+                "runtime": format!("{:?}", request.runtime),
+                "error": err.to_string(),
+            }),
+        ),
+    }
+    result
 }
 
 /// Resolve the input template/profile path and return full probe trace.
 pub fn resolve(request: &ComposeRequest) -> Result<ResolveResult, ComposerError> {
-    resolver::resolve_input_path(request)
+    let result = resolver::resolve_input_path(request);
+    match &result {
+        Ok(resolved) => emit_observability(
+            "resolve",
+            "ok",
+            serde_json::json!({
+                "mode": format!("{:?}", request.mode),
+                "runtime": format!("{:?}", request.runtime),
+                "attempted_paths": resolved.attempted_paths.len(),
+            }),
+        ),
+        Err(err) => emit_observability(
+            "resolve",
+            "err",
+            serde_json::json!({
+                "mode": format!("{:?}", request.mode),
+                "runtime": format!("{:?}", request.runtime),
+                "error": err.to_string(),
+            }),
+        ),
+    }
+    result
 }
 
 /// Discover template variables in Jinja content.
@@ -203,11 +333,13 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
+    use agent_team_mail_core::logging_event::LogEventV1;
+    use serial_test::serial;
     use tempfile::TempDir;
 
     use super::{
         ComposeMode, ComposePolicy, ComposeRequest, ComposerError, ProfileKind, RuntimeKind,
-        UnknownVariablePolicy, compose, validate,
+        UnknownVariablePolicy, compose, emit_observability, validate,
     };
 
     fn write_file(root: &TempDir, rel_path: &str, content: &str) -> PathBuf {
@@ -447,5 +579,47 @@ mod tests {
         req.vars_input.insert("name".to_string(), "Kai".to_string());
         let result = compose(&req).expect("compose");
         assert_eq!(result.rendered_text.trim(), "Hello Kai");
+    }
+
+    #[test]
+    #[serial]
+    fn emit_observability_includes_env_correlation_fields() {
+        let tmp = TempDir::new().expect("tempdir");
+        // SAFETY: test-scoped env overrides.
+        unsafe {
+            std::env::set_var("ATM_HOME", tmp.path());
+            std::env::set_var("ATM_TEAM", "atm-dev");
+            std::env::set_var("ATM_IDENTITY", "arch-ctm");
+            std::env::set_var("ATM_RUNTIME", "codex");
+            std::env::set_var("ATM_SESSION_ID", "sess-123");
+        }
+
+        emit_observability("compose", "ok", serde_json::json!({"mode": "file"}));
+        let log_path = tmp
+            .path()
+            .join(".config/sc-composer/logs/sc-composer.log.jsonl");
+        let lines: Vec<String> = std::fs::read_to_string(&log_path)
+            .expect("log file should exist")
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect();
+        let event: LogEventV1 =
+            serde_json::from_str(lines.last().expect("at least one log line should exist"))
+                .expect("parse event");
+        assert_eq!(event.team.as_deref(), Some("atm-dev"));
+        assert_eq!(event.agent.as_deref(), Some("arch-ctm"));
+        assert_eq!(event.runtime.as_deref(), Some("codex"));
+        assert_eq!(event.session_id.as_deref(), Some("sess-123"));
+        assert_eq!(event.outcome.as_deref(), Some("ok"));
+
+        // SAFETY: cleanup after test.
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("ATM_TEAM");
+            std::env::remove_var("ATM_IDENTITY");
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("ATM_SESSION_ID");
+        }
     }
 }
