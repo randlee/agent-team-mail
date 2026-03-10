@@ -425,6 +425,12 @@ fn test_doctor_no_daemon_not_running_after_status_autostart() {
         .arg("--json")
         .assert()
         .success();
+    wait_for_daemon_socket(home);
+    assert_eq!(
+        spawn_count(home),
+        1,
+        "status should auto-start exactly one daemon"
+    );
 
     let mut doctor_cmd = cargo::cargo_bin_cmd!("atm");
     let output = doctor_cmd
