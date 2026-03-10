@@ -57,10 +57,13 @@ Health evaluator is implemented once and reused by `atm doctor` and `atm status`
 ## 6. Pathing and Namespacing
 
 - Shared schema, per-tool namespace in output pathing.
-- Canonical log root: `${home_dir}/.config/atm/logs`.
-- Canonical sink path pattern: `${home_dir}/.config/atm/logs/<tool>/<tool>.log.jsonl`.
-- Canonical spool path pattern: `${home_dir}/.config/atm/logs/<tool>/spool`.
-- Companion tools maintain their own default root while preserving schema compatibility.
+- Path profile A (ATM-managed default): `${home_dir}/.config/atm/logs/<tool>/...`
+  (`<tool>.log.jsonl` sink + `spool/`).
+- Path profile B (standalone default): `${home_dir}/.config/<tool>/logs/...`
+  (`<tool>.log.jsonl` sink + `spool/`).
+- Profile selection is deterministic by runtime mode; explicit operator override
+  can replace root, but sink/spool derivation pattern stays profile-consistent.
+- Companion tools preserve schema compatibility in either profile.
 
 ## 7. Failure Semantics
 
@@ -86,6 +89,20 @@ Required baseline:
   internals only; export uses canonical `session_id` attribute.
 - `trace_id`/`span_id` are required for traces; `subagent_id` is required for
   sub-agent telemetry.
+- `spans` chain semantics are root→leaf ordered, same-trace constrained, and
+  must parent-link each consecutive span (`parent_span_id == previous span_id`).
+- When top-level `trace_id`/`span_id` are present, the final `spans` item must
+  match those values.
 
 OTel export failures must never block core command execution; local structured
 logging remains continuously available.
+
+## 10. Diagnostics JSON Contract Lock
+
+`atm doctor --json` and `atm status --json` share one locked `logging_health`
+object contract:
+- `schema_version`, `state`, `log_root`, `canonical_log_path`, `spool_path`,
+  `dropped_events_total`, `spool_file_count`, `oldest_spool_age_seconds`,
+  `last_error.code`, `last_error.message`, `last_error.at`.
+
+No drift is allowed across these two command surfaces for shared keys.

@@ -50,9 +50,9 @@ Required fields:
 - `target`
 - `action`
 
-Optional correlation fields:
-- `team`, `agent`, `session_id`
-- `trace_id`, `span_id`, `subagent_id`
+Context fields (conditionally required by scope rules below):
+- `team`, `agent`, `runtime`, `session_id`
+- `trace_id`, `span_id`, `parent_span_id`, `subagent_id`
 - `request_id`, `correlation_id`
 - `outcome`, `error`
 - `fields` (structured map)
@@ -68,20 +68,46 @@ Validation requirements:
 - Apply built-in redaction before enqueue/write.
 - `action` must be stable snake_case; baseline vocabulary lives in `docs/logging-l1a-spec.md`.
 - For agent/runtime-scoped events (`atm.send`, `atm.read`, spawn/resume, hook lifecycle,
-  daemon member/session state transitions), `team`, `agent`, and `session_id`
-  are mandatory correlation fields.
+  daemon member/session state transitions), `team`, `agent`, `runtime`, and
+  `session_id` are mandatory correlation fields.
+
+### 4.1 Correlation Rules by Event Scope
+
+| Event scope | Mandatory correlation fields |
+|---|---|
+| System-level events (no actor/session context) | none |
+| Agent/runtime-scoped events | `team`, `agent`, `runtime`, `session_id` |
+| Trace events | `trace_id`, `span_id` |
+| Sub-agent events (trace/log) | `team`, `agent`, `runtime`, `session_id`, `trace_id`, `span_id`, `subagent_id` |
+
+### 4.2 `spans` Chain Semantics (ATM-QA-007)
+
+If `spans` is present:
+- It is an ordered chain from root to leaf.
+- Every item must contain `trace_id` and `span_id`; `name` and `parent_span_id`
+  are optional.
+- All items must share the same `trace_id`.
+- First item must omit `parent_span_id` (or set it `null`).
+- For every item after the first, `parent_span_id` must equal the previous item's
+  `span_id`.
+- When top-level `trace_id`/`span_id` are present, the final `spans` item must
+  match those top-level values.
+- Violations are schema errors (`INVALID_PAYLOAD`).
 
 ## 5. Sink, Queue, Rotation, and Merge Requirements
 
-Canonical log root:
-- `${home_dir}/.config/atm/logs` where `home_dir` resolves via `get_home_dir()`.
-
-Canonical per-tool sink:
-- `${home_dir}/.config/atm/logs/<tool>/<tool>.log.jsonl`
-- Example (ATM CLI): `${home_dir}/.config/atm/logs/atm/atm.log.jsonl`
-
-Producer fallback spool directory:
-- `${home_dir}/.config/atm/logs/<tool>/spool`.
+Path profiles (ATM-QA-004):
+- ATM-managed profile (default for ATM ecosystem binaries):
+  - log root: `${home_dir}/.config/atm/logs`
+  - sink: `${home_dir}/.config/atm/logs/<tool>/<tool>.log.jsonl`
+  - spool: `${home_dir}/.config/atm/logs/<tool>/spool`
+- Standalone profile (default for standalone companion tools):
+  - log root: `${home_dir}/.config/<tool>/logs`
+  - sink: `${home_dir}/.config/<tool>/logs/<tool>.log.jsonl`
+  - spool: `${home_dir}/.config/<tool>/logs/spool`
+- `home_dir` resolves via `get_home_dir()`.
+- Explicit operator override may set log root; sink/spool still derive from the
+  same profile formulas.
 
 Spool filename:
 - `{source_binary}-{pid}-{unix_millis}.jsonl`.
@@ -138,6 +164,11 @@ Required JSON keys for both `atm doctor --json` and `atm status --json`:
 - `logging_health.last_error.code`
 - `logging_health.last_error.message`
 - `logging_health.last_error.at`
+
+Contract lock (ATM-QA-009):
+- The `logging_health` object name and key set above are stable contract keys.
+- `atm doctor --json` and `atm status --json` must use the same field names,
+  types, and nullability for these keys.
 
 Formal `logging_health` JSON schema (v1):
 

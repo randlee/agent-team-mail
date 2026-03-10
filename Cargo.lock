@@ -1618,6 +1618,7 @@ dependencies = [
  "agent-team-mail-core",
  "anyhow",
  "chrono",
+ "serde",
  "serde_json",
  "serial_test",
  "tempfile",

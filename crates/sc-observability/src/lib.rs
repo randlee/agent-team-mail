@@ -23,6 +23,8 @@ pub const SOCKET_ERROR_VERSION_MISMATCH: &str = "VERSION_MISMATCH";
 pub const SOCKET_ERROR_INVALID_PAYLOAD: &str = "INVALID_PAYLOAD";
 pub const SOCKET_ERROR_INTERNAL_ERROR: &str = "INTERNAL_ERROR";
 
+pub use agent_team_mail_core::logging_event::SpanRefV1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
     Trace,
@@ -73,12 +75,66 @@ pub struct LogConfig {
 }
 
 impl LogConfig {
-    pub fn from_home(home_dir: &Path) -> Self {
-        let log_path = std::env::var("ATM_LOG_FILE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| home_dir.join(".config/atm/atm.log.jsonl"));
+    fn normalize_tool_name(tool: &str) -> String {
+        let trimmed = tool.trim();
+        if trimmed.is_empty() {
+            return "atm".to_string();
+        }
+        trimmed
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    }
 
-        let spool_dir = home_dir.join(".config/atm/log-spool");
+    fn canonical_log_path(home_dir: &Path, tool: &str) -> PathBuf {
+        let tool = Self::normalize_tool_name(tool);
+        home_dir
+            .join(".config")
+            .join("atm")
+            .join("logs")
+            .join(&tool)
+            .join(format!("{tool}.log.jsonl"))
+    }
+
+    fn canonical_spool_dir(home_dir: &Path, tool: &str) -> PathBuf {
+        let tool = Self::normalize_tool_name(tool);
+        home_dir
+            .join(".config")
+            .join("atm")
+            .join("logs")
+            .join(tool)
+            .join("spool")
+    }
+
+    fn spool_dir_from_log_path(log_path: &Path) -> PathBuf {
+        log_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("spool")
+    }
+
+    pub fn from_home(home_dir: &Path) -> Self {
+        Self::from_home_for_tool(home_dir, "atm")
+    }
+
+    pub fn from_home_for_tool(home_dir: &Path, tool: &str) -> Self {
+        let log_path = std::env::var("ATM_LOG_FILE")
+            .or_else(|_| std::env::var("ATM_LOG_PATH"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| Self::canonical_log_path(home_dir, tool));
+
+        let spool_dir =
+            if std::env::var("ATM_LOG_FILE").is_ok() || std::env::var("ATM_LOG_PATH").is_ok() {
+                Self::spool_dir_from_log_path(&log_path)
+            } else {
+                Self::canonical_spool_dir(home_dir, tool)
+            };
         let level = std::env::var("ATM_LOG")
             .ok()
             .and_then(|v| LogLevel::from_str(&v).ok())
@@ -448,6 +504,7 @@ mod tests {
         assert_eq!(cfg.level, LogLevel::Debug);
         assert!(cfg.message_preview_enabled);
         assert_eq!(cfg.log_path, custom_log);
+        assert_eq!(cfg.spool_dir, tmp.path().join("spool"));
         assert_eq!(cfg.max_bytes, 1024);
         assert_eq!(cfg.max_files, 7);
         assert_eq!(cfg.retention_days, 9);
@@ -462,6 +519,55 @@ mod tests {
             std::env::remove_var("ATM_LOG_MAX_FILES");
             std::env::remove_var("ATM_LOG_RETENTION_DAYS");
         }
+    }
+
+    #[test]
+    #[serial]
+    fn config_default_paths_follow_tool_scoped_contract() {
+        let tmp = TempDir::new().expect("temp dir");
+        // SAFETY: test-scoped env cleanup to force default path resolution.
+        unsafe {
+            std::env::remove_var("ATM_LOG_FILE");
+            std::env::remove_var("ATM_LOG_PATH");
+        }
+
+        let cfg = LogConfig::from_home_for_tool(tmp.path(), "atm-daemon");
+        assert_eq!(
+            cfg.log_path,
+            tmp.path()
+                .join(".config/atm/logs/atm-daemon/atm-daemon.log.jsonl")
+        );
+        assert_eq!(
+            cfg.spool_dir,
+            tmp.path().join(".config/atm/logs/atm-daemon/spool")
+        );
+    }
+
+    #[test]
+    fn span_ref_v1_round_trip_serialization() {
+        let span = SpanRefV1 {
+            name: "compose".to_string(),
+            trace_id: "trace-123".to_string(),
+            span_id: "span-456".to_string(),
+            parent_span_id: None,
+            fields: serde_json::Map::new(),
+        };
+        let json = serde_json::to_string(&span).expect("serialize span");
+        let decoded: SpanRefV1 = serde_json::from_str(&json).expect("deserialize span");
+        assert_eq!(decoded, span);
+    }
+
+    #[test]
+    fn span_ref_v1_fields_are_non_empty_after_construction() {
+        let span = SpanRefV1 {
+            name: "compose".to_string(),
+            trace_id: "trace-abc".to_string(),
+            span_id: "span-def".to_string(),
+            parent_span_id: None,
+            fields: serde_json::Map::new(),
+        };
+        assert!(!span.trace_id.is_empty());
+        assert!(!span.span_id.is_empty());
     }
 
     #[test]
