@@ -15,6 +15,8 @@ mod validate;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use agent_team_mail_core::home::get_home_dir;
+use agent_team_mail_core::logging_event::LogEventV1;
 use pipeline::compose_blocks;
 use render::render_template;
 use sc_observability::{LogConfig as SharedLogConfig, Logger as SharedLogger};
@@ -148,7 +150,7 @@ pub enum ComposerError {
 }
 
 fn emit_observability(action: &str, outcome: &str, fields: serde_json::Value) {
-    let Some(home_dir) = dirs::home_dir() else {
+    let Some(home_dir) = get_home_dir().ok() else {
         return;
     };
     let mut cfg = SharedLogConfig::from_home(&home_dir);
@@ -163,13 +165,46 @@ fn emit_observability(action: &str, outcome: &str, fields: serde_json::Value) {
         .join("logs")
         .join("spool");
     let logger = SharedLogger::new(cfg);
-    let _ = logger.emit_action(
-        "sc-composer",
-        "sc_composer::lib",
-        action,
-        Some(outcome),
-        fields,
-    );
+    let mut event = LogEventV1::builder("sc-composer", action, "sc_composer::lib")
+        .level("info")
+        .build();
+    event.outcome = Some(outcome.to_string());
+    event.fields = json_to_map(fields);
+    if let Some(team) = env_nonempty("ATM_TEAM") {
+        event.team = Some(team);
+    }
+    if let Some(agent) = env_nonempty("ATM_IDENTITY") {
+        event.agent = Some(agent);
+    }
+    if let Some(runtime) = env_nonempty("ATM_RUNTIME") {
+        event.runtime = Some(runtime);
+    }
+    if let Some(session_id) = env_nonempty("ATM_SESSION_ID") {
+        event.session_id = Some(session_id);
+    }
+    let _ = logger.emit(&event);
+}
+
+fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key).ok().and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn json_to_map(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    match value {
+        serde_json::Value::Object(map) => map,
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("value".to_string(), other);
+            map
+        }
+    }
 }
 
 /// Compose a final prompt output.
@@ -298,11 +333,13 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
+    use agent_team_mail_core::logging_event::LogEventV1;
+    use serial_test::serial;
     use tempfile::TempDir;
 
     use super::{
         ComposeMode, ComposePolicy, ComposeRequest, ComposerError, ProfileKind, RuntimeKind,
-        UnknownVariablePolicy, compose, validate,
+        UnknownVariablePolicy, compose, emit_observability, validate,
     };
 
     fn write_file(root: &TempDir, rel_path: &str, content: &str) -> PathBuf {
@@ -542,5 +579,46 @@ mod tests {
         req.vars_input.insert("name".to_string(), "Kai".to_string());
         let result = compose(&req).expect("compose");
         assert_eq!(result.rendered_text.trim(), "Hello Kai");
+    }
+
+    #[test]
+    #[serial]
+    fn emit_observability_includes_env_correlation_fields() {
+        let tmp = TempDir::new().expect("tempdir");
+        // SAFETY: test-scoped env overrides.
+        unsafe {
+            std::env::set_var("ATM_HOME", tmp.path());
+            std::env::set_var("ATM_TEAM", "atm-dev");
+            std::env::set_var("ATM_IDENTITY", "arch-ctm");
+            std::env::set_var("ATM_RUNTIME", "codex");
+            std::env::set_var("ATM_SESSION_ID", "sess-123");
+        }
+
+        emit_observability("compose", "ok", serde_json::json!({"mode": "file"}));
+        let log_path = tmp
+            .path()
+            .join(".config/sc-composer/logs/sc-composer.log.jsonl");
+        let lines: Vec<String> = std::fs::read_to_string(&log_path)
+            .expect("log file should exist")
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let event: LogEventV1 =
+            serde_json::from_str(lines.last().expect("at least one log line should exist"))
+                .expect("parse event");
+        assert_eq!(event.team.as_deref(), Some("atm-dev"));
+        assert_eq!(event.agent.as_deref(), Some("arch-ctm"));
+        assert_eq!(event.runtime.as_deref(), Some("codex"));
+        assert_eq!(event.session_id.as_deref(), Some("sess-123"));
+        assert_eq!(event.outcome.as_deref(), Some("ok"));
+
+        // SAFETY: cleanup after test.
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("ATM_TEAM");
+            std::env::remove_var("ATM_IDENTITY");
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("ATM_SESSION_ID");
+        }
     }
 }
