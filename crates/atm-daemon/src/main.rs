@@ -154,7 +154,7 @@ async fn main() -> Result<()> {
     }
 
     // Build system context
-    let claude_root = home_dir.join(".claude");
+    let claude_root = agent_team_mail_core::home::claude_root_dir_for(&home_dir);
 
     let system_ctx = agent_team_mail_core::context::SystemContext::new(
         hostname::get()
@@ -167,7 +167,7 @@ async fn main() -> Result<()> {
         config.core.default_team.clone(),
     );
 
-    let teams_root = claude_root.join("teams");
+    let teams_root = agent_team_mail_core::home::teams_root_dir_for(&home_dir);
 
     info!("Teams root: {}", teams_root.display());
 

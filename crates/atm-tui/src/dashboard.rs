@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use agent_team_mail_core::home::get_home_dir;
+use agent_team_mail_core::home::{get_home_dir, teams_root_dir_for};
 use agent_team_mail_core::io::lock::acquire_lock;
 use agent_team_mail_core::schema::InboxMessage;
 use serde_json::Value;
@@ -21,8 +21,7 @@ use serde_json::Value;
 /// * `team` - Team name.
 /// * `agent` - Agent name.
 pub fn get_inbox_count(home: &Path, team: &str, agent: &str) -> usize {
-    let inbox_path = home
-        .join(".claude/teams")
+    let inbox_path = teams_root_dir_for(home)
         .join(team)
         .join("inboxes")
         .join(format!("{agent}.json"));
@@ -45,7 +44,7 @@ pub fn get_inbox_count(home: &Path, team: &str, agent: &str) -> usize {
 ///
 /// Returns an empty vector when the config is missing or malformed.
 pub fn read_team_members(home: &Path, team: &str) -> Vec<String> {
-    let config_path = home.join(".claude/teams").join(team).join("config.json");
+    let config_path = teams_root_dir_for(home).join(team).join("config.json");
     let lock_path = config_path.with_extension("lock");
     let _lock = match acquire_lock(&lock_path, 5) {
         Ok(lock) => lock,
@@ -78,8 +77,7 @@ pub fn read_team_members(home: &Path, team: &str) -> Vec<String> {
 ///
 /// Returns up to `max_items` lines formatted for compact dashboard display.
 pub fn read_inbox_preview(home: &Path, team: &str, agent: &str, max_items: usize) -> Vec<String> {
-    let inbox_path = home
-        .join(".claude/teams")
+    let inbox_path = teams_root_dir_for(home)
         .join(team)
         .join("inboxes")
         .join(format!("{agent}.json"));
@@ -121,8 +119,7 @@ pub fn read_inbox_messages(
     agent: &str,
     max_items: usize,
 ) -> Vec<InboxMessage> {
-    let inbox_path = home
-        .join(".claude/teams")
+    let inbox_path = teams_root_dir_for(home)
         .join(team)
         .join("inboxes")
         .join(format!("{agent}.json"));
@@ -156,8 +153,7 @@ pub fn mark_inbox_message_read(
     from: &str,
     timestamp: &str,
 ) -> Result<bool, String> {
-    let inbox_path = home
-        .join(".claude/teams")
+    let inbox_path = teams_root_dir_for(home)
         .join(team)
         .join("inboxes")
         .join(format!("{agent}.json"));
@@ -212,12 +208,14 @@ pub fn mark_inbox_message_read(
 /// * `agent` - Agent identifier.
 ///
 /// [`LogEventV1`]: agent_team_mail_core::logging_event::LogEventV1
-pub fn session_log_path(team: &str, agent: &str) -> PathBuf {
-    let base = get_home_dir().unwrap_or_default();
-    base.join(".config/atm/agent-sessions")
-        .join(team)
-        .join(agent)
-        .join("output.log")
+pub fn session_log_path(team: &str, agent: &str) -> Option<PathBuf> {
+    let base = get_home_dir().ok()?;
+    Some(
+        base.join(".config/atm/agent-sessions")
+            .join(team)
+            .join(agent)
+            .join("output.log"),
+    )
 }
 
 #[cfg(test)]
@@ -249,7 +247,7 @@ mod tests {
     #[serial]
     fn test_session_log_path() {
         with_tmp_home(|home| {
-            let path = session_log_path("atm-dev", "arch-ctm");
+            let path = session_log_path("atm-dev", "arch-ctm").expect("session log path");
             let expected = home
                 .join(".config/atm/agent-sessions")
                 .join("atm-dev")

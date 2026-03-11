@@ -7,7 +7,7 @@ use chrono::DateTime;
 use clap::{ArgAction, Args};
 use std::path::Path;
 
-use crate::util::settings::get_home_dir;
+use crate::util::settings::{get_home_dir, teams_root_dir_for};
 use crate::util::state::{get_last_seen, load_seen_state};
 
 /// Show inbox summary for team members
@@ -50,7 +50,7 @@ pub fn execute(args: InboxArgs) -> Result<()> {
 
     let config = resolve_config(&overrides, &current_dir, &home_dir)?;
 
-    let teams_dir = home_dir.join(".claude/teams");
+    let teams_dir = teams_root_dir_for(&home_dir);
     if !teams_dir.exists() {
         anyhow::bail!("Teams directory not found at {teams_dir:?}");
     }
@@ -99,7 +99,7 @@ pub fn execute(args: InboxArgs) -> Result<()> {
 
 /// Show inbox summary for a single team
 fn show_team_summary(home_dir: &Path, team_name: &str, use_since_last_seen: bool) -> Result<()> {
-    let team_dir = home_dir.join(".claude/teams").join(team_name);
+    let team_dir = teams_root_dir_for(home_dir).join(team_name);
 
     if !team_dir.exists() {
         println!("Team: {team_name} (not found)");
@@ -223,7 +223,7 @@ fn watch_inboxes(
 
     loop {
         let team_names = if all_teams {
-            let entries = std::fs::read_dir(home_dir.join(".claude/teams"))?;
+            let entries = std::fs::read_dir(teams_root_dir_for(home_dir))?;
             let mut names = Vec::new();
             for entry in entries {
                 let entry = entry?;
@@ -240,7 +240,7 @@ fn watch_inboxes(
         };
 
         for team_name in team_names {
-            let team_dir = home_dir.join(".claude/teams").join(&team_name);
+            let team_dir = teams_root_dir_for(home_dir).join(&team_name);
             let team_config_path = team_dir.join("config.json");
             if !team_config_path.exists() {
                 continue;

@@ -185,7 +185,7 @@ pub fn execute(args: InitArgs) -> Result<()> {
     let settings_path = resolve_settings_path(install_global)?;
 
     let scripts_dir = if install_global {
-        home_dir.join(".claude").join("scripts")
+        crate::util::settings::claude_root_dir_for(&home_dir).join("scripts")
     } else {
         current_dir.join(".claude").join("scripts")
     };
@@ -226,8 +226,7 @@ pub fn execute(args: InitArgs) -> Result<()> {
         };
         let team_status = if args.skip_team {
             TeamStatus::Skipped
-        } else if home_dir
-            .join(".claude/teams")
+        } else if crate::util::settings::teams_root_dir_for(&home_dir)
             .join(&args.team)
             .join("config.json")
             .exists()
@@ -760,7 +759,7 @@ fn ensure_gitignore_entry(path: &Path, entry: &str) -> Result<()> {
 }
 
 fn ensure_team_config(home_dir: &Path, team: &str, cwd: &Path) -> Result<TeamStatus> {
-    let team_dir = home_dir.join(".claude/teams").join(team);
+    let team_dir = crate::util::settings::teams_root_dir_for(home_dir).join(team);
     let inboxes_dir = team_dir.join("inboxes");
     let config_path = team_dir.join("config.json");
 
@@ -909,7 +908,7 @@ fn resolve_settings_path(global: bool) -> Result<PathBuf> {
     if global {
         let home = crate::util::settings::get_home_dir()
             .context("Cannot resolve home directory for global settings")?;
-        Ok(home.join(".claude").join("settings.json"))
+        Ok(crate::util::settings::claude_root_dir_for(&home).join("settings.json"))
     } else {
         let cwd = std::env::current_dir().context("Cannot determine current directory")?;
         Ok(cwd.join(".claude").join("settings.json"))

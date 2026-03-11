@@ -16,7 +16,7 @@ use crate::commands::logging_health::{
     build_logging_health_contract, logging_remediation, read_daemon_logging_health,
 };
 use crate::util::member_labels::{GHOST_SUFFIX, UNREGISTERED_MARKER};
-use crate::util::settings::get_home_dir;
+use crate::util::settings::{get_home_dir, teams_root_dir_for};
 
 /// Show combined team overview
 #[derive(Args, Debug)]
@@ -54,7 +54,7 @@ pub fn execute(args: StatusArgs) -> Result<()> {
     let team_name = &config.core.default_team;
 
     // Load team config
-    let team_dir = home_dir.join(".claude/teams").join(team_name);
+    let team_dir = teams_root_dir_for(&home_dir).join(team_name);
     if !team_dir.exists() {
         anyhow::bail!("Team '{team_name}' not found (directory {team_dir:?} doesn't exist)");
     }
@@ -81,7 +81,9 @@ pub fn execute(args: StatusArgs) -> Result<()> {
     let inbox_counts = count_inbox_messages(&team_dir, &member_rows)?;
 
     // Count tasks if tasks directory exists
-    let tasks_dir = home_dir.join(".claude/tasks").join(team_name);
+    let tasks_dir = crate::util::settings::claude_root_dir_for(&home_dir)
+        .join("tasks")
+        .join(team_name);
     let (pending_tasks, completed_tasks) = if tasks_dir.exists() {
         count_tasks(&tasks_dir)?
     } else {

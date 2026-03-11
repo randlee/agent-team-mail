@@ -10,7 +10,7 @@ use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
 
 use crate::commands::doctor::monitor_report_json;
-use crate::util::settings::get_home_dir;
+use crate::util::settings::{get_home_dir, teams_root_dir_for};
 
 #[derive(Args, Debug)]
 pub struct MonitorArgs {
@@ -203,8 +203,7 @@ fn send_alerts(
     );
 
     for recipient in recipients {
-        let inbox = home_dir
-            .join(".claude/teams")
+        let inbox = teams_root_dir_for(home_dir)
             .join(team)
             .join("inboxes")
             .join(format!("{recipient}.json"));

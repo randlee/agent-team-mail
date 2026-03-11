@@ -76,8 +76,7 @@ impl RuntimeAdapter for GeminiAdapter {
 
     fn build_env(&self, spec: &SpawnSpec, home_dir: &Path) -> Result<HashMap<String, String>> {
         let mut env = HashMap::new();
-        let runtime_home = home_dir
-            .join(".claude")
+        let runtime_home = agent_team_mail_core::home::claude_root_dir_for(home_dir)
             .join("runtime")
             .join("gemini")
             .join(&spec.team)

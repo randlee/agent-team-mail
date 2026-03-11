@@ -26,7 +26,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::util::caller_identity::resolve_caller_session_id_required;
-use crate::util::settings::get_home_dir;
+use crate::util::settings::{get_home_dir, teams_root_dir_for};
 
 /// Register this agent session with a team.
 ///
@@ -48,7 +48,7 @@ pub struct RegisterArgs {
 /// Execute the register command.
 pub fn execute(args: RegisterArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
-    let team_dir = home_dir.join(".claude/teams").join(&args.team);
+    let team_dir = teams_root_dir_for(&home_dir).join(&args.team);
     let config_path = team_dir.join("config.json");
 
     if !config_path.exists() {
