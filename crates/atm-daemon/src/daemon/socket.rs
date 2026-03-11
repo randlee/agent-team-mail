@@ -5419,6 +5419,7 @@ fn handle_list_agents(
 
         for m in members {
             bootstrap_session_from_member_hint(team_name, &m, &mut session_guard);
+            bootstrap_session_from_session_file(&home, team_name, &m, &mut session_guard);
             let tracker_state = tracker.get_state(&m.name);
             let tracker_meta = tracker.transition_meta(&m.name);
             let session = session_guard.query_for_team_with_liveness(team_name, &m.name);
@@ -5531,6 +5532,192 @@ fn runtime_for_member(member: &AgentMember) -> Option<String> {
         agent_team_mail_core::schema::BackendType::External
         | agent_team_mail_core::schema::BackendType::Human(_) => None,
     })
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct SessionFileHint {
+    session_id: String,
+    team: String,
+    identity: String,
+    pid: Option<u32>,
+    created_at: f64,
+    updated_at: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct SessionFileCandidate {
+    path: std::path::PathBuf,
+    data: SessionFileHint,
+    timestamp: f64,
+    pid: u32,
+}
+
+const SESSION_FILE_TTL_SECS: f64 = 86400.0;
+
+fn remove_session_file_best_effort(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+}
+
+fn session_file_owned_by_current_user(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(meta) = std::fs::metadata(path) else {
+            return false;
+        };
+        // SAFETY: getuid() has no preconditions and always succeeds on Unix.
+        let current_uid = unsafe { libc::getuid() };
+        meta.uid() == current_uid
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        true
+    }
+}
+
+fn session_file_timestamp(data: &SessionFileHint) -> Option<f64> {
+    let timestamp = data.updated_at.unwrap_or(data.created_at);
+    (timestamp > 0.0).then_some(timestamp)
+}
+
+fn scan_live_session_files(
+    home: &std::path::Path,
+    team: &str,
+    member_name: &str,
+) -> Vec<SessionFileCandidate> {
+    let sessions_dir = home.join(".claude/teams").join(team).join("sessions");
+    let Ok(entries) = std::fs::read_dir(&sessions_dir) else {
+        return Vec::new();
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    let mut matches: Vec<SessionFileCandidate> = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        if !session_file_owned_by_current_user(&path) {
+            continue;
+        }
+
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(_) => {
+                remove_session_file_best_effort(&path);
+                continue;
+            }
+        };
+        let data: SessionFileHint = match serde_json::from_str(&content) {
+            Ok(data) => data,
+            Err(_) => {
+                remove_session_file_best_effort(&path);
+                continue;
+            }
+        };
+
+        if data.team != team {
+            remove_session_file_best_effort(&path);
+            continue;
+        }
+        if data.identity != member_name {
+            continue;
+        }
+
+        let Some(timestamp) = session_file_timestamp(&data) else {
+            remove_session_file_best_effort(&path);
+            continue;
+        };
+        if (now - timestamp) > SESSION_FILE_TTL_SECS {
+            remove_session_file_best_effort(&path);
+            continue;
+        }
+
+        let Some(pid) = data.pid.filter(|pid| *pid > 1) else {
+            remove_session_file_best_effort(&path);
+            continue;
+        };
+        if !agent_team_mail_core::pid::is_pid_alive(pid) {
+            remove_session_file_best_effort(&path);
+            continue;
+        }
+        if data.session_id.trim().is_empty() {
+            remove_session_file_best_effort(&path);
+            continue;
+        }
+
+        matches.push(SessionFileCandidate {
+            path,
+            data,
+            timestamp,
+            pid,
+        });
+    }
+
+    matches.sort_by(|left, right| {
+        right
+            .timestamp
+            .partial_cmp(&left.timestamp)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    if matches.len() > 1 {
+        for duplicate in matches.iter().skip(1) {
+            remove_session_file_best_effort(&duplicate.path);
+        }
+        matches.truncate(1);
+    }
+
+    matches
+}
+
+fn bootstrap_session_from_session_file(
+    home: &std::path::Path,
+    team: &str,
+    member: &AgentMember,
+    session_registry: &mut crate::daemon::session_registry::SessionRegistry,
+) {
+    let mut matches = scan_live_session_files(home, team, &member.name);
+    if session_registry
+        .query_for_team(team, &member.name)
+        .is_some()
+    {
+        return;
+    }
+    if matches.is_empty() {
+        return;
+    }
+
+    let candidate = matches.pop().expect("single live session file");
+    let data = candidate.data;
+    let pid = candidate.pid;
+    let validation = validate_pid_backend(member, pid);
+    if validation.is_alive_mismatch() {
+        emit_pid_process_mismatch(team, &member.name, &validation, "session-file-bootstrap");
+    }
+
+    let runtime = runtime_for_member(member);
+    let runtime_session_id = runtime
+        .as_deref()
+        .filter(|runtime| *runtime != "claude")
+        .map(|_| data.session_id.clone());
+
+    session_registry.upsert_runtime_for_team(
+        team,
+        &member.name,
+        &data.session_id,
+        pid,
+        runtime,
+        runtime_session_id,
+        member.tmux_pane_id.clone(),
+        None,
+    );
 }
 
 fn bootstrap_session_from_member_hint(
@@ -6234,6 +6421,30 @@ fi
         }
     }
 
+    fn write_session_file(
+        home_dir: &std::path::Path,
+        team: &str,
+        identity: &str,
+        session_id: &str,
+        pid: u32,
+        created_at: f64,
+        updated_at: Option<f64>,
+    ) -> std::path::PathBuf {
+        let sessions_dir = home_dir.join(".claude/teams").join(team).join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join(format!("{session_id}.json"));
+        let data = serde_json::json!({
+            "session_id": session_id,
+            "team": team,
+            "identity": identity,
+            "pid": pid,
+            "created_at": created_at,
+            "updated_at": updated_at,
+        });
+        std::fs::write(&path, serde_json::to_string(&data).unwrap()).unwrap();
+        path
+    }
+
     #[cfg(unix)]
     fn read_team_inbox_messages(
         home_dir: &std::path::Path,
@@ -6780,6 +6991,143 @@ notify_target = "team-lead"
         assert!(
             reg.query_for_team("atm-dev", "arch-ctm").is_none(),
             "bootstrap must not fabricate synthetic session IDs when sessionId hint is missing"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_list_agents_bootstraps_session_from_live_session_file() {
+        let _fixture =
+            setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "atm-monitor"]);
+        let home = std::env::var("ATM_HOME").expect("ATM_HOME set by fixture");
+        let home_path = std::path::Path::new(&home);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        write_session_file(
+            home_path,
+            "atm-dev",
+            "atm-monitor",
+            "sess-monitor-1",
+            std::process::id(),
+            now,
+            Some(now),
+        );
+
+        let store = make_store();
+        let sr = make_sr();
+        let req = make_request("list-agents", serde_json::json!({"team": "atm-dev"}));
+        let resp = handle_list_agents(&req, &store, &sr);
+        assert_eq!(resp.status, "ok");
+        let arr = resp.payload.unwrap().as_array().unwrap().clone();
+        let monitor = arr
+            .iter()
+            .find(|a| a["agent"].as_str() == Some("atm-monitor"))
+            .expect("atm-monitor entry missing");
+        assert_eq!(monitor["state"].as_str(), Some("active"));
+        assert_eq!(monitor["session_id"].as_str(), Some("sess-monitor-1"));
+        assert_eq!(monitor["process_id"].as_u64(), Some(std::process::id() as u64));
+
+        let reg = sr.lock().unwrap();
+        let session = reg
+            .query_for_team("atm-dev", "atm-monitor")
+            .expect("session registry bootstrapped from session file");
+        assert_eq!(session.session_id, "sess-monitor-1");
+        assert_eq!(session.process_id, std::process::id());
+    }
+
+    #[test]
+    #[serial]
+    fn test_list_agents_prunes_dead_session_file() {
+        let _fixture =
+            setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "atm-monitor"]);
+        let home = std::env::var("ATM_HOME").expect("ATM_HOME set by fixture");
+        let home_path = std::path::Path::new(&home);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let dead_pid = (i32::MAX - 1) as u32;
+        let session_path = write_session_file(
+            home_path,
+            "atm-dev",
+            "atm-monitor",
+            "sess-monitor-dead",
+            dead_pid,
+            now,
+            Some(now),
+        );
+
+        let store = make_store();
+        let sr = make_sr();
+        let req = make_request("list-agents", serde_json::json!({"team": "atm-dev"}));
+        let resp = handle_list_agents(&req, &store, &sr);
+        assert_eq!(resp.status, "ok");
+
+        let reg = sr.lock().unwrap();
+        assert!(
+            reg.query_for_team("atm-dev", "atm-monitor").is_none(),
+            "dead session file must not bootstrap daemon state"
+        );
+        assert!(
+            !session_path.exists(),
+            "dead session file should be removed during bootstrap scan"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_list_agents_prunes_dead_duplicate_session_file_for_registered_member() {
+        let _fixture =
+            setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "atm-monitor"]);
+        let home = std::env::var("ATM_HOME").expect("ATM_HOME set by fixture");
+        let home_path = std::path::Path::new(&home);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+
+        let dead_pid = (i32::MAX - 1) as u32;
+        let dead_session_path = write_session_file(
+            home_path,
+            "atm-dev",
+            "team-lead",
+            "sess-team-lead-dead",
+            dead_pid,
+            now,
+            Some(now),
+        );
+
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert_runtime_for_team(
+                "atm-dev",
+                "team-lead",
+                "sess-team-lead-live",
+                std::process::id(),
+                Some("claude".to_string()),
+                None,
+                None,
+                None,
+            );
+        }
+
+        let req = make_request("list-agents", serde_json::json!({"team": "atm-dev"}));
+        let resp = handle_list_agents(&req, &store, &sr);
+        assert_eq!(resp.status, "ok");
+
+        let reg = sr.lock().unwrap();
+        let session = reg
+            .query_for_team("atm-dev", "team-lead")
+            .expect("registered session should remain present");
+        assert_eq!(session.session_id, "sess-team-lead-live");
+        assert_eq!(session.process_id, std::process::id());
+        assert!(
+            !dead_session_path.exists(),
+            "dead duplicate session file should be removed even when registry already has a live record"
         );
     }
 

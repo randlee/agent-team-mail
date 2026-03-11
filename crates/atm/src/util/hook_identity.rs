@@ -14,6 +14,7 @@
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::util::settings::get_home_dir;
@@ -137,6 +138,34 @@ pub struct SessionFileData {
 /// Maximum age in seconds before a session file is considered stale (24 hours).
 const SESSION_FILE_TTL_SECS: f64 = 86400.0;
 
+fn session_file_timestamp(data: &SessionFileData) -> Option<f64> {
+    let timestamp = data.updated_at.unwrap_or(data.created_at);
+    (timestamp > 0.0).then_some(timestamp)
+}
+
+fn remove_session_file_best_effort(path: &Path) {
+    let _ = std::fs::remove_file(path);
+}
+
+fn session_file_owned_by_current_user(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(meta) = std::fs::metadata(path) else {
+            return false;
+        };
+        // SAFETY: getuid() has no preconditions and always succeeds on Unix.
+        let current_uid = unsafe { libc::getuid() };
+        meta.uid() == current_uid
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        true
+    }
+}
+
 /// Scan session files for a matching `team` + `identity`.
 ///
 /// Session files are stored at `{ATM_HOME}/.claude/teams/<team>/sessions/<session_id>.json`.
@@ -175,30 +204,44 @@ pub fn read_session_file(team: &str, identity: &str) -> Result<Option<String>> {
         }
 
         // Ownership check (Unix only).
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if let Ok(meta) = std::fs::metadata(&path) {
-                // SAFETY: getuid() has no preconditions and always succeeds on Unix.
-                let current_uid = unsafe { libc::getuid() };
-                if meta.uid() != current_uid {
-                    continue;
-                }
-            }
+        if !session_file_owned_by_current_user(&path) {
+            continue;
         }
 
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(_) => {
+                remove_session_file_best_effort(&path);
+                continue;
+            }
         };
         let data: SessionFileData = match serde_json::from_str(&content) {
             Ok(d) => d,
-            Err(_) => continue,
+            Err(_) => {
+                remove_session_file_best_effort(&path);
+                continue;
+            }
         };
 
         // TTL check: use updated_at if present, else fall back to created_at.
-        let timestamp = data.updated_at.unwrap_or(data.created_at);
-        if timestamp <= 0.0 || (now - timestamp) > SESSION_FILE_TTL_SECS {
+        let Some(timestamp) = session_file_timestamp(&data) else {
+            remove_session_file_best_effort(&path);
+            continue;
+        };
+        if (now - timestamp) > SESSION_FILE_TTL_SECS {
+            remove_session_file_best_effort(&path);
+            continue;
+        }
+
+        if data.session_id.trim().is_empty() {
+            remove_session_file_best_effort(&path);
+            continue;
+        }
+
+        if let Some(pid) = data.pid
+            && !agent_team_mail_core::pid::is_pid_alive(pid)
+        {
+            remove_session_file_best_effort(&path);
             continue;
         }
 
