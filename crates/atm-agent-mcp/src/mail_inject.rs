@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use agent_team_mail_core::InboxMessage;
-use agent_team_mail_core::home::get_home_dir;
+use agent_team_mail_core::home::{get_home_dir, teams_root_dir_for};
 use agent_team_mail_core::io::inbox_update;
 use agent_team_mail_core::text::truncate_chars;
 use serde::{Deserialize, Serialize};
@@ -260,10 +260,9 @@ impl MailPoller {
 
 /// Build the inbox file path for `identity` in `team`.
 ///
-/// Path: `<home>/.claude/teams/<team>/inboxes/<identity>.json`
+/// Path: `<teams_root>/<team>/inboxes/<identity>.json`
 fn inbox_path(home: &std::path::Path, team: &str, identity: &str) -> PathBuf {
-    home.join(".claude")
-        .join("teams")
+    teams_root_dir_for(home)
         .join(team)
         .join("inboxes")
         .join(format!("{identity}.json"))
