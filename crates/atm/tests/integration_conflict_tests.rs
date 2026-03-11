@@ -1305,9 +1305,10 @@ fn test_dead_pid_stale_lock_starts_daemon_cleanly() {
         .env_remove("ATM_CONFIG")
         .env_remove("CLAUDE_SESSION_ID")
         .current_dir(&workdir);
-    cmd.arg("send")
-        .arg("agent-a")
-        .arg("stale-lock-recovery-check")
+    cmd.arg("status")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
         .assert()
         .success();
 
