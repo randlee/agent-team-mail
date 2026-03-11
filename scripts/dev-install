@@ -36,6 +36,8 @@ BINARIES = [
 ATM_DEV_ROOT = None
 BIN_DIR = None
 SEMVER_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+# Matches labels of the form "X.Y.Z-dev.N"
+DEV_LABEL_RE = re.compile(r"^(\d+\.\d+\.\d+)-dev\.(\d+)$")
 
 
 def die(msg: str) -> None:
@@ -110,28 +112,82 @@ def read_binary_version(binary_path: Path) -> str | None:
     return format_semver(parsed) if parsed else None
 
 
-def next_milestone_version(source_dir: Path, current_manifest: Path) -> str:
-    baseline: tuple[int, int, int] | None = None
+def read_workspace_version() -> str:
+    """Return the version declared in [workspace.package] of the root Cargo.toml.
 
-    source_version = read_binary_version(source_dir / "atm")
-    if source_version:
-        baseline = parse_semver(source_version)
+    Uses ``cargo metadata`` so the result is always authoritative even when
+    workspace inheritance is involved.  The script's own directory is used as
+    the working directory so the correct workspace is always resolved.
+    """
+    scripts_dir = Path(__file__).resolve().parent
+    repo_root = scripts_dir.parent
+    try:
+        result = subprocess.run(
+            ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=str(repo_root),
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        die(f"cargo metadata failed: {exc}")
+
+    try:
+        meta = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        die(f"failed to parse cargo metadata output: {exc}")
+
+    # Find the package named "agent-team-mail" (the main CLI crate).
+    # All workspace members share this version via version.workspace = true.
+    packages = meta.get("packages", [])
+    for pkg in packages:
+        if pkg.get("name") == "agent-team-mail":
+            return pkg["version"]
+
+    # Fallback: use the first workspace member's version.
+    if packages:
+        return packages[0]["version"]
+
+    die("could not determine workspace version from cargo metadata")
+
+
+def next_milestone_version(source_dir: Path, current_manifest: Path) -> str:
+    """Return the next dev-build label derived from the workspace Cargo version.
+
+    Format: ``{cargo_version}-dev.{N}`` where N increments from the last
+    installed label.  If the workspace version has changed since the last
+    install the counter resets to 1.
+
+    Examples:
+        workspace=0.44.0, last label=0.44.0-dev.2  -> ``0.44.0-dev.3``
+        workspace=0.44.1, last label=0.44.0-dev.2  -> ``0.44.1-dev.1``
+        workspace=0.44.0, no prior install          -> ``0.44.0-dev.1``
+    """
+    cargo_version = read_workspace_version()
+
+    last_n = 0
+    atm_dev_root = current_manifest.parent
+
+    if atm_dev_root.exists():
+        for entry in atm_dev_root.iterdir():
+            if not entry.is_dir():
+                continue
+            m = DEV_LABEL_RE.match(entry.name)
+            if m and m.group(1) == cargo_version:
+                last_n = max(last_n, int(m.group(2)))
 
     if current_manifest.exists():
         try:
             current = json.loads(current_manifest.read_text())
-            manifest_version = current.get("milestone_version") or current.get("binary_version")
-            parsed = parse_semver(str(manifest_version)) if manifest_version else None
-            if parsed and (baseline is None or parsed > baseline):
-                baseline = parsed
-        except (json.JSONDecodeError, OSError):
+            prev_label = current.get("milestone_version") or current.get("label", "")
+            if prev_label:
+                m = DEV_LABEL_RE.match(str(prev_label))
+                if m and m.group(1) == cargo_version:
+                    last_n = max(last_n, int(m.group(2)))
+        except (json.JSONDecodeError, OSError, ValueError):
             pass
 
-    if baseline is None:
-        die("could not determine source milestone version from binaries or manifest")
-
-    major, minor, patch = baseline
-    return f"{major}.{minor}.{patch + 1}"
+    return f"{cargo_version}-dev.{last_n + 1}"
 
 
 def restart_daemon() -> None:
@@ -164,6 +220,29 @@ def verify_install() -> bool:
         except (subprocess.CalledProcessError, FileNotFoundError, IndexError) as exc:
             print(f"  [FAIL] {label}: {exc}")
             all_pass = False
+
+    # Smoke-check that the installed binaries report the workspace Cargo version.
+    # This is non-fatal: pre-release builds may intentionally carry a different
+    # embedded version, but a mismatch is worth surfacing clearly.
+    print("\n[version consistency check]")
+    try:
+        cargo_version = read_workspace_version()
+        for binary_name in ("atm", "atm-daemon"):
+            binary_path = bin_dir / binary_name
+            installed_version = read_binary_version(binary_path)
+            if installed_version is None:
+                print(f"  [WARN] {binary_name} --version: could not parse version string")
+            elif installed_version == cargo_version:
+                print(f"  [PASS] {binary_name} version matches workspace: {installed_version}")
+            else:
+                print(
+                    f"  [WARN] {binary_name} version mismatch: "
+                    f"binary={installed_version}, workspace={cargo_version}"
+                )
+    except SystemExit:
+        # read_workspace_version() calls die() on failure; treat as non-fatal here.
+        print("  [WARN] could not read workspace Cargo version for consistency check")
+
     return all_pass
 
 
