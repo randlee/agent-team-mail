@@ -1514,6 +1514,21 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
     Ok(())
 }
 
+fn effective_add_member_agent_type(agent_type: &str, backend_type: Option<&BackendType>) -> String {
+    if agent_type != "codex" {
+        return agent_type.to_string();
+    }
+
+    match backend_type {
+        Some(BackendType::ClaudeCode) => "claude-code".to_string(),
+        Some(BackendType::Codex) => "codex".to_string(),
+        Some(BackendType::Gemini) => "gemini".to_string(),
+        Some(BackendType::External) => "external".to_string(),
+        Some(BackendType::Human(_)) => "human".to_string(),
+        None => "codex".to_string(),
+    }
+}
+
 fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
     let home_dir = get_home_dir()?;
     let team_dir = home_dir.join(".claude/teams").join(&args.team);
@@ -1543,6 +1558,8 @@ fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
     } else {
         None
     };
+    let effective_agent_type =
+        effective_add_member_agent_type(&args.agent_type, parsed_backend_type.as_ref());
 
     let lock_path = config_path.with_extension("lock");
     let _lock = acquire_lock(&lock_path, 5)
@@ -1594,7 +1611,7 @@ fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
         let now_ms = chrono::Utc::now().timestamp_millis() as u64;
         let m = &mut team_config.members[idx];
         m.agent_id = agent_id;
-        m.agent_type = args.agent_type.clone();
+        m.agent_type = effective_agent_type.clone();
         m.model = args.model.clone();
         m.cwd = cwd;
         m.is_active = Some(!args.inactive);
@@ -1629,7 +1646,7 @@ fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
     let member = agent_team_mail_core::schema::AgentMember {
         agent_id,
         name: args.agent.clone(),
-        agent_type: args.agent_type.clone(),
+        agent_type: effective_agent_type,
         model: args.model.clone(),
         prompt: None,
         color: None,
