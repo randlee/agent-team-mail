@@ -5727,7 +5727,9 @@ fn bootstrap_session_from_member_hint(
 ) {
     if session_registry
         .query_for_team(team, &member.name)
-        .is_some()
+        .is_some_and(|session| {
+            session.state == crate::daemon::session_registry::SessionState::Active
+        })
     {
         return;
     }
@@ -6991,6 +6993,104 @@ notify_target = "team-lead"
         assert!(
             reg.query_for_team("atm-dev", "arch-ctm").is_none(),
             "bootstrap must not fabricate synthetic session IDs when sessionId hint is missing"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_list_agents_dead_session_without_hint_stays_dead() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let home = std::env::var("ATM_HOME").expect("ATM_HOME set by fixture");
+        let config_path = std::path::Path::new(&home).join(".claude/teams/atm-dev/config.json");
+        let mut cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        let members = cfg["members"].as_array_mut().unwrap();
+        let target = members
+            .iter_mut()
+            .find(|m| m["name"].as_str() == Some("arch-ctm"))
+            .expect("arch-ctm in config");
+        target["processId"] = serde_json::json!(std::process::id());
+        target.as_object_mut().unwrap().remove("sessionId");
+        target["externalBackendType"] = serde_json::json!("external");
+        std::fs::write(&config_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert_for_team("atm-dev", "arch-ctm", "dead-session-1", std::process::id());
+            let outcome = reg.mark_dead_for_team_session("atm-dev", "arch-ctm", "dead-session-1");
+            assert_eq!(
+                outcome,
+                crate::daemon::session_registry::MarkDeadForSessionOutcome::MarkedDead
+            );
+        }
+
+        let req = make_request("list-agents", serde_json::json!({"team": "atm-dev"}));
+        let resp = handle_list_agents(&req, &store, &sr);
+        assert_eq!(resp.status, "ok");
+
+        let reg = sr.lock().unwrap();
+        let session = reg
+            .query_for_team("atm-dev", "arch-ctm")
+            .expect("dead session should remain present");
+        assert_eq!(session.session_id, "dead-session-1");
+        assert_eq!(
+            session.state,
+            crate::daemon::session_registry::SessionState::Dead
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_list_agents_dead_session_with_valid_hint_reactivates() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let home = std::env::var("ATM_HOME").expect("ATM_HOME set by fixture");
+        let config_path = std::path::Path::new(&home).join(".claude/teams/atm-dev/config.json");
+        let mut cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        let members = cfg["members"].as_array_mut().unwrap();
+        let target = members
+            .iter_mut()
+            .find(|m| m["name"].as_str() == Some("arch-ctm"))
+            .expect("arch-ctm in config");
+        target["processId"] = serde_json::json!(std::process::id());
+        target["sessionId"] = serde_json::json!("hint-session-2");
+        target["externalBackendType"] = serde_json::json!("external");
+        std::fs::write(&config_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert_for_team("atm-dev", "arch-ctm", "dead-session-1", std::process::id());
+            let outcome = reg.mark_dead_for_team_session("atm-dev", "arch-ctm", "dead-session-1");
+            assert_eq!(
+                outcome,
+                crate::daemon::session_registry::MarkDeadForSessionOutcome::MarkedDead
+            );
+        }
+
+        let req = make_request("list-agents", serde_json::json!({"team": "atm-dev"}));
+        let resp = handle_list_agents(&req, &store, &sr);
+        assert_eq!(resp.status, "ok");
+        let arr = resp.payload.unwrap().as_array().unwrap().clone();
+        let member = arr
+            .iter()
+            .find(|a| a["agent"].as_str() == Some("arch-ctm"))
+            .expect("arch-ctm entry missing");
+        assert_eq!(member["state"].as_str(), Some("active"));
+        assert_eq!(member["session_id"].as_str(), Some("hint-session-2"));
+
+        let reg = sr.lock().unwrap();
+        let session = reg
+            .query_for_team("atm-dev", "arch-ctm")
+            .expect("session registry reactivated from member hint");
+        assert_eq!(session.session_id, "hint-session-2");
+        assert_eq!(session.process_id, std::process::id());
+        assert_eq!(
+            session.state,
+            crate::daemon::session_registry::SessionState::Active
         );
     }
 
