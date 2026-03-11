@@ -2167,7 +2167,10 @@ mod tests {
     fn fake_lock_metadata(home: &str, pid: u32) -> DaemonLockMetadata {
         DaemonLockMetadata {
             pid,
-            executable_path: "/tmp/fake-atm-daemon".to_string(),
+            executable_path: std::env::temp_dir()
+                .join("fake-atm-daemon")
+                .to_string_lossy()
+                .into_owned(),
             home_scope: home.to_string(),
             version: "0.0.1".to_string(),
             written_at: chrono::Utc::now().to_rfc3339(),
@@ -2634,10 +2637,12 @@ sleep 2
     #[cfg(unix)]
     #[test]
     fn test_evaluate_daemon_identity_mismatch_requires_metadata_or_socket() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_string_lossy().into_owned();
         let snapshot = DaemonIdentitySnapshot::default();
         let reason = evaluate_daemon_identity_mismatch(
             &snapshot,
-            "/tmp/atm-home",
+            &home,
             std::ffi::OsStr::new("atm-daemon"),
             env!("CARGO_PKG_VERSION"),
             |_| true,
@@ -2650,13 +2655,15 @@ sleep 2
     #[cfg(unix)]
     #[test]
     fn test_evaluate_daemon_identity_mismatch_reports_missing_metadata_when_socket_live() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_string_lossy().into_owned();
         let snapshot = DaemonIdentitySnapshot {
             socket_connectable: true,
             ..Default::default()
         };
         let reason = evaluate_daemon_identity_mismatch(
             &snapshot,
-            "/tmp/atm-home",
+            &home,
             std::ffi::OsStr::new("atm-daemon"),
             env!("CARGO_PKG_VERSION"),
             |_| true,
@@ -2670,15 +2677,17 @@ sleep 2
     #[cfg(unix)]
     #[test]
     fn test_evaluate_daemon_identity_mismatch_reports_command_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_string_lossy().into_owned();
         let snapshot = DaemonIdentitySnapshot {
-            metadata: Some(fake_lock_metadata("/tmp/atm-home", 4242)),
+            metadata: Some(fake_lock_metadata(&home, 4242)),
             pid_from_file: Some(4242),
             socket_connectable: true,
             ..Default::default()
         };
         let reason = evaluate_daemon_identity_mismatch(
             &snapshot,
-            "/tmp/atm-home",
+            &home,
             std::ffi::OsStr::new("atm-daemon"),
             env!("CARGO_PKG_VERSION"),
             |_| true,
@@ -2693,8 +2702,10 @@ sleep 2
     #[cfg(unix)]
     #[test]
     fn test_evaluate_daemon_identity_mismatch_reports_version_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_string_lossy().into_owned();
         let snapshot = DaemonIdentitySnapshot {
-            metadata: Some(fake_lock_metadata("/tmp/atm-home", 4242)),
+            metadata: Some(fake_lock_metadata(&home, 4242)),
             pid_from_file: Some(4242),
             version_from_status: Some("0.0.1".to_string()),
             socket_connectable: true,
@@ -2702,7 +2713,7 @@ sleep 2
         };
         let reason = evaluate_daemon_identity_mismatch(
             &snapshot,
-            "/tmp/atm-home",
+            &home,
             std::ffi::OsStr::new("atm-daemon"),
             env!("CARGO_PKG_VERSION"),
             |_| true,
@@ -2717,8 +2728,10 @@ sleep 2
     #[cfg(unix)]
     #[test]
     fn test_evaluate_daemon_identity_mismatch_accepts_matching_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_string_lossy().into_owned();
         let snapshot = DaemonIdentitySnapshot {
-            metadata: Some(fake_lock_metadata("/tmp/atm-home", 4242)),
+            metadata: Some(fake_lock_metadata(&home, 4242)),
             pid_from_file: Some(4242),
             version_from_status: Some(env!("CARGO_PKG_VERSION").to_string()),
             socket_connectable: true,
@@ -2726,7 +2739,7 @@ sleep 2
         };
         let reason = evaluate_daemon_identity_mismatch(
             &snapshot,
-            "/tmp/atm-home",
+            &home,
             std::ffi::OsStr::new("atm-daemon"),
             env!("CARGO_PKG_VERSION"),
             |_| true,

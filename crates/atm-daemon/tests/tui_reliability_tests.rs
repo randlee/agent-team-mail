@@ -188,7 +188,7 @@ fn test_stale_sent_at_does_not_consume_dedup_slot() {
 ///
 /// `query_list_agents()` connects to `{ATM_HOME}/.atm/daemon/atm-daemon.sock`.
 /// When the socket is absent the function must return `Ok(None)`, `Ok(Some(_))`,
-/// or an `Err` — none of which are a panic.  We do NOT set `ATM_HOME` here to
+/// or an `Err` — none of which are a panic. We do NOT set `ATM_HOME` here to
 /// avoid `set_var` races in parallel test execution; the default home path has
 /// no running daemon in CI, which exercises the same failure path.
 #[test]

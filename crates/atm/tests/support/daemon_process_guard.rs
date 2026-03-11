@@ -47,7 +47,7 @@ impl DaemonProcessGuard {
     }
 
     pub fn wait_ready(&mut self, home: &TempDir) {
-        let daemon_dir = home.path().join(".claude").join("daemon");
+        let daemon_dir = home.path().join(".atm").join("daemon");
         let pid_path = daemon_dir.join("atm-daemon.pid");
         let status_path = daemon_dir.join("status.json");
         #[cfg(windows)]
