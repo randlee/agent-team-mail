@@ -7027,7 +7027,10 @@ notify_target = "team-lead"
             .expect("atm-monitor entry missing");
         assert_eq!(monitor["state"].as_str(), Some("active"));
         assert_eq!(monitor["session_id"].as_str(), Some("sess-monitor-1"));
-        assert_eq!(monitor["process_id"].as_u64(), Some(std::process::id() as u64));
+        assert_eq!(
+            monitor["process_id"].as_u64(),
+            Some(std::process::id() as u64)
+        );
 
         let reg = sr.lock().unwrap();
         let session = reg
