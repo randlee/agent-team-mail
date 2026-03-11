@@ -34,6 +34,38 @@ fn new_reconcile_cycle_state() -> SharedCycleState {
     Arc::new(std::sync::Mutex::new(ReconcileCycleState::default()))
 }
 
+/// Wait for a daemon shutdown task to finish within `timeout`.
+///
+/// Shutdown tasks are expected to honor the shared [`CancellationToken`] and
+/// exit promptly once cancellation is requested. `abort()` is a last-resort
+/// fallback used only after the cooperative timeout has expired.
+///
+/// This helper is intentionally status-agnostic. Non-plugin callers use it for
+/// internal daemon tasks where the only required behavior is bounded shutdown
+/// latency plus best-effort logging. Plugin degraded-state transitions remain
+/// the responsibility of plugin lifecycle/status code, not this generic join
+/// helper.
+async fn wait_for_shutdown_task<T>(task_name: &str, mut handle: JoinHandle<T>, timeout: Duration)
+where
+    T: Send + 'static,
+{
+    match tokio::time::timeout(timeout, &mut handle).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            error!("{task_name} task failed during shutdown: {e}");
+        }
+        Err(e) => {
+            error!("{task_name} task did not complete in time: {e}");
+            handle.abort();
+            if let Err(join_err) = handle.await
+                && !join_err.is_cancelled()
+            {
+                error!("{task_name} task failed after abort: {join_err}");
+            }
+        }
+    }
+}
+
 /// Run the main daemon event loop.
 ///
 /// This function:
@@ -118,7 +150,7 @@ pub async fn run(
     info!("Starting {} plugin task(s)", plugins.len());
 
     // Spawn a task for each plugin's run() method
-    let mut plugin_tasks: Vec<JoinHandle<()>> = Vec::new();
+    let mut plugin_tasks: Vec<(String, JoinHandle<()>)> = Vec::new();
     let reconcile_cycle_state = new_reconcile_cycle_state();
 
     for (metadata, plugin_arc) in plugins.clone() {
@@ -139,7 +171,7 @@ pub async fn run(
             }
         });
 
-        plugin_tasks.push(task);
+        plugin_tasks.push((metadata.name.to_string(), task));
     }
 
     // Start the Unix socket server (CLI↔daemon IPC).
@@ -448,30 +480,16 @@ pub async fn run(
     info!("Cancellation signal received. Beginning shutdown...");
 
     // Wait for background tasks to complete (they should respect cancellation)
-    if let Err(e) = tokio::time::timeout(Duration::from_secs(5), spool_task).await {
-        error!("Spool task did not complete in time: {}", e);
-    }
-
-    if let Err(e) = tokio::time::timeout(Duration::from_secs(5), watcher_task).await {
-        error!("Watcher task did not complete in time: {}", e);
-    }
-
-    if let Err(e) = tokio::time::timeout(Duration::from_secs(5), dispatch_task).await {
-        error!("Dispatch task did not complete in time: {}", e);
-    }
+    wait_for_shutdown_task("Spool", spool_task, Duration::from_secs(5)).await;
+    wait_for_shutdown_task("Watcher", watcher_task, Duration::from_secs(5)).await;
+    wait_for_shutdown_task("Dispatch", dispatch_task, Duration::from_secs(5)).await;
 
     if let Some(task) = retention_task {
-        if let Err(e) = tokio::time::timeout(Duration::from_secs(5), task).await {
-            error!("Retention task did not complete in time: {}", e);
-        }
+        wait_for_shutdown_task("Retention", task, Duration::from_secs(5)).await;
     }
 
-    if let Err(e) = tokio::time::timeout(Duration::from_secs(5), status_task).await {
-        error!("Status writer task did not complete in time: {}", e);
-    }
-    if let Err(e) = tokio::time::timeout(Duration::from_secs(5), reconcile_task).await {
-        error!("Reconcile task did not complete in time: {}", e);
-    }
+    wait_for_shutdown_task("Status writer", status_task, Duration::from_secs(5)).await;
+    wait_for_shutdown_task("Reconcile", reconcile_task, Duration::from_secs(5)).await;
 
     // Graceful shutdown of all plugins
     graceful_shutdown(plugins, Duration::from_secs(5))
@@ -479,10 +497,9 @@ pub async fn run(
         .context("Plugin shutdown encountered errors")?;
 
     // Wait for plugin tasks to complete
-    for task in plugin_tasks {
-        if let Err(e) = task.await {
-            error!("Plugin task panicked: {}", e);
-        }
+    for (plugin_name, task) in plugin_tasks {
+        let label = format!("Plugin {plugin_name}");
+        wait_for_shutdown_task(&label, task, Duration::from_secs(5)).await;
     }
 
     info!("Daemon event loop shutdown complete");
@@ -1602,6 +1619,7 @@ mod tests {
     use agent_team_mail_core::schema::InboxMessage;
     use std::collections::HashMap;
     use std::fs as stdfs;
+    use std::time::Duration;
     use tempfile::TempDir;
     use tokio::fs;
 
@@ -2805,5 +2823,21 @@ mod tests {
                 .is_some(),
             "dispatch-mode reconcile must not advance stale-prune absent cycles"
         );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_shutdown_task_aborts_timed_out_task() {
+        let handle = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+
+        super::wait_for_shutdown_task("test", handle, Duration::from_millis(10)).await;
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_shutdown_task_allows_completed_task() {
+        let handle = tokio::spawn(async {});
+
+        super::wait_for_shutdown_task("test", handle, Duration::from_secs(1)).await;
     }
 }
