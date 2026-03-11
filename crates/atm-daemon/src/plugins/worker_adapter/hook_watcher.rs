@@ -1,6 +1,6 @@
 //! Hook event file watcher for Codex agent lifecycle signals
 //!
-//! Watches `${ATM_HOME}/.claude/daemon/hooks/events.jsonl` for new hook events
+//! Watches `${ATM_HOME}/.atm/daemon/hooks/events.jsonl` for new hook events
 //! appended by the `atm-hook-relay.sh` script (Sprint 10.0). On each file
 //! change, reads only new lines from the last-known offset (incremental, no
 //! re-reading the full file). Parses JSON lines and routes events to the

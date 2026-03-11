@@ -1,11 +1,11 @@
 ---
 name: sprint-report
-description: Generate a sprint status report for the current phase. Use --detailed for a full per-sprint breakdown or --table for a condensed summary table.
+description: Generate a sprint status report for the current phase. Default is --table.
 ---
 
 # Sprint Report Skill
 
-Generate a formatted status report for all sprints in the current phase.
+Build fenced JSON and pipe to the Jinja2 template. `mode` controls table vs detailed.
 
 ## Usage
 
@@ -17,75 +17,46 @@ Default: `--table`
 
 ---
 
-## Invocation
+## Render Command
 
-Build the fenced JSON context and pipe it directly via `--var-file -` (stdin),
-or write to a temp file and pass the path:
+The template path is relative — must run from the **main repo root** (not a worktree).
 
 ```bash
-# Preferred: pipe JSON directly without a temp file
-echo '<json>' | sc-compose render .claude/skills/sprint-report/report.md.j2 --var-file -
-
-# Alternative: write to a temp file first
+cd "${CLAUDE_PROJECT_DIR:-$(git worktree list | head -1 | awk '{print $1}')}"
 echo '<json>' > /tmp/sprint-report.json
 sc-compose render .claude/skills/sprint-report/report.md.j2 --var-file /tmp/sprint-report.json
 ```
 
-Output the rendered result directly in the conversation.
-
----
-
-## Icon Reference
-
-**Dev**
-| State | Icon |
-|-------|------|
-| ASSIGNED | 📥 |
-| IN_PROGRESS | 🌀 |
-| DONE | ✅ |
-| FINDINGS | 🚩 |
-| FIXING | 🔨 |
-
-**QA**
-| State | Icon |
-|-------|------|
-| ASSIGNED | 📥 |
-| IN_PROGRESS | 🌀 |
-| FINDINGS | 🚩 |
-| PASSED | ✅ |
-
-**CI**
-| State | Icon |
-|-------|------|
-| RUNNING | 🌀 |
-| BLOCKED | 🚧 |
-| FAIL | ❌ |
-| PASS | ✅ |
-| MERGED | 🏁 |
-| READY TO MERGE | 🚀 |
-
----
-
-## Variables
-
-`sprint_rows` — newline-separated table rows, one per sprint:
-```
-| AJ.1 | 🏁 | ✅ | 🏁 | #615 |
-| AJ.2 | | ✅ | 🏁 | #616 |
-```
-
-`integration_row` — single integration branch row:
-```
-| **integrate** | | — | 🌀 | — |
-```
-
----
-
-## JSON Input
+## --table (default)
 
 ```json
 {
-  "sprint_rows": "| AJ.1 | 🏁 | ✅ | 🏁 | #615 |\n| AJ.2 | | ✅ | 🏁 | #616 |",
+  "mode": "table",
+  "sprint_rows": "| AK.1 | ✅ | ✅ | 🏁 | #621 |\n| AK.2 | ✅ | ✅ | 🌀 | #622 |",
   "integration_row": "| **integrate** | | — | 🌀 | — |"
 }
 ```
+
+## --detailed
+
+```json
+{
+  "mode": "detailed",
+  "sprint_rows": "Sprint: AK.1  Contract reconciliation\nPR: #621\nQA: PASS ✓ (iter 3)\nCI: Merged to integrate/phase-AK ✓\n────────────────────────────────────────\nSprint: AK.2  OTel core\nPR: #622\nQA: PASS ✓\nCI: Running (1 pending)",
+  "integration_row": "Integration: integrate/phase-AK → develop\nCI: Running — pending AK.4 + AK.5"
+}
+```
+
+## Icon Reference
+
+| State | DEV | QA | CI |
+|-------|-----|----|----|
+| Assigned | 📥 | 📥 | |
+| In progress | 🌀 | 🌀 | 🌀 |
+| Done/Pass | ✅ | ✅ | ✅ |
+| Findings | 🚩 | 🚩 | |
+| Fixing | 🔨 | | |
+| Blocked | | | 🚧 |
+| Fail | | | ❌ |
+| Merged | | | 🏁 |
+| Ready to merge | | | 🚀 |

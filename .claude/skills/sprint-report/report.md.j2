@@ -1,13 +1,20 @@
 ---
 name: sprint-report
-version: 2.0.0
+version: 3.1.0
 description: Sprint status report for agent-team-mail phases.
 format: markdown
 required_variables:
+  - mode
   - sprint_rows
   - integration_row
 ---
-| Sprint # | Dev | QA | CI | PR |
-|----------|-----|----|----|-----|
+{% if mode == "detailed" %}
+{{ sprint_rows }}
+────────────────────────────────────────
+{{ integration_row }}
+{% else %}
+| Sprint | DEV | QA | CI | PR |
+|--------|-----|----|----|-----|
 {{ sprint_rows }}
 {{ integration_row }}
+{% endif %}

@@ -144,7 +144,7 @@ pub async fn run(
 
     // Start the Unix socket server (CLI↔daemon IPC).
     //
-    // The socket path is ${ATM_HOME}/.claude/daemon/atm-daemon.sock.
+    // The socket path is ${ATM_HOME}/.atm/daemon/atm-daemon.sock.
     // ctx.system.claude_root is ${ATM_HOME}/.claude, so the home_dir is its
     // parent. We fall back to get_home_dir() if the parent cannot be determined
     // (e.g., claude_root is the filesystem root, which should never happen in
@@ -697,42 +697,21 @@ fn reconcile_team_member_activity_with_mode(
                 // No live session record means member is not active.
                 false
             };
-            let reconciled_alive = alive;
-
-            if member.is_active != Some(reconciled_alive) {
-                let previous = member.is_active;
-                member.is_active = Some(reconciled_alive);
-                changed = true;
-                emit_event_best_effort(EventFields {
-                    level: "warn",
-                    source: "atm-daemon",
-                    action: "state_drift_detected",
-                    team: Some(team_name.clone()),
-                    agent_name: Some(member.name.clone()),
-                    result: Some("reconciled".to_string()),
-                    error: Some(format!(
-                        "isActive drift for {}@{}: config={:?}, reconciled={}",
-                        member.name, team_name, previous, reconciled_alive
-                    )),
-                    ..Default::default()
-                });
-
-                if reconciled_alive {
-                    member.last_active = Some(now_ms);
-                    state_store.lock().unwrap().set_state_with_context(
-                        &member.name,
-                        AgentState::Active,
-                        "session active + pid alive",
-                        "session_reconcile",
-                    );
-                } else {
-                    state_store.lock().unwrap().set_state_with_context(
-                        &member.name,
-                        AgentState::Offline,
-                        "session missing/dead during reconcile",
-                        "session_reconcile",
-                    );
-                }
+            if alive {
+                member.last_active = Some(now_ms);
+                state_store.lock().unwrap().set_state_with_context(
+                    &member.name,
+                    AgentState::Active,
+                    "session active + pid alive",
+                    "session_reconcile",
+                );
+            } else {
+                state_store.lock().unwrap().set_state_with_context(
+                    &member.name,
+                    AgentState::Offline,
+                    "session missing/dead during reconcile",
+                    "session_reconcile",
+                );
             }
 
             // Terminal non-lead members must be fully removed (roster + mailbox)
@@ -1544,7 +1523,7 @@ fn gh_monitor_plugin_status_projection(
     ctx: &PluginContext,
 ) -> Option<(PluginStatusKind, Option<String>, Option<String>)> {
     let home_dir = ctx.system.claude_root.parent()?.to_path_buf();
-    let path = home_dir.join(".claude/daemon/gh-monitor-health.json");
+    let path = home_dir.join(".atm/daemon/gh-monitor-health.json");
     let raw = std::fs::read_to_string(path).ok()?;
     let value = serde_json::from_str::<Value>(&raw).ok()?;
     let records = value.get("records")?.as_array()?;

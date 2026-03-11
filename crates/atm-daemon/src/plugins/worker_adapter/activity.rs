@@ -1,7 +1,7 @@
-//! Agent activity tracking for accurate offline detection
+//! Agent activity tracking for message timestamps.
 //!
-//! Monitors inbox file events and updates agent activity status in team config.json.
-//! Uses atomic writes to prevent corruption (same infrastructure as inbox writes).
+//! Monitors inbox file events and updates `lastActive` in team config.json.
+//! `isActive` is hook-owned and must not be mutated here.
 
 use crate::plugin::PluginError;
 use agent_team_mail_core::io::{atomic::atomic_swap, lock::acquire_lock};
@@ -29,9 +29,7 @@ impl ActivityTracker {
         }
     }
 
-    /// Update agent activity timestamp when they send a message
-    ///
-    /// Sets `isActive: true` and updates `lastActive` timestamp.
+    /// Update agent activity timestamp when they send a message.
     ///
     /// # Arguments
     ///
@@ -48,11 +46,8 @@ impl ActivityTracker {
     ) -> Result<(), PluginError> {
         self.update_config_atomic_with_time(team_config_path, |config, now_ms| {
             if let Some(member) = config.members.iter_mut().find(|m| m.name == agent_name) {
-                member.is_active = Some(true);
                 member.last_active = Some(now_ms);
-                debug!(
-                    "Updated activity for agent {agent_name}: isActive=true, lastActive={now_ms}"
-                );
+                debug!("Updated activity for agent {agent_name}: lastActive={now_ms}");
                 true
             } else {
                 warn!("Agent {agent_name} not found in team config");
@@ -61,10 +56,7 @@ impl ActivityTracker {
         })
     }
 
-    /// Check for inactive agents and mark them as inactive
-    ///
-    /// Scans all agents with `isActive: true` and checks if they've exceeded
-    /// the inactivity timeout. Updates config atomically if changes are needed.
+    /// `isActive` is hook-owned, so inbox activity does not clear activity state.
     ///
     /// # Arguments
     ///
@@ -74,34 +66,9 @@ impl ActivityTracker {
     ///
     /// Returns `PluginError` if config update fails
     pub fn check_inactivity(&self, team_config_path: &Path) -> Result<(), PluginError> {
-        self.update_config_atomic_with_time(team_config_path, |config, now_ms| {
-            let mut changed = false;
-            for member in &mut config.members {
-                // Only check agents that are marked active
-                if member.is_active == Some(true) {
-                    if let Some(last_active) = member.last_active {
-                        let elapsed = now_ms.saturating_sub(last_active);
-                        if elapsed > self.inactivity_timeout_ms {
-                            debug!(
-                                "Marking agent {} as inactive (last activity {} ms ago)",
-                                member.name, elapsed
-                            );
-                            member.is_active = Some(false);
-                            changed = true;
-                        }
-                    } else {
-                        // Active but no last_active timestamp — suspicious, mark inactive
-                        warn!(
-                            "Agent {} marked active but has no lastActive timestamp, marking inactive",
-                            member.name
-                        );
-                        member.is_active = Some(false);
-                        changed = true;
-                    }
-                }
-            }
-            changed
-        })
+        let _ = team_config_path;
+        let _ = self.inactivity_timeout_ms;
+        Ok(())
     }
 
     /// Atomically update team config using lock/swap infrastructure
