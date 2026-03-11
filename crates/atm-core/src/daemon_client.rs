@@ -413,6 +413,18 @@ pub fn daemon_start_lock_path() -> anyhow::Result<PathBuf> {
     Ok(daemon_runtime_dir()?.join("daemon-start.lock"))
 }
 
+/// Compute the durable dedup store path for the ATM daemon.
+///
+/// The path is `${ATM_HOME}/.atm/daemon/dedup.jsonl`, where `ATM_HOME` is
+/// resolved via [`crate::home::get_home_dir`].
+///
+/// # Errors
+///
+/// Returns an error only if home directory resolution fails.
+pub fn daemon_dedup_path() -> anyhow::Result<PathBuf> {
+    Ok(daemon_runtime_dir()?.join("dedup.jsonl"))
+}
+
 /// Write daemon lock metadata atomically for the current process.
 ///
 /// Called by `atm-daemon` after lock acquisition so CLI identity checks can

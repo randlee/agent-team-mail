@@ -271,11 +271,12 @@ async fn main() -> Result<()> {
             tracing::warn!(
                 "Failed to initialise durable dedupe store, falling back to fresh empty store: {e}"
             );
-            // Construct a fallback store pointing at the same default path.
+            // Construct a fallback store pointing at the ATM_HOME-based path.
             // If the error was a corrupted file, the subsequent write will
             // overwrite it; if the directory is inaccessible, we'll log on
             // every insert but the daemon stays running.
-            let path = home_dir.join(".atm/daemon/dedup.jsonl");
+            let path = agent_team_mail_core::daemon_client::daemon_dedup_path()
+                .unwrap_or_else(|_| home_dir.join(".atm/daemon/dedup.jsonl"));
             let _ = std::fs::create_dir_all(path.parent().unwrap_or(&home_dir));
             std::sync::Arc::new(std::sync::Mutex::new(
                 agent_team_mail_daemon::daemon::dedup::DurableDedupeStore::new(
@@ -284,8 +285,13 @@ async fn main() -> Result<()> {
                     1000,
                 )
                 .unwrap_or_else(|_| {
+                    let fallback = std::env::temp_dir().join("atm-dedup-fallback.jsonl");
+                    tracing::error!(
+                        path = %fallback.display(),
+                        "dedup store init failed — falling back to temp dir, ATM_HOME dedup is DISABLED"
+                    );
                     agent_team_mail_daemon::daemon::dedup::DurableDedupeStore::new(
-                        std::env::temp_dir().join("atm-dedup-fallback.jsonl"),
+                        fallback,
                         std::time::Duration::from_secs(600),
                         1000,
                     )
