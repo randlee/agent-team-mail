@@ -9238,17 +9238,16 @@ exit 1
     /// Integration-style control test over unix socket.
     #[cfg(unix)]
     #[tokio::test]
-    #[ignore = "integration coverage for control receiver over unix socket"]
     #[serial_test::serial]
     async fn test_socket_server_control_stdin_roundtrip() {
         use crate::plugins::worker_adapter::AgentState;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio_util::sync::CancellationToken;
+        use uuid::Uuid;
 
         let temp_dir = tempfile::TempDir::new().unwrap();
         let home_dir = temp_dir.path().to_path_buf();
-        // SAFETY: serialized test; env var scoped by process.
-        unsafe { std::env::set_var("ATM_HOME", &home_dir) };
+        let _home_guard = EnvGuard::set("ATM_HOME", &home_dir.to_string_lossy());
         let cancel = CancellationToken::new();
         let daemon_lock = {
             let path = home_dir.join(".config/atm/daemon.lock");
@@ -9291,17 +9290,23 @@ exit 1
         let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
         let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
 
-        let control_payload = serde_json::json!({
-            "v": 1,
-            "request_id": "ctrl-intg-1",
-            "sent_at": chrono::Utc::now().to_rfc3339(),
-            "team": "atm-dev",
-            "session_id": "sess-intg-1",
-            "agent_id": "arch-ctm",
-            "sender": "team-lead",
-            "action": "stdin",
-            "payload": "integration payload"
-        });
+        let control_payload = serde_json::to_value(ControlRequest {
+            v: CONTROL_SCHEMA_VERSION,
+            request_id: Uuid::new_v4().to_string(),
+            msg_type: "control.stdin.request".to_string(),
+            signal: None,
+            sent_at: chrono::Utc::now().to_rfc3339(),
+            team: "atm-dev".to_string(),
+            session_id: "sess-intg-1".to_string(),
+            agent_id: "arch-ctm".to_string(),
+            sender: "team-lead".to_string(),
+            action: ControlAction::Stdin,
+            payload: Some("integration payload".to_string()),
+            content_ref: None,
+            elicitation_id: None,
+            decision: None,
+        })
+        .expect("serialize control request");
         let request = SocketRequest {
             version: PROTOCOL_VERSION,
             request_id: "sock-ctrl-1".to_string(),
