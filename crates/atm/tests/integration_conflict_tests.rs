@@ -94,7 +94,7 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
 
 #[cfg(unix)]
 fn daemon_pid_path(temp_dir: &TempDir) -> PathBuf {
-    temp_dir.path().join(".claude/daemon/atm-daemon.pid")
+    temp_dir.path().join(".atm/daemon/atm-daemon.pid")
 }
 
 #[cfg(unix)]
@@ -128,7 +128,7 @@ fn daemon_binary_path() -> PathBuf {
 
 #[cfg(unix)]
 fn write_lock_metadata(temp_dir: &TempDir, pid: u32, home_scope: String, executable_path: String) {
-    let metadata_path = temp_dir.path().join(".config/atm/daemon.lock.meta.json");
+    let metadata_path = temp_dir.path().join(".atm/daemon/daemon.lock.meta.json");
     if let Some(parent) = metadata_path.parent() {
         fs::create_dir_all(parent).expect("create metadata dir");
     }
@@ -1268,7 +1268,7 @@ fn test_dead_pid_stale_lock_starts_daemon_cleanly() {
     let dead_pid = 999_991_u32;
     assert!(!pid_alive(dead_pid as i32), "fixture pid should be dead");
 
-    let daemon_dir = temp_dir.path().join(".claude/daemon");
+    let daemon_dir = temp_dir.path().join(".atm/daemon");
     fs::create_dir_all(&daemon_dir).unwrap();
     fs::write(daemon_dir.join("atm-daemon.pid"), format!("{dead_pid}\n")).unwrap();
     fs::write(
@@ -1291,7 +1291,7 @@ fn test_dead_pid_stale_lock_starts_daemon_cleanly() {
         home_scope,
         daemon_binary_path().to_string_lossy().to_string(),
     );
-    let lock_path = temp_dir.path().join(".config/atm/daemon.lock");
+    let lock_path = temp_dir.path().join(".atm/daemon/daemon.lock");
     fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
     fs::write(&lock_path, "stale").unwrap();
 

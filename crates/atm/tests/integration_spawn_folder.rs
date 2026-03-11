@@ -182,7 +182,7 @@ finally:
 
 #[cfg(unix)]
 fn wait_for_daemon_socket(home: &Path) {
-    let socket = home.join(".claude/daemon/atm-daemon.sock");
+    let socket = home.join(".atm/daemon/atm-daemon.sock");
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
         if socket.exists() {

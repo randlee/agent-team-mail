@@ -2113,7 +2113,7 @@ mod tests {
     #[cfg(unix)]
     fn wait_for_daemon_runtime_ready(home: &std::path::Path) -> bool {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        let pid_path = home.join(".claude/daemon/atm-daemon.pid");
+        let pid_path = home.join(".atm/daemon/atm-daemon.pid");
         while std::time::Instant::now() < deadline {
             if pid_path.exists() && super::daemon_socket_connectable(home) {
                 return true;
@@ -2126,8 +2126,8 @@ mod tests {
     #[cfg(unix)]
     fn wait_for_daemon_version(home: &std::path::Path, expected_version: &str) -> Option<i32> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        let pid_path = home.join(".claude/daemon/atm-daemon.pid");
-        let status_path = home.join(".claude/daemon/status.json");
+        let pid_path = home.join(".atm/daemon/atm-daemon.pid");
+        let status_path = home.join(".atm/daemon/status.json");
         while std::time::Instant::now() < deadline {
             let pid = std::fs::read_to_string(&pid_path)
                 .ok()
@@ -2329,7 +2329,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
-        let daemon_dir = home.join(".claude/daemon");
+        let daemon_dir = home.join(".atm/daemon");
         fs::create_dir_all(&daemon_dir).unwrap();
 
         let pid_path = daemon_dir.join("atm-daemon.pid");
@@ -2351,7 +2351,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
-        let daemon_dir = home.join(".claude/daemon");
+        let daemon_dir = home.join(".atm/daemon");
         fs::create_dir_all(&daemon_dir).unwrap();
 
         let pid_path = daemon_dir.join("atm-daemon.pid");
@@ -2380,7 +2380,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
-        let daemon_dir = home.join(".claude/daemon");
+        let daemon_dir = home.join(".atm/daemon");
         fs::create_dir_all(&daemon_dir).unwrap();
 
         let pid_path = daemon_dir.join("atm-daemon.pid");
@@ -2534,10 +2534,10 @@ sleep 10
         let script = r#"#!/bin/sh
 set -eu
 home="${ATM_HOME:?}"
-mkdir -p "$home/.claude/daemon"
+mkdir -p "$home/.atm/daemon"
 mkdir -p "$home/spawn-markers"
 touch "$home/spawn-markers/spawn.$$"
-echo $$ > "$home/.claude/daemon/atm-daemon.pid"
+echo $$ > "$home/.atm/daemon/atm-daemon.pid"
 sleep 2
 "#;
         fs::write(&script_path, script).unwrap();
@@ -2603,7 +2603,7 @@ sleep 2
 
         write_daemon_lock_metadata(home, "9.9.9-test").expect("write lock metadata");
 
-        let path = home.join(".config/atm/daemon.lock.meta.json");
+        let path = home.join(".atm/daemon/daemon.lock.meta.json");
         let raw = std::fs::read_to_string(&path).expect("read lock metadata");
         let meta: DaemonLockMetadata = serde_json::from_str(&raw).expect("parse lock metadata");
 
@@ -2733,11 +2733,10 @@ sleep 2
 
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().to_path_buf();
-        fs::create_dir_all(home.join(".claude/daemon")).unwrap();
-        fs::create_dir_all(home.join(".config/atm")).unwrap();
+        fs::create_dir_all(home.join(".atm/daemon")).unwrap();
 
         // Simulate stale metadata from a dead prior daemon instance.
-        fs::write(home.join(".claude/daemon/atm-daemon.pid"), "999999\n").unwrap();
+        fs::write(home.join(".atm/daemon/atm-daemon.pid"), "999999\n").unwrap();
         let stale = DaemonLockMetadata {
             pid: 999999,
             executable_path: std::env::temp_dir()
@@ -2749,7 +2748,7 @@ sleep 2
             written_at: chrono::Utc::now().to_rfc3339(),
         };
         fs::write(
-            home.join(".config/atm/daemon.lock.meta.json"),
+            home.join(".atm/daemon/daemon.lock.meta.json"),
             serde_json::to_string_pretty(&stale).unwrap(),
         )
         .unwrap();
@@ -2759,16 +2758,16 @@ sleep 2
             r#"#!/bin/sh
 set -eu
 home="${{ATM_HOME:?}}"
-mkdir -p "$home/.claude/daemon"
+mkdir -p "$home/.atm/daemon"
 pid=$$
-echo "$pid" > "$home/.claude/daemon/atm-daemon.pid"
-cat > "$home/.claude/daemon/status.json" <<'JSON'
+echo "$pid" > "$home/.atm/daemon/atm-daemon.pid"
+cat > "$home/.atm/daemon/status.json" <<'JSON'
 {{"timestamp":"2026-01-01T00:00:00Z","pid":0,"version":"{}","uptime_secs":1,"plugins":[],"teams":[]}}
 JSON
 python3 - <<'PY'
 import json, os
 home=os.environ["ATM_HOME"]
-path=os.path.join(home, ".claude", "daemon", "status.json")
+path=os.path.join(home, ".atm", "daemon", "status.json")
 with open(path, "r", encoding="utf-8") as f:
     obj=json.load(f)
 obj["pid"]=os.getpid()
@@ -2802,7 +2801,7 @@ sleep 8
         }
         assert!(marker.exists(), "expected replacement daemon to start");
 
-        if let Ok(pid_str) = std::fs::read_to_string(home.join(".claude/daemon/atm-daemon.pid"))
+        if let Ok(pid_str) = std::fs::read_to_string(home.join(".atm/daemon/atm-daemon.pid"))
             && let Ok(pid) = pid_str.trim().parse::<i32>()
             && pid_alive(pid)
         {
@@ -2835,30 +2834,29 @@ sleep 8
 
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().to_path_buf();
-        fs::create_dir_all(home.join(".claude/daemon")).unwrap();
-        fs::create_dir_all(home.join(".config/atm")).unwrap();
+        fs::create_dir_all(home.join(".atm/daemon")).unwrap();
 
         let stale_script = home.join("stale-daemon.sh");
         let stale = r#"#!/bin/sh
 set -eu
 home="${ATM_HOME:?}"
-mkdir -p "$home/.claude/daemon"
+mkdir -p "$home/.atm/daemon"
 pid=$$
-echo "$pid" > "$home/.claude/daemon/atm-daemon.pid"
-cat > "$home/.claude/daemon/status.json" <<'JSON'
+echo "$pid" > "$home/.atm/daemon/atm-daemon.pid"
+cat > "$home/.atm/daemon/status.json" <<'JSON'
 {"timestamp":"2026-01-01T00:00:00Z","pid":0,"version":"0.0.1","uptime_secs":1,"plugins":[],"teams":[]}
 JSON
 python3 - <<'PY'
 import json, os
 home=os.environ["ATM_HOME"]
-path=os.path.join(home, ".claude", "daemon", "status.json")
+path=os.path.join(home, ".atm", "daemon", "status.json")
 with open(path, "r", encoding="utf-8") as f:
     obj=json.load(f)
 obj["pid"]=os.getpid()
 with open(path, "w", encoding="utf-8") as f:
     json.dump(obj, f)
 PY
-exec python3 - "$home/.claude/daemon/atm-daemon.sock" <<'PY'
+exec python3 - "$home/.atm/daemon/atm-daemon.sock" <<'PY'
 import os, signal, socket, sys, time
 path=sys.argv[1]
 try:
@@ -2893,16 +2891,16 @@ PY
             r#"#!/bin/sh
 set -eu
 home="${{ATM_HOME:?}}"
-mkdir -p "$home/.claude/daemon"
+mkdir -p "$home/.atm/daemon"
 pid=$$
-echo "$pid" > "$home/.claude/daemon/atm-daemon.pid"
-cat > "$home/.claude/daemon/status.json" <<'JSON'
+echo "$pid" > "$home/.atm/daemon/atm-daemon.pid"
+cat > "$home/.atm/daemon/status.json" <<'JSON'
 {{"timestamp":"2026-01-01T00:00:00Z","pid":0,"version":"{}","uptime_secs":1,"plugins":[],"teams":[]}}
 JSON
 python3 - <<'PY'
 import json, os
 home=os.environ["ATM_HOME"]
-path=os.path.join(home, ".claude", "daemon", "status.json")
+path=os.path.join(home, ".atm", "daemon", "status.json")
 with open(path, "r", encoding="utf-8") as f:
     obj=json.load(f)
 obj["pid"]=os.getpid()
@@ -2937,7 +2935,7 @@ sleep 8
             wait_for_daemon_runtime_ready(&home),
             "stale daemon must publish pid file and bind socket before mismatch check"
         );
-        let stale_pid: u32 = std::fs::read_to_string(home.join(".claude/daemon/atm-daemon.pid"))
+        let stale_pid: u32 = std::fs::read_to_string(home.join(".atm/daemon/atm-daemon.pid"))
             .unwrap()
             .trim()
             .parse()
@@ -2953,7 +2951,7 @@ sleep 8
             written_at: chrono::Utc::now().to_rfc3339(),
         };
         std::fs::write(
-            home.join(".config/atm/daemon.lock.meta.json"),
+            home.join(".atm/daemon/daemon.lock.meta.json"),
             serde_json::to_string_pretty(&stale_metadata).unwrap(),
         )
         .unwrap();
@@ -3020,14 +3018,14 @@ sleep 8
     fn test_daemon_socket_path_contains_expected_suffix() {
         let path = daemon_socket_path().unwrap();
         assert!(path.to_string_lossy().ends_with("atm-daemon.sock"));
-        assert!(path.to_string_lossy().contains(".claude/daemon"));
+        assert!(path.to_string_lossy().contains(".atm/daemon"));
     }
 
     #[test]
     fn test_daemon_pid_path_contains_expected_suffix() {
         let path = daemon_pid_path().unwrap();
         assert!(path.to_string_lossy().ends_with("atm-daemon.pid"));
-        assert!(path.to_string_lossy().contains(".claude/daemon"));
+        assert!(path.to_string_lossy().contains(".atm/daemon"));
     }
 
     #[test]
@@ -3076,7 +3074,7 @@ sleep 8
 
         with_autostart_disabled(|| {
             let tmp = tempfile::tempdir().expect("tempdir");
-            let daemon_dir = tmp.path().join(".claude/daemon");
+            let daemon_dir = tmp.path().join(".atm/daemon");
             std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
             let socket_path = daemon_dir.join("atm-daemon.sock");
 
@@ -3868,8 +3866,8 @@ sleep 8
             "daemon_socket_path must end with 'atm-daemon.sock' on Windows, got: {s}"
         );
         assert!(
-            s.contains(".claude") && s.contains("daemon"),
-            "daemon_socket_path must contain '.claude/daemon' on Windows, got: {s}"
+            s.contains(".atm") && s.contains("daemon"),
+            "daemon_socket_path must contain '.atm/daemon' on Windows, got: {s}"
         );
     }
 
@@ -3885,8 +3883,8 @@ sleep 8
             "daemon_pid_path must end with 'atm-daemon.pid' on Windows, got: {s}"
         );
         assert!(
-            s.contains(".claude") && s.contains("daemon"),
-            "daemon_pid_path must contain '.claude/daemon' on Windows, got: {s}"
+            s.contains(".atm") && s.contains("daemon"),
+            "daemon_pid_path must contain '.atm/daemon' on Windows, got: {s}"
         );
     }
 

@@ -34,7 +34,7 @@ fn setup_team(home: &Path, team: &str) {
 }
 
 fn setup_daemon_status(home: &Path) {
-    let daemon_dir = home.join(".claude/daemon");
+    let daemon_dir = home.join(".atm/daemon");
     fs::create_dir_all(&daemon_dir).expect("create daemon dir");
     let tmp = std::env::temp_dir();
     let spool_path = tmp.join("log-spool").to_string_lossy().into_owned();

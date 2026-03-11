@@ -251,7 +251,7 @@ fn create_test_status_writer(temp_dir: &TempDir) -> Arc<StatusWriter> {
 }
 
 fn create_test_daemon_lock(temp_dir: &TempDir) -> agent_team_mail_core::io::lock::FileLock {
-    let lock_path = temp_dir.path().join(".config/atm/daemon.lock");
+    let lock_path = temp_dir.path().join(".atm/daemon/daemon.lock");
     std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
     agent_team_mail_core::io::lock::acquire_lock(&lock_path, 0).unwrap()
 }

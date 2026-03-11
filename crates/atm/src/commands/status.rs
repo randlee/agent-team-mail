@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn read_daemon_logging_health_parses_extended_fields() {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let daemon_dir = tmp.path().join(".claude/daemon");
+        let daemon_dir = tmp.path().join(".atm/daemon");
         std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
         let sys_tmp = std::env::temp_dir();
         let spool_path = sys_tmp.join("spool").to_string_lossy().into_owned();

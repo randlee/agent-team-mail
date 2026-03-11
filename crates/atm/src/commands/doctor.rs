@@ -460,8 +460,10 @@ fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     let running = daemon_is_running();
-    let socket_path = daemon_socket_path().unwrap_or_else(|_| home_dir.join(".atm/daemon/atm-daemon.sock"));
-    let pid_path = daemon_pid_path().unwrap_or_else(|_| home_dir.join(".atm/daemon/atm-daemon.pid"));
+    let socket_path =
+        daemon_socket_path().unwrap_or_else(|_| home_dir.join(".atm/daemon/atm-daemon.sock"));
+    let pid_path =
+        daemon_pid_path().unwrap_or_else(|_| home_dir.join(".atm/daemon/atm-daemon.pid"));
     let lock_path = home_dir.join(".atm/daemon/daemon.lock");
     let status_path = home_dir.join(".atm/daemon/status.json");
 
@@ -2108,7 +2110,7 @@ mod tests {
     #[test]
     fn check_plugin_init_failures_reports_disabled_init_error() {
         let tmp = tempfile::tempdir().unwrap();
-        let daemon_dir = tmp.path().join(".claude/daemon");
+        let daemon_dir = tmp.path().join(".atm/daemon");
         fs::create_dir_all(&daemon_dir).unwrap();
         fs::write(
             daemon_dir.join("status.json"),

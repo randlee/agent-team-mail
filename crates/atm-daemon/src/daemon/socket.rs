@@ -6830,7 +6830,7 @@ notify_target = "team-lead"
         set_member_backend(temp.path(), "team-a", "a1", "external");
         set_member_backend(temp.path(), "team-b", "b1", "external");
 
-        let persist_path = temp.path().join(".claude/daemon/session-registry.json");
+        let persist_path = temp.path().join(".atm/daemon/session-registry.json");
         {
             let mut seeded = crate::daemon::session_registry::SessionRegistry::with_persist_path(
                 persist_path.clone(),
@@ -6885,7 +6885,7 @@ notify_target = "team-lead"
         // backend validation against the cargo test process.
         set_member_backend(temp.path(), "atm-dev", "arch-ctm", "external");
 
-        let persist_path = temp.path().join(".claude/daemon/session-registry.json");
+        let persist_path = temp.path().join(".atm/daemon/session-registry.json");
         {
             let mut seeded = crate::daemon::session_registry::SessionRegistry::with_persist_path(
                 persist_path.clone(),
@@ -9023,7 +9023,7 @@ exit 1
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
         let daemon_lock = {
-            let path = home_dir.join(".config/atm/daemon.lock");
+            let path = home_dir.join(".atm/daemon/daemon.lock");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
         };
@@ -9057,7 +9057,7 @@ exit 1
         .expect("Expected socket server handle on unix");
 
         // Connect and send a request
-        let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+        let socket_path = home_dir.join(".atm/daemon/atm-daemon.sock");
         let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
 
         let request = SocketRequest {
@@ -9100,7 +9100,7 @@ exit 1
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
         let daemon_lock = {
-            let path = home_dir.join(".config/atm/daemon.lock");
+            let path = home_dir.join(".atm/daemon/daemon.lock");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
         };
@@ -9132,7 +9132,7 @@ exit 1
         .unwrap()
         .expect("Expected socket server handle on unix");
 
-        let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+        let socket_path = home_dir.join(".atm/daemon/atm-daemon.sock");
         let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
 
         let request = SocketRequest {
@@ -9175,7 +9175,7 @@ exit 1
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
         let daemon_lock = {
-            let path = home_dir.join(".config/atm/daemon.lock");
+            let path = home_dir.join(".atm/daemon/daemon.lock");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
         };
@@ -9199,7 +9199,7 @@ exit 1
         .unwrap()
         .expect("Expected socket server handle on unix");
 
-        let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+        let socket_path = home_dir.join(".atm/daemon/atm-daemon.sock");
         let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
 
         let request = SocketRequest {
@@ -9251,7 +9251,7 @@ exit 1
         unsafe { std::env::set_var("ATM_HOME", &home_dir) };
         let cancel = CancellationToken::new();
         let daemon_lock = {
-            let path = home_dir.join(".config/atm/daemon.lock");
+            let path = home_dir.join(".atm/daemon/daemon.lock");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
         };
@@ -9288,7 +9288,7 @@ exit 1
         .unwrap()
         .expect("Expected socket server handle on unix");
 
-        let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+        let socket_path = home_dir.join(".atm/daemon/atm-daemon.sock");
         let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
 
         let control_payload = serde_json::json!({
@@ -9337,7 +9337,7 @@ exit 1
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
         let daemon_lock = {
-            let path = home_dir.join(".config/atm/daemon.lock");
+            let path = home_dir.join(".atm/daemon/daemon.lock");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
         };
@@ -9362,7 +9362,7 @@ exit 1
         .unwrap()
         .expect("Expected socket server handle on unix");
 
-        let pid_path = home_dir.join(".claude/daemon/atm-daemon.pid");
+        let pid_path = home_dir.join(".atm/daemon/atm-daemon.pid");
         assert!(
             pid_path.exists(),
             "PID file should exist after server start"
@@ -10315,7 +10315,7 @@ exit 1
         write_hook_auth_team_config(&home_dir, "atm-dev", "team-lead", &["team-lead"]);
         let cancel = CancellationToken::new();
         let daemon_lock = {
-            let path = home_dir.join(".config/atm/daemon.lock");
+            let path = home_dir.join(".atm/daemon/daemon.lock");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
         };
@@ -10342,7 +10342,7 @@ exit 1
         .unwrap()
         .expect("Expected socket server handle on unix");
 
-        let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+        let socket_path = home_dir.join(".atm/daemon/atm-daemon.sock");
 
         // Send a hook-event/session_start
         let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
@@ -10442,7 +10442,7 @@ exit 1
         write_hook_auth_team_config(&home_dir, "atm-dev", "team-lead", &["team-lead"]);
         let cancel = CancellationToken::new();
         let daemon_lock = {
-            let path = home_dir.join(".config/atm/daemon.lock");
+            let path = home_dir.join(".atm/daemon/daemon.lock");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
         };
@@ -10485,7 +10485,7 @@ exit 1
         .unwrap()
         .expect("Expected socket server handle on unix");
 
-        let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+        let socket_path = home_dir.join(".atm/daemon/atm-daemon.sock");
 
         // ── Step 1: Send hook-event/session_end ───────────────────────────────
         let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
@@ -10594,13 +10594,13 @@ exit 1
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
         let daemon_lock = {
-            let path = home_dir.join(".config/atm/daemon.lock");
+            let path = home_dir.join(".atm/daemon/daemon.lock");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
         };
         let state_store = make_store();
 
-        let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+        let socket_path = home_dir.join(".atm/daemon/atm-daemon.sock");
 
         {
             let launch_tx = new_launch_sender();

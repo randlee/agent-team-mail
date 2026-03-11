@@ -186,7 +186,7 @@ fn test_stale_sent_at_does_not_consume_dedup_slot() {
 
 /// Attempting to query agents when no daemon socket exists must not panic.
 ///
-/// `query_list_agents()` connects to `{ATM_HOME}/.claude/daemon/atm-daemon.sock`.
+/// `query_list_agents()` connects to `{ATM_HOME}/.atm/daemon/atm-daemon.sock`.
 /// When the socket is absent the function must return `Ok(None)`, `Ok(Some(_))`,
 /// or an `Err` — none of which are a panic.  We do NOT set `ATM_HOME` here to
 /// avoid `set_var` races in parallel test execution; the default home path has
@@ -293,7 +293,7 @@ fn test_stale_session_state_tracking() {
     use agent_team_mail_daemon::daemon::{SessionRegistry, SessionState};
 
     // Use an in-memory registry so this test never reads/writes real
-    // ~/.claude/daemon/session-registry.json state from the host machine.
+    // ~/.atm/daemon/session-registry.json state from the host machine.
     let session_registry = std::sync::Arc::new(std::sync::Mutex::new(SessionRegistry::new()));
 
     // Register agent with an active session (pid = i32::MAX, always dead on any real OS).

@@ -78,7 +78,12 @@ fn parse_runtime(value: &str) -> CallerRuntime {
 }
 
 fn runtime_from_process_observation(comm: &str, args: &str) -> CallerRuntime {
-    let comm = comm.rsplit('/').next().unwrap_or(comm).trim().to_ascii_lowercase();
+    let comm = comm
+        .rsplit('/')
+        .next()
+        .unwrap_or(comm)
+        .trim()
+        .to_ascii_lowercase();
     let args = args.trim().to_ascii_lowercase();
     match comm.as_str() {
         "claude" => CallerRuntime::Claude,
