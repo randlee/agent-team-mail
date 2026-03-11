@@ -158,6 +158,40 @@ fn doctor_json_includes_extended_logging_fields() {
 }
 
 #[test]
+fn daemon_status_json_includes_extended_logging_fields() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    setup_daemon_status(temp_dir.path());
+
+    let output = Command::new(cargo::cargo_bin!("atm"))
+        .env("ATM_HOME", temp_dir.path())
+        .env("ATM_DAEMON_AUTOSTART", "0")
+        .arg("daemon")
+        .arg("status")
+        .arg("--json")
+        .output()
+        .expect("run daemon status");
+
+    assert!(
+        output.status.success() || output.status.code() == Some(1),
+        "daemon status failed with unexpected code: {:?}",
+        output.status.code()
+    );
+
+    let body = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let value: Value = serde_json::from_str(&body).expect("daemon status json");
+    assert!(
+        value.get("logging").is_none(),
+        "legacy logging key must not be emitted"
+    );
+    let logging_health = &value["logging_health"];
+    assert_canonical_logging_health(logging_health);
+    assert_eq!(logging_health["state"], "degraded_spooling");
+    assert_eq!(logging_health["spool_file_count"], 3);
+    assert_eq!(logging_health["dropped_events_total"], 2);
+    assert_eq!(logging_health["last_error"]["code"], "DEGRADED_SPOOLING");
+}
+
+#[test]
 fn doctor_and_status_logging_health_schema_parity() {
     let temp_dir = TempDir::new().expect("temp dir");
     setup_team(temp_dir.path(), "atm-dev");
@@ -193,10 +227,28 @@ fn doctor_and_status_logging_health_schema_parity() {
     let doctor_value: Value =
         serde_json::from_slice(&doctor_output.stdout).expect("doctor output JSON");
 
+    let daemon_output = Command::new(cargo::cargo_bin!("atm"))
+        .env("ATM_HOME", temp_dir.path())
+        .env("ATM_DAEMON_AUTOSTART", "0")
+        .arg("daemon")
+        .arg("status")
+        .arg("--json")
+        .output()
+        .expect("run daemon status");
+    assert!(
+        daemon_output.status.success() || daemon_output.status.code() == Some(1),
+        "daemon status failed with unexpected code: {:?}",
+        daemon_output.status.code()
+    );
+    let daemon_value: Value =
+        serde_json::from_slice(&daemon_output.stdout).expect("daemon status output JSON");
+
     let status_health = &status_value["logging_health"];
     let doctor_health = &doctor_value["logging_health"];
+    let daemon_health = &daemon_value["logging_health"];
     assert_canonical_logging_health(status_health);
     assert_canonical_logging_health(doctor_health);
+    assert_canonical_logging_health(daemon_health);
 
     let status_keys = status_health
         .as_object()
@@ -210,9 +262,19 @@ fn doctor_and_status_logging_health_schema_parity() {
         .keys()
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
+    let daemon_keys = daemon_health
+        .as_object()
+        .expect("daemon logging_health object")
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         status_keys, doctor_keys,
         "doctor/status logging_health keys must be identical"
+    );
+    assert_eq!(
+        status_keys, daemon_keys,
+        "daemon/status logging_health keys must be identical"
     );
 
     let status_last_error_keys = status_health["last_error"]
@@ -227,8 +289,18 @@ fn doctor_and_status_logging_health_schema_parity() {
         .keys()
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
+    let daemon_last_error_keys = daemon_health["last_error"]
+        .as_object()
+        .expect("daemon last_error object")
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         status_last_error_keys, doctor_last_error_keys,
         "doctor/status logging_health.last_error keys must be identical"
+    );
+    assert_eq!(
+        status_last_error_keys, daemon_last_error_keys,
+        "daemon/status logging_health.last_error keys must be identical"
     );
 }

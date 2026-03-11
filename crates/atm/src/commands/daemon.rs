@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 
-use crate::commands::logging_health::LoggingHealthSnapshot;
+use crate::commands::logging_health::{LoggingHealthSnapshot, build_logging_health_contract};
 use crate::util::settings::get_home_dir;
 use agent_team_mail_core::daemon_client::daemon_status_path_for;
 
@@ -368,10 +368,17 @@ fn execute_status(args: StatusArgs) -> Result<()> {
     let stale_threshold_secs = 60;
     let is_stale = is_status_stale(&status.timestamp, stale_threshold_secs);
 
+    let logging_health = build_logging_health_contract(&status.logging, &home_dir);
+
     if args.json {
-        // Output as JSON with stale flag
+        // Output as JSON with stale flag and canonical logging schema.
         let mut output = serde_json::to_value(&status)?;
         if let Some(obj) = output.as_object_mut() {
+            obj.remove("logging");
+            obj.insert(
+                "logging_health".to_string(),
+                serde_json::to_value(&logging_health)?,
+            );
             obj.insert("stale".to_string(), serde_json::Value::Bool(is_stale));
         }
         println!("{}", serde_json::to_string_pretty(&output)?);
@@ -447,6 +454,25 @@ fn execute_status(args: StatusArgs) -> Result<()> {
         }
         if let Some(last_error) = &status.logging.last_error {
             println!("  last_error:      {last_error}");
+        }
+        println!("  schema_version:  {}", logging_health.schema_version);
+        println!("  log_root:        {}", logging_health.log_root);
+        println!(
+            "  dropped_events_total: {}",
+            logging_health.dropped_events_total
+        );
+        println!("  spool_file_count: {}", logging_health.spool_file_count);
+        if let Some(oldest_spool_age) = logging_health.oldest_spool_age_seconds {
+            println!("  oldest_spool_age_seconds: {oldest_spool_age}s");
+        }
+        if let Some(last_code) = &logging_health.last_error.code {
+            println!("  last_error.code: {last_code}");
+        }
+        if let Some(last_message) = &logging_health.last_error.message {
+            println!("  last_error.message: {last_message}");
+        }
+        if let Some(last_at) = &logging_health.last_error.at {
+            println!("  last_error.at:   {last_at}");
         }
     }
 
