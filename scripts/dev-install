@@ -167,6 +167,24 @@ def verify_install() -> bool:
     return all_pass
 
 
+def codesign_binary(path: Path) -> None:
+    """Re-sign with ad-hoc signature on macOS to satisfy AMFI CT requirements."""
+    if sys.platform != "darwin":
+        return
+    codesign = shutil.which("codesign")
+    if not codesign:
+        return
+    result = subprocess.run(
+        [codesign, "--sign", "-", "--force", str(path)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"  warning: codesign failed for {path.name}: {result.stderr.strip()}")
+    else:
+        print(f"  codesigned {path.name}")
+
+
 def copy_binaries(src_dir: Path, dst_dir: Path) -> None:
     dst_dir.mkdir(parents=True, exist_ok=True)
     for name in BINARIES:
@@ -174,6 +192,7 @@ def copy_binaries(src_dir: Path, dst_dir: Path) -> None:
         dst = dst_dir / name
         shutil.copy2(src, dst)
         dst.chmod(0o755)
+        codesign_binary(dst)
         print(f"  installed {name}")
 
 
