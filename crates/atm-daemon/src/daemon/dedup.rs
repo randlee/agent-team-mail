@@ -242,7 +242,7 @@ impl DurableDedupeStore {
             .filter(|v| *v > 0)
             .unwrap_or(DEFAULT_TTL_SECS);
 
-        let path = daemon_dedup_path().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let path = daemon_dedup_path().map_err(io::Error::other)?;
         Self::new(path, Duration::from_secs(ttl_secs), capacity)
     }
 
