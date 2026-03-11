@@ -166,6 +166,16 @@ def next_milestone_version(source_dir: Path, current_manifest: Path) -> str:
     cargo_version = read_workspace_version()
 
     last_n = 0
+    atm_dev_root = current_manifest.parent
+
+    if atm_dev_root.exists():
+        for entry in atm_dev_root.iterdir():
+            if not entry.is_dir():
+                continue
+            m = DEV_LABEL_RE.match(entry.name)
+            if m and m.group(1) == cargo_version:
+                last_n = max(last_n, int(m.group(2)))
+
     if current_manifest.exists():
         try:
             current = json.loads(current_manifest.read_text())
@@ -173,8 +183,7 @@ def next_milestone_version(source_dir: Path, current_manifest: Path) -> str:
             if prev_label:
                 m = DEV_LABEL_RE.match(str(prev_label))
                 if m and m.group(1) == cargo_version:
-                    # Same base version — keep incrementing.
-                    last_n = int(m.group(2))
+                    last_n = max(last_n, int(m.group(2)))
         except (json.JSONDecodeError, OSError, ValueError):
             pass
 
