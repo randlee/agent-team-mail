@@ -128,7 +128,7 @@ import time
 from pathlib import Path
 
 home = Path(os.environ["ATM_HOME"])
-daemon_dir = home / ".claude" / "daemon"
+daemon_dir = home / ".atm" / "daemon"
 daemon_dir.mkdir(parents=True, exist_ok=True)
 state_path = daemon_dir / "gh-state.json"
 health_path = daemon_dir / "gh-health.json"

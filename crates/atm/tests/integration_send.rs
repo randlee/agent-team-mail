@@ -47,7 +47,7 @@ import socket
 from pathlib import Path
 
 home = Path(os.environ["ATM_HOME"])
-daemon_dir = home / ".claude" / "daemon"
+daemon_dir = home / ".atm" / "daemon"
 daemon_dir.mkdir(parents=True, exist_ok=True)
 
 sock_path = daemon_dir / "atm-daemon.sock"
@@ -177,7 +177,7 @@ import socket
 from pathlib import Path
 
 home = Path(os.environ["ATM_HOME"])
-daemon_dir = home / ".claude" / "daemon"
+daemon_dir = home / ".atm" / "daemon"
 daemon_dir.mkdir(parents=True, exist_ok=True)
 
 sock_path = daemon_dir / "atm-daemon.sock"

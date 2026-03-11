@@ -55,7 +55,7 @@ import socket
 from pathlib import Path
 
 home = Path(os.environ["ATM_HOME"])
-daemon_dir = home / ".claude" / "daemon"
+daemon_dir = home / ".atm" / "daemon"
 daemon_dir.mkdir(parents=True, exist_ok=True)
 marker_dir = home / "spawn-markers"
 marker_dir.mkdir(parents=True, exist_ok=True)
