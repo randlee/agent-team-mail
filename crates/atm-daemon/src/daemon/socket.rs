@@ -2041,7 +2041,7 @@ fn default_gh_monitor_health(team: &str) -> GhMonitorHealth {
 
 #[cfg(unix)]
 fn gh_monitor_health_path(home: &std::path::Path) -> PathBuf {
-    home.join(".atm/daemon/gh-monitor-health.json")
+    agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(home)
 }
 
 #[cfg(unix)]

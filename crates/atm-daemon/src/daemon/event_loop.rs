@@ -1523,7 +1523,7 @@ fn gh_monitor_plugin_status_projection(
     ctx: &PluginContext,
 ) -> Option<(PluginStatusKind, Option<String>, Option<String>)> {
     let home_dir = ctx.system.claude_root.parent()?.to_path_buf();
-    let path = home_dir.join(".atm/daemon/gh-monitor-health.json");
+    let path = agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(&home_dir);
     let raw = std::fs::read_to_string(path).ok()?;
     let value = serde_json::from_str::<Value>(&raw).ok()?;
     let records = value.get("records")?.as_array()?;

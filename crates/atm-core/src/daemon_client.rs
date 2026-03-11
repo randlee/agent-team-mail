@@ -363,6 +363,11 @@ pub fn daemon_runtime_dir() -> anyhow::Result<PathBuf> {
     Ok(home.join(".atm/daemon"))
 }
 
+/// Compute the daemon runtime directory for an explicit ATM home.
+pub fn daemon_runtime_dir_for(home: &std::path::Path) -> PathBuf {
+    home.join(".atm/daemon")
+}
+
 /// Compute the well-known socket path for the ATM daemon.
 ///
 /// The path is `${ATM_HOME}/.atm/daemon/atm-daemon.sock`.
@@ -392,6 +397,11 @@ pub fn daemon_status_path() -> anyhow::Result<PathBuf> {
     Ok(daemon_runtime_dir()?.join("status.json"))
 }
 
+/// Compute the daemon status snapshot path for an explicit ATM home.
+pub fn daemon_status_path_for(home: &std::path::Path) -> PathBuf {
+    daemon_runtime_dir_for(home).join("status.json")
+}
+
 /// Compute the daemon singleton lock path.
 ///
 /// The path is `${ATM_HOME}/.atm/daemon/daemon.lock`.
@@ -404,6 +414,11 @@ pub fn daemon_lock_path() -> anyhow::Result<PathBuf> {
 /// The path is `${ATM_HOME}/.atm/daemon/daemon.lock.meta.json`.
 pub fn daemon_lock_metadata_path() -> anyhow::Result<PathBuf> {
     Ok(daemon_runtime_dir()?.join("daemon.lock.meta.json"))
+}
+
+/// Compute the daemon lock metadata path for an explicit ATM home.
+pub fn daemon_lock_metadata_path_for(home: &std::path::Path) -> PathBuf {
+    daemon_runtime_dir_for(home).join("daemon.lock.meta.json")
 }
 
 /// Compute the daemon startup serialization lock path.
@@ -425,12 +440,22 @@ pub fn daemon_dedup_path() -> anyhow::Result<PathBuf> {
     Ok(daemon_runtime_dir()?.join("dedup.jsonl"))
 }
 
+/// Compute the gh-monitor health snapshot path.
+pub fn daemon_gh_monitor_health_path() -> anyhow::Result<PathBuf> {
+    Ok(daemon_runtime_dir()?.join("gh-monitor-health.json"))
+}
+
+/// Compute the gh-monitor health snapshot path for an explicit ATM home.
+pub fn daemon_gh_monitor_health_path_for(home: &std::path::Path) -> PathBuf {
+    daemon_runtime_dir_for(home).join("gh-monitor-health.json")
+}
+
 /// Write daemon lock metadata atomically for the current process.
 ///
 /// Called by `atm-daemon` after lock acquisition so CLI identity checks can
 /// validate PID/home-scope/executable coherence.
 pub fn write_daemon_lock_metadata(home: &std::path::Path, version: &str) -> anyhow::Result<()> {
-    let metadata_path = home.join(".atm/daemon/daemon.lock.meta.json");
+    let metadata_path = daemon_lock_metadata_path_for(home);
     if let Some(parent) = metadata_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1834,8 +1859,8 @@ fn detect_daemon_identity_mismatch(
     socket_connectable: bool,
 ) -> Option<String> {
     let pid_path = home.join(".atm/daemon/atm-daemon.pid");
-    let status_path = home.join(".atm/daemon/status.json");
-    let metadata_path = home.join(".atm/daemon/daemon.lock.meta.json");
+    let status_path = daemon_status_path_for(home);
+    let metadata_path = daemon_lock_metadata_path_for(home);
 
     let pid_from_file = std::fs::read_to_string(&pid_path)
         .ok()

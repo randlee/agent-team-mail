@@ -344,6 +344,7 @@ fn format_age(timestamp_ms: u64) -> String {
 mod tests {
     use super::*;
     use agent_team_mail_core::schema::{AgentMember, TeamConfig};
+    use serial_test::serial;
 
     fn member(name: &str) -> AgentMember {
         AgentMember {
@@ -401,7 +402,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn read_daemon_logging_health_parses_extended_fields() {
+        let original_home = std::env::var("ATM_HOME").ok();
         let tmp = tempfile::tempdir().expect("temp dir");
         let daemon_dir = tmp.path().join(".atm/daemon");
         std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
@@ -424,6 +427,7 @@ mod tests {
             .to_string(),
         )
         .expect("write status");
+        unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
 
         let logging = read_daemon_logging_health(tmp.path());
         assert_eq!(logging.state, "degraded_spooling");
@@ -431,6 +435,13 @@ mod tests {
         assert_eq!(logging.spool_count, 3);
         assert_eq!(logging.oldest_spool_age, Some(17));
         assert_eq!(logging.canonical_log_path, log_path);
+
+        unsafe {
+            match original_home {
+                Some(value) => std::env::set_var("ATM_HOME", value),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
     }
 
     #[test]

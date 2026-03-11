@@ -13,6 +13,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use agent_team_mail_core::daemon_client::daemon_dedup_path;
 use chrono::{DateTime, Utc};
 
 /// Default max in-memory dedupe keys when `ATM_DEDUP_CAPACITY` is unset.
@@ -229,7 +230,7 @@ impl DurableDedupeStore {
     /// # Errors
     ///
     /// Propagates I/O errors from [`Self::new`].
-    pub fn from_env(home_dir: &Path) -> io::Result<Self> {
+    pub fn from_env(_home_dir: &Path) -> io::Result<Self> {
         let capacity = std::env::var("ATM_DEDUP_CAPACITY")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -241,7 +242,7 @@ impl DurableDedupeStore {
             .filter(|v| *v > 0)
             .unwrap_or(DEFAULT_TTL_SECS);
 
-        let path = home_dir.join(".atm/daemon/dedup.jsonl");
+        let path = daemon_dedup_path().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         Self::new(path, Duration::from_secs(ttl_secs), capacity)
     }
 
