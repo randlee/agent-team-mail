@@ -343,7 +343,7 @@ fn wait_for_session_dead(team_name: &str, agent_name: &str, timeout_secs: u64) -
 /// Execute daemon status command
 fn execute_status(args: StatusArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
-    let status_path = home_dir.join(".claude/daemon/status.json");
+    let status_path = home_dir.join(".atm/daemon/status.json");
 
     // Check if status file exists
     if !status_path.exists() {

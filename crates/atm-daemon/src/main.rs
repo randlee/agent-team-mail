@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
         agent_team_mail_core::home::get_home_dir().context("Failed to determine home directory")?;
 
     // Enforce single-instance daemon ownership with an exclusive process lock.
-    let daemon_lock_path = home_dir.join(".config/atm/daemon.lock");
+    let daemon_lock_path = home_dir.join(".atm/daemon/daemon.lock");
     std::fs::create_dir_all(
         daemon_lock_path
             .parent()
@@ -275,7 +275,7 @@ async fn main() -> Result<()> {
             // If the error was a corrupted file, the subsequent write will
             // overwrite it; if the directory is inaccessible, we'll log on
             // every insert but the daemon stays running.
-            let path = home_dir.join(".claude/daemon/dedup.jsonl");
+            let path = home_dir.join(".atm/daemon/dedup.jsonl");
             let _ = std::fs::create_dir_all(path.parent().unwrap_or(&home_dir));
             std::sync::Arc::new(std::sync::Mutex::new(
                 agent_team_mail_daemon::daemon::dedup::DurableDedupeStore::new(

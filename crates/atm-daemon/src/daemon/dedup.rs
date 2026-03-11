@@ -170,7 +170,7 @@ impl DurableEntry {
 ///
 /// # File location
 ///
-/// Default: `{home_dir}/.claude/daemon/dedup.jsonl`
+/// Default: `{home_dir}/.atm/daemon/dedup.jsonl`
 ///
 /// Each line is a JSON object:
 /// ```text
@@ -224,7 +224,7 @@ impl DurableDedupeStore {
     /// - `ATM_DEDUP_CAPACITY` (default `1000`)
     /// - `ATM_DEDUP_TTL_SECS` (default `600`)
     ///
-    /// File path: `{home_dir}/.claude/daemon/dedup.jsonl`
+    /// File path: `{home_dir}/.atm/daemon/dedup.jsonl`
     ///
     /// # Errors
     ///
@@ -241,7 +241,7 @@ impl DurableDedupeStore {
             .filter(|v| *v > 0)
             .unwrap_or(DEFAULT_TTL_SECS);
 
-        let path = home_dir.join(".claude/daemon/dedup.jsonl");
+        let path = home_dir.join(".atm/daemon/dedup.jsonl");
         Self::new(path, Duration::from_secs(ttl_secs), capacity)
     }
 

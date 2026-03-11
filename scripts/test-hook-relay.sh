@@ -21,7 +21,7 @@ trap "rm -rf '$TEMP_DIR'" EXIT
 
 # Set ATM_HOME to temp directory
 export ATM_HOME="$TEMP_DIR"
-EVENTS_FILE="$ATM_HOME/.claude/daemon/hooks/events.jsonl"
+EVENTS_FILE="$ATM_HOME/.atm/daemon/hooks/events.jsonl"
 
 # Sample AfterAgent payload from Codex
 SAMPLE_PAYLOAD='{

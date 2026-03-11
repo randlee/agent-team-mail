@@ -378,7 +378,7 @@ fn setup_daemon_writer(
 
     let mut guards = Vec::<Box<dyn std::any::Any + Send>>::new();
     if let Ok(home_dir) = crate::home::get_home_dir() {
-        let daemon_socket = home_dir.join(".claude/daemon/atm-daemon.sock");
+        let daemon_socket = home_dir.join(".atm/daemon/atm-daemon.sock");
         let fallback_spool_dir = crate::logging_event::spool_dir(&home_dir);
 
         match setup_producer_fan_in("atm-daemon", daemon_socket, fallback_spool_dir) {

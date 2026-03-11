@@ -4,7 +4,7 @@
 //! The daemon listens on a Unix domain socket at:
 //!
 //! ```text
-//! ${ATM_HOME}/.claude/daemon/atm-daemon.sock
+//! ${ATM_HOME}/.atm/daemon/atm-daemon.sock
 //! ```
 //!
 //! The protocol is newline-delimited JSON (one request line, one response line per connection):
@@ -354,45 +354,63 @@ pub fn launch_agent(config: &LaunchConfig) -> anyhow::Result<Option<LaunchResult
     }
 }
 
+/// Compute the daemon runtime directory.
+///
+/// The path is `${ATM_HOME}/.atm/daemon`, where `ATM_HOME` is resolved via
+/// [`crate::home::get_home_dir`].
+pub fn daemon_runtime_dir() -> anyhow::Result<PathBuf> {
+    let home = crate::home::get_home_dir()?;
+    Ok(home.join(".atm/daemon"))
+}
+
 /// Compute the well-known socket path for the ATM daemon.
 ///
-/// The path is `${ATM_HOME}/.claude/daemon/atm-daemon.sock`, where `ATM_HOME`
-/// is resolved via [`crate::home::get_home_dir`].
+/// The path is `${ATM_HOME}/.atm/daemon/atm-daemon.sock`.
 ///
 /// # Errors
 ///
 /// Returns an error only if home directory resolution fails.
 pub fn daemon_socket_path() -> anyhow::Result<PathBuf> {
-    let home = crate::home::get_home_dir()?;
-    Ok(home.join(".claude/daemon/atm-daemon.sock"))
+    Ok(daemon_runtime_dir()?.join("atm-daemon.sock"))
 }
 
 /// Compute the well-known PID file path for the ATM daemon.
 ///
-/// The path is `${ATM_HOME}/.claude/daemon/atm-daemon.pid`.
+/// The path is `${ATM_HOME}/.atm/daemon/atm-daemon.pid`.
 ///
 /// # Errors
 ///
 /// Returns an error only if home directory resolution fails.
 pub fn daemon_pid_path() -> anyhow::Result<PathBuf> {
-    let home = crate::home::get_home_dir()?;
-    Ok(home.join(".claude/daemon/atm-daemon.pid"))
+    Ok(daemon_runtime_dir()?.join("atm-daemon.pid"))
+}
+
+/// Compute the daemon status snapshot path.
+///
+/// The path is `${ATM_HOME}/.atm/daemon/status.json`.
+pub fn daemon_status_path() -> anyhow::Result<PathBuf> {
+    Ok(daemon_runtime_dir()?.join("status.json"))
 }
 
 /// Compute the daemon singleton lock path.
 ///
-/// The path is `${ATM_HOME}/.config/atm/daemon.lock`.
+/// The path is `${ATM_HOME}/.atm/daemon/daemon.lock`.
 pub fn daemon_lock_path() -> anyhow::Result<PathBuf> {
-    let home = crate::home::get_home_dir()?;
-    Ok(home.join(".config/atm/daemon.lock"))
+    Ok(daemon_runtime_dir()?.join("daemon.lock"))
 }
 
 /// Compute the daemon singleton lock metadata path.
 ///
-/// The path is `${ATM_HOME}/.config/atm/daemon.lock.meta.json`.
+/// The path is `${ATM_HOME}/.atm/daemon/daemon.lock.meta.json`.
 pub fn daemon_lock_metadata_path() -> anyhow::Result<PathBuf> {
-    let home = crate::home::get_home_dir()?;
-    Ok(home.join(".config/atm/daemon.lock.meta.json"))
+    Ok(daemon_runtime_dir()?.join("daemon.lock.meta.json"))
+}
+
+/// Compute the daemon startup serialization lock path.
+///
+/// The path is `${ATM_HOME}/.atm/daemon/daemon-start.lock`.
+pub fn daemon_start_lock_path() -> anyhow::Result<PathBuf> {
+    Ok(daemon_runtime_dir()?.join("daemon-start.lock"))
 }
 
 /// Write daemon lock metadata atomically for the current process.
@@ -400,7 +418,7 @@ pub fn daemon_lock_metadata_path() -> anyhow::Result<PathBuf> {
 /// Called by `atm-daemon` after lock acquisition so CLI identity checks can
 /// validate PID/home-scope/executable coherence.
 pub fn write_daemon_lock_metadata(home: &std::path::Path, version: &str) -> anyhow::Result<()> {
-    let metadata_path = home.join(".config/atm/daemon.lock.meta.json");
+    let metadata_path = home.join(".atm/daemon/daemon.lock.meta.json");
     if let Some(parent) = metadata_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1493,7 +1511,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
 
     cleanup_stale_daemon_runtime_files(&home);
 
-    let startup_lock_path = home.join(".config/atm/daemon-start.lock");
+    let startup_lock_path = daemon_start_lock_path()?;
     if let Some(parent) = startup_lock_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1627,8 +1645,8 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    let socket_path = home.join(".claude/daemon/atm-daemon.sock");
-    let pid_path = home.join(".claude/daemon/atm-daemon.pid");
+    let socket_path = daemon_socket_path()?;
+    let pid_path = daemon_pid_path()?;
     let timeout_error = format!(
         "daemon startup timed out after 5s; pid_file_exists={}, socket_exists={}, pid_path={}, socket_path={}",
         pid_path.exists(),
@@ -1660,14 +1678,14 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
 #[cfg(unix)]
 fn daemon_socket_connectable(home: &std::path::Path) -> bool {
     use std::os::unix::net::UnixStream;
-    let socket_path = home.join(".claude/daemon/atm-daemon.sock");
+    let socket_path = home.join(".atm/daemon/atm-daemon.sock");
     UnixStream::connect(socket_path).is_ok()
 }
 
 #[cfg(unix)]
 fn cleanup_stale_daemon_runtime_files(home: &std::path::Path) {
-    let socket_path = home.join(".claude/daemon/atm-daemon.sock");
-    let pid_path = home.join(".claude/daemon/atm-daemon.pid");
+    let socket_path = home.join(".atm/daemon/atm-daemon.sock");
+    let pid_path = home.join(".atm/daemon/atm-daemon.pid");
 
     let pid_state = read_daemon_pid_state(&pid_path);
     if matches!(
@@ -1803,9 +1821,9 @@ fn detect_daemon_identity_mismatch(
     home: &std::path::Path,
     socket_connectable: bool,
 ) -> Option<String> {
-    let pid_path = home.join(".claude/daemon/atm-daemon.pid");
-    let status_path = home.join(".claude/daemon/status.json");
-    let metadata_path = home.join(".config/atm/daemon.lock.meta.json");
+    let pid_path = home.join(".atm/daemon/atm-daemon.pid");
+    let status_path = home.join(".atm/daemon/status.json");
+    let metadata_path = home.join(".atm/daemon/daemon.lock.meta.json");
 
     let pid_from_file = std::fs::read_to_string(&pid_path)
         .ok()
@@ -1902,7 +1920,7 @@ fn restart_mismatched_daemon(home: &std::path::Path, reason: &str) -> anyhow::Re
     use crate::event_log::{EventFields, emit_event_best_effort};
     use std::time::Duration;
 
-    let pid_path = home.join(".claude/daemon/atm-daemon.pid");
+    let pid_path = home.join(".atm/daemon/atm-daemon.pid");
     let pid = std::fs::read_to_string(&pid_path)
         .ok()
         .and_then(|s| s.trim().parse::<i32>().ok());
@@ -1949,7 +1967,7 @@ fn restart_mismatched_daemon(home: &std::path::Path, reason: &str) -> anyhow::Re
         }
     }
 
-    let lock_path = home.join(".config/atm/daemon.lock");
+    let lock_path = home.join(".atm/daemon/daemon.lock");
     if let Some(parent) = lock_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -1963,7 +1981,7 @@ fn restart_mismatched_daemon(home: &std::path::Path, reason: &str) -> anyhow::Re
     // Replace runtime files aggressively for identity-mismatch recovery. This is
     // scope-local and avoids broad process sweeps while allowing a fresh daemon
     // to bind canonical paths.
-    let daemon_dir = home.join(".claude/daemon");
+    let daemon_dir = home.join(".atm/daemon");
     let _ = std::fs::remove_file(daemon_dir.join("atm-daemon.sock"));
     let _ = std::fs::remove_file(daemon_dir.join("atm-daemon.pid"));
     let _ = std::fs::remove_file(daemon_dir.join("status.json"));

@@ -72,7 +72,7 @@ struct DaemonStatusSnapshot {
 }
 
 pub(crate) fn read_daemon_logging_health(home_dir: &Path) -> LoggingHealthSnapshot {
-    let status_path = home_dir.join(".claude/daemon/status.json");
+    let status_path = home_dir.join(".atm/daemon/status.json");
     let Ok(content) = fs::read_to_string(status_path) else {
         return LoggingHealthSnapshot::default();
     };

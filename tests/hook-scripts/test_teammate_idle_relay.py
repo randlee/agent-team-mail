@@ -70,7 +70,7 @@ class TestTeammateIdleRelayFileWrite(unittest.TestCase):
                 Path(tmpdir, ".atm.toml").write_text(_TOML_WITH_TEAM)
                 rc = self._run(_make_payload(), atm_home=atm_home)
                 self.assertEqual(rc, 0)
-                events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
+                events_file = atm_home / ".atm" / "daemon" / "hooks" / "events.jsonl"
                 self.assertTrue(events_file.exists())
                 lines = events_file.read_text().strip().splitlines()
                 self.assertEqual(len(lines), 1)
@@ -90,7 +90,7 @@ class TestTeammateIdleRelayFileWrite(unittest.TestCase):
                 Path(tmpdir, ".atm.toml").write_text(_TOML_WITH_TEAM)
                 for _ in range(3):
                     self._run(_make_payload(), atm_home=atm_home)
-                events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
+                events_file = atm_home / ".atm" / "daemon" / "hooks" / "events.jsonl"
                 lines = events_file.read_text().strip().splitlines()
                 self.assertEqual(len(lines), 3)
             finally:
@@ -108,7 +108,7 @@ class TestTeammateIdleRelayFileWrite(unittest.TestCase):
                 payload = {"name": "arch-ctm", "session_id": "s1"}
                 rc = self._run(payload, atm_home=atm_home)
                 self.assertEqual(rc, 0)
-                events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
+                events_file = atm_home / ".atm" / "daemon" / "hooks" / "events.jsonl"
                 event = json.loads(events_file.read_text().strip())
                 self.assertEqual(event["team"], "toml-team")
             finally:
@@ -125,7 +125,7 @@ class TestTeammateIdleRelayFileWrite(unittest.TestCase):
                 Path(tmpdir, ".atm.toml").write_text(_TOML_WITH_TEAM)
                 rc = self._run(_make_payload(), atm_home=atm_home, parent_pid=expected_parent_pid)
                 self.assertEqual(rc, 0)
-                events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
+                events_file = atm_home / ".atm" / "daemon" / "hooks" / "events.jsonl"
                 event = json.loads(events_file.read_text().strip().splitlines()[0])
                 self.assertIn("process_id", event)
                 self.assertEqual(event["process_id"], expected_parent_pid)
@@ -167,7 +167,7 @@ class TestTeammateIdleRelaySocketSend(unittest.TestCase):
         def capture_send(data: bytes):
             send_calls.append(data)
 
-        sock_dir = atm_home / ".claude" / "daemon"
+        sock_dir = atm_home / ".atm" / "daemon"
         sock_dir.mkdir(parents=True, exist_ok=True)
         if socket_file_exists:
             (sock_dir / "atm-daemon.sock").touch()
@@ -274,7 +274,7 @@ class TestTeammateIdleRelaySocketSend(unittest.TestCase):
                 socket_file_exists=True,
                 socket_side_effect=ConnectionRefusedError("daemon not running"),
             )
-            events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
+            events_file = atm_home / ".atm" / "daemon" / "hooks" / "events.jsonl"
             self.assertEqual(rc, 0)
             self.assertTrue(events_file.exists(), "events.jsonl must exist even on socket error")
 
@@ -336,7 +336,7 @@ class TestTeammateIdleRelayRealPayload(unittest.TestCase):
                 Path(tmpdir, ".atm.toml").write_text(_TOML_WITH_TEAM)
                 rc = self._run(real_payload, atm_home=atm_home)
                 self.assertEqual(rc, 0)
-                events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
+                events_file = atm_home / ".atm" / "daemon" / "hooks" / "events.jsonl"
                 self.assertTrue(events_file.exists(), "Event should be written for real payload")
                 event = json.loads(events_file.read_text().strip())
                 self.assertEqual(event["agent"], "sm-e-7")
@@ -360,7 +360,7 @@ class TestTeammateIdleRelayRealPayload(unittest.TestCase):
                 Path(tmpdir, ".atm.toml").write_text(_TOML_WITH_TEAM)
                 rc = self._run(payload, atm_home=atm_home)
                 self.assertEqual(rc, 0)
-                events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
+                events_file = atm_home / ".atm" / "daemon" / "hooks" / "events.jsonl"
                 event = json.loads(events_file.read_text().strip())
                 self.assertEqual(event["agent"], "real-agent",
                                  "teammate_name should be preferred over name")
@@ -398,7 +398,7 @@ class TestTeammateIdleRelayGuards(unittest.TestCase):
         # No socket send
         self.assertEqual(socket_calls, [], "Socket must not be called when .atm.toml is absent")
         # No file write — events.jsonl must not exist
-        events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
+        events_file = atm_home / ".atm" / "daemon" / "hooks" / "events.jsonl"
         self.assertFalse(
             events_file.exists(),
             "events.jsonl must NOT be created when .atm.toml is absent"
@@ -441,7 +441,7 @@ class TestTeammateIdleRelayGuards(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         self.assertEqual(socket_calls, [], "Socket must not be called when tomllib is unavailable")
-        events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
+        events_file = atm_home / ".atm" / "daemon" / "hooks" / "events.jsonl"
         self.assertFalse(
             events_file.exists(),
             "events.jsonl must NOT be created when tomllib is unavailable"
@@ -477,7 +477,7 @@ class TestTeammateIdleRelayGuards(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         self.assertEqual(socket_calls, [], "Socket must not be called when agent/team are missing")
-        events_file = atm_home / ".claude" / "daemon" / "hooks" / "events.jsonl"
+        events_file = atm_home / ".atm" / "daemon" / "hooks" / "events.jsonl"
         self.assertFalse(
             events_file.exists(),
             "events.jsonl must NOT be created when agent/team are unresolved"

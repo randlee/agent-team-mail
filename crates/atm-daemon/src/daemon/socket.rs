@@ -3,7 +3,7 @@
 //! The daemon listens on a Unix domain socket at:
 //!
 //! ```text
-//! ${ATM_HOME}/.claude/daemon/atm-daemon.sock
+//! ${ATM_HOME}/.atm/daemon/atm-daemon.sock
 //! ```
 //!
 //! Each client connection follows a simple request/response protocol:
@@ -61,7 +61,7 @@ pub type SharedDedupeStore = std::sync::Arc<std::sync::Mutex<DurableDedupeStore>
 /// Create a new [`SharedDedupeStore`] from the given home directory.
 ///
 /// Reads `ATM_DEDUP_CAPACITY` and `ATM_DEDUP_TTL_SECS` from the environment.
-/// The backing file is `{home_dir}/.claude/daemon/dedup.jsonl`.
+/// The backing file is `{home_dir}/.atm/daemon/dedup.jsonl`.
 ///
 /// # Errors
 ///
@@ -298,7 +298,7 @@ async fn start_unix_socket_server(
 ) -> Result<SocketServerHandle> {
     use tokio::net::UnixListener;
 
-    let daemon_dir = home_dir.join(".claude/daemon");
+    let daemon_dir = home_dir.join(".atm/daemon");
     let socket_path = daemon_dir.join("atm-daemon.sock");
     let pid_path = daemon_dir.join("atm-daemon.pid");
 
@@ -2041,7 +2041,7 @@ fn default_gh_monitor_health(team: &str) -> GhMonitorHealth {
 
 #[cfg(unix)]
 fn gh_monitor_health_path(home: &std::path::Path) -> PathBuf {
-    home.join(".claude/daemon/gh-monitor-health.json")
+    home.join(".atm/daemon/gh-monitor-health.json")
 }
 
 #[cfg(unix)]
@@ -3991,7 +3991,7 @@ fn derive_pr_url(
 
 #[cfg(unix)]
 fn gh_monitor_state_path(home: &std::path::Path) -> PathBuf {
-    home.join(".claude/daemon/gh-monitor-state.json")
+    home.join(".atm/daemon/gh-monitor-state.json")
 }
 
 #[cfg(unix)]

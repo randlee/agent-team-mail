@@ -501,7 +501,7 @@ pub fn new_session_registry() -> SharedSessionRegistry {
     #[cfg(not(test))]
     let registry = match agent_team_mail_core::home::get_home_dir() {
         Ok(home) => {
-            let path = home.join(".claude/daemon/session-registry.json");
+            let path = home.join(".atm/daemon/session-registry.json");
             SessionRegistry::load_or_new(path)
         }
         Err(_) => SessionRegistry::new(),
