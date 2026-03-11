@@ -54,7 +54,7 @@ class TestSessionEnd(unittest.TestCase):
                     Path(tmpdir, ".atm.toml").write_text(toml_content)
 
                 atm_home = Path(tmpdir)
-                sock_dir = atm_home / ".claude" / "daemon"
+                sock_dir = atm_home / ".atm" / "daemon"
                 sock_dir.mkdir(parents=True, exist_ok=True)
                 if socket_file_exists:
                     (sock_dir / "atm-daemon.sock").touch()
@@ -151,7 +151,7 @@ class TestSessionEnd(unittest.TestCase):
                 os.chdir(tmpdir)
                 Path(tmpdir, ".atm.toml").write_text(toml)
                 atm_home = Path(tmpdir)
-                sock_dir = atm_home / ".claude" / "daemon"
+                sock_dir = atm_home / ".atm" / "daemon"
                 sock_dir.mkdir(parents=True, exist_ok=True)
                 (sock_dir / "atm-daemon.sock").touch()
 
