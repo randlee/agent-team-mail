@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    AgentSummary, CanonicalMemberState, SessionQueryResult, daemon_is_running, daemon_pid_path,
-    daemon_socket_path, query_list_agents, query_list_agents_for_team, query_session_for_team,
-    query_team_member_states,
+    AgentSummary, CanonicalMemberState, SessionQueryResult, daemon_is_running, daemon_lock_path,
+    daemon_pid_path, daemon_socket_path, daemon_status_path, query_list_agents,
+    query_list_agents_for_team, query_session_for_team, query_team_member_states,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::log_reader::{LogFilter, LogReader};
@@ -464,8 +464,9 @@ fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
         daemon_socket_path().unwrap_or_else(|_| home_dir.join(".atm/daemon/atm-daemon.sock"));
     let pid_path =
         daemon_pid_path().unwrap_or_else(|_| home_dir.join(".atm/daemon/atm-daemon.pid"));
-    let lock_path = home_dir.join(".atm/daemon/daemon.lock");
-    let status_path = home_dir.join(".atm/daemon/status.json");
+    let lock_path = daemon_lock_path().unwrap_or_else(|_| home_dir.join(".atm/daemon/daemon.lock"));
+    let status_path =
+        daemon_status_path().unwrap_or_else(|_| home_dir.join(".atm/daemon/status.json"));
 
     if !running {
         findings.push(finding(

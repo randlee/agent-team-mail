@@ -1274,9 +1274,12 @@ Required behavior:
   `process_id`) directly in team `config.json`; these are daemon-owned via
   session registry.
 - On daemon cold start (or when no live registry record exists for a configured
-  member), daemon may bootstrap a session-registry record from roster hints only
-  when `processId` is present and alive. Backend validation mismatch is
-  diagnostic-only and must not block bootstrap registration.
+  member), daemon bootstraps a session-registry record via two strategies: (1)
+  from roster hints when `processId` is present and alive (primary path), and
+  (2) from existing session files when roster hints are absent (secondary path).
+  During the session-file bootstrap scan, daemon prunes dead, stale, or corrupt
+  session files as a side-effect. Backend validation mismatch is diagnostic-only
+  and must not block bootstrap registration.
 - `atm send` PID fallback detection must use the same strict backend rules as the
   daemon validator (`claude=basename(comm):claude`,
   `codex=basename(comm):codex`, `gemini=basename(comm):node+args~gemini`) and

@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
         agent_team_mail_core::home::get_home_dir().context("Failed to determine home directory")?;
 
     // Enforce single-instance daemon ownership with an exclusive process lock.
-    let daemon_lock_path = home_dir.join(".atm/daemon/daemon.lock");
+    let daemon_lock_path = agent_team_mail_core::daemon_client::daemon_lock_path()?;
     std::fs::create_dir_all(
         daemon_lock_path
             .parent()
