@@ -164,15 +164,7 @@ fn query_daemon_session(team: Option<&str>, identity: Option<&str>) -> Option<Se
 
 fn runtime_hint(daemon: Option<&SessionQueryResult>) -> CallerRuntime {
     let _ = daemon;
-    // Skip process-tree tracing in the test harness: the ambient parent process
-    // (e.g. `claude`) would shadow ATM_RUNTIME/CODEX_THREAD_ID set by individual tests.
-    if !running_test_harness() {
-        let traced = runtime_from_process_tree();
-        if traced != CallerRuntime::Unknown {
-            return traced;
-        }
-    }
-
+    // Direct runtime signals are more specific than an ambient ancestor process.
     if let Some(runtime) = env_var_nonempty("ATM_RUNTIME") {
         let parsed = parse_runtime(&runtime);
         if parsed != CallerRuntime::Unknown {
@@ -182,6 +174,11 @@ fn runtime_hint(daemon: Option<&SessionQueryResult>) -> CallerRuntime {
 
     if env_var_nonempty("CODEX_THREAD_ID").is_some() {
         return CallerRuntime::Codex;
+    }
+
+    let traced = runtime_from_process_tree();
+    if traced != CallerRuntime::Unknown {
+        return traced;
     }
 
     if env_var_nonempty("CLAUDE_SESSION_ID").is_some() {
@@ -615,8 +612,8 @@ where
 ///
 /// Precedence:
 /// 1) `ATM_SESSION_ID`
-/// 2) runtime-native env (`CLAUDE_SESSION_ID` / `CODEX_THREAD_ID`)
-/// 3) runtime-specific resolution path
+/// 2) runtime-native env for non-Claude runtimes (`CODEX_THREAD_ID`)
+/// 3) runtime-specific resolution path (`hook > CLAUDE_SESSION_ID > session file` for Claude)
 /// 4) daemon session registry (team+identity scoped, alive only)
 pub fn resolve_caller_session_id_optional(
     team: Option<&str>,
