@@ -754,9 +754,13 @@ mod tests {
     #[test]
     #[serial]
     fn daemon_ambiguity_surfaces_stable_code() {
+        let temp = TempDir::new().unwrap();
         let hook_path = current_ppid_hook_path();
         let _ = std::fs::remove_file(&hook_path);
         unsafe {
+            std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("ATM_TEST_HOME", temp.path());
+            std::env::remove_var("ATM_RUNTIME");
             std::env::remove_var("ATM_SESSION_ID");
             std::env::remove_var("CLAUDE_SESSION_ID");
             std::env::remove_var("CODEX_THREAD_ID");
@@ -768,6 +772,15 @@ mod tests {
             |_team, _identity| bail!("Ambiguous: daemon found multiple sessions"),
         )
         .expect_err("expected ambiguity");
+
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("ATM_TEST_HOME");
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("ATM_SESSION_ID");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+            std::env::remove_var("CODEX_THREAD_ID");
+        }
 
         assert!(err.to_string().contains(CALLER_AMBIGUOUS));
     }
