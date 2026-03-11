@@ -34,6 +34,17 @@ fn new_reconcile_cycle_state() -> SharedCycleState {
     Arc::new(std::sync::Mutex::new(ReconcileCycleState::default()))
 }
 
+/// Wait for a daemon shutdown task to finish within `timeout`.
+///
+/// Shutdown tasks are expected to honor the shared [`CancellationToken`] and
+/// exit promptly once cancellation is requested. `abort()` is a last-resort
+/// fallback used only after the cooperative timeout has expired.
+///
+/// This helper is intentionally status-agnostic. Non-plugin callers use it for
+/// internal daemon tasks where the only required behavior is bounded shutdown
+/// latency plus best-effort logging. Plugin degraded-state transitions remain
+/// the responsibility of plugin lifecycle/status code, not this generic join
+/// helper.
 async fn wait_for_shutdown_task<T>(task_name: &str, mut handle: JoinHandle<T>, timeout: Duration)
 where
     T: Send + 'static,

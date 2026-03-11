@@ -8,8 +8,16 @@ use tracing::{error, info, warn};
 
 /// Perform graceful shutdown of all plugins.
 ///
-/// Calls shutdown() on each plugin with a timeout. If any plugin exceeds the
-/// timeout, it's logged as a warning and shutdown continues for remaining plugins.
+/// Calls `shutdown()` on each plugin sequentially with a per-plugin timeout.
+/// Worst-case shutdown latency for this phase is therefore `plugins.len() *
+/// shutdown_timeout` when every plugin stalls until timeout.
+///
+/// This function intentionally preserves bounded forward progress over perfect
+/// plugin cleanup. If any plugin exceeds the timeout, it is logged as a warning
+/// and shutdown continues for remaining plugins.
+///
+/// TODO(#539): evaluate parallel plugin shutdown so the worst-case latency is
+/// bounded by one timeout window instead of `N * shutdown_timeout`.
 ///
 /// # Arguments
 ///
