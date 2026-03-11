@@ -47,7 +47,7 @@ import socket
 from pathlib import Path
 
 home = Path(os.environ["ATM_HOME"])
-daemon_dir = home / ".claude" / "daemon"
+daemon_dir = home / ".atm" / "daemon"
 daemon_dir.mkdir(parents=True, exist_ok=True)
 
 sock_path = daemon_dir / "atm-daemon.sock"
@@ -134,7 +134,7 @@ finally:
 
 #[cfg(unix)]
 fn wait_for_daemon_socket(home: &Path) {
-    let socket = home.join(".claude/daemon/atm-daemon.sock");
+    let socket = home.join(".atm/daemon/atm-daemon.sock");
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
         if socket.exists() {
@@ -177,7 +177,7 @@ import socket
 from pathlib import Path
 
 home = Path(os.environ["ATM_HOME"])
-daemon_dir = home / ".claude" / "daemon"
+daemon_dir = home / ".atm" / "daemon"
 daemon_dir.mkdir(parents=True, exist_ok=True)
 
 sock_path = daemon_dir / "atm-daemon.sock"

@@ -21,6 +21,7 @@ fn configure_cmd(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     cmd.env("ATM_HOME", temp_dir.path())
         .env_remove("ATM_TEAM")
         .env_remove("ATM_IDENTITY")
+        .env("ATM_RUNTIME", "claude")
         .env_remove("ATM_SESSION_ID")
         .env_remove("ATM_CONFIG")
         .env_remove("CLAUDE_SESSION_ID")

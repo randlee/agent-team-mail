@@ -142,7 +142,7 @@ class TestSessionStartSocketSend(unittest.TestCase):
 
                 # Create a fake socket file when requested
                 atm_home = Path(tmpdir)
-                sock_dir = atm_home / ".claude" / "daemon"
+                sock_dir = atm_home / ".atm" / "daemon"
                 sock_dir.mkdir(parents=True, exist_ok=True)
                 sock_path = sock_dir / "atm-daemon.sock"
                 if socket_file_exists:
@@ -237,7 +237,7 @@ class TestSessionStartSocketSend(unittest.TestCase):
                 os.chdir(tmpdir)
                 Path(tmpdir, ".atm.toml").write_text(toml)
                 atm_home = Path(tmpdir)
-                sock_dir = atm_home / ".claude" / "daemon"
+                sock_dir = atm_home / ".atm" / "daemon"
                 sock_dir.mkdir(parents=True, exist_ok=True)
                 (sock_dir / "atm-daemon.sock").touch()
                 if platform.system() == "Windows":
@@ -304,7 +304,7 @@ class TestSessionStartSocketSend(unittest.TestCase):
                 os.chdir(tmpdir)
                 Path(tmpdir, ".atm.toml").write_text(toml)
                 atm_home = Path(tmpdir)
-                sock_dir = atm_home / ".claude" / "daemon"
+                sock_dir = atm_home / ".atm" / "daemon"
                 sock_dir.mkdir(parents=True, exist_ok=True)
                 (sock_dir / "atm-daemon.sock").touch()
                 if platform.system() == "Windows":

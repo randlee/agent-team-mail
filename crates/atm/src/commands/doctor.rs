@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    AgentSummary, CanonicalMemberState, SessionQueryResult, daemon_is_running, daemon_pid_path,
-    daemon_socket_path, query_list_agents, query_list_agents_for_team, query_session_for_team,
-    query_team_member_states,
+    AgentSummary, CanonicalMemberState, SessionQueryResult, daemon_is_running, daemon_lock_path,
+    daemon_pid_path, daemon_socket_path, daemon_status_path_for, query_list_agents,
+    query_list_agents_for_team, query_session_for_team, query_team_member_states,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::log_reader::{LogFilter, LogReader};
@@ -84,6 +84,10 @@ struct Summary {
     generated_at: String,
     has_critical: bool,
     counts: FindingCounts,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    daemon_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    install_milestone: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +148,8 @@ struct DoctorState {
 
 #[derive(Debug, Clone, Deserialize)]
 struct DaemonStatusSnapshot {
+    #[serde(default)]
+    version: Option<String>,
     #[serde(default)]
     plugins: Vec<PluginStatusSnapshot>,
     #[serde(default)]
@@ -309,8 +315,14 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
         generated_at: now.to_rfc3339(),
         has_critical: counts.critical > 0,
         counts,
+        daemon_version: None,
+        install_milestone: read_active_install_milestone(),
     };
     let daemon_status = read_daemon_status(home_dir);
+    let summary = Summary {
+        daemon_version: daemon_status.version.clone(),
+        ..summary
+    };
     let logging = daemon_status.logging;
     let logging_health = build_logging_health_contract(&logging, home_dir);
 
@@ -449,11 +461,11 @@ fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
 
     let running = daemon_is_running();
     let socket_path =
-        daemon_socket_path().unwrap_or_else(|_| home_dir.join(".claude/daemon/atm-daemon.sock"));
+        daemon_socket_path().unwrap_or_else(|_| home_dir.join(".atm/daemon/atm-daemon.sock"));
     let pid_path =
-        daemon_pid_path().unwrap_or_else(|_| home_dir.join(".claude/daemon/atm-daemon.pid"));
-    let lock_path = home_dir.join(".config/atm/daemon.lock");
-    let status_path = home_dir.join(".claude/daemon/status.json");
+        daemon_pid_path().unwrap_or_else(|_| home_dir.join(".atm/daemon/atm-daemon.pid"));
+    let lock_path = daemon_lock_path().unwrap_or_else(|_| home_dir.join(".atm/daemon/daemon.lock"));
+    let status_path = daemon_status_path_for(home_dir);
 
     if !running {
         findings.push(finding(
@@ -543,17 +555,35 @@ fn check_plugin_init_failures(home_dir: &Path) -> Vec<Finding> {
 }
 
 fn read_daemon_status(home_dir: &Path) -> DaemonStatusSnapshot {
-    let status_path = home_dir.join(".claude/daemon/status.json");
+    let status_path = daemon_status_path_for(home_dir);
     let Ok(raw) = fs::read_to_string(&status_path) else {
         return DaemonStatusSnapshot {
+            version: None,
             plugins: Vec::new(),
             logging: LoggingHealthSnapshot::default(),
         };
     };
     serde_json::from_str(&raw).unwrap_or(DaemonStatusSnapshot {
+        version: None,
         plugins: Vec::new(),
         logging: LoggingHealthSnapshot::default(),
     })
+}
+
+fn read_active_install_milestone() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let bin_dir = exe.parent()?;
+    if bin_dir.file_name()?.to_str()? != "bin" {
+        return None;
+    }
+
+    let manifest_path = bin_dir.parent()?.join("manifest.json");
+    let raw = fs::read_to_string(manifest_path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    value
+        .get("milestone_version")
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string)
 }
 
 fn check_pid_session_reconciliation_with_query<F>(
@@ -1156,6 +1186,12 @@ fn render_human(report: &DoctorReport) -> String {
         "Findings: critical={} warn={} info={}\n",
         report.summary.counts.critical, report.summary.counts.warn, report.summary.counts.info
     ));
+    if let Some(version) = &report.summary.daemon_version {
+        out.push_str(&format!("Daemon version: {version}\n"));
+    }
+    if let Some(milestone) = &report.summary.install_milestone {
+        out.push_str(&format!("Install milestone: {milestone}\n"));
+    }
     out.push_str(&format!(
         "Log window: {}\n\n",
         render_log_window_human(&report.log_window)
@@ -2072,9 +2108,11 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn check_plugin_init_failures_reports_disabled_init_error() {
+        let _guard = EnvGuard::isolate(OVERRIDE_ENV_KEYS);
         let tmp = tempfile::tempdir().unwrap();
-        let daemon_dir = tmp.path().join(".claude/daemon");
+        let daemon_dir = tmp.path().join(".atm/daemon");
         fs::create_dir_all(&daemon_dir).unwrap();
         fs::write(
             daemon_dir.join("status.json"),
@@ -2086,6 +2124,7 @@ mod tests {
 }"#,
         )
         .unwrap();
+        unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
 
         let findings = check_plugin_init_failures(tmp.path());
         assert_eq!(findings.len(), 1);
@@ -2145,6 +2184,8 @@ mod tests {
                     warn: 1,
                     info: 0,
                 },
+                daemon_version: Some("0.44.1".to_string()),
+                install_milestone: Some("0.44.2".to_string()),
             },
             findings: vec![finding(
                 Severity::Warn,
@@ -2238,6 +2279,8 @@ mod tests {
                     warn: 0,
                     info: 0,
                 },
+                daemon_version: Some("0.44.1".to_string()),
+                install_milestone: Some("0.44.2".to_string()),
             },
             findings: vec![],
             recommendations: vec![],
@@ -2364,6 +2407,8 @@ mod tests {
                     warn: 0,
                     info: 0,
                 },
+                daemon_version: Some("0.44.1".to_string()),
+                install_milestone: Some("0.44.2".to_string()),
             },
             findings: vec![],
             recommendations: vec![],
@@ -2412,6 +2457,8 @@ mod tests {
                     warn: 0,
                     info: 0,
                 },
+                daemon_version: Some("0.44.1".to_string()),
+                install_milestone: Some("0.44.2".to_string()),
             },
             findings: vec![],
             recommendations: vec![],

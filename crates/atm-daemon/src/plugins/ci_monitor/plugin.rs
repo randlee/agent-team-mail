@@ -777,11 +777,11 @@ impl CiMonitorPlugin {
     }
 
     fn write_disabled_health_record(ctx: &PluginContext, team: &str, message: &str) {
-        let path = ctx
-            .system
-            .claude_root
-            .join("daemon")
-            .join("gh-monitor-health.json");
+        let Some(home_dir) = ctx.system.claude_root.parent() else {
+            warn!("CI Monitor: failed to derive ATM home for health file");
+            return;
+        };
+        let path = agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(home_dir);
         let mut file = match std::fs::read_to_string(&path) {
             Ok(raw) => match serde_json::from_str::<GhMonitorHealthFile>(&raw) {
                 Ok(parsed) => parsed,

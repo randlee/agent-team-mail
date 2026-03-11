@@ -1,37 +1,29 @@
 #!/usr/bin/env python3
-"""dev-install: Build and install ATM binaries to the dev channel.
+"""dev-install: Copy prebuilt ATM binaries into the active dev channel bin dir.
 
-Builds all ATM binaries from source, saves a versioned backup, overwrites the
-active ~/.local/atm-dev/bin/ in place, restarts the daemon, and runs
-post-install verification.
+This script does not build binaries and does not manage shell environment files.
+It simply copies a chosen binary source directory into the active dev install.
 
-No symlinks. PATH always points to ~/.local/atm-dev/bin/ — files swap
-underneath without requiring session restarts.
+Default source:
+    <repo>/target/release
 
-Usage:
-    dev-install [--repo <path>] [--allow-dirty] [--skip-build]
-
-Options:
-    --repo <path>     Path to the repository root (default: parent of scripts/)
-    --allow-dirty     Skip the dirty-worktree check
-    --skip-build      Skip cargo build; use existing target/release/ binaries
-    -h, --help        Show this help message
+Examples:
+    dev-install
+    dev-install --source /opt/homebrew/bin --label release-0.43.4
+    dev-install --homebrew --label release-latest
 """
 
 import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 
 BINARIES = [
     "atm",
@@ -41,37 +33,21 @@ BINARIES = [
     "sc-compose",
 ]
 
-CARGO_PACKAGES = [
-    "agent-team-mail",
-    "agent-team-mail-daemon",
-    "agent-team-mail-mcp",
-    "agent-team-mail-tui",
-    "sc-compose",
-]
+ATM_DEV_ROOT = None
+BIN_DIR = None
+SEMVER_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
-ATM_DEV_ROOT = Path.home() / ".local" / "atm-dev"
-ATM_HOME = Path.home() / ".local" / "share" / "atm-dev" / "home"
-BIN_DIR = ATM_DEV_ROOT / "bin"
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def die(msg: str) -> None:
     print(f"error: {msg}", file=sys.stderr)
     sys.exit(1)
 
 
-def run(cmd: list, *, cwd: Path = None, capture: bool = False,
-        env: dict = None) -> subprocess.CompletedProcess:
+def run(cmd: list, *, capture: bool = False) -> subprocess.CompletedProcess:
     display = " ".join(str(c) for c in cmd)
     print(f"  $ {display}")
     try:
-        return subprocess.run(
-            cmd, check=True, cwd=cwd,
-            capture_output=capture, text=True, env=env,
-        )
+        return subprocess.run(cmd, check=True, capture_output=capture, text=True)
     except subprocess.CalledProcessError as exc:
         msg = f"command failed (exit {exc.returncode}): {display}"
         if capture and exc.stderr:
@@ -79,8 +55,23 @@ def run(cmd: list, *, cwd: Path = None, capture: bool = False,
         die(msg)
 
 
-def run_capture(cmd: list, *, cwd: Path = None) -> str:
-    return run(cmd, cwd=cwd, capture=True).stdout.strip()
+def run_capture(cmd: list) -> str:
+    return run(cmd, capture=True).stdout.strip()
+
+
+def resolve_dev_paths() -> tuple:
+    global ATM_DEV_ROOT, BIN_DIR
+
+    if ATM_DEV_ROOT is not None and BIN_DIR is not None:
+        return ATM_DEV_ROOT, BIN_DIR
+
+    daemon_bin = os.environ.get("ATM_DAEMON_BIN", "").strip()
+    if not daemon_bin:
+        die("ATM_DAEMON_BIN must be set in the environment before running dev-install")
+
+    BIN_DIR = Path(daemon_bin).expanduser().resolve().parent
+    ATM_DEV_ROOT = BIN_DIR.parent
+    return ATM_DEV_ROOT, BIN_DIR
 
 
 def sha256_file(path: Path) -> str:
@@ -91,87 +82,83 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def dev_env() -> dict:
-    """Build subprocess environment pointing at the active bin/ dir."""
-    env = os.environ.copy()
-    env["ATM_HOME"] = str(ATM_HOME)
-    env["ATM_DAEMON_BIN"] = str(BIN_DIR / "atm-daemon")
-    env["ATM_CHANNEL"] = "dev"
-    env["PATH"] = str(BIN_DIR) + os.pathsep + env.get("PATH", "")
-    return env
+def parse_semver(text: str) -> tuple[int, int, int] | None:
+    match = SEMVER_RE.search(text)
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups())
 
 
-def write_env_sh() -> None:
-    """Write ~/.local/atm-dev/env.sh with the canonical dev environment."""
-    ATM_DEV_ROOT.mkdir(parents=True, exist_ok=True)
-    env_sh = ATM_DEV_ROOT / "env.sh"
-    content = (
-        "# ATM dev channel environment\n"
-        "# Add to ~/.zshrc: source ~/.local/atm-dev/env.sh\n"
-        'export ATM_DEV_ROOT="$HOME/.local/atm-dev"\n'
-        'export ATM_HOME="$HOME/.local/share/atm-dev/home"\n'
-        'export PATH="$ATM_DEV_ROOT/bin:$PATH"\n'
-        'export ATM_DAEMON_BIN="$ATM_DEV_ROOT/bin/atm-daemon"\n'
-        'export ATM_CHANNEL=dev\n'
-    )
-    env_sh.write_text(content)
-    print(f"  wrote {env_sh}")
+def format_semver(version: tuple[int, int, int]) -> str:
+    major, minor, patch = version
+    return f"{major}.{minor}.{patch}"
 
 
-def save_backup(label: str, binary_entries: list, git_sha: str,
-                git_branch: str, rust_toolchain: str, dirty: bool,
-                repo: Path) -> Path:
-    """Copy current bin/ to <label>/ as a versioned backup."""
-    backup_dir = ATM_DEV_ROOT / label / "bin"
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    for name in BINARIES:
-        src = BIN_DIR / name
-        if src.exists():
-            shutil.copy2(src, backup_dir / name)
-    manifest = {
-        "label": label,
-        "git_sha": git_sha,
-        "git_branch": git_branch,
-        "build_timestamp": datetime.now(timezone.utc).isoformat(),
-        "dirty": dirty,
-        "rust_toolchain": rust_toolchain,
-        "binaries": binary_entries,
-    }
-    (ATM_DEV_ROOT / label / "manifest.json").write_text(
-        json.dumps(manifest, indent=2) + "\n"
-    )
-    (ATM_DEV_ROOT / label / "source.txt").write_text(str(repo) + "\n")
-    return ATM_DEV_ROOT / label
+def read_binary_version(binary_path: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            [str(binary_path), "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+    output = (result.stdout or result.stderr).strip()
+    parsed = parse_semver(output)
+    return format_semver(parsed) if parsed else None
+
+
+def next_milestone_version(source_dir: Path, current_manifest: Path) -> str:
+    baseline: tuple[int, int, int] | None = None
+
+    source_version = read_binary_version(source_dir / "atm")
+    if source_version:
+        baseline = parse_semver(source_version)
+
+    if current_manifest.exists():
+        try:
+            current = json.loads(current_manifest.read_text())
+            manifest_version = current.get("milestone_version") or current.get("binary_version")
+            parsed = parse_semver(str(manifest_version)) if manifest_version else None
+            if parsed and (baseline is None or parsed > baseline):
+                baseline = parsed
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    if baseline is None:
+        die("could not determine source milestone version from binaries or manifest")
+
+    major, minor, patch = baseline
+    return f"{major}.{minor}.{patch + 1}"
 
 
 def restart_daemon() -> None:
     print("\n[restart daemon]")
-    atm_bin = BIN_DIR / "atm"
+    _, bin_dir = resolve_dev_paths()
+    atm_bin = bin_dir / "atm"
     if not atm_bin.exists():
         die(f"atm binary not found at {atm_bin}")
-    env = dev_env()
     try:
-        run([str(atm_bin), "daemon", "restart"], env=env)
+        run([str(atm_bin), "daemon", "restart"])
     except SystemExit:
         print("  note: daemon restart returned non-zero (first-time start ok)")
 
 
 def verify_install() -> bool:
     print("\n[post-install verification]")
-    atm_bin = BIN_DIR / "atm"
-    env = dev_env()
+    _, bin_dir = resolve_dev_paths()
     checks = [
-        ([str(atm_bin), "daemon", "status"], "daemon status"),
-        ([str(atm_bin), "--version"], "atm --version"),
-        ([str(BIN_DIR / "atm-daemon"), "--version"], "atm-daemon --version"),
-        ([str(BIN_DIR / "sc-compose"), "--version"], "sc-compose --version"),
+        ([str(bin_dir / "atm"), "daemon", "status"], "daemon status"),
+        ([str(bin_dir / "atm"), "--version"], "atm --version"),
+        ([str(bin_dir / "atm-daemon"), "--version"], "atm-daemon --version"),
+        ([str(bin_dir / "sc-compose"), "--version"], "sc-compose --version"),
     ]
     all_pass = True
     for cmd, label in checks:
         try:
-            result = subprocess.run(
-                cmd, check=True, capture_output=True, text=True, env=env
-            )
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
             line = (result.stdout or result.stderr).strip().splitlines()[0]
             print(f"  [PASS] {label}: {line}")
         except (subprocess.CalledProcessError, FileNotFoundError, IndexError) as exc:
@@ -180,150 +167,158 @@ def verify_install() -> bool:
     return all_pass
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Build and install ATM binaries to the dev channel.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    scripts_dir = Path(__file__).resolve().parent
-    parser.add_argument("--repo", type=Path, default=scripts_dir.parent,
-                        metavar="PATH", help="repository root")
-    parser.add_argument("--allow-dirty", action="store_true",
-                        help="skip the dirty-worktree check")
-    parser.add_argument("--skip-build", action="store_true",
-                        help="skip cargo build; use existing target/release/ binaries")
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    repo = args.repo.resolve()
-
-    if not (repo / "Cargo.toml").exists():
-        die(f"no Cargo.toml found in repo root: {repo}")
-
-    print(f"[dev-install] repo: {repo}")
-
-    # 1. Dirty check
-    print("\n[dirty check]")
-    if args.allow_dirty:
-        dirty = True
-        print("  --allow-dirty passed, skipping")
-    else:
-        status_output = run_capture(["git", "status", "--porcelain"], cwd=repo)
-        if status_output:
-            die("working tree is dirty. Commit or stash changes, or pass --allow-dirty.\n"
-                + status_output)
-        dirty = False
-        print("  clean")
-
-    # 2. Git metadata
-    print("\n[git metadata]")
-    git_sha = run_capture(["git", "rev-parse", "HEAD"], cwd=repo)
-    short_sha = git_sha[:7]
-    git_branch = run_capture(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo)
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    label = f"{today}-{short_sha}"
-    print(f"  label:  {label}")
-    print(f"  branch: {git_branch}")
-
-    # 3. Build (unless --skip-build)
-    if args.skip_build:
-        print("\n[skipping build — using existing target/release/]")
-    else:
-        print("\n[cargo build --release]")
-        cargo_args = ["cargo", "build", "--release"]
-        for pkg in CARGO_PACKAGES:
-            cargo_args += ["-p", pkg]
-        run(cargo_args, cwd=repo)
-
-    # 4. Verify built binaries exist before touching anything
-    print("\n[verify source binaries]")
-    release_dir = repo / "target" / "release"
+def copy_binaries(src_dir: Path, dst_dir: Path) -> None:
+    dst_dir.mkdir(parents=True, exist_ok=True)
     for name in BINARIES:
-        if not (release_dir / name).exists():
-            die(f"expected binary not found: {release_dir / name}")
-        print(f"  found {name}")
-
-    rust_toolchain = run_capture(["rustc", "--version"], cwd=repo)
-
-    # 5. Compute checksums from source
-    binary_entries = []
-    for name in BINARIES:
-        checksum = sha256_file(release_dir / name)
-        binary_entries.append({"name": name, "sha256": checksum})
-
-    # 6. Save backup of current bin/ before overwriting
-    if BIN_DIR.exists() and any((BIN_DIR / b).exists() for b in BINARIES):
-        # Read current manifest to get its label for the backup dir name
-        current_manifest = ATM_DEV_ROOT / "manifest.json"
-        if current_manifest.exists():
-            try:
-                cur = json.loads(current_manifest.read_text())
-                prev_label = cur.get("label", "unknown")
-            except (json.JSONDecodeError, OSError):
-                prev_label = "unknown"
-        else:
-            prev_label = f"pre-{label}"
-
-        if not (ATM_DEV_ROOT / prev_label).exists():
-            print(f"\n[backup current -> {prev_label}/]")
-            backup_dir = ATM_DEV_ROOT / prev_label / "bin"
-            backup_dir.mkdir(parents=True, exist_ok=True)
-            for name in BINARIES:
-                src = BIN_DIR / name
-                if src.exists():
-                    shutil.copy2(src, backup_dir / name)
-            if current_manifest.exists():
-                shutil.copy2(current_manifest, ATM_DEV_ROOT / prev_label / "manifest.json")
-            print(f"  saved to {ATM_DEV_ROOT / prev_label}/")
-            # Record previous label for rollback
-            (ATM_DEV_ROOT / "previous.txt").write_text(prev_label + "\n")
-
-    # 7. Install binaries to bin/ (overwrite in place)
-    print("\n[install binaries -> ~/.local/atm-dev/bin/]")
-    BIN_DIR.mkdir(parents=True, exist_ok=True)
-    for name in BINARIES:
-        src = release_dir / name
-        dst = BIN_DIR / name
+        src = src_dir / name
+        dst = dst_dir / name
         shutil.copy2(src, dst)
         dst.chmod(0o755)
         print(f"  installed {name}")
 
-    # 8. Write root manifest.json for current install
+
+def save_current_backup(current_label: str) -> None:
+    atm_dev_root, bin_dir = resolve_dev_paths()
+    backup_dir = atm_dev_root / current_label / "bin"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    for name in BINARIES:
+        src = bin_dir / name
+        if src.exists():
+            shutil.copy2(src, backup_dir / name)
+    current_manifest = atm_dev_root / "manifest.json"
+    if current_manifest.exists():
+        shutil.copy2(current_manifest, atm_dev_root / current_label / "manifest.json")
+    print(f"  saved to {atm_dev_root / current_label}/")
+
+
+def write_version_snapshot(label: str, src_dir: Path, manifest: dict, source_dir: Path) -> None:
+    atm_dev_root, _ = resolve_dev_paths()
+    version_dir = atm_dev_root / label
+    snapshot_bin = version_dir / "bin"
+    snapshot_bin.mkdir(parents=True, exist_ok=True)
+    for name in BINARIES:
+        shutil.copy2(src_dir / name, snapshot_bin / name)
+        (snapshot_bin / name).chmod(0o755)
+    (version_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    (version_dir / "source.txt").write_text(str(source_dir) + "\n")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Copy prebuilt ATM binaries into the active dev channel.",
+    )
+    scripts_dir = Path(__file__).resolve().parent
+    default_repo = scripts_dir.parent
+    parser.add_argument(
+        "--source",
+        type=Path,
+        default=default_repo / "target" / "release",
+        metavar="PATH",
+        help="directory containing prebuilt binaries to install",
+    )
+    parser.add_argument(
+        "--homebrew",
+        "--restore",
+        action="store_true",
+        help="copy binaries from the installed Homebrew release instead of --source",
+    )
+    parser.add_argument(
+        "--label",
+        metavar="LABEL",
+        help="version label to record for this install (default: incremented milestone version)",
+    )
+    return parser.parse_args()
+
+
+def resolve_source_dir(args: argparse.Namespace) -> Path:
+    if not args.homebrew:
+        return args.source.expanduser().resolve()
+
+    if shutil.which("brew") is None:
+        die("brew is not installed or not on PATH")
+
+    prefix = run_capture(["brew", "--prefix", "agent-team-mail"])
+    if not prefix:
+        die("failed to resolve Homebrew prefix for agent-team-mail")
+
+    source_dir = Path(prefix).expanduser().resolve() / "bin"
+    if not source_dir.is_dir():
+        die(f"Homebrew bin directory not found: {source_dir}")
+    return source_dir
+
+
+def main() -> None:
+    args = parse_args()
+    source_dir = resolve_source_dir(args)
+    atm_dev_root, bin_dir = resolve_dev_paths()
+
+    if not source_dir.is_dir():
+        die(f"source directory not found: {source_dir}")
+
+    binary_version = read_binary_version(source_dir / "atm")
+    milestone_version = next_milestone_version(source_dir, atm_dev_root / "manifest.json")
+    label = args.label or milestone_version
+
+    print(f"[dev-install] source: {source_dir}")
+    print(f"[dev-install] bin:    {bin_dir}")
+    print(f"[dev-install] label:  {label}")
+    if binary_version:
+        print(f"[dev-install] binary version:    {binary_version}")
+    print(f"[dev-install] milestone version: {milestone_version}")
+
+    print("\n[verify source binaries]")
+    binary_entries = []
+    for name in BINARIES:
+        src = source_dir / name
+        if not src.exists():
+            die(f"expected binary not found: {src}")
+        print(f"  found {name}")
+        binary_entries.append({"name": name, "sha256": sha256_file(src)})
+
+    current_manifest = atm_dev_root / "manifest.json"
+    if bin_dir.exists() and any((bin_dir / name).exists() for name in BINARIES):
+        if current_manifest.exists():
+            try:
+                current = json.loads(current_manifest.read_text())
+                previous_label = current.get("label", "unknown")
+            except (json.JSONDecodeError, OSError):
+                previous_label = "unknown"
+        else:
+            previous_label = f"pre-{label}"
+
+        print(f"\n[backup current -> {previous_label}/]")
+        save_current_backup(previous_label)
+        (atm_dev_root / "previous.txt").write_text(previous_label + "\n")
+
     manifest = {
         "label": label,
-        "git_sha": git_sha,
-        "git_branch": git_branch,
-        "build_timestamp": datetime.now(timezone.utc).isoformat(),
-        "dirty": dirty,
-        "rust_toolchain": rust_toolchain,
+        "source_dir": str(source_dir),
+        "installed_at": datetime.now(timezone.utc).isoformat(),
+        "binary_version": binary_version,
+        "milestone_version": milestone_version,
         "binaries": binary_entries,
     }
-    (ATM_DEV_ROOT / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    (ATM_DEV_ROOT / "current.txt").write_text(label + "\n")
 
-    # 9. Ensure ATM_HOME and env.sh exist
-    ATM_HOME.mkdir(parents=True, exist_ok=True)
-    print(f"\n[ATM_HOME] {ATM_HOME}")
-    write_env_sh()
+    print(f"\n[save version snapshot -> {atm_dev_root / label}]")
+    write_version_snapshot(label, source_dir, manifest, source_dir)
 
-    # 10. Restart daemon
+    print(f"\n[install binaries -> {bin_dir}]")
+    copy_binaries(source_dir, bin_dir)
+
+    (atm_dev_root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    (atm_dev_root / "current.txt").write_text(label + "\n")
+
     restart_daemon()
-
-    # 11. Post-install verification
     all_pass = verify_install()
 
-    # 12. Summary
     print("\n" + "=" * 60)
     print("dev-install complete")
-    print(f"  label:    {label}")
-    print(f"  bin:      {BIN_DIR}")
-    print(f"  ATM_HOME: {ATM_HOME}")
+    print(f"  label:        {label}")
+    print(f"  binary:       {binary_version or 'unknown'}")
+    print(f"  milestone:    {milestone_version}")
+    print(f"  source:       {source_dir}")
+    print(f"  dev root:     {atm_dev_root}")
+    print(f"  bin:          {bin_dir}")
     print(f"  verification: {'ALL PASS' if all_pass else 'SOME CHECKS FAILED'}")
     if not all_pass:
         print("\nTo rollback:  scripts/dev-rollback")

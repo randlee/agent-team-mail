@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::commands::logging_health::LoggingHealthSnapshot;
 use crate::util::settings::get_home_dir;
+use agent_team_mail_core::daemon_client::daemon_status_path_for;
 
 /// Daemon management commands
 #[derive(Args, Debug)]
@@ -343,7 +344,7 @@ fn wait_for_session_dead(team_name: &str, agent_name: &str, timeout_secs: u64) -
 /// Execute daemon status command
 fn execute_status(args: StatusArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
-    let status_path = home_dir.join(".claude/daemon/status.json");
+    let status_path = daemon_status_path_for(&home_dir);
 
     // Check if status file exists
     if !status_path.exists() {

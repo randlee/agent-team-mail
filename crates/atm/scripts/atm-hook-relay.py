@@ -3,8 +3,9 @@
 
 Codex notify invokes this script with one JSON payload argument describing the
 completed turn. This script enriches that payload with ATM routing context and
-appends one JSON object line to:
-  ${ATM_HOME:-$HOME}/.claude/daemon/hooks/events.jsonl
+appends one JSON object line to the active ATM daemon home:
+  ${ATM_HOME}/.atm/daemon/hooks/events.jsonl
+or, when ATM_HOME is unset, the OS home directory.
 
 It is intentionally fail-open and exits 0 for non-ATM contexts.
 """
@@ -21,7 +22,13 @@ from typing import Any
 
 
 def _atm_home() -> Path:
-    return Path(os.environ.get("ATM_HOME", str(Path.home())))
+    explicit = os.environ.get("ATM_HOME", "").strip()
+    if explicit:
+        return Path(explicit)
+    env_home = os.environ.get("HOME", "").strip()
+    if env_home:
+        return Path(env_home)
+    return Path.home()
 
 
 def _read_atm_toml() -> dict[str, Any] | None:
@@ -60,7 +67,7 @@ def _parse_payload(raw: str | None) -> dict[str, Any]:
 
 
 def _append_event(event: dict[str, Any]) -> None:
-    events_file = _atm_home() / ".claude" / "daemon" / "hooks" / "events.jsonl"
+    events_file = _atm_home() / ".atm" / "daemon" / "hooks" / "events.jsonl"
     events_file.parent.mkdir(parents=True, exist_ok=True)
     with events_file.open("a", encoding="utf-8") as f:
         f.write(json.dumps(event, separators=(",", ":")) + "\n")

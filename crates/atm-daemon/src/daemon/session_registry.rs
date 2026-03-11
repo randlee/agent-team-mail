@@ -501,7 +501,7 @@ pub fn new_session_registry() -> SharedSessionRegistry {
     #[cfg(not(test))]
     let registry = match agent_team_mail_core::home::get_home_dir() {
         Ok(home) => {
-            let path = home.join(".claude/daemon/session-registry.json");
+            let path = home.join(".atm/daemon/session-registry.json");
             SessionRegistry::load_or_new(path)
         }
         Err(_) => SessionRegistry::new(),
@@ -759,7 +759,7 @@ mod tests {
     #[test]
     fn test_persisted_registry_writes_and_reads() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".claude/daemon/session-registry.json");
+        let path = dir.path().join(".atm/daemon/session-registry.json");
 
         let mut reg = SessionRegistry::with_persist_path(path.clone());
         reg.upsert("team-lead", "sess-a", 42);
@@ -809,7 +809,7 @@ mod tests {
     #[test]
     fn test_load_or_new_upsert_same_team_agent_replaces_without_duplication() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".claude/daemon/session-registry.json");
+        let path = dir.path().join(".atm/daemon/session-registry.json");
 
         let mut initial = SessionRegistry::with_persist_path(path.clone());
         initial.upsert_for_team("atm-dev", "arch-ctm", "sess-initial", 111);

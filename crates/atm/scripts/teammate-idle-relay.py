@@ -3,7 +3,7 @@
 
 Reads the hook payload from stdin JSON, enriches with ATM identity/team context,
 and appends one JSON line to:
-  ${ATM_HOME:-$HOME}/.claude/daemon/hooks/events.jsonl
+  ${ATM_HOME:-$HOME}/.atm/daemon/hooks/events.jsonl
 
 Also sends a hook_event/teammate_idle message to the ATM daemon socket (when
 .atm.toml exists in the cwd) so daemon state is updated in real-time. The file
@@ -32,7 +32,7 @@ from atm_hook_lib import send_hook_event, read_atm_toml, first_str, load_payload
 def append_event(event: dict[str, Any]) -> None:
     """Append one event JSON line to daemon hook event log."""
     from atm_hook_lib import atm_home
-    events_file = atm_home() / ".claude" / "daemon" / "hooks" / "events.jsonl"
+    events_file = atm_home() / ".atm" / "daemon" / "hooks" / "events.jsonl"
     events_file.parent.mkdir(parents=True, exist_ok=True)
     with events_file.open("a", encoding="utf-8") as f:
         f.write(json.dumps(event, separators=(",", ":")) + "\n")

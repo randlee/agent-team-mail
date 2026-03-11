@@ -144,7 +144,7 @@ pub async fn run(
 
     // Start the Unix socket server (CLI↔daemon IPC).
     //
-    // The socket path is ${ATM_HOME}/.claude/daemon/atm-daemon.sock.
+    // The socket path is ${ATM_HOME}/.atm/daemon/atm-daemon.sock.
     // ctx.system.claude_root is ${ATM_HOME}/.claude, so the home_dir is its
     // parent. We fall back to get_home_dir() if the parent cannot be determined
     // (e.g., claude_root is the filesystem root, which should never happen in
@@ -697,42 +697,21 @@ fn reconcile_team_member_activity_with_mode(
                 // No live session record means member is not active.
                 false
             };
-            let reconciled_alive = alive;
-
-            if member.is_active != Some(reconciled_alive) {
-                let previous = member.is_active;
-                member.is_active = Some(reconciled_alive);
-                changed = true;
-                emit_event_best_effort(EventFields {
-                    level: "warn",
-                    source: "atm-daemon",
-                    action: "state_drift_detected",
-                    team: Some(team_name.clone()),
-                    agent_name: Some(member.name.clone()),
-                    result: Some("reconciled".to_string()),
-                    error: Some(format!(
-                        "isActive drift for {}@{}: config={:?}, reconciled={}",
-                        member.name, team_name, previous, reconciled_alive
-                    )),
-                    ..Default::default()
-                });
-
-                if reconciled_alive {
-                    member.last_active = Some(now_ms);
-                    state_store.lock().unwrap().set_state_with_context(
-                        &member.name,
-                        AgentState::Active,
-                        "session active + pid alive",
-                        "session_reconcile",
-                    );
-                } else {
-                    state_store.lock().unwrap().set_state_with_context(
-                        &member.name,
-                        AgentState::Offline,
-                        "session missing/dead during reconcile",
-                        "session_reconcile",
-                    );
-                }
+            if alive {
+                member.last_active = Some(now_ms);
+                state_store.lock().unwrap().set_state_with_context(
+                    &member.name,
+                    AgentState::Active,
+                    "session active + pid alive",
+                    "session_reconcile",
+                );
+            } else {
+                state_store.lock().unwrap().set_state_with_context(
+                    &member.name,
+                    AgentState::Offline,
+                    "session missing/dead during reconcile",
+                    "session_reconcile",
+                );
             }
 
             // Terminal non-lead members must be fully removed (roster + mailbox)
@@ -1544,7 +1523,7 @@ fn gh_monitor_plugin_status_projection(
     ctx: &PluginContext,
 ) -> Option<(PluginStatusKind, Option<String>, Option<String>)> {
     let home_dir = ctx.system.claude_root.parent()?.to_path_buf();
-    let path = home_dir.join(".claude/daemon/gh-monitor-health.json");
+    let path = agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(&home_dir);
     let raw = std::fs::read_to_string(path).ok()?;
     let value = serde_json::from_str::<Value>(&raw).ok()?;
     let records = value.get("records")?.as_array()?;
@@ -1965,6 +1944,14 @@ mod tests {
         )
         .unwrap();
 
+        let tracker = state_store.lock().unwrap();
+        assert_eq!(tracker.get_state("arch-gtm"), Some(AgentState::Offline));
+        let transition = tracker
+            .transition_meta("arch-gtm")
+            .expect("transition metadata should be present");
+        assert_eq!(transition.source, "session_reconcile");
+        drop(tracker);
+
         let cfg: agent_team_mail_core::schema::TeamConfig = serde_json::from_str(
             &stdfs::read_to_string(home.join(".claude/teams/atm-dev/config.json")).unwrap(),
         )
@@ -1974,7 +1961,8 @@ mod tests {
             .iter()
             .find(|m| m.name == "arch-gtm")
             .expect("member present");
-        assert_eq!(restored.is_active, Some(false));
+        assert_eq!(restored.is_active, Some(true));
+        assert!(restored.last_active.is_none());
     }
 
     #[test]
@@ -2042,7 +2030,7 @@ mod tests {
         let transition = tracker
             .transition_meta("arch-ctm")
             .expect("transition metadata should be present");
-        assert_eq!(transition.source, "config_watcher");
+        assert_eq!(transition.source, "session_reconcile");
 
         let cfg: agent_team_mail_core::schema::TeamConfig = serde_json::from_str(
             &stdfs::read_to_string(home.join(".claude/teams/atm-dev/config.json")).unwrap(),
@@ -2130,8 +2118,8 @@ mod tests {
             .iter()
             .find(|m| m.name == "arch-ctm")
             .expect("member present");
-        assert_eq!(member.is_active, Some(true));
-        assert!(member.last_active.is_some());
+        assert_eq!(member.is_active, Some(false));
+        assert!(member.last_active.is_none());
     }
 
     #[test]
@@ -2190,6 +2178,10 @@ mod tests {
 
         let tracker = state_store.lock().unwrap();
         assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Offline));
+        let transition = tracker
+            .transition_meta("arch-ctm")
+            .expect("transition metadata should be present");
+        assert_eq!(transition.source, "session_reconcile");
         drop(tracker);
 
         let cfg: agent_team_mail_core::schema::TeamConfig = serde_json::from_str(
@@ -2201,7 +2193,7 @@ mod tests {
             .iter()
             .find(|m| m.name == "arch-ctm")
             .expect("member present");
-        assert_eq!(member.is_active, Some(false));
+        assert_eq!(member.is_active, Some(true));
 
         let reg = sr.lock().unwrap();
         let record = reg.query_for_team("atm-dev", "arch-ctm").unwrap();
