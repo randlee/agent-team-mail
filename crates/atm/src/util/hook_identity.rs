@@ -434,7 +434,7 @@ mod tests {
             "session_id": session_id,
             "team": team,
             "identity": identity,
-            "pid": 12345u32,
+            "pid": std::process::id(),
             "created_at": created_at,
             "updated_at": updated_at,
         });

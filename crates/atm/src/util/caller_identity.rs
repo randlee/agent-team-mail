@@ -164,9 +164,13 @@ fn query_daemon_session(team: Option<&str>, identity: Option<&str>) -> Option<Se
 
 fn runtime_hint(daemon: Option<&SessionQueryResult>) -> CallerRuntime {
     let _ = daemon;
-    let traced = runtime_from_process_tree();
-    if traced != CallerRuntime::Unknown {
-        return traced;
+    // Skip process-tree tracing in the test harness: the ambient parent process
+    // (e.g. `claude`) would shadow ATM_RUNTIME/CODEX_THREAD_ID set by individual tests.
+    if !running_test_harness() {
+        let traced = runtime_from_process_tree();
+        if traced != CallerRuntime::Unknown {
+            return traced;
+        }
     }
 
     if let Some(runtime) = env_var_nonempty("ATM_RUNTIME") {
@@ -272,7 +276,9 @@ fn read_session_file_scoped(team: &str, identity: &str) -> Result<Option<String>
 
 fn resolve_runtime_native_env(runtime: CallerRuntime) -> Option<String> {
     match runtime {
-        CallerRuntime::Claude => env_var_nonempty("CLAUDE_SESSION_ID"),
+        // Claude: do NOT short-circuit here — hook file takes priority over
+        // CLAUDE_SESSION_ID and is resolved inside resolve_claude_session().
+        CallerRuntime::Claude => None,
         CallerRuntime::Codex => env_var_nonempty("CODEX_THREAD_ID"),
         CallerRuntime::Gemini | CallerRuntime::Opencode => None,
         CallerRuntime::Unknown => None,
@@ -690,7 +696,7 @@ mod tests {
             "session_id": session_id,
             "team": team,
             "identity": identity,
-            "pid": 12345,
+            "pid": std::process::id(),
             "created_at": now,
             "updated_at": now,
         });

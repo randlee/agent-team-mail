@@ -1070,7 +1070,7 @@ mod tests {
             "session_id": session_id,
             "team": team,
             "identity": identity,
-            "pid": 12345,
+            "pid": std::process::id(),
             "created_at": now,
             "updated_at": now,
         });
