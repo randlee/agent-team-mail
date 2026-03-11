@@ -299,7 +299,7 @@ fn test_monitor_survives_daemon_unavailable() {
     setup_team(&temp_dir, "test-team");
 
     // Explicitly ensure no daemon artifacts exist in the test home.
-    let daemon_dir = temp_dir.path().join(".claude/daemon");
+    let daemon_dir = temp_dir.path().join(".atm/daemon");
     fs::create_dir_all(&daemon_dir).unwrap();
     // Do not create atm-daemon.pid or atm-daemon.sock — daemon is absent.
 

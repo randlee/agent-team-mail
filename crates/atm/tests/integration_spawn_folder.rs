@@ -1,8 +1,11 @@
 use assert_cmd::cargo;
 use predicates::prelude::*;
+use serial_test::serial;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
@@ -76,6 +79,15 @@ fn write_team_config(home: &TempDir, team: &str) {
 
 #[cfg(unix)]
 fn write_fake_spawn_session_daemon_script(home: &Path) -> PathBuf {
+    let canonical_daemon_dir = home.join(".atm/daemon");
+    fs::create_dir_all(&canonical_daemon_dir).unwrap();
+    let legacy_daemon_root = home.join(".claude");
+    fs::create_dir_all(&legacy_daemon_root).unwrap();
+    let legacy_daemon_dir = legacy_daemon_root.join("daemon");
+    if !legacy_daemon_dir.exists() {
+        symlink(&canonical_daemon_dir, &legacy_daemon_dir).unwrap();
+    }
+
     let script = home.join("fake-spawn-session-daemon.py");
     let body = r#"#!/usr/bin/env python3
 import json
@@ -85,7 +97,7 @@ import socket
 from pathlib import Path
 
 home = Path(os.environ["ATM_HOME"])
-daemon_dir = home / ".claude" / "daemon"
+daemon_dir = home / ".atm" / "daemon"
 daemon_dir.mkdir(parents=True, exist_ok=True)
 sock_path = daemon_dir / "atm-daemon.sock"
 pid_path = daemon_dir / "atm-daemon.pid"
@@ -133,6 +145,7 @@ while running:
                     "activity": "busy",
                     "session_id": "abc11111-1111-4111-8111-111111111111",
                     "process_id": 1001,
+                    "last_alive_at": "2026-03-10T12:00:00Z",
                     "reason": "ok",
                     "source": "daemon",
                     "in_config": True,
@@ -143,6 +156,7 @@ while running:
                     "activity": "busy",
                     "session_id": "abc22222-2222-4222-8222-222222222222",
                     "process_id": 1002,
+                    "last_alive_at": "2026-03-10T12:00:01Z",
                     "reason": "ok",
                     "source": "daemon",
                     "in_config": True,
@@ -182,7 +196,7 @@ finally:
 
 #[cfg(unix)]
 fn wait_for_daemon_socket(home: &Path) {
-    let socket = home.join(".claude/daemon/atm-daemon.sock");
+    let socket = home.join(".atm/daemon/atm-daemon.sock");
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
         if socket.exists() {
@@ -626,6 +640,7 @@ fn test_spawn_continue_without_tracked_session_returns_stable_not_found_code() {
 
 #[cfg(unix)]
 #[test]
+#[serial]
 fn test_spawn_resume_prefix_ambiguous_returns_stable_error_code() {
     let temp_dir = TempDir::new().unwrap();
     let folder = temp_dir.path().join("workdir").join("spawn-folder");

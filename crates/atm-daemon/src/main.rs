@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
         agent_team_mail_core::home::get_home_dir().context("Failed to determine home directory")?;
 
     // Enforce single-instance daemon ownership with an exclusive process lock.
-    let daemon_lock_path = home_dir.join(".atm/daemon/daemon.lock");
+    let daemon_lock_path = agent_team_mail_core::daemon_client::daemon_lock_path()?;
     std::fs::create_dir_all(
         daemon_lock_path
             .parent()
@@ -265,35 +265,12 @@ async fn main() -> Result<()> {
     info!("Registered {} plugin(s)", registry.len());
 
     // Create the durable dedupe store for restart-safe request idempotency.
-    let dedup_store = match new_dedup_store(&home_dir) {
-        Ok(store) => store,
-        Err(e) => {
-            tracing::warn!(
-                "Failed to initialise durable dedupe store, falling back to fresh empty store: {e}"
-            );
-            // Construct a fallback store pointing at the same default path.
-            // If the error was a corrupted file, the subsequent write will
-            // overwrite it; if the directory is inaccessible, we'll log on
-            // every insert but the daemon stays running.
-            let path = home_dir.join(".atm/daemon/dedup.jsonl");
-            let _ = std::fs::create_dir_all(path.parent().unwrap_or(&home_dir));
-            std::sync::Arc::new(std::sync::Mutex::new(
-                agent_team_mail_daemon::daemon::dedup::DurableDedupeStore::new(
-                    path,
-                    std::time::Duration::from_secs(600),
-                    1000,
-                )
-                .unwrap_or_else(|_| {
-                    agent_team_mail_daemon::daemon::dedup::DurableDedupeStore::new(
-                        std::env::temp_dir().join("atm-dedup-fallback.jsonl"),
-                        std::time::Duration::from_secs(600),
-                        1000,
-                    )
-                    .expect("failed to create fallback dedup store")
-                }),
-            ))
-        }
-    };
+    let dedup_store = new_dedup_store(&home_dir).with_context(|| {
+        let path = agent_team_mail_core::daemon_client::daemon_dedup_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "<unresolved daemon dedup path>".to_string());
+        format!("Failed to initialise durable dedupe store at {path}")
+    })?;
 
     // Create status writer
     let status_writer = Arc::new(StatusWriter::new(

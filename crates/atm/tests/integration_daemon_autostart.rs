@@ -55,7 +55,7 @@ import socket
 from pathlib import Path
 
 home = Path(os.environ["ATM_HOME"])
-daemon_dir = home / ".claude" / "daemon"
+daemon_dir = home / ".atm" / "daemon"
 daemon_dir.mkdir(parents=True, exist_ok=True)
 marker_dir = home / "spawn-markers"
 marker_dir.mkdir(parents=True, exist_ok=True)
@@ -150,7 +150,7 @@ finally:
 
 #[cfg(unix)]
 fn wait_for_daemon_socket(home: &Path) {
-    let socket = home.join(".claude/daemon/atm-daemon.sock");
+    let socket = home.join(".atm/daemon/atm-daemon.sock");
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
         if socket.exists() {
@@ -176,7 +176,7 @@ fn spawn_count(home: &Path) -> usize {
 
 #[cfg(unix)]
 fn kill_pid_from_file(home: &Path) {
-    let pid_path = home.join(".claude/daemon/atm-daemon.pid");
+    let pid_path = home.join(".atm/daemon/atm-daemon.pid");
     if let Ok(content) = fs::read_to_string(pid_path)
         && let Ok(pid) = content.trim().parse::<i32>()
     {

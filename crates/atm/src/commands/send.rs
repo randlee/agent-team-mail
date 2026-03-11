@@ -1070,7 +1070,7 @@ mod tests {
             "session_id": session_id,
             "team": team,
             "identity": identity,
-            "pid": 12345,
+            "pid": std::process::id(),
             "created_at": now,
             "updated_at": now,
         });
@@ -1094,6 +1094,8 @@ mod tests {
         unsafe {
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
+            std::env::set_var("ATM_RUNTIME", "claude");
+            std::env::remove_var("CODEX_THREAD_ID");
             std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
             std::env::set_var("ATM_TEST_ENABLE_HOOK_RESOLUTION", "1");
         }
@@ -1104,6 +1106,8 @@ mod tests {
         unsafe {
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("CODEX_THREAD_ID");
             std::env::remove_var("CLAUDE_SESSION_ID");
             std::env::remove_var("ATM_TEST_ENABLE_HOOK_RESOLUTION");
         }
@@ -1124,6 +1128,8 @@ mod tests {
         unsafe {
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
+            std::env::set_var("ATM_RUNTIME", "claude");
+            std::env::remove_var("CODEX_THREAD_ID");
             std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
         }
 
@@ -1133,6 +1139,8 @@ mod tests {
         unsafe {
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("CODEX_THREAD_ID");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
@@ -1151,6 +1159,8 @@ mod tests {
         unsafe {
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
+            std::env::set_var("ATM_RUNTIME", "claude");
+            std::env::remove_var("CODEX_THREAD_ID");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
@@ -1160,6 +1170,8 @@ mod tests {
         unsafe {
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("CODEX_THREAD_ID");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
@@ -1176,6 +1188,8 @@ mod tests {
         unsafe {
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
+            std::env::set_var("ATM_RUNTIME", "claude");
+            std::env::remove_var("CODEX_THREAD_ID");
             std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
         }
 
@@ -1185,6 +1199,8 @@ mod tests {
         unsafe {
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("CODEX_THREAD_ID");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
@@ -1204,6 +1220,8 @@ mod tests {
         unsafe {
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
+            std::env::set_var("ATM_RUNTIME", "claude");
+            std::env::remove_var("CODEX_THREAD_ID");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
@@ -1213,6 +1231,8 @@ mod tests {
         unsafe {
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("CODEX_THREAD_ID");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 

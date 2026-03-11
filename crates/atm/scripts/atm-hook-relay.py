@@ -25,6 +25,9 @@ def _atm_home() -> Path:
     explicit = os.environ.get("ATM_HOME", "").strip()
     if explicit:
         return Path(explicit)
+    env_home = os.environ.get("HOME", "").strip()
+    if env_home:
+        return Path(env_home)
     return Path.home()
 
 

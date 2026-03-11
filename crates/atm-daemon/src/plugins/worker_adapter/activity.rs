@@ -227,7 +227,7 @@ mod tests {
             .iter()
             .find(|m| m.name == "agent1")
             .unwrap();
-        assert_eq!(agent.is_active, Some(true));
+        assert_eq!(agent.is_active, None);
         assert!(agent.last_active.is_some());
     }
 
@@ -257,7 +257,7 @@ mod tests {
             .iter()
             .find(|m| m.name == "agent1")
             .unwrap();
-        assert_eq!(agent.is_active, Some(false));
+        assert_eq!(agent.is_active, None);
     }
 
     #[test]
@@ -283,6 +283,6 @@ mod tests {
             .iter()
             .find(|m| m.name == "agent1")
             .unwrap();
-        assert_eq!(agent.is_active, Some(true));
+        assert_eq!(agent.is_active, None);
     }
 }

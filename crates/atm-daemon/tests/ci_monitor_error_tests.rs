@@ -68,9 +68,7 @@ fn create_team_config(teams_root: &Path, team_name: &str) {
 }
 
 fn read_health_record(temp_dir: &TempDir, team: &str) -> Option<serde_json::Value> {
-    let path = temp_dir
-        .path()
-        .join(".claude/daemon/gh-monitor-health.json");
+    let path = temp_dir.path().join(".atm/daemon/gh-monitor-health.json");
     let content = std::fs::read_to_string(path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&content).ok()?;
     let records = value.get("records")?.as_array()?;

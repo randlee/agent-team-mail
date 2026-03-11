@@ -1649,7 +1649,7 @@ mod tests {
             std::env::set_var("ATM_HOME", temp_dir.path());
         }
 
-        let daemon_dir = temp_dir.path().join(".claude/daemon");
+        let daemon_dir = temp_dir.path().join(".atm/daemon");
         fs::create_dir_all(&daemon_dir).expect("daemon dir");
         let socket_path = daemon_dir.join("atm-daemon.sock");
         let listener = UnixListener::bind(&socket_path).expect("bind unix socket");
@@ -1719,7 +1719,7 @@ mod tests {
             std::env::set_var("ATM_HOME", temp_dir.path());
         }
 
-        let daemon_dir = temp_dir.path().join(".claude/daemon");
+        let daemon_dir = temp_dir.path().join(".atm/daemon");
         fs::create_dir_all(&daemon_dir).expect("daemon dir");
         let socket_path = daemon_dir.join("atm-daemon.sock");
         let listener = UnixListener::bind(&socket_path).expect("bind unix socket");

@@ -3306,7 +3306,7 @@ mod tests {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixListener;
 
-        let daemon_dir = home.join(".claude/daemon");
+        let daemon_dir = home.join(".atm/daemon");
         fs::create_dir_all(&daemon_dir).unwrap();
         let socket_path = daemon_dir.join("atm-daemon.sock");
         if socket_path.exists() {

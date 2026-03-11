@@ -67,7 +67,7 @@ def _run_script(
             (run_dir / ".atm.toml").write_text(toml_content)
 
         atm_home = run_dir
-        daemon_dir = atm_home / ".claude" / "daemon"
+        daemon_dir = atm_home / ".atm" / "daemon"
         daemon_dir.mkdir(parents=True, exist_ok=True)
         if socket_file_exists:
             (daemon_dir / "atm-daemon.sock").touch()

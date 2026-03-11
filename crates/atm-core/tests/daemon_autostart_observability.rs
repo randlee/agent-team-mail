@@ -90,7 +90,7 @@ exit 42
     let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", &script_path.to_string_lossy());
     let _autostart_guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "1");
 
-    let missing_socket = home.join(".claude/daemon/atm-daemon.sock");
+    let missing_socket = home.join(".atm/daemon/atm-daemon.sock");
     let spool = spool_dir(&home);
     let _guards = init_unified(
         "atm",

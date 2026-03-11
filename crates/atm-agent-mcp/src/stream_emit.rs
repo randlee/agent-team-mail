@@ -3,7 +3,7 @@
 //! Mirrors the design of [`crate::lifecycle_emit`]:
 //! - Emissions are **best-effort** (warn and return on error, never panic)
 //! - Unix-only; no-op stubs on non-Unix platforms
-//! - Uses the daemon socket at `${ATM_HOME}/.claude/daemon/atm-daemon.sock`
+//! - Uses the daemon socket at `${ATM_HOME}/.atm/daemon/atm-daemon.sock`
 //! - Short 200 ms timeout so the proxy is never blocked by a slow daemon
 //!
 //! # Usage

@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    AgentSummary, CanonicalMemberState, SessionQueryResult, daemon_is_running, daemon_pid_path,
-    daemon_socket_path, query_list_agents, query_list_agents_for_team, query_session_for_team,
-    query_team_member_states,
+    AgentSummary, CanonicalMemberState, SessionQueryResult, daemon_is_running, daemon_lock_path,
+    daemon_pid_path, daemon_socket_path, daemon_status_path_for, query_list_agents,
+    query_list_agents_for_team, query_session_for_team, query_team_member_states,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::log_reader::{LogFilter, LogReader};
@@ -460,10 +460,12 @@ fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     let running = daemon_is_running();
-    let socket_path = daemon_socket_path().unwrap_or_else(|_| home_dir.join(".atm/daemon/atm-daemon.sock"));
-    let pid_path = daemon_pid_path().unwrap_or_else(|_| home_dir.join(".atm/daemon/atm-daemon.pid"));
-    let lock_path = home_dir.join(".atm/daemon/daemon.lock");
-    let status_path = home_dir.join(".atm/daemon/status.json");
+    let socket_path =
+        daemon_socket_path().unwrap_or_else(|_| home_dir.join(".atm/daemon/atm-daemon.sock"));
+    let pid_path =
+        daemon_pid_path().unwrap_or_else(|_| home_dir.join(".atm/daemon/atm-daemon.pid"));
+    let lock_path = daemon_lock_path().unwrap_or_else(|_| home_dir.join(".atm/daemon/daemon.lock"));
+    let status_path = daemon_status_path_for(home_dir);
 
     if !running {
         findings.push(finding(
@@ -553,7 +555,7 @@ fn check_plugin_init_failures(home_dir: &Path) -> Vec<Finding> {
 }
 
 fn read_daemon_status(home_dir: &Path) -> DaemonStatusSnapshot {
-    let status_path = home_dir.join(".atm/daemon/status.json");
+    let status_path = daemon_status_path_for(home_dir);
     let Ok(raw) = fs::read_to_string(&status_path) else {
         return DaemonStatusSnapshot {
             version: None,
@@ -2106,9 +2108,11 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn check_plugin_init_failures_reports_disabled_init_error() {
+        let _guard = EnvGuard::isolate(OVERRIDE_ENV_KEYS);
         let tmp = tempfile::tempdir().unwrap();
-        let daemon_dir = tmp.path().join(".claude/daemon");
+        let daemon_dir = tmp.path().join(".atm/daemon");
         fs::create_dir_all(&daemon_dir).unwrap();
         fs::write(
             daemon_dir.join("status.json"),
@@ -2120,6 +2124,7 @@ mod tests {
 }"#,
         )
         .unwrap();
+        unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
 
         let findings = check_plugin_init_failures(tmp.path());
         assert_eq!(findings.len(), 1);
