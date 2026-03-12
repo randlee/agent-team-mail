@@ -1,6 +1,7 @@
 //! Integration tests for discovery commands (teams, members, status, config)
 
 use assert_cmd::cargo;
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -254,15 +255,59 @@ fn test_status_command_team_not_found() {
 #[test]
 fn test_status_command_json_output() {
     let temp_dir = TempDir::new().unwrap();
-    setup_test_team(&temp_dir, "test-team");
+    let team_dir = setup_test_team(&temp_dir, "test-team");
+    fs::write(
+        team_dir.join("inboxes/agent-1.json"),
+        serde_json::to_string_pretty(&vec![
+            serde_json::json!({
+                "from": "team-lead",
+                "text": "Unread task",
+                "timestamp": "2026-02-11T12:00:00Z",
+                "read": false,
+                "message_id": "msg-1"
+            }),
+            serde_json::json!({
+                "from": "team-lead",
+                "text": "Read but pending",
+                "timestamp": "2026-02-11T12:05:00Z",
+                "read": true,
+                "message_id": "msg-2",
+                "pendingAckAt": "2026-02-11T12:06:00Z"
+            }),
+            serde_json::json!({
+                "from": "team-lead",
+                "text": "Acknowledged",
+                "timestamp": "2026-02-11T12:10:00Z",
+                "read": true,
+                "message_id": "msg-3",
+                "acknowledgedAt": "2026-02-11T12:11:00Z"
+            })
+        ])
+        .unwrap(),
+    )
+    .unwrap();
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);
-    cmd.env("ATM_TEAM", "test-team")
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
         .arg("status")
         .arg("--json")
         .assert()
-        .success();
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let value: Value = serde_json::from_slice(&output).expect("status json");
+    let member = value["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["name"].as_str() == Some("agent-1"))
+        .expect("agent-1 row");
+    assert_eq!(member["unreadCount"].as_u64(), Some(1));
+    assert_eq!(member["pendingCount"].as_u64(), Some(2));
 }
 
 #[test]

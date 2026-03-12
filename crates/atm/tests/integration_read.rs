@@ -219,6 +219,142 @@ fn test_read_marks_as_read() {
     let content = fs::read_to_string(&inbox_path).unwrap();
     let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
     assert_eq!(messages[0]["read"], true);
+    assert!(messages[0]["pendingAckAt"].is_string());
+}
+
+#[test]
+fn test_read_keeps_message_visible_until_acknowledged() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = setup_test_team(&temp_dir, "test-team");
+
+    let messages = vec![serde_json::json!({
+        "from": "team-lead",
+        "text": "Task assignment",
+        "timestamp": "2026-02-11T10:00:00Z",
+        "read": false,
+        "message_id": "msg-001"
+    })];
+    create_test_inbox(&team_dir, "test-agent", messages);
+
+    let mut first_read = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut first_read, &temp_dir);
+    first_read
+        .env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "test-agent")
+        .arg("read")
+        .arg("--no-since-last-seen")
+        .arg("test-agent")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Task assignment"));
+
+    let mut second_read = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut second_read, &temp_dir);
+    second_read
+        .env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "test-agent")
+        .arg("read")
+        .arg("--no-since-last-seen")
+        .arg("test-agent")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Task assignment"))
+        .stdout(predicate::str::contains("[read, pending ack]"));
+
+    let mut ack = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut ack, &temp_dir);
+    ack.env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "test-agent")
+        .arg("ack")
+        .arg("msg-001")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Acknowledged 1 of 1 selected"));
+
+    let inbox_path = team_dir.join("inboxes/test-agent.json");
+    let content = fs::read_to_string(&inbox_path).unwrap();
+    let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
+    assert_eq!(messages[0]["read"], true);
+    assert!(messages[0]["acknowledgedAt"].is_string());
+    assert!(messages[0].get("pendingAckAt").is_none());
+
+    let mut final_read = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut final_read, &temp_dir);
+    final_read
+        .env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "test-agent")
+        .arg("read")
+        .arg("--no-since-last-seen")
+        .arg("test-agent")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No messages found"));
+}
+
+#[test]
+fn test_ack_all_pending_clears_all_pending_messages() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = setup_test_team(&temp_dir, "test-team");
+
+    let messages = vec![
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Pending task one",
+            "timestamp": "2026-02-11T10:00:00Z",
+            "read": true,
+            "pendingAckAt": "2026-02-11T10:05:00Z",
+            "message_id": "msg-201"
+        }),
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Pending task two",
+            "timestamp": "2026-02-11T11:00:00Z",
+            "read": false,
+            "message_id": "msg-202"
+        }),
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Already acknowledged",
+            "timestamp": "2026-02-11T12:00:00Z",
+            "read": true,
+            "acknowledgedAt": "2026-02-11T12:05:00Z",
+            "message_id": "msg-203"
+        }),
+    ];
+    create_test_inbox(&team_dir, "test-agent", messages);
+
+    let mut ack = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut ack, &temp_dir);
+    ack.env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "test-agent")
+        .arg("ack")
+        .arg("--all-pending")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Acknowledged 2 pending message(s)",
+        ));
+
+    let inbox_path = team_dir.join("inboxes/test-agent.json");
+    let content = fs::read_to_string(&inbox_path).unwrap();
+    let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
+
+    assert!(messages[0]["acknowledgedAt"].is_string());
+    assert!(messages[0].get("pendingAckAt").is_none());
+    assert!(messages[1]["acknowledgedAt"].is_string());
+    assert!(messages[1].get("pendingAckAt").is_none());
+    assert_eq!(messages[2]["acknowledgedAt"], "2026-02-11T12:05:00Z");
+
+    let mut read = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut read, &temp_dir);
+    read.env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "test-agent")
+        .arg("read")
+        .arg("--no-since-last-seen")
+        .arg("test-agent")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No messages found"));
 }
 
 #[test]
@@ -542,6 +678,50 @@ fn test_read_since_last_seen_still_shows_older_unread_messages() {
         .success()
         .stdout(predicates::str::contains("Older unread message"))
         .stdout(predicates::str::contains("Newer read message").not());
+}
+
+#[test]
+fn test_read_since_last_seen_first_run_shows_only_pending_action_messages() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = setup_test_team(&temp_dir, "test-team");
+
+    let messages = vec![
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Historical acknowledged message",
+            "timestamp": "2026-02-11T09:00:00Z",
+            "read": true,
+            "message_id": "msg-110"
+        }),
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Pending unread assignment",
+            "timestamp": "2026-02-11T10:00:00Z",
+            "read": false,
+            "message_id": "msg-111"
+        }),
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Pending read assignment",
+            "timestamp": "2026-02-11T11:00:00Z",
+            "read": true,
+            "pendingAckAt": "2026-02-11T11:05:00Z",
+            "message_id": "msg-112"
+        }),
+    ];
+    create_test_inbox(&team_dir, "test-agent", messages);
+
+    // No last-seen state file exists yet: this is a true first run.
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("read")
+        .arg("test-agent")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Pending unread assignment"))
+        .stdout(predicates::str::contains("Pending read assignment"))
+        .stdout(predicates::str::contains("Historical acknowledged message").not());
 }
 
 #[test]

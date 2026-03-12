@@ -3,6 +3,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+mod ack;
 mod bridge;
 mod broadcast;
 mod cleanup;
@@ -45,6 +46,9 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Acknowledge previously-read ATM messages as actioned
+    Ack(ack::AckArgs),
+
     /// Send a message to a specific agent
     Send(send::SendArgs),
 
@@ -122,6 +126,7 @@ impl Cli {
     /// Execute the CLI command
     pub fn execute(self) -> Result<()> {
         match self.command {
+            Commands::Ack(args) => ack::execute(args),
             Commands::Send(args) => send::execute(args),
             Commands::Broadcast(args) => broadcast::execute(args),
             Commands::Read(args) => read::execute(args),
