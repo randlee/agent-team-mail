@@ -7,6 +7,7 @@ use super::provider::ErasedCiProvider;
 use super::registry::{CiProviderFactory, CiProviderRegistry};
 use super::types::{CiFilter, CiJob, CiRunConclusion, CiRunStatus};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
+use crate::roster::RosterError;
 use agent_team_mail_core::context::{GitProvider as GitProviderType, RepoContext};
 use agent_team_mail_core::schema::{AgentMember, InboxMessage, TeamConfig};
 use chrono::{DateTime, Utc};
@@ -1090,12 +1091,47 @@ impl Plugin for CiMonitorPlugin {
             unknown_fields: std::collections::HashMap::new(),
         };
 
-        ctx.roster
+        match ctx
+            .roster
             .add_member(&self.config.team, member, "gh_monitor")
-            .map_err(|e| PluginError::Init {
-                message: format!("Failed to register synthetic member: {e}"),
-                source: None,
-            })?;
+        {
+            Ok(()) => {}
+            Err(RosterError::DuplicateMember { ref name, ref team }) => {
+                // Member already exists. Only adopt if it is the expected synthetic
+                // shape (agent_type == "plugin:gh_monitor"). A non-plugin row with the
+                // same name must not be silently hijacked — cleanup_plugin only purges
+                // rows with agent_type "plugin:gh_monitor", so a mismatched row would
+                // escape cleanup and the plugin would be bound to the wrong entry.
+                let is_valid_synthetic = ctx
+                    .roster
+                    .list_members(team, Some("gh_monitor"))
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|m| &m.name == name);
+
+                if is_valid_synthetic {
+                    // Note: MembershipTracker has no entry for this triple;
+                    // cleanup_plugin uses agent_type prefix matching so shutdown
+                    // soft-cleanup still fires correctly without tracker presence.
+                    debug!(agent = %name, "gh_monitor: synthetic member already registered, adopting existing roster entry");
+                } else {
+                    return Err(PluginError::Init {
+                        message: format!(
+                            "Cannot register synthetic member '{name}': a non-plugin roster \
+                             entry with that name already exists in team '{team}'. \
+                             Remove the conflicting member to allow gh_monitor to initialize."
+                        ),
+                        source: None,
+                    });
+                }
+            }
+            Err(e) => {
+                return Err(PluginError::Init {
+                    message: format!("Failed to register synthetic member: {e}"),
+                    source: None,
+                });
+            }
+        }
 
         // Validate notify targets exist in team config (warn if not found)
         if !self.config.notify_target.is_empty() {
@@ -2082,6 +2118,112 @@ repo = "config-owner/config-repo"
             .find(|member| member.name == "ci-monitor")
             .expect("synthetic member registered");
         assert_eq!(member.cwd, temp_dir.path().to_string_lossy());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_init_adopts_existing_ci_monitor_member_without_error() {
+        use crate::plugins::ci_monitor::MockCiProvider;
+        use agent_team_mail_core::schema::{AgentMember, TeamConfig};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let team_dir = teams_root.join("dev-team");
+        let inboxes_dir = team_dir.join("inboxes");
+        std::fs::create_dir_all(&inboxes_dir).unwrap();
+        std::fs::write(inboxes_dir.join("ci-monitor.json"), "[]").unwrap();
+
+        // Pre-populate config.json with ci-monitor already present (simulates a
+        // persisted member from a previous session that would trigger DuplicateMember).
+        let ci_monitor_member = AgentMember {
+            agent_id: "ci-monitor@dev-team".to_string(),
+            name: "ci-monitor".to_string(),
+            agent_type: "plugin:gh_monitor".to_string(),
+            model: String::new(),
+            prompt: None,
+            color: None,
+            plan_mode_required: None,
+            joined_at: 1234567890,
+            tmux_pane_id: None,
+            cwd: ".".to_string(),
+            subscriptions: Vec::new(),
+            backend_type: None,
+            is_active: None,
+            last_active: None,
+            session_id: None,
+            external_backend_type: None,
+            external_model: None,
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        let team_config = TeamConfig {
+            name: "dev-team".to_string(),
+            description: None,
+            created_at: 1234567890,
+            lead_agent_id: "lead@dev-team".to_string(),
+            lead_session_id: "session-123".to_string(),
+            members: vec![ci_monitor_member],
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        std::fs::write(
+            team_dir.join("config.json"),
+            serde_json::to_string(&team_config).unwrap(),
+        )
+        .unwrap();
+
+        let toml_str = r#"
+team = "dev-team"
+repo = "config-owner/config-repo"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let ctx = create_mock_context_with_repo_config(teams_root.clone(), Some(table), false);
+        let mut plugin = CiMonitorPlugin::new().with_provider(Box::new(MockCiProvider::new()));
+
+        let atm_config_path = temp_dir.path().join(".atm.toml");
+        std::fs::write(&atm_config_path, toml_str).unwrap();
+
+        struct EnvRestoreGuard {
+            key: &'static str,
+            original: Option<String>,
+        }
+        impl Drop for EnvRestoreGuard {
+            fn drop(&mut self) {
+                match self.original.take() {
+                    Some(value) => unsafe { std::env::set_var(self.key, value) },
+                    None => unsafe { std::env::remove_var(self.key) },
+                }
+            }
+        }
+        struct CurrentDirGuard(std::path::PathBuf);
+        impl Drop for CurrentDirGuard {
+            fn drop(&mut self) {
+                std::env::set_current_dir(&self.0).expect("restore current directory");
+            }
+        }
+
+        let _atm_config_guard = EnvRestoreGuard {
+            key: "ATM_CONFIG",
+            original: std::env::var("ATM_CONFIG").ok(),
+        };
+        let _cwd_guard = CurrentDirGuard(std::env::current_dir().unwrap());
+        unsafe { std::env::set_var("ATM_CONFIG", &atm_config_path) };
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+
+        // Init must succeed even though ci-monitor is already in the roster.
+        let result = plugin.init(&ctx).await;
+        assert!(
+            result.is_ok(),
+            "init should succeed when ci-monitor already exists: {result:?}"
+        );
+
+        // The existing member should still be present (not duplicated).
+        let roster = ctx.roster.list_members("dev-team", None).expect("members");
+        let ci_members: Vec<_> = roster.iter().filter(|m| m.name == "ci-monitor").collect();
+        assert_eq!(
+            ci_members.len(),
+            1,
+            "ci-monitor should appear exactly once in roster"
+        );
     }
 
     #[tokio::test]
