@@ -158,8 +158,8 @@ fn show_team_summary(home_dir: &Path, team_name: &str, use_since_last_seen: bool
                         .filter(|m| {
                             m.is_pending_action()
                                 || DateTime::parse_from_rfc3339(&m.timestamp)
-                                .map(|dt| dt > last_seen_dt)
-                                .unwrap_or(false)
+                                    .map(|dt| dt > last_seen_dt)
+                                    .unwrap_or(false)
                         })
                         .count(),
                     None => messages.iter().filter(|m| m.is_pending_action()).count(),

@@ -281,7 +281,7 @@ fn test_status_command_json_output() {
                 "read": true,
                 "message_id": "msg-3",
                 "acknowledgedAt": "2026-02-11T12:11:00Z"
-            })
+            }),
         ])
         .unwrap(),
     )
