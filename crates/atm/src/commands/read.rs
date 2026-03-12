@@ -189,20 +189,12 @@ pub fn execute(args: ReadArgs) -> Result<()> {
     // Visibility filter:
     // - Default mode: pending-action only (unacknowledged, whether read or unread)
     // - Since-last-seen mode: pending-action OR newer-than-last-seen
-    if !args.all {
-        if use_since_last_seen {
-            if let Some(last_seen_dt) = last_seen {
-                filtered_messages.retain(|m| {
-                    m.is_pending_action()
-                        || DateTime::parse_from_rfc3339(&m.timestamp)
-                            .map(|dt| dt > last_seen_dt)
-                            .unwrap_or(false)
-                });
-            }
-        } else {
-            filtered_messages.retain(|m| m.is_pending_action());
-        }
-    }
+    apply_visibility_filter(
+        &mut filtered_messages,
+        args.all,
+        use_since_last_seen,
+        last_seen.as_ref(),
+    );
 
     // Filter by sender
     if let Some(ref from_name) = args.from {
@@ -253,20 +245,12 @@ pub fn execute(args: ReadArgs) -> Result<()> {
                 let mut new_filtered = new_messages.clone();
 
                 // Re-apply the same filters
-                if !args.all {
-                    if use_since_last_seen {
-                        if let Some(last_seen_dt) = last_seen {
-                            new_filtered.retain(|m| {
-                                m.is_pending_action()
-                                    || DateTime::parse_from_rfc3339(&m.timestamp)
-                                        .map(|dt| dt > last_seen_dt)
-                                        .unwrap_or(false)
-                            });
-                        }
-                    } else {
-                        new_filtered.retain(|m| m.is_pending_action());
-                    }
-                }
+                apply_visibility_filter(
+                    &mut new_filtered,
+                    args.all,
+                    use_since_last_seen,
+                    last_seen.as_ref(),
+                );
 
                 if let Some(ref from_name) = args.from {
                     new_filtered.retain(|m| m.from == *from_name);
@@ -474,6 +458,34 @@ fn format_relative_time(timestamp_str: &str) -> String {
         }
     } else {
         "unknown".to_string()
+    }
+}
+
+fn apply_visibility_filter(
+    messages: &mut Vec<agent_team_mail_core::schema::InboxMessage>,
+    show_all: bool,
+    use_since_last_seen: bool,
+    last_seen: Option<&DateTime<Utc>>,
+) {
+    if show_all {
+        return;
+    }
+
+    if use_since_last_seen {
+        if let Some(last_seen_dt) = last_seen {
+            messages.retain(|m| {
+                m.is_pending_action()
+                    || DateTime::parse_from_rfc3339(&m.timestamp)
+                        .map(|dt| dt.with_timezone(&Utc) > *last_seen_dt)
+                        .unwrap_or(false)
+            });
+        } else {
+            // First run with no watermark should show actionable work, not dump
+            // the full historical inbox.
+            messages.retain(|m| m.is_pending_action());
+        }
+    } else {
+        messages.retain(|m| m.is_pending_action());
     }
 }
 

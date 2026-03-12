@@ -55,6 +55,7 @@ Pending-action semantics are:
 `crates/atm/src/commands/read.rs`
 
 - default visibility is now pending-action messages, not raw unread-only
+- first run with no `last_seen` watermark still filters to pending-action messages, so historical acknowledged mail does not flood a fresh session
 - first read marks a message as both `read=true` and `pendingAckAt=<ts>`
 - human output now shows explicit state markers
 - pending messages print their `message_id` so they can be acknowledged directly
@@ -95,6 +96,7 @@ Added/updated regression coverage for:
 
 - read marks `pendingAckAt`
 - repeated read keeps pending work visible until explicit ack
+- first-run `since-last-seen` hides acknowledged history while keeping pending work visible
 - `atm ack` clears pending state
 - inbox summary shows pending counts
 - status JSON reports `pendingCount`

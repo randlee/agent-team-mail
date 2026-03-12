@@ -615,6 +615,50 @@ fn test_read_since_last_seen_still_shows_older_unread_messages() {
 }
 
 #[test]
+fn test_read_since_last_seen_first_run_shows_only_pending_action_messages() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = setup_test_team(&temp_dir, "test-team");
+
+    let messages = vec![
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Historical acknowledged message",
+            "timestamp": "2026-02-11T09:00:00Z",
+            "read": true,
+            "message_id": "msg-110"
+        }),
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Pending unread assignment",
+            "timestamp": "2026-02-11T10:00:00Z",
+            "read": false,
+            "message_id": "msg-111"
+        }),
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Pending read assignment",
+            "timestamp": "2026-02-11T11:00:00Z",
+            "read": true,
+            "pendingAckAt": "2026-02-11T11:05:00Z",
+            "message_id": "msg-112"
+        }),
+    ];
+    create_test_inbox(&team_dir, "test-agent", messages);
+
+    // No last-seen state file exists yet: this is a true first run.
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("read")
+        .arg("test-agent")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Pending unread assignment"))
+        .stdout(predicates::str::contains("Pending read assignment"))
+        .stdout(predicates::str::contains("Historical acknowledged message").not());
+}
+
+#[test]
 fn test_read_all_ignores_last_seen_filter() {
     let temp_dir = TempDir::new().unwrap();
     let team_dir = setup_test_team(&temp_dir, "test-team");
