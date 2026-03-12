@@ -1449,8 +1449,8 @@ mod tests {
             "123e4567"
         );
         assert_eq!(
-            format_session_short(Some("local:team-lead:1772608955543:20111")),
-            "local:te"
+            format_session_short(Some("codex-thread-abc1234def567890")),
+            "codex-th"
         );
         assert_eq!(format_session_short(Some("sess-123456789")), "sess-123");
         assert_eq!(format_session_short(Some("sess-1")), "sess-1");
@@ -2575,7 +2575,20 @@ mod tests {
         assert!(rendered.contains("arch-ctm"));
         assert!(rendered.contains("atm-monitor"));
         assert!(rendered.contains("123e4567"));
-        assert!(!rendered.contains(full_session));
+        assert!(
+            !rendered.contains(full_session),
+            "full UUID must not appear in rendered output"
+        );
         assert!(rendered.contains("abcd1234"));
+    }
+
+    #[test]
+    fn format_session_short_returns_unchanged_when_shorter_than_8_chars() {
+        // Session IDs shorter than 8 chars must be returned as-is (no padding/truncation).
+        assert_eq!(format_session_short(Some("abc123")), "abc123");
+        assert_eq!(format_session_short(Some("xy")), "xy");
+        assert_eq!(format_session_short(Some("1234567")), "1234567");
+        // Exactly 8 chars is returned in full.
+        assert_eq!(format_session_short(Some("abcd1234")), "abcd1234");
     }
 }

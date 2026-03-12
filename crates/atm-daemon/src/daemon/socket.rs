@@ -8519,7 +8519,7 @@ exit 1
         let store = make_store();
         let ps = make_ps();
         let sr = make_sr();
-        let req_json = r#"{"version":1,"request_id":"r1","command":"register-hint","payload":{"team":"atm-dev","agent":"arch-ctm","session_id":"local:arch-ctm:test:1234","process_id":1234}}"#;
+        let req_json = r#"{"version":1,"request_id":"r1","command":"register-hint","payload":{"team":"atm-dev","agent":"arch-ctm","session_id":"local:arch-ctm:test:1234","process_id":0}}"#;
         let resp =
             parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
         assert_eq!(resp.status, "error");
@@ -8533,7 +8533,7 @@ exit 1
         let store = make_store();
         let ps = make_ps();
         let sr = make_sr();
-        let req_json = r#"{"version":1,"request_id":"r1","command":"register-hint","payload":{"team":"atm-dev","agent":"arch-ctm","session_id":"sess-1234","process_id":1234,"runtime":"codex","runtime_session_id":"local:arch-ctm:test:1234"}}"#;
+        let req_json = r#"{"version":1,"request_id":"r1","command":"register-hint","payload":{"team":"atm-dev","agent":"arch-ctm","session_id":"sess-1234","process_id":2,"runtime":"codex","runtime_session_id":"local:arch-ctm:test:1234"}}"#;
         let resp =
             parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
         assert_eq!(resp.status, "error");
