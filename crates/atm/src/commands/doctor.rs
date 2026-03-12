@@ -693,20 +693,7 @@ where
                     ),
                 ))
             }
-            Some("active") | Some("idle") if member.is_active != Some(true) => {
-                findings.push(finding(
-                    Severity::Warn,
-                    "pid_session_reconciliation",
-                    "GHOST_SESSION",
-                    format!(
-                        "Member '{}' has activity hint isActive!=true but daemon reports live state '{}'",
-                        member.name,
-                        daemon_state
-                            .map(|s| s.state.as_str())
-                            .unwrap_or("unknown")
-                    ),
-                ))
-            }
+            Some("active") | Some("idle") => {}
             _ if member.is_active == Some(true) && query_unreachable => findings.push(finding(
                 Severity::Warn,
                 "pid_session_reconciliation",
@@ -1141,7 +1128,7 @@ fn build_recommendations(
         });
     }
 
-    if has("ACTIVE_WITHOUT_SESSION") || has("ACTIVE_FLAG_STALE") || has("GHOST_SESSION") {
+    if has("ACTIVE_WITHOUT_SESSION") || has("ACTIVE_FLAG_STALE") {
         recs.push(Recommendation {
             command: format!("atm teams cleanup {team}"),
             reason: "Reconcile stale non-lead session state and mailbox/roster drift".to_string(),
@@ -1994,8 +1981,8 @@ mod tests {
     }
 
     #[test]
-    fn check_pid_session_reconciliation_detects_ghost_session_for_inactive_hint() {
-        let cfg = TeamConfig {
+    fn check_pid_session_reconciliation_allows_live_daemon_state_without_activity_hint() {
+        let cfg_none = TeamConfig {
             name: "atm-dev".to_string(),
             description: None,
             created_at: 0,
@@ -2005,7 +1992,66 @@ mod tests {
             unknown_fields: HashMap::new(),
         };
 
-        let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
+        let (findings_none, _) =
+            check_pid_session_reconciliation_with_query("atm-dev", &cfg_none, |_| {
+                Ok(Some(vec![CanonicalMemberState {
+                    agent: "worker-a".to_string(),
+                    state: "active".to_string(),
+                    activity: "busy".to_string(),
+                    session_id: Some("sess-1".to_string()),
+                    process_id: Some(4321),
+                    last_alive_at: None,
+                    reason: "session active".to_string(),
+                    source: "session_registry".to_string(),
+                    in_config: true,
+                }]))
+            });
+        assert!(
+            findings_none.is_empty(),
+            "live daemon state with no activity hint must not be treated as a ghost session"
+        );
+
+        let cfg_false = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("worker-a", Some(false), 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        let (findings_false, _) =
+            check_pid_session_reconciliation_with_query("atm-dev", &cfg_false, |_| {
+                Ok(Some(vec![CanonicalMemberState {
+                    agent: "worker-a".to_string(),
+                    state: "active".to_string(),
+                    activity: "busy".to_string(),
+                    session_id: Some("sess-1".to_string()),
+                    process_id: Some(4321),
+                    last_alive_at: None,
+                    reason: "session active".to_string(),
+                    source: "session_registry".to_string(),
+                    in_config: true,
+                }]))
+            });
+        assert!(
+            findings_false.is_empty(),
+            "live daemon state with isActive=false must not be treated as a ghost session"
+        );
+
+        let cfg_true = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("worker-a", Some(true), 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        let (findings_true, _) =
+            check_pid_session_reconciliation_with_query("atm-dev", &cfg_true, |_| {
             Ok(Some(vec![CanonicalMemberState {
                 agent: "worker-a".to_string(),
                 state: "active".to_string(),
@@ -2018,7 +2064,10 @@ mod tests {
                 in_config: true,
             }]))
         });
-        assert!(findings.iter().any(|f| f.code == "GHOST_SESSION"));
+        assert!(
+            findings_true.is_empty(),
+            "live daemon state with isActive=true should remain the clean happy path"
+        );
     }
 
     #[test]
