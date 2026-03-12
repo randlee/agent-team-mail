@@ -10400,6 +10400,11 @@ exit 1
         let store = make_store();
         let sr = make_sr();
         {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("atm-monitor");
+            tracker.set_state("atm-monitor", AgentState::Active);
+        }
+        {
             sr.lock()
                 .unwrap()
                 .upsert_for_team("atm-dev", "team-lead", "sess-shared", 7777);
@@ -10421,6 +10426,10 @@ exit 1
             reg.query_for_team("atm-dev", "atm-monitor").is_none(),
             "conflicting teammate_idle must not register atm-monitor"
         );
+        drop(reg);
+
+        let tracker = store.lock().unwrap();
+        assert_eq!(tracker.get_state("atm-monitor"), Some(AgentState::Active));
     }
 
     #[cfg(unix)]
