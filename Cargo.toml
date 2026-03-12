@@ -15,7 +15,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.44.0"
+version = "0.44.5"
 edition = "2024"
 authors = ["agent-team-mail contributors"]
 license = "MIT OR Apache-2.0"
@@ -37,6 +37,6 @@ thiserror = "2.0"
 anyhow = "1.0"
 
 # Internal dependencies
-agent-team-mail-core = { path = "crates/atm-core", version = "=0.44.0" }
-sc-composer = { path = "crates/sc-composer", version = "=0.44.0" }
-sc-observability = { path = "crates/sc-observability", version = "=0.44.0" }
+agent-team-mail-core = { path = "crates/atm-core", version = "=0.44.5" }
+sc-composer = { path = "crates/sc-composer", version = "=0.44.5" }
+sc-observability = { path = "crates/sc-observability", version = "=0.44.5" }

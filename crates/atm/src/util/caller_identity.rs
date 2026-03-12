@@ -13,7 +13,11 @@ use std::process::Command;
 use crate::util::hook_identity::{read_hook_file, read_session_file};
 use crate::util::settings::get_home_dir;
 
+/// Returned when multiple caller/session resolution candidates remain valid
+/// and ATM cannot choose one canonical caller identity automatically.
 pub const CALLER_AMBIGUOUS: &str = "CALLER_AMBIGUOUS";
+/// Returned when caller/session resolution exhausts all supported sources
+/// without finding a canonical caller identity.
 pub const CALLER_UNRESOLVED: &str = "CALLER_UNRESOLVED";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
