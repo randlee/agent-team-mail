@@ -307,7 +307,9 @@ fn execute_restart(timeout_secs: u64) -> Result<()> {
                 RestartTiming::DEFAULT,
             )?;
         } else {
-            eprintln!("warning: unable to resolve expected daemon binary path; skipping pre-restart daemon cleanup");
+            eprintln!(
+                "warning: unable to resolve expected daemon binary path; skipping pre-restart daemon cleanup"
+            );
         }
         restart_daemon_with(
             &runtime,
@@ -947,8 +949,8 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_stop_daemon_cleans_socket_when_sigterm_reports_esrch() {
-    let tmp = TempDir::new().expect("temp dir");
-    let runtime = temp_runtime_paths(&tmp);
+        let tmp = TempDir::new().expect("temp dir");
+        let runtime = temp_runtime_paths(&tmp);
         std::fs::write(&runtime.pid_path, "4242\n").expect("write pid");
         std::fs::write(&runtime.socket_path, "").expect("write socket");
 
@@ -1131,7 +1133,11 @@ mod tests {
     fn test_process_executable_matches_parts_checks_exe_and_cmd() {
         let expected = std::env::temp_dir().join("atm-daemon");
         let other = std::env::temp_dir().join("other");
-        assert!(process_executable_matches_parts(Some(&expected), None, &expected));
+        assert!(process_executable_matches_parts(
+            Some(&expected),
+            None,
+            &expected
+        ));
         assert!(process_executable_matches_parts(
             None,
             Some(&std::ffi::OsString::from(expected.clone())),
@@ -1272,5 +1278,4 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("failed to send SIGTERM to daemon process 4444"));
     }
-
 }
