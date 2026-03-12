@@ -1467,6 +1467,13 @@ fn spool_metrics(spool_path: &Path) -> std::io::Result<(u64, Option<u64>)> {
         if !file_type.is_file() {
             continue;
         }
+        if !entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.ends_with(".jsonl"))
+        {
+            continue;
+        }
 
         spool_count += 1;
 
@@ -1655,6 +1662,20 @@ mod tests {
         assert_eq!(snapshot.state, "degraded_spooling");
         assert!(snapshot.spool_count >= 1);
         assert!(snapshot.oldest_spool_age.is_some());
+    }
+
+    #[test]
+    fn test_build_logging_health_snapshot_ignores_claiming_files() {
+        let tmp = TempDir::new().expect("temp dir");
+        let spool_dir = agent_team_mail_core::logging_event::configured_spool_dir(tmp.path());
+        stdfs::create_dir_all(&spool_dir).expect("mkdir spool");
+        stdfs::write(spool_dir.join("atm-1-1.jsonl"), "{\"v\":1}\n").expect("write spool file");
+        stdfs::write(spool_dir.join("atm-1-1.claiming"), "{\"v\":1}\n")
+            .expect("write claiming file");
+
+        let snapshot = build_logging_health_snapshot(tmp.path(), 0, false);
+        assert_eq!(snapshot.state, "degraded_spooling");
+        assert_eq!(snapshot.spool_count, 1);
     }
 
     #[test]

@@ -222,6 +222,25 @@ fn test_merge_skips_unparseable_lines() {
 }
 
 #[test]
+fn test_merge_writes_to_configured_canonical_log_path() {
+    let tmp = TempDir::new().unwrap();
+    let spool_dir = agent_team_mail_core::logging_event::configured_spool_dir(tmp.path());
+    fs::create_dir_all(&spool_dir).unwrap();
+    let log_path = agent_team_mail_core::logging_event::configured_log_path(tmp.path());
+
+    let event = new_log_event("atm", "daemon_start", "atm_daemon::main", "info");
+    write_spool_file(&spool_dir, "atm-1-100.jsonl", &[event]);
+
+    let merged = merge_spool_on_startup(&spool_dir, &log_path).unwrap();
+    assert_eq!(merged, 1);
+    assert!(log_path.exists(), "configured canonical log should be created");
+    assert!(
+        spool_jsonl_files(&spool_dir).is_empty(),
+        "configured spool directory should be drained after merge"
+    );
+}
+
+#[test]
 fn test_merge_events_sorted_by_timestamp() {
     let tmp = TempDir::new().unwrap();
     let spool_dir = tmp.path().join("spool");

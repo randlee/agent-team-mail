@@ -109,7 +109,7 @@ async fn main() -> Result<()> {
     // This runs before the socket server starts so no new spool files can arrive
     // from this daemon instance during the merge window.
     {
-        let spool_dir = agent_team_mail_core::logging_event::spool_dir(&home_dir);
+        let spool_dir = agent_team_mail_core::logging_event::configured_spool_dir(&home_dir);
         match agent_team_mail_daemon::daemon::spool_merge::merge_spool_on_startup(
             &spool_dir, &log_file,
         ) {
