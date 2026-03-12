@@ -5120,6 +5120,23 @@ fn handle_register_hint(
     state_store: &SharedStateStore,
     session_registry: &SharedSessionRegistry,
 ) -> SocketResponse {
+    fn reject_deprecated_local_session_id(
+        request_id: &str,
+        field: &str,
+        value: &str,
+    ) -> Option<SocketResponse> {
+        if value.starts_with("local:") {
+            return Some(make_error_response(
+                request_id,
+                "INVALID_REQUEST",
+                &format!(
+                    "Deprecated register-hint {field} '{value}' is not allowed; use canonical session IDs"
+                ),
+            ));
+        }
+        None
+    }
+
     let team = match request.payload.get("team").and_then(|v| v.as_str()) {
         Some(t) if !t.trim().is_empty() => t.trim().to_string(),
         _ => {
@@ -5172,6 +5189,11 @@ fn handle_register_hint(
             );
         }
     };
+    if let Some(resp) =
+        reject_deprecated_local_session_id(&request.request_id, "session_id", &session_id)
+    {
+        return resp;
+    }
     let process_id = match request.payload.get("process_id").and_then(|v| v.as_u64()) {
         Some(pid) if pid > 1 => pid as u32,
         _ => {
@@ -5197,6 +5219,15 @@ fn handle_register_hint(
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(str::to_string);
+    if let Some(runtime_session_id) = runtime_session_id.as_deref()
+        && let Some(resp) = reject_deprecated_local_session_id(
+            &request.request_id,
+            "runtime_session_id",
+            runtime_session_id,
+        )
+    {
+        return resp;
+    }
     let pane_id = request
         .payload
         .get("pane_id")
@@ -8484,6 +8515,37 @@ exit 1
     }
 
     #[test]
+    fn test_parse_and_dispatch_register_hint_rejects_deprecated_local_session_id() {
+        let store = make_store();
+        let ps = make_ps();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r1","command":"register-hint","payload":{"team":"atm-dev","agent":"arch-ctm","session_id":"local:arch-ctm:test:1234","process_id":1234}}"#;
+        let resp =
+            parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
+        assert_eq!(resp.status, "error");
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, "INVALID_REQUEST");
+        assert!(err.message.contains("Deprecated register-hint session_id"));
+    }
+
+    #[test]
+    fn test_parse_and_dispatch_register_hint_rejects_deprecated_local_runtime_session_id() {
+        let store = make_store();
+        let ps = make_ps();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r1","command":"register-hint","payload":{"team":"atm-dev","agent":"arch-ctm","session_id":"sess-1234","process_id":1234,"runtime":"codex","runtime_session_id":"local:arch-ctm:test:1234"}}"#;
+        let resp =
+            parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
+        assert_eq!(resp.status, "error");
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, "INVALID_REQUEST");
+        assert!(
+            err.message
+                .contains("Deprecated register-hint runtime_session_id")
+        );
+    }
+
+    #[test]
     #[serial]
     fn test_handle_register_hint_registers_external_member_session() {
         let temp = TempDir::new().unwrap();
@@ -8525,10 +8587,10 @@ exit 1
             serde_json::json!({
                 "team": "atm-dev",
                 "agent": "arch-ctm",
-                "session_id": "local:arch-ctm:sess:1234",
+                "session_id": "sess-arch-ctm-1234",
                 "process_id": std::process::id(),
                 "runtime": "codex",
-                "runtime_session_id": "local:arch-ctm:sess:1234"
+                "runtime_session_id": "thread-id:arch-ctm-1234"
             }),
         );
         let resp = handle_register_hint(&req, &store, &sr);
@@ -8540,9 +8602,13 @@ exit 1
             .query_for_team("atm-dev", "arch-ctm")
             .cloned()
             .expect("session should be registered");
-        assert_eq!(session.session_id, "local:arch-ctm:sess:1234");
+        assert_eq!(session.session_id, "sess-arch-ctm-1234");
         assert_eq!(session.process_id, std::process::id());
         assert_eq!(session.runtime.as_deref(), Some("codex"));
+        assert_eq!(
+            session.runtime_session_id.as_deref(),
+            Some("thread-id:arch-ctm-1234")
+        );
 
         let tracker_state = store.lock().unwrap().get_state("arch-ctm");
         assert_eq!(tracker_state, Some(AgentState::Active));
@@ -8712,10 +8778,10 @@ exit 1
             serde_json::json!({
                 "team": "atm-dev",
                 "agent": "arch-ctm",
-                "session_id": "local:arch-ctm:recover:1",
+                "session_id": "sess-recover-1",
                 "process_id": hint_pid,
                 "runtime": "codex",
-                "runtime_session_id": "local:arch-ctm:recover:1"
+                "runtime_session_id": "thread-id:recover-1"
             }),
         );
         let resp = handle_register_hint(&req, &store, &sr);
@@ -8833,7 +8899,7 @@ exit 1
                 "team": "atm-dev",
                 "agent": "arch-ctm",
                 "identity": "team-lead",
-                "session_id": "local:arch-ctm:sess:9999",
+                "session_id": "sess-cross-9999",
                 "process_id": std::process::id(),
             }),
         );

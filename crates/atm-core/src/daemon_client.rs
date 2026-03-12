@@ -3389,10 +3389,10 @@ sleep 8
             let outcome = register_hint(
                 "atm-dev",
                 "arch-ctm",
-                "local:arch-ctm:test:1234",
+                "sess-arch-ctm-test-1234",
                 1234,
                 Some("codex"),
-                Some("local:arch-ctm:test:1234"),
+                Some("thread-id:arch-ctm-test-1234"),
                 None,
                 None,
             )

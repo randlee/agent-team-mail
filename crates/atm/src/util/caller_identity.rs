@@ -1038,6 +1038,53 @@ mod tests {
 
     #[test]
     #[serial]
+    fn codex_thread_id_precedence_holds_even_when_live_daemon_session_exists() {
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+
+        unsafe {
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::set_var("CODEX_THREAD_ID", "codex-env-live-123");
+            std::env::remove_var("ATM_SESSION_ID");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        let mut query_called = false;
+        let resolved = resolve_caller_session_id_optional_with_query(
+            Some("atm-dev"),
+            Some("arch-ctm"),
+            |_team, _identity| {
+                query_called = true;
+                Ok(Some(SessionQueryResult {
+                    session_id: "session_id:daemon-live-session".to_string(),
+                    process_id: std::process::id(),
+                    alive: true,
+                    last_seen_at: None,
+                    runtime: Some("codex".to_string()),
+                    runtime_session_id: Some("thread-id:daemon-live-thread".to_string()),
+                    pane_id: None,
+                    runtime_home: None,
+                }))
+            },
+        )
+        .expect("resolve");
+
+        unsafe {
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("CODEX_THREAD_ID");
+            std::env::remove_var("ATM_SESSION_ID");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        assert_eq!(resolved.as_deref(), Some("codex-env-live-123"));
+        assert!(
+            !query_called,
+            "daemon query should not run when CODEX_THREAD_ID already resolves the caller session"
+        );
+    }
+
+    #[test]
+    #[serial]
     fn claude_runtime_env_wins_over_live_daemon_session() {
         let hook_path = current_ppid_hook_path();
         let _ = std::fs::remove_file(&hook_path);
