@@ -111,7 +111,24 @@ does not need to change. New helpers serve code that currently constructs paths 
 
 **Phase 2 — Add centralized helpers to `atm-core/src/home.rs`:**
 - [x] Add the 10 helpers above with unit tests (trivial path construction)
-- [x] Re-export from `atm_core::home` (`pub mod home` already exposes the helpers directly)
+- [x] Re-export from `atm_core::home` (`pub mod home` already exposes the helpers directly; no `pub use home::*` flattening added)
+
+## As-Built Helper Names
+
+The implementation uses explicit `_for` suffixes for helpers that accept a resolved
+`home: &Path` input, alongside the existing zero-arg `claude_root_dir()` /
+`teams_root_dir()` wrappers that resolve `ATM_HOME` internally. This is intentional:
+
+- `claude_root_dir_for(home)`
+- `teams_root_dir_for(home)`
+- `team_dir_for(home, team)`
+- `team_config_path_for(home, team)`
+- `inbox_path_for(home, team, agent)`
+- `claude_settings_path_for(home)`
+- `claude_scripts_dir_for(home)`
+- `claude_agents_dir_for(home)`
+- `atm_config_dir_for(home)`
+- `sessions_dir_for(home)`
 
 **Phase 3 — Migrate HIGH call sites (H1–H17):**
 - [ ] Migrate all 14 call sites listed above (one commit per logical group: daemon init, socket, CLI, MCP, worker-adapter)

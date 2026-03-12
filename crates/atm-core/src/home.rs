@@ -355,7 +355,7 @@ mod tests {
 
     #[test]
     fn test_path_helpers_build_canonical_paths() {
-        let home = PathBuf::from("/tmp/atm-home");
+        let home = PathBuf::from("test-home");
 
         assert_eq!(claude_root_dir_for(&home), home.join(".claude"));
         assert_eq!(
@@ -404,15 +404,15 @@ mod tests {
     #[serial]
     fn test_root_dir_helpers_respect_atm_home() {
         let original = env::var("ATM_HOME").ok();
-        unsafe { env::set_var("ATM_HOME", "/atm-home") };
+        unsafe { env::set_var("ATM_HOME", "test-home") };
 
         assert_eq!(
             claude_root_dir().unwrap(),
-            PathBuf::from("/atm-home/.claude")
+            PathBuf::from("test-home/.claude")
         );
         assert_eq!(
             teams_root_dir().unwrap(),
-            PathBuf::from("/atm-home/.claude/teams")
+            PathBuf::from("test-home/.claude/teams")
         );
 
         unsafe {
