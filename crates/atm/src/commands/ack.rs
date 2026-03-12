@@ -89,6 +89,7 @@ pub fn execute(args: AckArgs) -> Result<()> {
             if selected {
                 matched += 1;
                 if !msg.is_acknowledged() {
+                    msg.read = true;
                     msg.mark_acknowledged(acknowledged_at.clone());
                     changed += 1;
                 }

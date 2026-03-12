@@ -292,6 +292,72 @@ fn test_read_keeps_message_visible_until_acknowledged() {
 }
 
 #[test]
+fn test_ack_all_pending_clears_all_pending_messages() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = setup_test_team(&temp_dir, "test-team");
+
+    let messages = vec![
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Pending task one",
+            "timestamp": "2026-02-11T10:00:00Z",
+            "read": true,
+            "pendingAckAt": "2026-02-11T10:05:00Z",
+            "message_id": "msg-201"
+        }),
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Pending task two",
+            "timestamp": "2026-02-11T11:00:00Z",
+            "read": false,
+            "message_id": "msg-202"
+        }),
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Already acknowledged",
+            "timestamp": "2026-02-11T12:00:00Z",
+            "read": true,
+            "acknowledgedAt": "2026-02-11T12:05:00Z",
+            "message_id": "msg-203"
+        }),
+    ];
+    create_test_inbox(&team_dir, "test-agent", messages);
+
+    let mut ack = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut ack, &temp_dir);
+    ack.env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "test-agent")
+        .arg("ack")
+        .arg("--all-pending")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Acknowledged 2 pending message(s)",
+        ));
+
+    let inbox_path = team_dir.join("inboxes/test-agent.json");
+    let content = fs::read_to_string(&inbox_path).unwrap();
+    let messages: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
+
+    assert!(messages[0]["acknowledgedAt"].is_string());
+    assert!(messages[0].get("pendingAckAt").is_none());
+    assert!(messages[1]["acknowledgedAt"].is_string());
+    assert!(messages[1].get("pendingAckAt").is_none());
+    assert_eq!(messages[2]["acknowledgedAt"], "2026-02-11T12:05:00Z");
+
+    let mut read = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut read, &temp_dir);
+    read.env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "test-agent")
+        .arg("read")
+        .arg("--no-since-last-seen")
+        .arg("test-agent")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No messages found"));
+}
+
+#[test]
 fn test_read_filter_by_from() {
     let temp_dir = TempDir::new().unwrap();
     let team_dir = setup_test_team(&temp_dir, "test-team");

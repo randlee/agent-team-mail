@@ -344,7 +344,7 @@ pub fn execute(args: ReadArgs) -> Result<()> {
                             filtered_timestamps.contains(&msg.timestamp) && !msg.read
                         };
 
-                        if should_mark && !msg.read {
+                        if should_mark {
                             msg.read = true;
                             msg.mark_pending_ack(pending_timestamp.clone());
                             marked_count += 1;
