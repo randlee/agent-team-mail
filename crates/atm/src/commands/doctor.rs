@@ -1449,8 +1449,8 @@ mod tests {
             "123e4567"
         );
         assert_eq!(
-            format_session_short(Some("local:team-lead:1772608955543:20111")),
-            "local:te"
+            format_session_short(Some("codex-thread-abc1234def567890")),
+            "codex-th"
         );
         assert_eq!(format_session_short(Some("sess-123456789")), "sess-123");
         assert_eq!(format_session_short(Some("sess-1")), "sess-1");
@@ -2500,5 +2500,95 @@ mod tests {
             json_value["members"][0]["session_id"],
             serde_json::Value::String(full_session.to_string())
         );
+    }
+
+    #[test]
+    fn render_human_members_mixed_session_formats_display_consistent_short_values() {
+        let full_session = "123e4567-e89b-12d3-a456-426614174000";
+        let short_session = "abcd1234";
+        let report = DoctorReport {
+            summary: Summary {
+                team: "atm-dev".to_string(),
+                generated_at: "2026-03-02T00:00:00Z".to_string(),
+                has_critical: false,
+                counts: FindingCounts {
+                    critical: 0,
+                    warn: 0,
+                    info: 0,
+                },
+                daemon_version: Some("0.44.5".to_string()),
+                install_milestone: Some("0.44.5-dev.1".to_string()),
+            },
+            findings: vec![],
+            recommendations: vec![],
+            log_window: LogWindow {
+                mode: "default_incremental".to_string(),
+                start: "2026-03-02T00:00:00Z".to_string(),
+                end: "2026-03-02T00:01:00Z".to_string(),
+                elapsed_secs: 60,
+            },
+            env_overrides: EnvOverrides::default(),
+            logging_health: LoggingHealthContract::default(),
+            members: vec![
+                MemberSnapshot {
+                    name: "arch-ctm".to_string(),
+                    agent_type: "codex".to_string(),
+                    model: "custom:codex".to_string(),
+                    status: "Online".to_string(),
+                    activity: "Busy".to_string(),
+                    session_id: Some(full_session.to_string()),
+                    process_id: Some(1234),
+                },
+                MemberSnapshot {
+                    name: "atm-monitor".to_string(),
+                    agent_type: "claude".to_string(),
+                    model: "claude-sonnet-4-6".to_string(),
+                    status: "Online".to_string(),
+                    activity: "Idle".to_string(),
+                    session_id: Some(short_session.to_string()),
+                    process_id: Some(2222),
+                },
+            ],
+            member_snapshot: vec![
+                MemberSnapshot {
+                    name: "arch-ctm".to_string(),
+                    agent_type: "codex".to_string(),
+                    model: "custom:codex".to_string(),
+                    status: "Online".to_string(),
+                    activity: "Busy".to_string(),
+                    session_id: Some(full_session.to_string()),
+                    process_id: Some(1234),
+                },
+                MemberSnapshot {
+                    name: "atm-monitor".to_string(),
+                    agent_type: "claude".to_string(),
+                    model: "claude-sonnet-4-6".to_string(),
+                    status: "Online".to_string(),
+                    activity: "Idle".to_string(),
+                    session_id: Some(short_session.to_string()),
+                    process_id: Some(2222),
+                },
+            ],
+        };
+
+        let rendered = render_human(&report);
+        assert!(rendered.contains("arch-ctm"));
+        assert!(rendered.contains("atm-monitor"));
+        assert!(rendered.contains("123e4567"));
+        assert!(
+            !rendered.contains(full_session),
+            "full UUID must not appear in rendered output"
+        );
+        assert!(rendered.contains("abcd1234"));
+    }
+
+    #[test]
+    fn format_session_short_returns_unchanged_when_shorter_than_8_chars() {
+        // Session IDs shorter than 8 chars must be returned as-is (no padding/truncation).
+        assert_eq!(format_session_short(Some("abc123")), "abc123");
+        assert_eq!(format_session_short(Some("xy")), "xy");
+        assert_eq!(format_session_short(Some("1234567")), "1234567");
+        // Exactly 8 chars is returned in full.
+        assert_eq!(format_session_short(Some("abcd1234")), "abcd1234");
     }
 }

@@ -1017,7 +1017,18 @@ mod tests {
             Some("arch-ctm"),
             |_team, _identity| {
                 query_called = true;
-                Ok(None)
+                // Return a live daemon session to prove CODEX_THREAD_ID beats it even when
+                // ATM_RUNTIME is absent — implicit Codex detection takes priority.
+                Ok(Some(SessionQueryResult {
+                    session_id: "session_id:daemon-should-not-win-implicit".to_string(),
+                    process_id: std::process::id(),
+                    alive: true,
+                    last_seen_at: None,
+                    runtime: Some("codex".to_string()),
+                    runtime_session_id: Some("thread-id:daemon-implicit-thread".to_string()),
+                    pane_id: None,
+                    runtime_home: None,
+                }))
             },
         )
         .expect("resolve");
@@ -1033,6 +1044,89 @@ mod tests {
         assert!(
             !query_called,
             "daemon query should not run when CODEX_THREAD_ID implies runtime"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn implicit_claude_session_resolved_from_env_when_no_runtime_or_codex_thread_id() {
+        // No ATM_RUNTIME, no CODEX_THREAD_ID, no hook file — only CLAUDE_SESSION_ID set.
+        // The resolver must detect Claude runtime via the env var and return that session ID.
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+
+        unsafe {
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("CODEX_THREAD_ID");
+            std::env::remove_var("ATM_SESSION_ID");
+            std::env::set_var("CLAUDE_SESSION_ID", "claude-implicit-session-abc");
+        }
+
+        let resolved = resolve_caller_session_id_optional_with_query(
+            Some("atm-dev"),
+            Some("team-lead"),
+            |_team, _identity| Ok(None),
+        )
+        .expect("resolve");
+
+        unsafe {
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("CODEX_THREAD_ID");
+            std::env::remove_var("ATM_SESSION_ID");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        assert_eq!(
+            resolved.as_deref(),
+            Some("claude-implicit-session-abc"),
+            "CLAUDE_SESSION_ID must resolve when it is the only session signal"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn codex_thread_id_precedence_holds_even_when_live_daemon_session_exists() {
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+
+        unsafe {
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::set_var("CODEX_THREAD_ID", "codex-env-live-123");
+            std::env::remove_var("ATM_SESSION_ID");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        let mut query_called = false;
+        let resolved = resolve_caller_session_id_optional_with_query(
+            Some("atm-dev"),
+            Some("arch-ctm"),
+            |_team, _identity| {
+                query_called = true;
+                Ok(Some(SessionQueryResult {
+                    session_id: "session_id:daemon-live-session".to_string(),
+                    process_id: std::process::id(),
+                    alive: true,
+                    last_seen_at: None,
+                    runtime: Some("codex".to_string()),
+                    runtime_session_id: Some("thread-id:daemon-live-thread".to_string()),
+                    pane_id: None,
+                    runtime_home: None,
+                }))
+            },
+        )
+        .expect("resolve");
+
+        unsafe {
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("CODEX_THREAD_ID");
+            std::env::remove_var("ATM_SESSION_ID");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        assert_eq!(resolved.as_deref(), Some("codex-env-live-123"));
+        assert!(
+            !query_called,
+            "daemon query should not run when CODEX_THREAD_ID already resolves the caller session"
         );
     }
 
