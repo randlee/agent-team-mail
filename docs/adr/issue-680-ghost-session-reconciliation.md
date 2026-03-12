@@ -3,7 +3,7 @@ issue: 680
 title: "GHOST_SESSION False-Positive: isActive hint must not corroborate daemon liveness"
 date: 2026-03-12
 worktree: fix/issue-680-ghost-session-reconciliation
-status: ready-to-implement
+status: implemented
 ---
 
 # Issue #680: GHOST_SESSION Reconciliation — Root Cause & Fix Blueprint
@@ -63,14 +63,15 @@ deferred as a follow-up. If added, the check should use `!state.in_config` not `
 
 ## Implementation Checklist
 
-- [ ] Delete GHOST_SESSION match arm at `doctor.rs:696–708`
-- [ ] Update test: rename + assert `findings.is_empty()`
-- [ ] Add `is_active: Some(false)` variant test
-- [ ] Add happy-path variant test
-- [ ] Remove `has("GHOST_SESSION")` from recommendation trigger (line 1144)
-- [ ] `cargo test -p agent-team-mail -- doctor` — all pass
-- [ ] `cargo test -p agent-team-mail --test '*' -- pid_session_reconciliation` — all pass
-- [ ] `cargo clippy --workspace` — clean
+- [x] Delete GHOST_SESSION match arm at `doctor.rs:696–708`
+- [x] Update test: rename + assert `findings.is_empty()`
+- [x] Add `is_active: Some(false)` variant test
+- [x] Add happy-path variant test
+- [x] Add idle-state variants for `is_active: None` and `Some(false)`
+- [x] Remove `has("GHOST_SESSION")` from recommendation trigger (line 1144)
+- [x] `cargo test -p agent-team-mail -- doctor` — all pass
+- [x] `cargo test -p agent-team-mail --test '*' -- pid_session_reconciliation` — all pass
+- [x] `cargo clippy --workspace` — clean
 
 ## Out of Scope
 
