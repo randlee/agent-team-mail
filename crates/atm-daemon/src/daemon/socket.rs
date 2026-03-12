@@ -10422,9 +10422,10 @@ exit 1
             "conflicting teammate_idle must not register atm-monitor"
         );
 
-        // ATM-QA-001 closure: IgnoredConflictingOwner must not pollute state tracker
+        drop(reg);
+        let tracker = store.lock().unwrap();
         assert_eq!(
-            store.lock().unwrap().get_state("atm-monitor"),
+            tracker.get_state("atm-monitor"),
             None,
             "IgnoredConflictingOwner must not register atm-monitor in state tracker"
         );
