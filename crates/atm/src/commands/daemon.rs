@@ -898,6 +898,7 @@ enum PluginStatusKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use tempfile::TempDir;
 
     #[test]
@@ -1111,9 +1112,10 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    #[serial]
     fn test_expected_daemon_binary_path_honors_atm_daemon_bin_override() {
         let old = std::env::var_os("ATM_DAEMON_BIN");
-        let expected = PathBuf::from("/tmp/custom-atm-daemon");
+        let expected = std::env::temp_dir().join("custom-atm-daemon");
         unsafe {
             std::env::set_var("ATM_DAEMON_BIN", &expected);
         }
@@ -1127,7 +1129,8 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_process_executable_matches_parts_checks_exe_and_cmd() {
-        let expected = PathBuf::from("/tmp/atm-daemon");
+        let expected = std::env::temp_dir().join("atm-daemon");
+        let other = std::env::temp_dir().join("other");
         assert!(process_executable_matches_parts(Some(&expected), None, &expected));
         assert!(process_executable_matches_parts(
             None,
@@ -1136,7 +1139,7 @@ mod tests {
         ));
         assert!(!process_executable_matches_parts(
             None,
-            Some(&std::ffi::OsString::from("/tmp/other")),
+            Some(&std::ffi::OsString::from(other)),
             &expected
         ));
     }
