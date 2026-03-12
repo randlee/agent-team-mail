@@ -1774,21 +1774,27 @@ async fn handle_hook_event_command_with_dedup(
             let (old_state, new_state) = {
                 let mut tracker = state_store.lock().unwrap();
                 let current = tracker.get_state(&agent);
-                if current.is_some() {
-                    tracker.set_state_with_context(
-                        &agent,
-                        AgentState::Idle,
-                        "teammate_idle lifecycle",
-                        "hook_event",
-                    );
-                } else {
-                    tracker.register_agent(&agent);
-                    tracker.set_state_with_context(
-                        &agent,
-                        AgentState::Idle,
-                        "teammate_idle lifecycle (auto-register)",
-                        "hook_event",
-                    );
+                if matches!(
+                    session_outcome,
+                    TeammateIdleSessionOutcome::NoSessionId
+                        | TeammateIdleSessionOutcome::Confirmed { .. }
+                ) {
+                    if current.is_some() {
+                        tracker.set_state_with_context(
+                            &agent,
+                            AgentState::Idle,
+                            "teammate_idle lifecycle",
+                            "hook_event",
+                        );
+                    } else {
+                        tracker.register_agent(&agent);
+                        tracker.set_state_with_context(
+                            &agent,
+                            AgentState::Idle,
+                            "teammate_idle lifecycle (auto-register)",
+                            "hook_event",
+                        );
+                    }
                 }
                 let updated = tracker.get_state(&agent).unwrap_or(AgentState::Unknown);
                 (current, updated)
@@ -10337,7 +10343,7 @@ exit 1
             tracker.register_agent("arch-ctm");
             tracker.set_state("arch-ctm", AgentState::Active);
         }
-        let req_json = r#"{"version":1,"request_id":"r3","command":"hook-event","payload":{"event":"teammate_idle","agent":"arch-ctm","session_id":"sess-1","team":"atm-dev"}}"#;
+        let req_json = r#"{"version":1,"request_id":"r3","command":"hook-event","payload":{"event":"teammate_idle","agent":"arch-ctm","session_id":"","team":"atm-dev"}}"#;
         let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
@@ -10415,6 +10421,14 @@ exit 1
             reg.query_for_team("atm-dev", "atm-monitor").is_none(),
             "conflicting teammate_idle must not register atm-monitor"
         );
+
+        drop(reg);
+        let tracker = store.lock().unwrap();
+        assert_eq!(
+            tracker.get_state("atm-monitor"),
+            None,
+            "IgnoredConflictingOwner must not register atm-monitor in state tracker"
+        );
     }
 
     #[cfg(unix)]
@@ -10424,6 +10438,11 @@ exit 1
         let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
         let store = make_store();
         let sr = make_sr();
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Active);
+        }
         {
             sr.lock()
                 .unwrap()
@@ -10442,6 +10461,10 @@ exit 1
             .expect("existing same-agent session should be preserved");
         assert_eq!(session.session_id, "sess-a");
         assert_eq!(session.process_id, 5555);
+        drop(reg);
+
+        let tracker = store.lock().unwrap();
+        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Active));
     }
 
     #[cfg(unix)]
