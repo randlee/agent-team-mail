@@ -71,6 +71,18 @@ fn check_file(path: &Path) -> Result<(), Vec<String>> {
                 line_num
             ));
         }
+
+        if line.contains("std::env::var(\"HOME\")")
+            || line.contains("std::env::var(\"USERPROFILE\")")
+            || line.contains("env::var(\"HOME\")")
+            || line.contains("env::var(\"USERPROFILE\")")
+        {
+            violations.push(format!(
+                "{}:{}: Found raw HOME/USERPROFILE env lookup - use `agent_team_mail_core::home::get_home_dir()` instead",
+                path.display(),
+                line_num
+            ));
+        }
     }
 
     if violations.is_empty() {

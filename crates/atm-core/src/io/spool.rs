@@ -7,7 +7,7 @@
 //! # Directory Structure
 //!
 //! ```text
-//! ~/.config/atm/spool/
+//! ~/.config/atm/logs/atm/spool/
 //!   pending/    - Messages awaiting retry
 //!   failed/     - Messages that exceeded max retries
 //! ```
@@ -322,7 +322,7 @@ fn get_spool_dir_with_base(subdir: &str, base_dir: Option<&Path>) -> Result<Path
         let home = crate::home::get_home_dir().map_err(|e| InboxError::SpoolError {
             message: format!("Could not determine home directory: {e}"),
         })?;
-        home.join(".config/atm/spool").join(subdir)
+        crate::logging_event::configured_spool_dir(&home).join(subdir)
     };
 
     Ok(spool_dir)
@@ -353,6 +353,7 @@ fn count_files(dir: &Path) -> Result<usize, InboxError> {
 mod tests {
     use super::*;
     use crate::io::WriteOutcome;
+    use serial_test::serial;
     use std::collections::HashMap;
     use tempfile::TempDir;
 
@@ -396,6 +397,30 @@ mod tests {
         assert_eq!(spooled.max_retries, 10);
         assert!(!spooled.created_at.is_empty());
         assert!(!spooled.last_attempt.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn test_get_spool_dir_default_uses_configured_spool_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        let original = std::env::var("ATM_HOME").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", temp_dir.path());
+        }
+
+        let spool_dir = get_spool_dir_with_base("pending", None).unwrap();
+
+        unsafe {
+            match original {
+                Some(value) => std::env::set_var("ATM_HOME", value),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+
+        assert_eq!(
+            spool_dir,
+            temp_dir.path().join(".config/atm/logs/atm/spool/pending")
+        );
     }
 
     #[test]

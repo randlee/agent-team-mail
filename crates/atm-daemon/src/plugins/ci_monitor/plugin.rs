@@ -794,9 +794,14 @@ impl CiMonitorPlugin {
     }
 
     fn gh_monitor_state_path(ctx: &PluginContext) -> PathBuf {
-        ctx.system
-            .claude_root
-            .join("daemon")
+        let Some(home_dir) = ctx.system.claude_root.parent() else {
+            return ctx
+                .system
+                .claude_root
+                .join("daemon")
+                .join("gh-monitor-state.json");
+        };
+        agent_team_mail_core::daemon_client::daemon_runtime_dir_for(home_dir)
             .join("gh-monitor-state.json")
     }
 
@@ -2278,11 +2283,7 @@ poll_interval_secs = 10
         .unwrap();
         let ctx = create_mock_context_with_config(teams_root.clone(), Some(table));
 
-        let state_path = ctx
-            .system
-            .claude_root
-            .join("daemon")
-            .join("gh-monitor-state.json");
+        let state_path = CiMonitorPlugin::gh_monitor_state_path(&ctx);
         std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         std::fs::write(
             &state_path,
