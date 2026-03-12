@@ -400,8 +400,18 @@ impl CiMonitorPlugin {
                 )
                 .map(|location| location.path)
             })
-            .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
-            .unwrap_or(current_dir);
+            .and_then(|path| path.parent().map(std::path::Path::to_path_buf));
+
+        let config_root = match config_root {
+            Some(config_root) => config_root,
+            None => {
+                warn!(
+                    "gh_monitor: no git context and no config file path available; report_dir will resolve relative to daemon CWD ({})",
+                    current_dir.display()
+                );
+                current_dir
+            }
+        };
 
         debug!(
             "gh_monitor falling back to config-provided repo {}/{} rooted at {}",
@@ -833,7 +843,12 @@ impl CiMonitorPlugin {
             .unwrap_or_else(|| ctx.config.core.default_team.clone())
     }
 
-    fn write_disabled_health_record(ctx: &PluginContext, team: &str, message: &str) {
+    fn write_health_record(
+        ctx: &PluginContext,
+        team: &str,
+        availability_state: &str,
+        message: &str,
+    ) {
         let Some(home_dir) = ctx.system.claude_root.parent() else {
             warn!("CI Monitor: failed to derive ATM home for health file");
             return;
@@ -857,7 +872,7 @@ impl CiMonitorPlugin {
         let updated_record = GhMonitorHealthRecord {
             team: team.to_string(),
             lifecycle_state: "running".to_string(),
-            availability_state: "disabled_config_error".to_string(),
+            availability_state: availability_state.to_string(),
             in_flight: 0,
             updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             message: Some(message.to_string()),
@@ -941,7 +956,7 @@ impl CiMonitorPlugin {
     ) {
         let team = Self::team_for_config_error(table, ctx);
         let message = format!("invalid gh_monitor config: {reason}");
-        Self::write_disabled_health_record(ctx, &team, &message);
+        Self::write_health_record(ctx, &team, "disabled_config_error", &message);
         self.notify_disabled_transition(ctx, &team, &message);
     }
 }
@@ -990,7 +1005,14 @@ impl Plugin for CiMonitorPlugin {
         // Get repo info for synthetic member registration. Prefer git
         // auto-detection; fall back to config-provided owner/repo when daemon
         // startup lacks repository context.
-        let repo = self.resolve_repo_context(ctx)?;
+        let repo = match self.resolve_repo_context(ctx) {
+            Ok(repo) => repo,
+            Err(err) => {
+                let team = Self::team_for_config_error(config_table, ctx);
+                Self::write_health_record(ctx, &team, "disabled_init_error", &err.to_string());
+                return Err(err);
+            }
+        };
 
         // Resolve report directory relative to repo root when configured as a relative path
         if !self.config.report_dir.is_absolute() {
@@ -2015,18 +2037,39 @@ repo = "config-owner/config-repo"
         let atm_config_path = temp_dir.path().join(".atm.toml");
         std::fs::write(&atm_config_path, toml_str).unwrap();
 
-        let original_cwd = std::env::current_dir().unwrap();
-        let original_atm_config = std::env::var("ATM_CONFIG").ok();
+        struct EnvRestoreGuard {
+            key: &'static str,
+            original: Option<String>,
+        }
+
+        impl Drop for EnvRestoreGuard {
+            fn drop(&mut self) {
+                match self.original.take() {
+                    Some(value) => unsafe { std::env::set_var(self.key, value) },
+                    None => unsafe { std::env::remove_var(self.key) },
+                }
+            }
+        }
+
+        struct CurrentDirGuard(std::path::PathBuf);
+
+        impl Drop for CurrentDirGuard {
+            fn drop(&mut self) {
+                std::env::set_current_dir(&self.0).expect("restore current directory");
+            }
+        }
+
+        let _atm_config_guard = EnvRestoreGuard {
+            key: "ATM_CONFIG",
+            original: std::env::var("ATM_CONFIG").ok(),
+        };
+        let _cwd_guard = CurrentDirGuard(std::env::current_dir().unwrap());
+
         unsafe {
             std::env::set_var("ATM_CONFIG", &atm_config_path);
         }
         std::env::set_current_dir(temp_dir.path()).unwrap();
         let result = plugin.init(&ctx).await;
-        std::env::set_current_dir(original_cwd).unwrap();
-        match original_atm_config {
-            Some(value) => unsafe { std::env::set_var("ATM_CONFIG", value) },
-            None => unsafe { std::env::remove_var("ATM_CONFIG") },
-        }
 
         assert!(result.is_ok());
         let roster = ctx.roster.list_members("dev-team", None).expect("members");
@@ -2035,6 +2078,45 @@ repo = "config-owner/config-repo"
             .find(|member| member.name == "ci-monitor")
             .expect("synthetic member registered");
         assert_eq!(member.cwd, temp_dir.path().to_string_lossy());
+    }
+
+    #[tokio::test]
+    async fn test_init_without_git_or_config_repo_writes_disabled_init_health_record() {
+        use crate::plugins::ci_monitor::MockCiProvider;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let table: toml::Table = toml::from_str("team = \"dev-team\"").unwrap();
+        let ctx = create_mock_context_with_repo_config(teams_root.clone(), Some(table), false);
+        let mut plugin = CiMonitorPlugin::new().with_provider(Box::new(MockCiProvider::new()));
+
+        let err = plugin
+            .init(&ctx)
+            .await
+            .expect_err("init should fail without git or config repo");
+        assert!(
+            err.to_string()
+                .contains("No repository information available"),
+            "unexpected init error: {err}"
+        );
+
+        let health_path =
+            agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(temp_dir.path());
+        let raw = std::fs::read_to_string(&health_path).expect("health record");
+        let health: GhMonitorHealthFile = serde_json::from_str(&raw).expect("health json");
+        let record = health
+            .records
+            .iter()
+            .find(|record| record.team == "dev-team")
+            .expect("dev-team health record");
+        assert_eq!(record.availability_state, "disabled_init_error");
+        assert!(
+            record
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("No repository information available"))
+        );
     }
 
     #[tokio::test]

@@ -2595,10 +2595,17 @@ Core behavior contract:
 Connectivity and availability contract:
 - Invalid plugin configuration disables monitoring (`disabled_config_error`)
   and must consume zero polling CPU until configuration is corrected.
-- `validate_gh_monitor_config` MUST return `CONFIG_ERROR` when the `repo` field
-  is absent or empty in `[plugins.gh_monitor]`. A config with `enabled = true`
-  but no `repo` is invalid and MUST transition availability to
-  `disabled_config_error`. (See issue #471.)
+- `validate_gh_monitor_config` MUST return `CONFIG_ERROR` only when **both**
+  `ctx.system.repo` (git auto-detection) and `config.repo` (explicit config
+  field) are absent or empty. The repo requirement is satisfied by either path:
+  (1) git context resolved at daemon startup populates `ctx.system.repo` and
+  `[plugins.gh_monitor] repo` may remain unset — init proceeds using the
+  detected repo; (2) `[plugins.gh_monitor] repo` is explicitly configured and
+  git context is unavailable — init proceeds using the config-provided value
+  with the config file's directory as the report root. A config with
+  `enabled = true` where neither git context nor `config.repo` is present is
+  invalid and MUST transition availability to `disabled_config_error`.
+  (See issues #471 and #676.)
 - Transient provider/connectivity/auth/rate-limit failures transition monitor
   state to degraded and must emit both structured logs and ATM notifications to
   designated monitor recipients.
