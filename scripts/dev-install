@@ -243,19 +243,24 @@ def kill_matching_daemons(binary_path: Path) -> None:
 
     print(f"  killing {len(pids)} existing daemon process(es) for {binary_path}")
     for sig in ("TERM", "KILL"):
+        if sig == "TERM":
+            for pid in pids:
+                result = subprocess.run(["kill", f"-{sig}", str(pid)], check=False)
+                if result.returncode not in (0, 1):
+                    die(f"kill -{sig} {pid} failed with exit {result.returncode}")
+            time.sleep(1)
         remaining = []
         for pid in pids:
-            result = subprocess.run(["kill", f"-{sig}", str(pid)], check=False)
-            if result.returncode not in (0, 1):
-                die(f"kill -{sig} {pid} failed with exit {result.returncode}")
+            if sig == "KILL":
+                result = subprocess.run(["kill", f"-{sig}", str(pid)], check=False)
+                if result.returncode not in (0, 1):
+                    die(f"kill -{sig} {pid} failed with exit {result.returncode}")
             poll = subprocess.run(["kill", "-0", str(pid)], check=False)
             if poll.returncode == 0:
                 remaining.append(pid)
         pids = remaining
         if not pids:
             break
-        if sig == "TERM":
-            time.sleep(1)
     if pids:
         die(f"failed to stop existing daemon process(es): {', '.join(str(pid) for pid in pids)}")
 

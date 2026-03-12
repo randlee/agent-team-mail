@@ -306,6 +306,8 @@ fn execute_restart(timeout_secs: u64) -> Result<()> {
                 is_pid_alive,
                 RestartTiming::DEFAULT,
             )?;
+        } else {
+            eprintln!("warning: unable to resolve expected daemon binary path; skipping pre-restart daemon cleanup");
         }
         restart_daemon_with(
             &runtime,
@@ -410,13 +412,18 @@ fn expected_daemon_binary_path() -> Option<PathBuf> {
 }
 
 #[cfg(unix)]
+fn process_executable_matches_parts(
+    exe: Option<&Path>,
+    cmd0: Option<&std::ffi::OsString>,
+    expected: &Path,
+) -> bool {
+    exe.is_some_and(|exe| exe == expected)
+        || cmd0.map(|arg| Path::new(arg) == expected).unwrap_or(false)
+}
+
+#[cfg(unix)]
 fn process_executable_matches(process: &sysinfo::Process, expected: &Path) -> bool {
-    process.exe().is_some_and(|exe| exe == expected)
-        || process
-            .cmd()
-            .first()
-            .map(|arg| Path::new(arg) == expected)
-            .unwrap_or(false)
+    process_executable_matches_parts(process.exe(), process.cmd().first(), expected)
 }
 
 #[cfg(unix)]
@@ -448,6 +455,21 @@ where
     FAlive: Fn(i32) -> bool,
 {
     let pids = matching_daemon_process_ids(expected);
+    stop_matching_daemon_processes_for_pids(pids, runtime, send_signal, is_alive, timing)
+}
+
+#[cfg(unix)]
+fn stop_matching_daemon_processes_for_pids<FSignal, FAlive>(
+    pids: Vec<i32>,
+    runtime: &DaemonRuntimePaths,
+    send_signal: FSignal,
+    is_alive: FAlive,
+    timing: RestartTiming,
+) -> Result<Vec<i32>>
+where
+    FSignal: Fn(i32, i32) -> std::io::Result<()>,
+    FAlive: Fn(i32) -> bool,
+{
     if pids.is_empty() {
         return Ok(Vec::new());
     }
@@ -924,8 +946,8 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_stop_daemon_cleans_socket_when_sigterm_reports_esrch() {
-        let tmp = TempDir::new().expect("temp dir");
-        let runtime = temp_runtime_paths(&tmp);
+    let tmp = TempDir::new().expect("temp dir");
+    let runtime = temp_runtime_paths(&tmp);
         std::fs::write(&runtime.pid_path, "4242\n").expect("write pid");
         std::fs::write(&runtime.socket_path, "").expect("write socket");
 
@@ -1085,6 +1107,167 @@ mod tests {
             "restart should recreate socket"
         );
         assert!(restarted.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_expected_daemon_binary_path_honors_atm_daemon_bin_override() {
+        let old = std::env::var_os("ATM_DAEMON_BIN");
+        let expected = PathBuf::from("/tmp/custom-atm-daemon");
+        unsafe {
+            std::env::set_var("ATM_DAEMON_BIN", &expected);
+        }
+        assert_eq!(expected_daemon_binary_path(), Some(expected));
+        match old {
+            Some(value) => unsafe { std::env::set_var("ATM_DAEMON_BIN", value) },
+            None => unsafe { std::env::remove_var("ATM_DAEMON_BIN") },
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_process_executable_matches_parts_checks_exe_and_cmd() {
+        let expected = PathBuf::from("/tmp/atm-daemon");
+        assert!(process_executable_matches_parts(Some(&expected), None, &expected));
+        assert!(process_executable_matches_parts(
+            None,
+            Some(&std::ffi::OsString::from(expected.clone())),
+            &expected
+        ));
+        assert!(!process_executable_matches_parts(
+            None,
+            Some(&std::ffi::OsString::from("/tmp/other")),
+            &expected
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_matching_daemon_process_ids_empty_for_missing_path() {
+        let missing = PathBuf::from("/definitely/missing/atm-daemon-test");
+        assert!(matching_daemon_process_ids(&missing).is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_stop_matching_daemon_processes_fast_path_when_no_pids() {
+        let tmp = TempDir::new().expect("temp dir");
+        let runtime = temp_runtime_paths(&tmp);
+
+        let killed = stop_matching_daemon_processes_for_pids(
+            Vec::new(),
+            &runtime,
+            |_pid, _signal| Ok(()),
+            |_pid| true,
+            RestartTiming {
+                stop_poll_interval: Duration::from_millis(1),
+                runtime_absent_timeout: Duration::from_millis(1),
+                runtime_absent_poll_interval: Duration::from_millis(1),
+            },
+        )
+        .expect("empty pid list should be a no-op");
+
+        assert!(killed.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_stop_matching_daemon_processes_all_exit_before_sigkill() {
+        let tmp = TempDir::new().expect("temp dir");
+        let runtime = temp_runtime_paths(&tmp);
+        std::fs::write(&runtime.pid_path, "1111\n").expect("write pid");
+        std::fs::write(&runtime.socket_path, "").expect("write socket");
+
+        let signals = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let alive_checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pids = vec![1111, 2222];
+
+        let stopped = stop_matching_daemon_processes_for_pids(
+            pids.clone(),
+            &runtime,
+            {
+                let signals = std::sync::Arc::clone(&signals);
+                move |pid, signal| {
+                    signals.lock().unwrap().push((pid, signal));
+                    Ok(())
+                }
+            },
+            {
+                let alive_checks = std::sync::Arc::clone(&alive_checks);
+                move |_pid| alive_checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2
+            },
+            RestartTiming {
+                stop_poll_interval: Duration::from_millis(1),
+                runtime_absent_timeout: Duration::from_millis(1),
+                runtime_absent_poll_interval: Duration::from_millis(1),
+            },
+        )
+        .expect("all pids should exit after SIGTERM");
+
+        assert_eq!(stopped, pids);
+        assert_eq!(
+            *signals.lock().unwrap(),
+            vec![(1111, libc::SIGTERM), (2222, libc::SIGTERM)]
+        );
+        assert!(!runtime.pid_path.exists());
+        assert!(!runtime.socket_path.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_stop_matching_daemon_processes_bails_when_sigkill_survivor_remains() {
+        let tmp = TempDir::new().expect("temp dir");
+        let runtime = temp_runtime_paths(&tmp);
+        let signals = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let err = stop_matching_daemon_processes_for_pids(
+            vec![3333],
+            &runtime,
+            {
+                let signals = std::sync::Arc::clone(&signals);
+                move |pid, signal| {
+                    signals.lock().unwrap().push((pid, signal));
+                    Ok(())
+                }
+            },
+            |_pid| true,
+            RestartTiming {
+                stop_poll_interval: Duration::from_millis(1),
+                runtime_absent_timeout: Duration::from_millis(1),
+                runtime_absent_poll_interval: Duration::from_millis(1),
+            },
+        )
+        .expect_err("surviving pid should fail cleanup");
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains("3333"));
+        assert_eq!(
+            *signals.lock().unwrap(),
+            vec![(3333, libc::SIGTERM), (3333, libc::SIGKILL)]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_stop_matching_daemon_processes_errors_on_non_esrch_sigterm_failure() {
+        let tmp = TempDir::new().expect("temp dir");
+        let runtime = temp_runtime_paths(&tmp);
+
+        let err = stop_matching_daemon_processes_for_pids(
+            vec![4444],
+            &runtime,
+            |_pid, _signal| Err(std::io::Error::from_raw_os_error(libc::EPERM)),
+            |_pid| true,
+            RestartTiming {
+                stop_poll_interval: Duration::from_millis(1),
+                runtime_absent_timeout: Duration::from_millis(1),
+                runtime_absent_poll_interval: Duration::from_millis(1),
+            },
+        )
+        .expect_err("unexpected SIGTERM error should fail");
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains("failed to send SIGTERM to daemon process 4444"));
     }
 
 }
