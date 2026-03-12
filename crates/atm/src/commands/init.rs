@@ -1278,7 +1278,7 @@ fn normalize_catch_all_hook_category_if_present(
     normalize_catch_all_hook_entries(array)
 }
 
-#[allow(dead_code)] // used in tests; production path uses merge_session_hook
+/// Return `true` when any catch-all hook entry contains a nested command equal to `cmd`.
 pub(crate) fn catch_all_hook_command_present(array: &[serde_json::Value], cmd: &str) -> bool {
     array.iter().any(|entry| {
         entry

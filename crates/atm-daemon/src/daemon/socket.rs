@@ -10420,6 +10420,33 @@ exit 1
     #[cfg(unix)]
     #[tokio::test]
     #[serial]
+    async fn test_hook_event_teammate_idle_does_not_replace_existing_same_agent_session() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        {
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "arch-ctm", "sess-a", 5555);
+        }
+
+        let req_json = r#"{"version":1,"request_id":"r3-mismatch","command":"hook-event","payload":{"event":"teammate_idle","agent":"arch-ctm","session_id":"sess-b","team":"atm-dev","process_id":6666}}"#;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+
+        let reg = sr.lock().unwrap();
+        let session = reg
+            .query_for_team("atm-dev", "arch-ctm")
+            .expect("existing same-agent session should be preserved");
+        assert_eq!(session.session_id, "sess-a");
+        assert_eq!(session.process_id, 5555);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
     async fn test_hook_event_teammate_idle_rejects_unknown_agent() {
         let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead"]);
         let store = make_store();
