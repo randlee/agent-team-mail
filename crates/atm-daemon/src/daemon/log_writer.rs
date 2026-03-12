@@ -21,7 +21,7 @@
 //! renames existing rotated files (`base.1` → `base.2` → … → `base.N`) and
 //! starts a fresh base file. The oldest rotation file (`.N`) is removed.
 
-use agent_team_mail_core::logging_event::LogEventV1;
+use agent_team_mail_core::logging_event::{LogEventV1, configured_log_path};
 use sc_observability::{DEFAULT_QUEUE_CAPACITY, export_otel_best_effort_from_path};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -120,7 +120,7 @@ pub fn new_log_event_queue() -> LogEventQueue {
 
 /// Configuration for the [`run_log_writer_task`] async writer.
 pub struct LogWriterConfig {
-    /// Path to the base JSONL log file (e.g. `~/.config/atm/atm.log.jsonl`).
+    /// Path to the base JSONL log file (e.g. `~/.config/atm/logs/atm/atm.log.jsonl`).
     pub log_path: PathBuf,
     /// Rotate when the file reaches this size in bytes (default: 50 MiB).
     pub max_bytes: u64,
@@ -135,20 +135,20 @@ impl LogWriterConfig {
     ///
     /// | Variable              | Default                                  |
     /// |-----------------------|------------------------------------------|
-    /// | `ATM_LOG_FILE`        | `{home_dir}/.config/atm/atm.log.jsonl`  |
+    /// | `ATM_LOG_FILE`        | `{home_dir}/.config/atm/logs/atm/atm.log.jsonl` |
     /// | `ATM_LOG_PATH`        | alias for `ATM_LOG_FILE` (compat)        |
     /// | `ATM_LOG_MAX_BYTES`   | 52428800 (50 MiB)                        |
     /// | `ATM_LOG_MAX_FILES`   | 5                                        |
     /// | `ATM_LOG_FLUSH_MS`    | 100                                      |
     ///
     /// `ATM_LOG_FILE` takes precedence over `ATM_LOG_PATH`. When neither is
-    /// set the log is written to `{home_dir}/.config/atm/atm.log.jsonl`.
+    /// set the log is written to `{home_dir}/.config/atm/logs/atm/atm.log.jsonl`.
     pub fn from_env(home_dir: &Path) -> Self {
         // Check ATM_LOG_FILE first (canonical), then ATM_LOG_PATH (compat alias).
         let log_path = std::env::var("ATM_LOG_FILE")
             .or_else(|_| std::env::var("ATM_LOG_PATH"))
             .map(PathBuf::from)
-            .unwrap_or_else(|_| home_dir.join(".config/atm/atm.log.jsonl"));
+            .unwrap_or_else(|_| configured_log_path(home_dir));
 
         let max_bytes = std::env::var("ATM_LOG_MAX_BYTES")
             .ok()
@@ -487,10 +487,7 @@ mod tests {
         // Use a temp dir as the home dir.
         let dir = TempDir::new().expect("temp dir");
         let config = LogWriterConfig::from_env(dir.path());
-        assert_eq!(
-            config.log_path,
-            dir.path().join(".config/atm/atm.log.jsonl")
-        );
+        assert_eq!(config.log_path, configured_log_path(dir.path()));
         assert_eq!(config.max_bytes, 50 * 1024 * 1024);
         assert_eq!(config.max_files, 5);
         assert_eq!(config.flush_interval_ms, 100);
