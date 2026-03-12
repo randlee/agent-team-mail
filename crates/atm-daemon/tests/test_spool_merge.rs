@@ -233,7 +233,10 @@ fn test_merge_writes_to_configured_canonical_log_path() {
 
     let merged = merge_spool_on_startup(&spool_dir, &log_path).unwrap();
     assert_eq!(merged, 1);
-    assert!(log_path.exists(), "configured canonical log should be created");
+    assert!(
+        log_path.exists(),
+        "configured canonical log should be created"
+    );
     assert!(
         spool_jsonl_files(&spool_dir).is_empty(),
         "configured spool directory should be drained after merge"
