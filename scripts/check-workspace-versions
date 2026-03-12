@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""check-workspace-versions: Assert every workspace member uses the same version.
+
+Reads the workspace version from ``[workspace.package] version`` in the root
+``Cargo.toml`` via ``cargo metadata`` and then checks every workspace member
+package against that version.
+
+Known intentional exceptions (example crates with their own version lines) are
+excluded from the check:
+  - provider-stub
+  - ci-provider-azdo
+
+Usage::
+
+    scripts/check-workspace-versions            # run from repo root or any subdir
+    scripts/check-workspace-versions --json     # emit JSON report to stdout
+
+Exit codes:
+    0  all workspace members match the workspace version
+    1  one or more members mismatch (or cargo metadata failed)
+"""
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+
+# Crate names whose version intentionally differs from the workspace version.
+# These are example/stub crates excluded from the workspace resolver.
+EXCLUDED_CRATES = {"provider-stub", "ci-provider-azdo"}
+
+
+def die(msg: str) -> None:
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def find_repo_root() -> Path:
+    """Walk upward from this script to find the directory containing Cargo.toml."""
+    candidate = Path(__file__).resolve().parent
+    for _ in range(10):
+        if (candidate / "Cargo.toml").exists():
+            return candidate
+        parent = candidate.parent
+        if parent == candidate:
+            break
+        candidate = parent
+    die(
+        "could not locate root Cargo.toml — "
+        "run this script from within the repository"
+    )
+
+
+def run_cargo_metadata(repo_root: Path) -> dict:
+    try:
+        result = subprocess.run(
+            ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=str(repo_root),
+        )
+    except FileNotFoundError:
+        die("cargo not found on PATH — install Rust via https://rustup.rs")
+    except subprocess.CalledProcessError as exc:
+        msg = f"cargo metadata failed (exit {exc.returncode})"
+        if exc.stderr:
+            msg += f":\n{exc.stderr.strip()}"
+        die(msg)
+
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        die(f"failed to parse cargo metadata output: {exc}")
+
+
+def get_workspace_version(meta: dict) -> str:
+    """Extract the canonical workspace version from the metadata packages list.
+
+    ``cargo metadata --no-deps`` resolves workspace inheritance, so every
+    package that declares ``version.workspace = true`` will appear with the
+    resolved version.  We identify the authoritative version by finding the
+    package named ``agent-team-mail`` (the primary CLI crate).  If that crate
+    is absent we fall back to the first workspace member.
+    """
+    packages = meta.get("packages", [])
+    for pkg in packages:
+        if pkg.get("name") == "agent-team-mail":
+            return pkg["version"]
+    if packages:
+        # Fallback: use the first listed package.
+        return packages[0]["version"]
+    die("cargo metadata returned no packages — is this a valid workspace?")
+
+
+def check_versions(meta: dict, workspace_version: str) -> list[dict]:
+    """Return a list of result records, one per non-excluded workspace member."""
+    workspace_members = set(meta.get("workspace_members", []))
+    packages = {pkg["id"]: pkg for pkg in meta.get("packages", [])}
+
+    results = []
+    for member_id in sorted(workspace_members):
+        pkg = packages.get(member_id)
+        if pkg is None:
+            # Should not happen, but guard defensively.
+            results.append(
+                {
+                    "name": member_id,
+                    "version": "unknown",
+                    "expected": workspace_version,
+                    "status": "FAIL",
+                    "note": "package not found in metadata",
+                }
+            )
+            continue
+
+        name = pkg["name"]
+        version = pkg["version"]
+
+        if name in EXCLUDED_CRATES:
+            results.append(
+                {
+                    "name": name,
+                    "version": version,
+                    "expected": workspace_version,
+                    "status": "SKIP",
+                    "note": "intentional exception",
+                }
+            )
+            continue
+
+        status = "PASS" if version == workspace_version else "FAIL"
+        results.append(
+            {
+                "name": name,
+                "version": version,
+                "expected": workspace_version,
+                "status": status,
+                "note": "",
+            }
+        )
+
+    return results
+
+
+def print_report(results: list[dict], workspace_version: str) -> None:
+    print(f"workspace version: {workspace_version}")
+    print()
+    col_name = max(len(r["name"]) for r in results) if results else 10
+    col_ver = max(len(r["version"]) for r in results) if results else 10
+    header = f"  {'CRATE':<{col_name}}  {'VERSION':<{col_ver}}  STATUS"
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+    for r in results:
+        note = f"  ({r['note']})" if r["note"] else ""
+        print(f"  {r['name']:<{col_name}}  {r['version']:<{col_ver}}  {r['status']}{note}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Assert all workspace members share the workspace Cargo version.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit JSON report to stdout instead of human-readable table",
+    )
+    args = parser.parse_args()
+
+    repo_root = find_repo_root()
+    meta = run_cargo_metadata(repo_root)
+    workspace_version = get_workspace_version(meta)
+    results = check_versions(meta, workspace_version)
+
+    if args.json:
+        report = {
+            "workspace_version": workspace_version,
+            "repo_root": str(repo_root),
+            "results": results,
+        }
+        print(json.dumps(report, indent=2))
+    else:
+        print_report(results, workspace_version)
+        print()
+
+    failures = [r for r in results if r["status"] == "FAIL"]
+    skipped = [r for r in results if r["status"] == "SKIP"]
+    passed = [r for r in results if r["status"] == "PASS"]
+
+    if not args.json:
+        print(
+            f"summary: {len(passed)} passed, {len(failures)} failed, "
+            f"{len(skipped)} skipped"
+        )
+
+    if failures:
+        if not args.json:
+            print("\nFAIL: version mismatch detected", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
