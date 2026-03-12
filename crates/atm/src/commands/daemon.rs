@@ -296,63 +296,17 @@ fn execute_stop(timeout_secs: u64) -> Result<()> {
 /// Restart the daemon: stop the running instance then trigger autostart.
 fn execute_restart(timeout_secs: u64) -> Result<()> {
     #[cfg(unix)]
-    if daemon_runtime_paths()?.pid_path.exists() {
+    {
         let runtime = daemon_runtime_paths()?;
-        match stop_daemon_with(
+        restart_daemon_with(
             &runtime,
             timeout_secs,
             signal_pid,
             is_pid_alive,
-            Duration::from_millis(200),
-        )? {
-            StopOutcome::Stopped { pid, already_dead } => {
-                if already_dead {
-                    println!("Daemon process {pid} no longer exists; cleaning up runtime files.");
-                } else {
-                    println!(
-                        "Sent SIGTERM to daemon (PID {pid}); waiting up to {timeout_secs}s for exit..."
-                    );
-                    println!("Daemon (PID {pid}) has stopped.");
-                }
-            }
-            StopOutcome::TimedOut { pid } => {
-                println!(
-                    "Sent SIGTERM to daemon (PID {pid}); waiting up to {timeout_secs}s for exit..."
-                );
-                println!(
-                    "Daemon (PID {pid}) did not stop within {timeout_secs}s after SIGTERM; escalating to SIGKILL."
-                );
-                signal_pid(pid, libc::SIGKILL)
-                    .with_context(|| format!("failed to send SIGKILL to daemon process {pid}"))?;
-                let deadline = Instant::now() + Duration::from_secs(timeout_secs.max(1));
-                while Instant::now() < deadline {
-                    if !is_pid_alive(pid) {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                if is_pid_alive(pid) {
-                    anyhow::bail!("daemon process {pid} remained alive after SIGKILL escalation");
-                }
-                cleanup_runtime_files(&runtime);
-            }
-        }
-
-        if !wait_for_runtime_files_absent(
-            &runtime,
-            Duration::from_secs(2),
-            Duration::from_millis(50),
-        ) {
-            cleanup_runtime_files(&runtime);
-        }
-    }
-
-    agent_team_mail_core::daemon_client::ensure_daemon_running()
-        .context("failed to autostart daemon after stop")?;
-    if agent_team_mail_core::daemon_client::daemon_is_running() {
-        println!("Daemon restarted successfully.");
-    } else {
-        anyhow::bail!("daemon did not come back online after restart");
+            agent_team_mail_core::daemon_client::ensure_daemon_running,
+            agent_team_mail_core::daemon_client::daemon_is_running,
+            RestartTiming::DEFAULT,
+        )?;
     }
     Ok(())
 }
@@ -369,6 +323,23 @@ struct DaemonRuntimePaths {
 enum StopOutcome {
     Stopped { pid: i32, already_dead: bool },
     TimedOut { pid: i32 },
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy)]
+struct RestartTiming {
+    stop_poll_interval: Duration,
+    runtime_absent_timeout: Duration,
+    runtime_absent_poll_interval: Duration,
+}
+
+#[cfg(unix)]
+impl RestartTiming {
+    const DEFAULT: Self = Self {
+        stop_poll_interval: Duration::from_millis(200),
+        runtime_absent_timeout: Duration::from_secs(2),
+        runtime_absent_poll_interval: Duration::from_millis(50),
+    };
 }
 
 #[cfg(unix)]
@@ -469,6 +440,7 @@ where
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     while Instant::now() < deadline {
         if !is_alive(pid) {
+            cleanup_runtime_files(paths);
             return Ok(StopOutcome::Stopped {
                 pid,
                 already_dead: false,
@@ -478,6 +450,81 @@ where
     }
 
     Ok(StopOutcome::TimedOut { pid })
+}
+
+#[cfg(unix)]
+fn restart_daemon_with<FSignal, FAlive, FEnsure, FDaemonRunning>(
+    runtime: &DaemonRuntimePaths,
+    timeout_secs: u64,
+    send_signal: FSignal,
+    is_alive: FAlive,
+    ensure_running: FEnsure,
+    daemon_running: FDaemonRunning,
+    timing: RestartTiming,
+) -> Result<()>
+where
+    FSignal: Fn(i32, i32) -> std::io::Result<()>,
+    FAlive: Fn(i32) -> bool,
+    FEnsure: Fn() -> Result<()>,
+    FDaemonRunning: Fn() -> bool,
+{
+    if runtime.pid_path.exists() {
+        match stop_daemon_with(
+            runtime,
+            timeout_secs,
+            &send_signal,
+            &is_alive,
+            timing.stop_poll_interval,
+        )? {
+            StopOutcome::Stopped { pid, already_dead } => {
+                if already_dead {
+                    println!("Daemon process {pid} no longer exists; cleaning up runtime files.");
+                } else {
+                    println!(
+                        "Sent SIGTERM to daemon (PID {pid}); waiting up to {timeout_secs}s for exit..."
+                    );
+                    println!("Daemon (PID {pid}) has stopped.");
+                }
+            }
+            StopOutcome::TimedOut { pid } => {
+                println!(
+                    "Sent SIGTERM to daemon (PID {pid}); waiting up to {timeout_secs}s for exit..."
+                );
+                println!(
+                    "Daemon (PID {pid}) did not stop within {timeout_secs}s after SIGTERM; escalating to SIGKILL."
+                );
+                send_signal(pid, libc::SIGKILL)
+                    .with_context(|| format!("failed to send SIGKILL to daemon process {pid}"))?;
+                let deadline = Instant::now() + Duration::from_secs(timeout_secs.max(1));
+                while Instant::now() < deadline {
+                    if !is_alive(pid) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                if is_alive(pid) {
+                    anyhow::bail!("daemon process {pid} remained alive after SIGKILL escalation");
+                }
+                cleanup_runtime_files(runtime);
+            }
+        }
+
+        if !wait_for_runtime_files_absent(
+            runtime,
+            timing.runtime_absent_timeout,
+            timing.runtime_absent_poll_interval,
+        ) {
+            cleanup_runtime_files(runtime);
+        }
+    }
+
+    ensure_running().context("failed to autostart daemon after stop")?;
+    if daemon_running() {
+        println!("Daemon restarted successfully.");
+    } else {
+        anyhow::bail!("daemon did not come back online after restart");
+    }
+    Ok(())
 }
 
 fn wait_for_session_dead(team_name: &str, agent_name: &str, timeout_secs: u64) -> bool {
@@ -808,6 +855,41 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn test_stop_daemon_removes_runtime_files() {
+        let tmp = TempDir::new().expect("temp dir");
+        let runtime = temp_runtime_paths(&tmp);
+        std::fs::write(&runtime.pid_path, "4242\n").expect("write pid");
+        std::fs::write(&runtime.socket_path, "").expect("write socket");
+
+        let checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let outcome = stop_daemon_with(
+            &runtime,
+            1,
+            |_pid, _signal| Ok(()),
+            {
+                let checks = std::sync::Arc::clone(&checks);
+                move |_pid| checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+            },
+            Duration::from_millis(1),
+        )
+        .expect("stop should succeed");
+
+        assert_eq!(
+            outcome,
+            StopOutcome::Stopped {
+                pid: 4242,
+                already_dead: false
+            }
+        );
+        assert!(!runtime.pid_path.exists(), "pid file should be removed");
+        assert!(
+            !runtime.socket_path.exists(),
+            "socket file should be removed"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn test_wait_for_runtime_files_absent_returns_true_after_cleanup() {
         let tmp = TempDir::new().expect("temp dir");
         let runtime = temp_runtime_paths(&tmp);
@@ -827,5 +909,63 @@ mod tests {
             Duration::from_millis(200),
             Duration::from_millis(5),
         ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_daemon_restart_produces_new_pid() {
+        let tmp = TempDir::new().expect("temp dir");
+        let runtime = temp_runtime_paths(&tmp);
+        std::fs::write(&runtime.pid_path, "4242\n").expect("write pid");
+        std::fs::write(&runtime.socket_path, "").expect("write socket");
+
+        let signals = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let alive_checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let restarted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        restart_daemon_with(
+            &runtime,
+            1,
+            {
+                let signals = std::sync::Arc::clone(&signals);
+                move |pid, signal| {
+                    signals.lock().unwrap().push((pid, signal));
+                    Ok(())
+                }
+            },
+            {
+                let alive_checks = std::sync::Arc::clone(&alive_checks);
+                move |_pid| alive_checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+            },
+            {
+                let runtime = runtime.clone();
+                let restarted = std::sync::Arc::clone(&restarted);
+                move || {
+                    std::fs::write(&runtime.pid_path, "5252\n").expect("write new pid");
+                    std::fs::write(&runtime.socket_path, "").expect("write new socket");
+                    restarted.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+            || true,
+            RestartTiming {
+                stop_poll_interval: Duration::from_millis(1),
+                runtime_absent_timeout: Duration::from_millis(50),
+                runtime_absent_poll_interval: Duration::from_millis(1),
+            },
+        )
+        .expect("restart should succeed");
+
+        assert_eq!(*signals.lock().unwrap(), vec![(4242, libc::SIGTERM)]);
+        assert_eq!(
+            std::fs::read_to_string(&runtime.pid_path).unwrap(),
+            "5252\n",
+            "restart should leave the new daemon pid file in place"
+        );
+        assert!(
+            runtime.socket_path.exists(),
+            "restart should recreate socket"
+        );
+        assert!(restarted.load(std::sync::atomic::Ordering::SeqCst));
     }
 }
