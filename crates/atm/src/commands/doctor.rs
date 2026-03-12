@@ -18,13 +18,18 @@ use agent_team_mail_core::schema::TeamConfig;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::commands::init::{
+    catch_all_hook_command_present, notification_idle_prompt_cmd, permission_request_cmd,
+    post_tool_use_bash_cmd, pre_tool_use_bash_cmd, pre_tool_use_task_cmd, runtime_detected,
+    session_end_cmd, session_start_cmd, stop_cmd,
+};
 use crate::commands::logging_health::{
     LoggingHealthContract, LoggingHealthSnapshot, build_logging_health_contract,
     logging_remediation,
 };
 use crate::util::caller_identity::resolve_caller_session_id_optional;
 use crate::util::member_labels::UNREGISTERED_MARKER;
-use crate::util::settings::{get_home_dir, teams_root_dir_for};
+use crate::util::settings::{claude_root_dir_for, get_home_dir, teams_root_dir_for};
 
 #[derive(Args, Debug)]
 pub struct DoctorArgs {
@@ -290,6 +295,9 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
     // Check 5: config/runtime drift
     findings.extend(check_config_runtime_drift(team, &args.team));
 
+    // Check 5b: hook installation / config audit
+    findings.extend(check_hook_audit(home_dir));
+
     // Check 6: unified log diagnostics
     let (window_start, mode) =
         compute_log_window_start(home_dir, team, team_config.as_ref(), args)?;
@@ -454,6 +462,400 @@ fn active_env_overrides() -> EnvOverrides {
         atm_team: env_override("ATM_TEAM"),
         atm_identity: env_override("ATM_IDENTITY"),
     }
+}
+
+fn count_nested_hook_command_matches(array: &[serde_json::Value], cmd: &str) -> usize {
+    array
+        .iter()
+        .map(|entry| {
+            if entry
+                .get("command")
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| value == cmd)
+            {
+                1
+            } else {
+                entry
+                    .get("hooks")
+                    .and_then(|hooks| hooks.as_array())
+                    .map(|hooks| {
+                        hooks
+                            .iter()
+                            .filter(|hook| {
+                                hook.get("command")
+                                    .and_then(|value| value.as_str())
+                                    .is_some_and(|value| value == cmd)
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0)
+            }
+        })
+        .sum()
+}
+
+fn hook_script_findings(scripts_dir: &Path, scripts: &[&str]) -> Vec<Finding> {
+    scripts
+        .iter()
+        .filter_map(|script| {
+            let path = scripts_dir.join(script);
+            (!path.is_file()).then(|| {
+                finding(
+                    Severity::Warn,
+                    "hook_audit",
+                    "HOOK_SCRIPT_MISSING",
+                    format!("Expected hook script missing: {}", path.display()),
+                )
+            })
+        })
+        .collect()
+}
+
+fn audit_claude_command(
+    findings: &mut Vec<Finding>,
+    hooks: &serde_json::Map<String, serde_json::Value>,
+    category: &str,
+    label: &str,
+    command: &str,
+) {
+    let Some(array) = hooks.get(category).and_then(|value| value.as_array()) else {
+        findings.push(finding(
+            Severity::Warn,
+            "hook_audit",
+            "HOOK_COMMAND_MISSING",
+            format!("Claude hook '{}' missing from hooks.{}", label, category),
+        ));
+        return;
+    };
+
+    let matches = if matches!(
+        category,
+        "SessionStart" | "SessionEnd" | "PermissionRequest" | "Stop"
+    ) {
+        if catch_all_hook_command_present(array, command) {
+            count_nested_hook_command_matches(array, command)
+        } else {
+            0
+        }
+    } else {
+        count_nested_hook_command_matches(array, command)
+    };
+
+    if matches == 0 {
+        findings.push(finding(
+            Severity::Warn,
+            "hook_audit",
+            "HOOK_COMMAND_MISSING",
+            format!(
+                "Claude hook '{}' is not installed with expected command '{}' in hooks.{}",
+                label, command, category
+            ),
+        ));
+    } else if matches > 1 {
+        findings.push(finding(
+            Severity::Warn,
+            "hook_audit",
+            "HOOK_COMMAND_DUPLICATED",
+            format!(
+                "Claude hook '{}' appears {} times in hooks.{}; expected exactly 1",
+                label, matches, category
+            ),
+        ));
+    }
+}
+
+fn audit_gemini_command(
+    findings: &mut Vec<Finding>,
+    hooks: &serde_json::Map<String, serde_json::Value>,
+    category: &str,
+    label: &str,
+    command: &str,
+) {
+    let Some(array) = hooks.get(category).and_then(|value| value.as_array()) else {
+        findings.push(finding(
+            Severity::Warn,
+            "hook_audit",
+            "HOOK_COMMAND_MISSING",
+            format!("Gemini hook '{}' missing from hooks.{}", label, category),
+        ));
+        return;
+    };
+
+    let matches = count_nested_hook_command_matches(array, command);
+    if matches == 0 {
+        findings.push(finding(
+            Severity::Warn,
+            "hook_audit",
+            "HOOK_COMMAND_MISSING",
+            format!(
+                "Gemini hook '{}' is not installed with expected command '{}' in hooks.{}",
+                label, command, category
+            ),
+        ));
+    } else if matches > 1 {
+        findings.push(finding(
+            Severity::Warn,
+            "hook_audit",
+            "HOOK_COMMAND_DUPLICATED",
+            format!(
+                "Gemini hook '{}' appears {} times in hooks.{}; expected exactly 1",
+                label, matches, category
+            ),
+        ));
+    }
+}
+
+fn check_hook_audit(home_dir: &Path) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let claude_root = claude_root_dir_for(home_dir);
+    let claude_scripts_dir = claude_root.join("scripts");
+
+    findings.extend(hook_script_findings(
+        &claude_scripts_dir,
+        &[
+            "session-start.py",
+            "session-end.py",
+            "permission-request-relay.py",
+            "stop-relay.py",
+            "notification-idle-relay.py",
+            "atm-identity-write.py",
+            "gate-agent-spawns.py",
+            "atm-identity-cleanup.py",
+            "atm-hook-relay.py",
+            "atm_hook_lib.py",
+            "teammate-idle-relay.py",
+        ],
+    ));
+
+    let claude_settings_path = claude_root.join("settings.json");
+    match fs::read_to_string(&claude_settings_path) {
+        Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(settings) => {
+                if let Some(hooks) = settings.get("hooks").and_then(|value| value.as_object()) {
+                    audit_claude_command(
+                        &mut findings,
+                        hooks,
+                        "SessionStart",
+                        "SessionStart",
+                        &session_start_cmd(Some(&claude_scripts_dir)),
+                    );
+                    audit_claude_command(
+                        &mut findings,
+                        hooks,
+                        "SessionEnd",
+                        "SessionEnd",
+                        &session_end_cmd(Some(&claude_scripts_dir)),
+                    );
+                    audit_claude_command(
+                        &mut findings,
+                        hooks,
+                        "PermissionRequest",
+                        "PermissionRequest",
+                        &permission_request_cmd(Some(&claude_scripts_dir)),
+                    );
+                    audit_claude_command(
+                        &mut findings,
+                        hooks,
+                        "Stop",
+                        "Stop",
+                        &stop_cmd(Some(&claude_scripts_dir)),
+                    );
+                    audit_claude_command(
+                        &mut findings,
+                        hooks,
+                        "Notification",
+                        "Notification(idle_prompt)",
+                        &notification_idle_prompt_cmd(Some(&claude_scripts_dir)),
+                    );
+                    audit_claude_command(
+                        &mut findings,
+                        hooks,
+                        "PreToolUse",
+                        "PreToolUse(Bash)",
+                        &pre_tool_use_bash_cmd(Some(&claude_scripts_dir)),
+                    );
+                    audit_claude_command(
+                        &mut findings,
+                        hooks,
+                        "PreToolUse",
+                        "PreToolUse(Task)",
+                        &pre_tool_use_task_cmd(Some(&claude_scripts_dir)),
+                    );
+                    audit_claude_command(
+                        &mut findings,
+                        hooks,
+                        "PostToolUse",
+                        "PostToolUse(Bash)",
+                        &post_tool_use_bash_cmd(Some(&claude_scripts_dir)),
+                    );
+                } else {
+                    findings.push(finding(
+                        Severity::Warn,
+                        "hook_audit",
+                        "HOOK_CONFIG_INVALID",
+                        format!(
+                            "Claude hook settings missing JSON object at {}",
+                            claude_settings_path.display()
+                        ),
+                    ));
+                }
+            }
+            Err(err) => findings.push(finding(
+                Severity::Warn,
+                "hook_audit",
+                "HOOK_CONFIG_INVALID",
+                format!(
+                    "Failed to parse Claude settings {}: {err}",
+                    claude_settings_path.display()
+                ),
+            )),
+        },
+        Err(err) => findings.push(finding(
+            Severity::Warn,
+            "hook_audit",
+            "HOOK_CONFIG_MISSING",
+            format!(
+                "Claude settings missing or unreadable at {}: {err}",
+                claude_settings_path.display()
+            ),
+        )),
+    }
+
+    let codex_config_path = home_dir.join(".codex/config.toml");
+    if runtime_detected("codex", &codex_config_path) {
+        let expected_notify = vec![
+            toml::Value::String("python3".to_string()),
+            toml::Value::String(
+                claude_scripts_dir
+                    .join("atm-hook-relay.py")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+        ];
+        match fs::read_to_string(&codex_config_path) {
+            Ok(raw) => match raw.parse::<toml::Table>() {
+                Ok(table) => match table.get("notify").and_then(|value| value.as_array()) {
+                    Some(array) if array == &expected_notify => {}
+                    Some(_) => findings.push(finding(
+                        Severity::Warn,
+                        "hook_audit",
+                        "HOOK_COMMAND_MISMATCH",
+                        format!(
+                            "Codex notify config in {} does not match expected ATM relay",
+                            codex_config_path.display()
+                        ),
+                    )),
+                    None => findings.push(finding(
+                        Severity::Warn,
+                        "hook_audit",
+                        "HOOK_COMMAND_MISSING",
+                        format!(
+                            "Codex notify hook missing in {}",
+                            codex_config_path.display()
+                        ),
+                    )),
+                },
+                Err(err) => findings.push(finding(
+                    Severity::Warn,
+                    "hook_audit",
+                    "HOOK_CONFIG_INVALID",
+                    format!(
+                        "Failed to parse Codex config {}: {err}",
+                        codex_config_path.display()
+                    ),
+                )),
+            },
+            Err(err) => findings.push(finding(
+                Severity::Warn,
+                "hook_audit",
+                "HOOK_CONFIG_MISSING",
+                format!(
+                    "Codex config missing or unreadable at {}: {err}",
+                    codex_config_path.display()
+                ),
+            )),
+        }
+    }
+
+    let gemini_root = home_dir.join(".gemini");
+    let gemini_settings_path = gemini_root.join("settings.json");
+    if runtime_detected("gemini", &gemini_root) {
+        match fs::read_to_string(&gemini_settings_path) {
+            Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(settings) => {
+                    if let Some(hooks) = settings.get("hooks").and_then(|value| value.as_object()) {
+                        let session_start = format!(
+                            "python3 \"{}\"",
+                            claude_scripts_dir
+                                .join("session-start.py")
+                                .to_string_lossy()
+                        );
+                        let session_end = format!(
+                            "python3 \"{}\"",
+                            claude_scripts_dir.join("session-end.py").to_string_lossy()
+                        );
+                        let after_agent = format!(
+                            "python3 \"{}\"",
+                            claude_scripts_dir
+                                .join("teammate-idle-relay.py")
+                                .to_string_lossy()
+                        );
+                        audit_gemini_command(
+                            &mut findings,
+                            hooks,
+                            "SessionStart",
+                            "SessionStart",
+                            &session_start,
+                        );
+                        audit_gemini_command(
+                            &mut findings,
+                            hooks,
+                            "SessionEnd",
+                            "SessionEnd",
+                            &session_end,
+                        );
+                        audit_gemini_command(
+                            &mut findings,
+                            hooks,
+                            "AfterAgent",
+                            "AfterAgent",
+                            &after_agent,
+                        );
+                    } else {
+                        findings.push(finding(
+                            Severity::Warn,
+                            "hook_audit",
+                            "HOOK_CONFIG_INVALID",
+                            format!(
+                                "Gemini hook settings missing JSON object at {}",
+                                gemini_settings_path.display()
+                            ),
+                        ));
+                    }
+                }
+                Err(err) => findings.push(finding(
+                    Severity::Warn,
+                    "hook_audit",
+                    "HOOK_CONFIG_INVALID",
+                    format!(
+                        "Failed to parse Gemini settings {}: {err}",
+                        gemini_settings_path.display()
+                    ),
+                )),
+            },
+            Err(err) => findings.push(finding(
+                Severity::Warn,
+                "hook_audit",
+                "HOOK_CONFIG_MISSING",
+                format!(
+                    "Gemini settings missing or unreadable at {}: {err}",
+                    gemini_settings_path.display()
+                ),
+            )),
+        }
+    }
+
+    findings
 }
 
 fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
@@ -1147,6 +1549,13 @@ fn build_recommendations(
                 reason: "No session context detected. Run from a managed session (or set ATM_SESSION_ID) before retrying register.".to_string(),
             });
         }
+    }
+
+    if findings.iter().any(|f| f.check == "hook_audit") {
+        recs.push(Recommendation {
+            command: format!("atm init {team}"),
+            reason: "Install or repair expected runtime hook wiring and scripts".to_string(),
+        });
     }
 
     recs
@@ -1906,6 +2315,18 @@ mod tests {
     }
 
     #[test]
+    fn build_recommendations_includes_atm_init_for_hook_audit() {
+        let findings = vec![finding(
+            Severity::Warn,
+            "hook_audit",
+            "HOOK_COMMAND_MISSING",
+            "x".to_string(),
+        )];
+        let recs = build_recommendations("atm-dev", &findings, true);
+        assert!(recs.iter().any(|r| r.command == "atm init atm-dev"));
+    }
+
+    #[test]
     fn check_pid_session_reconciliation_query_error_maps_to_active_without_session() {
         let cfg = TeamConfig {
             name: "atm-dev".to_string(),
@@ -2217,6 +2638,90 @@ mod tests {
         assert_eq!(findings[0].code, "PLUGIN_INIT_FAILED");
         assert!(findings[0].message.contains("issues"));
         assert!(findings[0].message.contains("bad token"));
+    }
+
+    #[test]
+    #[serial]
+    fn check_hook_audit_reports_missing_claude_settings_and_scripts() {
+        let _guard = EnvGuard::isolate(&["ATM_HOME", "ATM_TEAM", "ATM_IDENTITY", "PATH"]);
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("PATH", "") };
+
+        let findings = check_hook_audit(tmp.path());
+        assert!(findings.iter().any(|f| f.code == "HOOK_SCRIPT_MISSING"));
+        assert!(findings.iter().any(|f| f.code == "HOOK_CONFIG_MISSING"));
+    }
+
+    #[test]
+    #[serial]
+    fn check_hook_audit_accepts_installed_claude_hooks() {
+        let _guard = EnvGuard::isolate(&["ATM_HOME", "ATM_TEAM", "ATM_IDENTITY", "PATH"]);
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("PATH", "") };
+
+        let claude_root = claude_root_dir_for(tmp.path());
+        let scripts_dir = claude_root.join("scripts");
+        fs::create_dir_all(&scripts_dir).unwrap();
+        for script in [
+            "session-start.py",
+            "session-end.py",
+            "permission-request-relay.py",
+            "stop-relay.py",
+            "notification-idle-relay.py",
+            "atm-identity-write.py",
+            "gate-agent-spawns.py",
+            "atm-identity-cleanup.py",
+            "atm-hook-relay.py",
+            "atm_hook_lib.py",
+            "teammate-idle-relay.py",
+        ] {
+            fs::write(scripts_dir.join(script), "#!/usr/bin/env python3\n").unwrap();
+        }
+
+        let settings = serde_json::json!({
+            "hooks": {
+                "SessionStart": [{
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": session_start_cmd(Some(&scripts_dir))}]
+                }],
+                "SessionEnd": [{
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": session_end_cmd(Some(&scripts_dir))}]
+                }],
+                "PermissionRequest": [{
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": permission_request_cmd(Some(&scripts_dir))}]
+                }],
+                "Stop": [{
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": stop_cmd(Some(&scripts_dir))}]
+                }],
+                "Notification": [{
+                    "matcher": "idle_prompt",
+                    "hooks": [{"type": "command", "command": notification_idle_prompt_cmd(Some(&scripts_dir))}]
+                }],
+                "PreToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": pre_tool_use_bash_cmd(Some(&scripts_dir))}]},
+                    {"matcher": "Task", "hooks": [{"type": "command", "command": pre_tool_use_task_cmd(Some(&scripts_dir))}]}
+                ],
+                "PostToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": post_tool_use_bash_cmd(Some(&scripts_dir))}]}
+                ]
+            }
+        });
+        fs::create_dir_all(&claude_root).unwrap();
+        fs::write(
+            claude_root.join("settings.json"),
+            serde_json::to_vec_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+
+        let findings = check_hook_audit(tmp.path());
+        assert!(
+            findings.is_empty(),
+            "expected clean hook audit, got: {:?}",
+            findings
+        );
     }
 
     #[test]
