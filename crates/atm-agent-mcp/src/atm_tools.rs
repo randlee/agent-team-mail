@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_team_mail_core::InboxMessage;
-use agent_team_mail_core::home::get_home_dir;
+use agent_team_mail_core::home::{get_home_dir, teams_root_dir_for};
 use agent_team_mail_core::io::{inbox_append, inbox_update};
 use agent_team_mail_core::text::{truncate_chars, truncate_chars_slice};
 use serde_json::{Value, json};
@@ -121,10 +121,9 @@ fn parse_to(to: &str, default_team: &str) -> Result<(String, String), String> {
 
 /// Build the path to an agent's inbox file.
 ///
-/// `<home>/.claude/teams/<team>/inboxes/<agent>.json`
+/// `<teams_root>/<team>/inboxes/<agent>.json`
 fn inbox_path(home: &std::path::Path, team: &str, agent: &str) -> PathBuf {
-    home.join(".claude")
-        .join("teams")
+    teams_root_dir_for(home)
         .join(team)
         .join("inboxes")
         .join(format!("{agent}.json"))

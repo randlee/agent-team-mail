@@ -60,49 +60,49 @@ const ATM_HOOK_RELAY_PY: &str = include_str!("../../scripts/atm-hook-relay.py");
 // Teammate-idle relay scripts are also materialized for lifecycle parity.
 
 /// Return the SessionStart hook command string for local or global install.
-fn session_start_cmd(global_scripts_dir: Option<&Path>) -> String {
+pub(crate) fn session_start_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "session-start.py");
     format!("python3 \"{script}\"")
 }
 
 /// Return the SessionEnd hook command string for local or global install.
-fn session_end_cmd(global_scripts_dir: Option<&Path>) -> String {
+pub(crate) fn session_end_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "session-end.py");
     format!("python3 \"{script}\"")
 }
 
 /// Return the PermissionRequest hook command string for local or global install.
-fn permission_request_cmd(global_scripts_dir: Option<&Path>) -> String {
+pub(crate) fn permission_request_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "permission-request-relay.py");
     format!("python3 \"{script}\"")
 }
 
 /// Return the Stop hook command string for local or global install.
-fn stop_cmd(global_scripts_dir: Option<&Path>) -> String {
+pub(crate) fn stop_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "stop-relay.py");
     format!("python3 \"{script}\"")
 }
 
 /// Return the Notification(idle_prompt) hook command string for local/global install.
-fn notification_idle_prompt_cmd(global_scripts_dir: Option<&Path>) -> String {
+pub(crate) fn notification_idle_prompt_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "notification-idle-relay.py");
     format!("python3 \"{script}\"")
 }
 
 /// Return the PreToolUse(Bash) hook command string for local or global install.
-fn pre_tool_use_bash_cmd(global_scripts_dir: Option<&Path>) -> String {
+pub(crate) fn pre_tool_use_bash_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "atm-identity-write.py");
     format!("python3 \"{script}\"")
 }
 
 /// Return the PreToolUse(Task) hook command string for local or global install.
-fn pre_tool_use_task_cmd(global_scripts_dir: Option<&Path>) -> String {
+pub(crate) fn pre_tool_use_task_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "gate-agent-spawns.py");
     format!("python3 \"{script}\"")
 }
 
 /// Return the PostToolUse(Bash) hook command string for local or global install.
-fn post_tool_use_bash_cmd(global_scripts_dir: Option<&Path>) -> String {
+pub(crate) fn post_tool_use_bash_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "atm-identity-cleanup.py");
     format!("python3 \"{script}\"")
 }
@@ -110,7 +110,7 @@ fn post_tool_use_bash_cmd(global_scripts_dir: Option<&Path>) -> String {
 /// Return a hook script path expression:
 /// - Local: uses `$CLAUDE_PROJECT_DIR` so settings remain repo-portable.
 /// - Global: uses a resolved absolute per-user path for robustness.
-fn hook_script_path(global_scripts_dir: Option<&Path>, script_name: &str) -> String {
+pub(crate) fn hook_script_path(global_scripts_dir: Option<&Path>, script_name: &str) -> String {
     match global_scripts_dir {
         Some(dir) => normalize_for_bash_quoted_path(&dir.join(script_name)),
         None => format!("${{CLAUDE_PROJECT_DIR}}/.claude/scripts/{script_name}"),
@@ -185,7 +185,7 @@ pub fn execute(args: InitArgs) -> Result<()> {
     let settings_path = resolve_settings_path(install_global)?;
 
     let scripts_dir = if install_global {
-        home_dir.join(".claude").join("scripts")
+        crate::util::settings::claude_root_dir_for(&home_dir).join("scripts")
     } else {
         current_dir.join(".claude").join("scripts")
     };
@@ -226,8 +226,7 @@ pub fn execute(args: InitArgs) -> Result<()> {
         };
         let team_status = if args.skip_team {
             TeamStatus::Skipped
-        } else if home_dir
-            .join(".claude/teams")
+        } else if crate::util::settings::teams_root_dir_for(&home_dir)
             .join(&args.team)
             .join("config.json")
             .exists()
@@ -426,7 +425,7 @@ fn plan_gemini_runtime(home_dir: &Path, scripts_dir: &Path) -> RuntimeInstallRep
     }
 }
 
-fn runtime_detected(binary_name: &str, config_path: &Path) -> bool {
+pub(crate) fn runtime_detected(binary_name: &str, config_path: &Path) -> bool {
     find_in_path(binary_name).is_some() || config_path.exists()
 }
 
@@ -760,7 +759,7 @@ fn ensure_gitignore_entry(path: &Path, entry: &str) -> Result<()> {
 }
 
 fn ensure_team_config(home_dir: &Path, team: &str, cwd: &Path) -> Result<TeamStatus> {
-    let team_dir = home_dir.join(".claude/teams").join(team);
+    let team_dir = crate::util::settings::teams_root_dir_for(home_dir).join(team);
     let inboxes_dir = team_dir.join("inboxes");
     let config_path = team_dir.join("config.json");
 
@@ -909,7 +908,7 @@ fn resolve_settings_path(global: bool) -> Result<PathBuf> {
     if global {
         let home = crate::util::settings::get_home_dir()
             .context("Cannot resolve home directory for global settings")?;
-        Ok(home.join(".claude").join("settings.json"))
+        Ok(crate::util::settings::claude_root_dir_for(&home).join("settings.json"))
     } else {
         let cwd = std::env::current_dir().context("Cannot determine current directory")?;
         Ok(cwd.join(".claude").join("settings.json"))
@@ -1279,8 +1278,8 @@ fn normalize_catch_all_hook_category_if_present(
     normalize_catch_all_hook_entries(array)
 }
 
-#[allow(dead_code)] // used in tests; production path uses merge_session_hook
-fn catch_all_hook_command_present(array: &[serde_json::Value], cmd: &str) -> bool {
+/// Return `true` when any catch-all hook entry contains a nested command equal to `cmd`.
+pub(crate) fn catch_all_hook_command_present(array: &[serde_json::Value], cmd: &str) -> bool {
     array.iter().any(|entry| {
         entry
             .get("hooks")
@@ -1291,7 +1290,7 @@ fn catch_all_hook_command_present(array: &[serde_json::Value], cmd: &str) -> boo
 }
 
 /// Return `true` when any entry in `array` has a `command` field equal to `cmd`.
-fn hook_command_present(array: &[serde_json::Value], cmd: &str) -> bool {
+pub(crate) fn hook_command_present(array: &[serde_json::Value], cmd: &str) -> bool {
     array.iter().any(|entry| {
         entry
             .get("command")

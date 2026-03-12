@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::util::addressing::parse_address;
-use crate::util::settings::get_home_dir;
+use crate::util::settings::{get_home_dir, teams_root_dir_for};
 
 /// Send a message and wait for a response (polling)
 #[derive(Args, Debug)]
@@ -67,11 +67,11 @@ pub fn execute(args: RequestArgs) -> Result<()> {
     let (to_agent, to_team) = parse_address(&args.to, &args.to_team, &config.core.default_team)?;
 
     // Resolve team dirs and verify both members exist
-    let from_team_dir = home_dir.join(".claude/teams").join(&from_team);
+    let from_team_dir = teams_root_dir_for(&home_dir).join(&from_team);
     if !from_team_dir.exists() {
         anyhow::bail!("Team '{from_team}' not found (directory {from_team_dir:?} doesn't exist)");
     }
-    let to_team_dir = home_dir.join(".claude/teams").join(&to_team);
+    let to_team_dir = teams_root_dir_for(&home_dir).join(&to_team);
     if !to_team_dir.exists() {
         anyhow::bail!("Team '{to_team}' not found (directory {to_team_dir:?} doesn't exist)");
     }

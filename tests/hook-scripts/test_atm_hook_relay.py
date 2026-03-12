@@ -22,12 +22,16 @@ def _run(
     payload: dict,
     *,
     env_overrides: dict[str, str] | None = None,
+    set_atm_home: bool = True,
     toml_content: str | None = None,
     cwd: Path,
 ) -> tuple[int, str, str]:
     env = os.environ.copy()
-    env.setdefault("ATM_HOME", str(cwd))
-    env["ATM_HOME"] = str(cwd)
+    if set_atm_home:
+        env.setdefault("ATM_HOME", str(cwd))
+        env["ATM_HOME"] = str(cwd)
+    else:
+        env.pop("ATM_HOME", None)
     env["ATM_TEAM"] = ""
     env["ATM_IDENTITY"] = ""
     if env_overrides:
@@ -48,7 +52,14 @@ def _run(
 
 
 def _read_events(cwd: Path) -> list[dict]:
-    events_file = cwd / ".claude" / "daemon" / "hooks" / "events.jsonl"
+    events_file = cwd / ".atm" / "daemon" / "hooks" / "events.jsonl"
+    if not events_file.exists():
+        return []
+    return [json.loads(line) for line in events_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _read_events_at(path: Path) -> list[dict]:
+    events_file = path / ".atm" / "daemon" / "hooks" / "events.jsonl"
     if not events_file.exists():
         return []
     return [json.loads(line) for line in events_file.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -111,3 +122,24 @@ def test_relay_no_context_noop(tmp_path: Path, scripts_dir: Path):
 
     assert rc == 0
     assert _read_events(tmp_path) == []
+
+
+@pytest.mark.parametrize("scripts_dir", _SCRIPT_ROOTS)
+def test_relay_uses_os_home_when_atm_home_unset(tmp_path: Path, scripts_dir: Path, monkeypatch: pytest.MonkeyPatch):
+    script_path = scripts_dir / "atm-hook-relay.py"
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    payload = {"type": "agent-turn-complete", "turn-id": "turn-redirected"}
+    rc, _stdout, _stderr = _run(
+        script_path,
+        payload,
+        env_overrides={"ATM_TEAM": "atm-dev", "ATM_IDENTITY": "arch-ctm"},
+        set_atm_home=False,
+        toml_content=None,
+        cwd=tmp_path,
+    )
+
+    assert rc == 0
+    events = _read_events_at(tmp_path)
+    assert len(events) == 1
+    assert events[0]["idempotency_key"] == "atm-dev:arch-ctm:turn-redirected"

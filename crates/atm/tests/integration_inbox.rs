@@ -135,7 +135,7 @@ fn test_inbox_shows_correct_counts() {
         .arg("--no-since-last-seen")
         .assert()
         .success()
-        .stdout(contains("Unread"));
+        .stdout(contains("Pending"));
 
     // When using since-last-seen (default), header should say "New"
     let mut cmd2 = cargo::cargo_bin_cmd!("atm");

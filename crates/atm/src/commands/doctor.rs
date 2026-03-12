@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    AgentSummary, CanonicalMemberState, SessionQueryResult, daemon_is_running, daemon_pid_path,
-    daemon_socket_path, query_list_agents, query_list_agents_for_team, query_session_for_team,
-    query_team_member_states,
+    AgentSummary, CanonicalMemberState, SessionQueryResult, daemon_is_running, daemon_lock_path,
+    daemon_pid_path, daemon_socket_path, daemon_status_path_for, query_list_agents,
+    query_list_agents_for_team, query_session_for_team, query_team_member_states,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::log_reader::{LogFilter, LogReader};
@@ -18,13 +18,18 @@ use agent_team_mail_core::schema::TeamConfig;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::commands::init::{
+    catch_all_hook_command_present, notification_idle_prompt_cmd, permission_request_cmd,
+    post_tool_use_bash_cmd, pre_tool_use_bash_cmd, pre_tool_use_task_cmd, runtime_detected,
+    session_end_cmd, session_start_cmd, stop_cmd,
+};
 use crate::commands::logging_health::{
     LoggingHealthContract, LoggingHealthSnapshot, build_logging_health_contract,
     logging_remediation,
 };
 use crate::util::caller_identity::resolve_caller_session_id_optional;
 use crate::util::member_labels::UNREGISTERED_MARKER;
-use crate::util::settings::get_home_dir;
+use crate::util::settings::{claude_root_dir_for, get_home_dir, teams_root_dir_for};
 
 #[derive(Args, Debug)]
 pub struct DoctorArgs {
@@ -84,6 +89,10 @@ struct Summary {
     generated_at: String,
     has_critical: bool,
     counts: FindingCounts,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    daemon_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    install_milestone: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +153,8 @@ struct DoctorState {
 
 #[derive(Debug, Clone, Deserialize)]
 struct DaemonStatusSnapshot {
+    #[serde(default)]
+    version: Option<String>,
     #[serde(default)]
     plugins: Vec<PluginStatusSnapshot>,
     #[serde(default)]
@@ -238,7 +249,7 @@ pub(crate) fn monitor_report_json(home_dir: &Path, team: &str) -> Result<serde_j
 
 fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<DoctorReport> {
     let now = Utc::now();
-    let team_dir = home_dir.join(".claude/teams").join(team);
+    let team_dir = teams_root_dir_for(home_dir).join(team);
     let config_path = team_dir.join("config.json");
 
     let mut findings: Vec<Finding> = Vec::new();
@@ -284,6 +295,9 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
     // Check 5: config/runtime drift
     findings.extend(check_config_runtime_drift(team, &args.team));
 
+    // Check 5b: hook installation / config audit
+    findings.extend(check_hook_audit(home_dir));
+
     // Check 6: unified log diagnostics
     let (window_start, mode) =
         compute_log_window_start(home_dir, team, team_config.as_ref(), args)?;
@@ -309,8 +323,14 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
         generated_at: now.to_rfc3339(),
         has_critical: counts.critical > 0,
         counts,
+        daemon_version: None,
+        install_milestone: read_active_install_milestone(),
     };
     let daemon_status = read_daemon_status(home_dir);
+    let summary = Summary {
+        daemon_version: daemon_status.version.clone(),
+        ..summary
+    };
     let logging = daemon_status.logging;
     let logging_health = build_logging_health_contract(&logging, home_dir);
 
@@ -444,16 +464,410 @@ fn active_env_overrides() -> EnvOverrides {
     }
 }
 
+fn count_nested_hook_command_matches(array: &[serde_json::Value], cmd: &str) -> usize {
+    array
+        .iter()
+        .map(|entry| {
+            if entry
+                .get("command")
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| value == cmd)
+            {
+                1
+            } else {
+                entry
+                    .get("hooks")
+                    .and_then(|hooks| hooks.as_array())
+                    .map(|hooks| {
+                        hooks
+                            .iter()
+                            .filter(|hook| {
+                                hook.get("command")
+                                    .and_then(|value| value.as_str())
+                                    .is_some_and(|value| value == cmd)
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0)
+            }
+        })
+        .sum()
+}
+
+fn hook_script_findings(scripts_dir: &Path, scripts: &[&str]) -> Vec<Finding> {
+    scripts
+        .iter()
+        .filter_map(|script| {
+            let path = scripts_dir.join(script);
+            (!path.is_file()).then(|| {
+                finding(
+                    Severity::Warn,
+                    "hook_audit",
+                    "HOOK_SCRIPT_MISSING",
+                    format!("Expected hook script missing: {}", path.display()),
+                )
+            })
+        })
+        .collect()
+}
+
+fn audit_claude_command(
+    findings: &mut Vec<Finding>,
+    hooks: &serde_json::Map<String, serde_json::Value>,
+    category: &str,
+    label: &str,
+    command: &str,
+) {
+    let Some(array) = hooks.get(category).and_then(|value| value.as_array()) else {
+        findings.push(finding(
+            Severity::Warn,
+            "hook_audit",
+            "HOOK_COMMAND_MISSING",
+            format!("Claude hook '{}' missing from hooks.{}", label, category),
+        ));
+        return;
+    };
+
+    let matches = if matches!(
+        category,
+        "SessionStart" | "SessionEnd" | "PermissionRequest" | "Stop"
+    ) {
+        if catch_all_hook_command_present(array, command) {
+            count_nested_hook_command_matches(array, command)
+        } else {
+            0
+        }
+    } else {
+        count_nested_hook_command_matches(array, command)
+    };
+
+    if matches == 0 {
+        findings.push(finding(
+            Severity::Warn,
+            "hook_audit",
+            "HOOK_COMMAND_MISSING",
+            format!(
+                "Claude hook '{}' is not installed with expected command '{}' in hooks.{}",
+                label, command, category
+            ),
+        ));
+    } else if matches > 1 {
+        findings.push(finding(
+            Severity::Warn,
+            "hook_audit",
+            "HOOK_COMMAND_DUPLICATED",
+            format!(
+                "Claude hook '{}' appears {} times in hooks.{}; expected exactly 1",
+                label, matches, category
+            ),
+        ));
+    }
+}
+
+fn audit_gemini_command(
+    findings: &mut Vec<Finding>,
+    hooks: &serde_json::Map<String, serde_json::Value>,
+    category: &str,
+    label: &str,
+    command: &str,
+) {
+    let Some(array) = hooks.get(category).and_then(|value| value.as_array()) else {
+        findings.push(finding(
+            Severity::Warn,
+            "hook_audit",
+            "HOOK_COMMAND_MISSING",
+            format!("Gemini hook '{}' missing from hooks.{}", label, category),
+        ));
+        return;
+    };
+
+    let matches = count_nested_hook_command_matches(array, command);
+    if matches == 0 {
+        findings.push(finding(
+            Severity::Warn,
+            "hook_audit",
+            "HOOK_COMMAND_MISSING",
+            format!(
+                "Gemini hook '{}' is not installed with expected command '{}' in hooks.{}",
+                label, command, category
+            ),
+        ));
+    } else if matches > 1 {
+        findings.push(finding(
+            Severity::Warn,
+            "hook_audit",
+            "HOOK_COMMAND_DUPLICATED",
+            format!(
+                "Gemini hook '{}' appears {} times in hooks.{}; expected exactly 1",
+                label, matches, category
+            ),
+        ));
+    }
+}
+
+fn check_hook_audit(home_dir: &Path) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let claude_root = claude_root_dir_for(home_dir);
+    let claude_scripts_dir = claude_root.join("scripts");
+
+    findings.extend(hook_script_findings(
+        &claude_scripts_dir,
+        &[
+            "session-start.py",
+            "session-end.py",
+            "permission-request-relay.py",
+            "stop-relay.py",
+            "notification-idle-relay.py",
+            "atm-identity-write.py",
+            "gate-agent-spawns.py",
+            "atm-identity-cleanup.py",
+            "atm-hook-relay.py",
+            "atm_hook_lib.py",
+            "teammate-idle-relay.py",
+        ],
+    ));
+
+    let claude_settings_path = claude_root.join("settings.json");
+    match fs::read_to_string(&claude_settings_path) {
+        Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(settings) => {
+                if let Some(hooks) = settings.get("hooks").and_then(|value| value.as_object()) {
+                    audit_claude_command(
+                        &mut findings,
+                        hooks,
+                        "SessionStart",
+                        "SessionStart",
+                        &session_start_cmd(Some(&claude_scripts_dir)),
+                    );
+                    audit_claude_command(
+                        &mut findings,
+                        hooks,
+                        "SessionEnd",
+                        "SessionEnd",
+                        &session_end_cmd(Some(&claude_scripts_dir)),
+                    );
+                    audit_claude_command(
+                        &mut findings,
+                        hooks,
+                        "PermissionRequest",
+                        "PermissionRequest",
+                        &permission_request_cmd(Some(&claude_scripts_dir)),
+                    );
+                    audit_claude_command(
+                        &mut findings,
+                        hooks,
+                        "Stop",
+                        "Stop",
+                        &stop_cmd(Some(&claude_scripts_dir)),
+                    );
+                    audit_claude_command(
+                        &mut findings,
+                        hooks,
+                        "Notification",
+                        "Notification(idle_prompt)",
+                        &notification_idle_prompt_cmd(Some(&claude_scripts_dir)),
+                    );
+                    audit_claude_command(
+                        &mut findings,
+                        hooks,
+                        "PreToolUse",
+                        "PreToolUse(Bash)",
+                        &pre_tool_use_bash_cmd(Some(&claude_scripts_dir)),
+                    );
+                    audit_claude_command(
+                        &mut findings,
+                        hooks,
+                        "PreToolUse",
+                        "PreToolUse(Task)",
+                        &pre_tool_use_task_cmd(Some(&claude_scripts_dir)),
+                    );
+                    audit_claude_command(
+                        &mut findings,
+                        hooks,
+                        "PostToolUse",
+                        "PostToolUse(Bash)",
+                        &post_tool_use_bash_cmd(Some(&claude_scripts_dir)),
+                    );
+                } else {
+                    findings.push(finding(
+                        Severity::Warn,
+                        "hook_audit",
+                        "HOOK_CONFIG_INVALID",
+                        format!(
+                            "Claude hook settings missing JSON object at {}",
+                            claude_settings_path.display()
+                        ),
+                    ));
+                }
+            }
+            Err(err) => findings.push(finding(
+                Severity::Warn,
+                "hook_audit",
+                "HOOK_CONFIG_INVALID",
+                format!(
+                    "Failed to parse Claude settings {}: {err}",
+                    claude_settings_path.display()
+                ),
+            )),
+        },
+        Err(err) => findings.push(finding(
+            Severity::Warn,
+            "hook_audit",
+            "HOOK_CONFIG_MISSING",
+            format!(
+                "Claude settings missing or unreadable at {}: {err}",
+                claude_settings_path.display()
+            ),
+        )),
+    }
+
+    let codex_config_path = home_dir.join(".codex/config.toml");
+    if runtime_detected("codex", &codex_config_path) {
+        let expected_notify = vec![
+            toml::Value::String("python3".to_string()),
+            toml::Value::String(
+                claude_scripts_dir
+                    .join("atm-hook-relay.py")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+        ];
+        match fs::read_to_string(&codex_config_path) {
+            Ok(raw) => match raw.parse::<toml::Table>() {
+                Ok(table) => match table.get("notify").and_then(|value| value.as_array()) {
+                    Some(array) if array == &expected_notify => {}
+                    Some(_) => findings.push(finding(
+                        Severity::Warn,
+                        "hook_audit",
+                        "HOOK_COMMAND_MISMATCH",
+                        format!(
+                            "Codex notify config in {} does not match expected ATM relay",
+                            codex_config_path.display()
+                        ),
+                    )),
+                    None => findings.push(finding(
+                        Severity::Warn,
+                        "hook_audit",
+                        "HOOK_COMMAND_MISSING",
+                        format!(
+                            "Codex notify hook missing in {}",
+                            codex_config_path.display()
+                        ),
+                    )),
+                },
+                Err(err) => findings.push(finding(
+                    Severity::Warn,
+                    "hook_audit",
+                    "HOOK_CONFIG_INVALID",
+                    format!(
+                        "Failed to parse Codex config {}: {err}",
+                        codex_config_path.display()
+                    ),
+                )),
+            },
+            Err(err) => findings.push(finding(
+                Severity::Warn,
+                "hook_audit",
+                "HOOK_CONFIG_MISSING",
+                format!(
+                    "Codex config missing or unreadable at {}: {err}",
+                    codex_config_path.display()
+                ),
+            )),
+        }
+    }
+
+    let gemini_root = home_dir.join(".gemini");
+    let gemini_settings_path = gemini_root.join("settings.json");
+    if runtime_detected("gemini", &gemini_root) {
+        match fs::read_to_string(&gemini_settings_path) {
+            Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(settings) => {
+                    if let Some(hooks) = settings.get("hooks").and_then(|value| value.as_object()) {
+                        let session_start = format!(
+                            "python3 \"{}\"",
+                            claude_scripts_dir
+                                .join("session-start.py")
+                                .to_string_lossy()
+                        );
+                        let session_end = format!(
+                            "python3 \"{}\"",
+                            claude_scripts_dir.join("session-end.py").to_string_lossy()
+                        );
+                        let after_agent = format!(
+                            "python3 \"{}\"",
+                            claude_scripts_dir
+                                .join("teammate-idle-relay.py")
+                                .to_string_lossy()
+                        );
+                        audit_gemini_command(
+                            &mut findings,
+                            hooks,
+                            "SessionStart",
+                            "SessionStart",
+                            &session_start,
+                        );
+                        audit_gemini_command(
+                            &mut findings,
+                            hooks,
+                            "SessionEnd",
+                            "SessionEnd",
+                            &session_end,
+                        );
+                        audit_gemini_command(
+                            &mut findings,
+                            hooks,
+                            "AfterAgent",
+                            "AfterAgent",
+                            &after_agent,
+                        );
+                    } else {
+                        findings.push(finding(
+                            Severity::Warn,
+                            "hook_audit",
+                            "HOOK_CONFIG_INVALID",
+                            format!(
+                                "Gemini hook settings missing JSON object at {}",
+                                gemini_settings_path.display()
+                            ),
+                        ));
+                    }
+                }
+                Err(err) => findings.push(finding(
+                    Severity::Warn,
+                    "hook_audit",
+                    "HOOK_CONFIG_INVALID",
+                    format!(
+                        "Failed to parse Gemini settings {}: {err}",
+                        gemini_settings_path.display()
+                    ),
+                )),
+            },
+            Err(err) => findings.push(finding(
+                Severity::Warn,
+                "hook_audit",
+                "HOOK_CONFIG_MISSING",
+                format!(
+                    "Gemini settings missing or unreadable at {}: {err}",
+                    gemini_settings_path.display()
+                ),
+            )),
+        }
+    }
+
+    findings
+}
+
 fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     let running = daemon_is_running();
     let socket_path =
-        daemon_socket_path().unwrap_or_else(|_| home_dir.join(".claude/daemon/atm-daemon.sock"));
+        daemon_socket_path().unwrap_or_else(|_| home_dir.join(".atm/daemon/atm-daemon.sock"));
     let pid_path =
-        daemon_pid_path().unwrap_or_else(|_| home_dir.join(".claude/daemon/atm-daemon.pid"));
-    let lock_path = home_dir.join(".config/atm/daemon.lock");
-    let status_path = home_dir.join(".claude/daemon/status.json");
+        daemon_pid_path().unwrap_or_else(|_| home_dir.join(".atm/daemon/atm-daemon.pid"));
+    let lock_path = daemon_lock_path().unwrap_or_else(|_| home_dir.join(".atm/daemon/daemon.lock"));
+    let status_path = daemon_status_path_for(home_dir);
 
     if !running {
         findings.push(finding(
@@ -543,17 +957,35 @@ fn check_plugin_init_failures(home_dir: &Path) -> Vec<Finding> {
 }
 
 fn read_daemon_status(home_dir: &Path) -> DaemonStatusSnapshot {
-    let status_path = home_dir.join(".claude/daemon/status.json");
+    let status_path = daemon_status_path_for(home_dir);
     let Ok(raw) = fs::read_to_string(&status_path) else {
         return DaemonStatusSnapshot {
+            version: None,
             plugins: Vec::new(),
             logging: LoggingHealthSnapshot::default(),
         };
     };
     serde_json::from_str(&raw).unwrap_or(DaemonStatusSnapshot {
+        version: None,
         plugins: Vec::new(),
         logging: LoggingHealthSnapshot::default(),
     })
+}
+
+fn read_active_install_milestone() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let bin_dir = exe.parent()?;
+    if bin_dir.file_name()?.to_str()? != "bin" {
+        return None;
+    }
+
+    let manifest_path = bin_dir.parent()?.join("manifest.json");
+    let raw = fs::read_to_string(manifest_path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    value
+        .get("milestone_version")
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string)
 }
 
 fn check_pid_session_reconciliation_with_query<F>(
@@ -663,20 +1095,6 @@ where
                     ),
                 ))
             }
-            Some("active") | Some("idle") if member.is_active != Some(true) => {
-                findings.push(finding(
-                    Severity::Warn,
-                    "pid_session_reconciliation",
-                    "GHOST_SESSION",
-                    format!(
-                        "Member '{}' has activity hint isActive!=true but daemon reports live state '{}'",
-                        member.name,
-                        daemon_state
-                            .map(|s| s.state.as_str())
-                            .unwrap_or("unknown")
-                    ),
-                ))
-            }
             _ if member.is_active == Some(true) && query_unreachable => findings.push(finding(
                 Severity::Warn,
                 "pid_session_reconciliation",
@@ -686,7 +1104,7 @@ where
                     member.name
                 ),
             )),
-            _ if member.is_active == Some(true) => findings.push(finding(
+            _ if member.is_active == Some(true) && daemon_state.is_none() => findings.push(finding(
                 Severity::Warn,
                 "pid_session_reconciliation",
                 "ACTIVE_WITHOUT_SESSION",
@@ -1111,7 +1529,7 @@ fn build_recommendations(
         });
     }
 
-    if has("ACTIVE_WITHOUT_SESSION") || has("ACTIVE_FLAG_STALE") || has("GHOST_SESSION") {
+    if has("ACTIVE_WITHOUT_SESSION") || has("ACTIVE_FLAG_STALE") {
         recs.push(Recommendation {
             command: format!("atm teams cleanup {team}"),
             reason: "Reconcile stale non-lead session state and mailbox/roster drift".to_string(),
@@ -1131,6 +1549,13 @@ fn build_recommendations(
                 reason: "No session context detected. Run from a managed session (or set ATM_SESSION_ID) before retrying register.".to_string(),
             });
         }
+    }
+
+    if findings.iter().any(|f| f.check == "hook_audit") {
+        recs.push(Recommendation {
+            command: format!("atm init {team}"),
+            reason: "Install or repair expected runtime hook wiring and scripts".to_string(),
+        });
     }
 
     recs
@@ -1156,6 +1581,12 @@ fn render_human(report: &DoctorReport) -> String {
         "Findings: critical={} warn={} info={}\n",
         report.summary.counts.critical, report.summary.counts.warn, report.summary.counts.info
     ));
+    if let Some(version) = &report.summary.daemon_version {
+        out.push_str(&format!("Daemon version: {version}\n"));
+    }
+    if let Some(milestone) = &report.summary.install_milestone {
+        out.push_str(&format!("Install milestone: {milestone}\n"));
+    }
     out.push_str(&format!(
         "Log window: {}\n\n",
         render_log_window_human(&report.log_window)
@@ -1413,8 +1844,8 @@ mod tests {
             "123e4567"
         );
         assert_eq!(
-            format_session_short(Some("local:team-lead:1772608955543:20111")),
-            "local:te"
+            format_session_short(Some("codex-thread-abc1234def567890")),
+            "codex-th"
         );
         assert_eq!(format_session_short(Some("sess-123456789")), "sess-123");
         assert_eq!(format_session_short(Some("sess-1")), "sess-1");
@@ -1884,6 +2315,18 @@ mod tests {
     }
 
     #[test]
+    fn build_recommendations_includes_atm_init_for_hook_audit() {
+        let findings = vec![finding(
+            Severity::Warn,
+            "hook_audit",
+            "HOOK_COMMAND_MISSING",
+            "x".to_string(),
+        )];
+        let recs = build_recommendations("atm-dev", &findings, true);
+        assert!(recs.iter().any(|r| r.command == "atm init atm-dev"));
+    }
+
+    #[test]
     fn check_pid_session_reconciliation_query_error_maps_to_active_without_session() {
         let cfg = TeamConfig {
             name: "atm-dev".to_string(),
@@ -1958,8 +2401,8 @@ mod tests {
     }
 
     #[test]
-    fn check_pid_session_reconciliation_detects_ghost_session_for_inactive_hint() {
-        let cfg = TeamConfig {
+    fn check_pid_session_reconciliation_allows_live_daemon_state_without_activity_hint() {
+        let cfg_none = TeamConfig {
             name: "atm-dev".to_string(),
             description: None,
             created_at: 0,
@@ -1969,20 +2412,120 @@ mod tests {
             unknown_fields: HashMap::new(),
         };
 
-        let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
-            Ok(Some(vec![CanonicalMemberState {
-                agent: "worker-a".to_string(),
-                state: "active".to_string(),
-                activity: "busy".to_string(),
-                session_id: Some("sess-1".to_string()),
-                process_id: Some(4321),
-                last_alive_at: None,
-                reason: "session active".to_string(),
-                source: "session_registry".to_string(),
-                in_config: true,
-            }]))
-        });
-        assert!(findings.iter().any(|f| f.code == "GHOST_SESSION"));
+        let (findings_none, _) =
+            check_pid_session_reconciliation_with_query("atm-dev", &cfg_none, |_| {
+                Ok(Some(vec![CanonicalMemberState {
+                    agent: "worker-a".to_string(),
+                    state: "active".to_string(),
+                    activity: "busy".to_string(),
+                    session_id: Some("sess-1".to_string()),
+                    process_id: Some(4321),
+                    last_alive_at: None,
+                    reason: "session active".to_string(),
+                    source: "session_registry".to_string(),
+                    in_config: true,
+                }]))
+            });
+        assert!(
+            findings_none.is_empty(),
+            "live daemon state with no activity hint must not be treated as a ghost session"
+        );
+
+        let cfg_false = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("worker-a", Some(false), 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        let (findings_false, _) =
+            check_pid_session_reconciliation_with_query("atm-dev", &cfg_false, |_| {
+                Ok(Some(vec![CanonicalMemberState {
+                    agent: "worker-a".to_string(),
+                    state: "active".to_string(),
+                    activity: "busy".to_string(),
+                    session_id: Some("sess-1".to_string()),
+                    process_id: Some(4321),
+                    last_alive_at: None,
+                    reason: "session active".to_string(),
+                    source: "session_registry".to_string(),
+                    in_config: true,
+                }]))
+            });
+        assert!(
+            findings_false.is_empty(),
+            "live daemon state with isActive=false must not be treated as a ghost session"
+        );
+
+        let cfg_true = TeamConfig {
+            name: "atm-dev".to_string(),
+            description: None,
+            created_at: 0,
+            lead_agent_id: "team-lead@atm-dev".to_string(),
+            lead_session_id: "s".to_string(),
+            members: vec![member("worker-a", Some(true), 0)],
+            unknown_fields: HashMap::new(),
+        };
+
+        let (findings_true, _) =
+            check_pid_session_reconciliation_with_query("atm-dev", &cfg_true, |_| {
+                Ok(Some(vec![CanonicalMemberState {
+                    agent: "worker-a".to_string(),
+                    state: "active".to_string(),
+                    activity: "busy".to_string(),
+                    session_id: Some("sess-1".to_string()),
+                    process_id: Some(4321),
+                    last_alive_at: None,
+                    reason: "session active".to_string(),
+                    source: "session_registry".to_string(),
+                    in_config: true,
+                }]))
+            });
+        assert!(
+            findings_true.is_empty(),
+            "live daemon state with isActive=true should remain the clean happy path"
+        );
+
+        let (findings_idle_none, _) =
+            check_pid_session_reconciliation_with_query("atm-dev", &cfg_none, |_| {
+                Ok(Some(vec![CanonicalMemberState {
+                    agent: "worker-a".to_string(),
+                    state: "idle".to_string(),
+                    activity: "idle".to_string(),
+                    session_id: Some("sess-1".to_string()),
+                    process_id: Some(4321),
+                    last_alive_at: None,
+                    reason: "session idle".to_string(),
+                    source: "session_registry".to_string(),
+                    in_config: true,
+                }]))
+            });
+        assert!(
+            findings_idle_none.is_empty(),
+            "idle daemon state with no activity hint must not be treated as a ghost session"
+        );
+
+        let (findings_idle_false, _) =
+            check_pid_session_reconciliation_with_query("atm-dev", &cfg_false, |_| {
+                Ok(Some(vec![CanonicalMemberState {
+                    agent: "worker-a".to_string(),
+                    state: "idle".to_string(),
+                    activity: "idle".to_string(),
+                    session_id: Some("sess-1".to_string()),
+                    process_id: Some(4321),
+                    last_alive_at: None,
+                    reason: "session idle".to_string(),
+                    source: "session_registry".to_string(),
+                    in_config: true,
+                }]))
+            });
+        assert!(
+            findings_idle_false.is_empty(),
+            "idle daemon state with isActive=false must not be treated as a ghost session"
+        );
     }
 
     #[test]
@@ -2072,9 +2615,11 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn check_plugin_init_failures_reports_disabled_init_error() {
+        let _guard = EnvGuard::isolate(OVERRIDE_ENV_KEYS);
         let tmp = tempfile::tempdir().unwrap();
-        let daemon_dir = tmp.path().join(".claude/daemon");
+        let daemon_dir = tmp.path().join(".atm/daemon");
         fs::create_dir_all(&daemon_dir).unwrap();
         fs::write(
             daemon_dir.join("status.json"),
@@ -2086,12 +2631,97 @@ mod tests {
 }"#,
         )
         .unwrap();
+        unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
 
         let findings = check_plugin_init_failures(tmp.path());
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].code, "PLUGIN_INIT_FAILED");
         assert!(findings[0].message.contains("issues"));
         assert!(findings[0].message.contains("bad token"));
+    }
+
+    #[test]
+    #[serial]
+    fn check_hook_audit_reports_missing_claude_settings_and_scripts() {
+        let _guard = EnvGuard::isolate(&["ATM_HOME", "ATM_TEAM", "ATM_IDENTITY", "PATH"]);
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("PATH", "") };
+
+        let findings = check_hook_audit(tmp.path());
+        assert!(findings.iter().any(|f| f.code == "HOOK_SCRIPT_MISSING"));
+        assert!(findings.iter().any(|f| f.code == "HOOK_CONFIG_MISSING"));
+    }
+
+    #[test]
+    #[serial]
+    fn check_hook_audit_accepts_installed_claude_hooks() {
+        let _guard = EnvGuard::isolate(&["ATM_HOME", "ATM_TEAM", "ATM_IDENTITY", "PATH"]);
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("PATH", "") };
+
+        let claude_root = claude_root_dir_for(tmp.path());
+        let scripts_dir = claude_root.join("scripts");
+        fs::create_dir_all(&scripts_dir).unwrap();
+        for script in [
+            "session-start.py",
+            "session-end.py",
+            "permission-request-relay.py",
+            "stop-relay.py",
+            "notification-idle-relay.py",
+            "atm-identity-write.py",
+            "gate-agent-spawns.py",
+            "atm-identity-cleanup.py",
+            "atm-hook-relay.py",
+            "atm_hook_lib.py",
+            "teammate-idle-relay.py",
+        ] {
+            fs::write(scripts_dir.join(script), "#!/usr/bin/env python3\n").unwrap();
+        }
+
+        let settings = serde_json::json!({
+            "hooks": {
+                "SessionStart": [{
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": session_start_cmd(Some(&scripts_dir))}]
+                }],
+                "SessionEnd": [{
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": session_end_cmd(Some(&scripts_dir))}]
+                }],
+                "PermissionRequest": [{
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": permission_request_cmd(Some(&scripts_dir))}]
+                }],
+                "Stop": [{
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": stop_cmd(Some(&scripts_dir))}]
+                }],
+                "Notification": [{
+                    "matcher": "idle_prompt",
+                    "hooks": [{"type": "command", "command": notification_idle_prompt_cmd(Some(&scripts_dir))}]
+                }],
+                "PreToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": pre_tool_use_bash_cmd(Some(&scripts_dir))}]},
+                    {"matcher": "Task", "hooks": [{"type": "command", "command": pre_tool_use_task_cmd(Some(&scripts_dir))}]}
+                ],
+                "PostToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": post_tool_use_bash_cmd(Some(&scripts_dir))}]}
+                ]
+            }
+        });
+        fs::create_dir_all(&claude_root).unwrap();
+        fs::write(
+            claude_root.join("settings.json"),
+            serde_json::to_vec_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+
+        let findings = check_hook_audit(tmp.path());
+        assert!(
+            findings.is_empty(),
+            "expected clean hook audit, got: {:?}",
+            findings
+        );
     }
 
     #[test]
@@ -2145,6 +2775,8 @@ mod tests {
                     warn: 1,
                     info: 0,
                 },
+                daemon_version: Some("0.44.1".to_string()),
+                install_milestone: Some("0.44.2".to_string()),
             },
             findings: vec![finding(
                 Severity::Warn,
@@ -2238,6 +2870,8 @@ mod tests {
                     warn: 0,
                     info: 0,
                 },
+                daemon_version: Some("0.44.1".to_string()),
+                install_milestone: Some("0.44.2".to_string()),
             },
             findings: vec![],
             recommendations: vec![],
@@ -2364,6 +2998,8 @@ mod tests {
                     warn: 0,
                     info: 0,
                 },
+                daemon_version: Some("0.44.1".to_string()),
+                install_milestone: Some("0.44.2".to_string()),
             },
             findings: vec![],
             recommendations: vec![],
@@ -2412,6 +3048,8 @@ mod tests {
                     warn: 0,
                     info: 0,
                 },
+                daemon_version: Some("0.44.1".to_string()),
+                install_milestone: Some("0.44.2".to_string()),
             },
             findings: vec![],
             recommendations: vec![],
@@ -2453,5 +3091,95 @@ mod tests {
             json_value["members"][0]["session_id"],
             serde_json::Value::String(full_session.to_string())
         );
+    }
+
+    #[test]
+    fn render_human_members_mixed_session_formats_display_consistent_short_values() {
+        let full_session = "123e4567-e89b-12d3-a456-426614174000";
+        let short_session = "abcd1234";
+        let report = DoctorReport {
+            summary: Summary {
+                team: "atm-dev".to_string(),
+                generated_at: "2026-03-02T00:00:00Z".to_string(),
+                has_critical: false,
+                counts: FindingCounts {
+                    critical: 0,
+                    warn: 0,
+                    info: 0,
+                },
+                daemon_version: Some("0.44.5".to_string()),
+                install_milestone: Some("0.44.5-dev.1".to_string()),
+            },
+            findings: vec![],
+            recommendations: vec![],
+            log_window: LogWindow {
+                mode: "default_incremental".to_string(),
+                start: "2026-03-02T00:00:00Z".to_string(),
+                end: "2026-03-02T00:01:00Z".to_string(),
+                elapsed_secs: 60,
+            },
+            env_overrides: EnvOverrides::default(),
+            logging_health: LoggingHealthContract::default(),
+            members: vec![
+                MemberSnapshot {
+                    name: "arch-ctm".to_string(),
+                    agent_type: "codex".to_string(),
+                    model: "custom:codex".to_string(),
+                    status: "Online".to_string(),
+                    activity: "Busy".to_string(),
+                    session_id: Some(full_session.to_string()),
+                    process_id: Some(1234),
+                },
+                MemberSnapshot {
+                    name: "atm-monitor".to_string(),
+                    agent_type: "claude".to_string(),
+                    model: "claude-sonnet-4-6".to_string(),
+                    status: "Online".to_string(),
+                    activity: "Idle".to_string(),
+                    session_id: Some(short_session.to_string()),
+                    process_id: Some(2222),
+                },
+            ],
+            member_snapshot: vec![
+                MemberSnapshot {
+                    name: "arch-ctm".to_string(),
+                    agent_type: "codex".to_string(),
+                    model: "custom:codex".to_string(),
+                    status: "Online".to_string(),
+                    activity: "Busy".to_string(),
+                    session_id: Some(full_session.to_string()),
+                    process_id: Some(1234),
+                },
+                MemberSnapshot {
+                    name: "atm-monitor".to_string(),
+                    agent_type: "claude".to_string(),
+                    model: "claude-sonnet-4-6".to_string(),
+                    status: "Online".to_string(),
+                    activity: "Idle".to_string(),
+                    session_id: Some(short_session.to_string()),
+                    process_id: Some(2222),
+                },
+            ],
+        };
+
+        let rendered = render_human(&report);
+        assert!(rendered.contains("arch-ctm"));
+        assert!(rendered.contains("atm-monitor"));
+        assert!(rendered.contains("123e4567"));
+        assert!(
+            !rendered.contains(full_session),
+            "full UUID must not appear in rendered output"
+        );
+        assert!(rendered.contains("abcd1234"));
+    }
+
+    #[test]
+    fn format_session_short_returns_unchanged_when_shorter_than_8_chars() {
+        // Session IDs shorter than 8 chars must be returned as-is (no padding/truncation).
+        assert_eq!(format_session_short(Some("abc123")), "abc123");
+        assert_eq!(format_session_short(Some("xy")), "xy");
+        assert_eq!(format_session_short(Some("1234567")), "1234567");
+        // Exactly 8 chars is returned in full.
+        assert_eq!(format_session_short(Some("abcd1234")), "abcd1234");
     }
 }

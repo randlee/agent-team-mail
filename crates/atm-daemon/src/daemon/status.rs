@@ -1,6 +1,6 @@
 //! Daemon status file writer
 //!
-//! Writes daemon status to `${ATM_HOME}/.claude/daemon/status.json` for CLI consumption.
+//! Writes daemon status to `${ATM_HOME}/.atm/daemon/status.json` for CLI consumption.
 //! Status includes daemon PID, uptime, plugin states, and last update timestamp.
 
 use anyhow::{Context, Result};
@@ -110,7 +110,7 @@ impl StatusWriter {
     /// * `home_dir` - ATM home directory (from `get_home_dir()`)
     /// * `version` - Daemon version string
     pub fn new(home_dir: PathBuf, version: String) -> Self {
-        let daemon_dir = home_dir.join(".claude/daemon");
+        let daemon_dir = home_dir.join(".atm/daemon");
         let status_path = daemon_dir.join("status.json");
 
         Self {

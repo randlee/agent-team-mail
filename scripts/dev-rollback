@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""dev-rollback: Restore the previously active ATM dev install."""
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+BINARIES = ["atm", "atm-daemon", "atm-agent-mcp", "atm-tui", "sc-compose"]
+
+ATM_DEV_ROOT = None
+BIN_DIR = None
+
+
+def die(msg: str) -> None:
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def run(cmd: list) -> subprocess.CompletedProcess:
+    display = " ".join(str(c) for c in cmd)
+    print(f"  $ {display}")
+    try:
+        return subprocess.run(cmd, check=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        die(f"command failed (exit {exc.returncode}): {display}")
+
+
+def resolve_dev_paths() -> tuple:
+    global ATM_DEV_ROOT, BIN_DIR
+
+    if ATM_DEV_ROOT is not None and BIN_DIR is not None:
+        return ATM_DEV_ROOT, BIN_DIR
+
+    daemon_bin = os.environ.get("ATM_DAEMON_BIN", "").strip()
+    if not daemon_bin:
+        die("ATM_DAEMON_BIN must be set in the environment before running dev-rollback")
+
+    BIN_DIR = Path(daemon_bin).expanduser().resolve().parent
+    ATM_DEV_ROOT = BIN_DIR.parent
+    return ATM_DEV_ROOT, BIN_DIR
+
+
+def restart_daemon() -> None:
+    print("\n[restart daemon]")
+    _, bin_dir = resolve_dev_paths()
+    atm_bin = bin_dir / "atm"
+    if not atm_bin.exists():
+        die(f"atm binary not found at {atm_bin}")
+    try:
+        run([str(atm_bin), "daemon", "restart"])
+    except SystemExit:
+        print("  note: daemon restart returned non-zero (ok)")
+
+
+def verify_install() -> bool:
+    print("\n[post-rollback verification]")
+    _, bin_dir = resolve_dev_paths()
+    checks = [
+        ([str(bin_dir / "atm"), "daemon", "status"], "daemon status"),
+        ([str(bin_dir / "atm"), "--version"], "atm --version"),
+        ([str(bin_dir / "atm-daemon"), "--version"], "atm-daemon --version"),
+        ([str(bin_dir / "sc-compose"), "--version"], "sc-compose --version"),
+    ]
+    all_pass = True
+    for cmd, label in checks:
+        try:
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            line = (result.stdout or result.stderr).strip().splitlines()[0]
+            print(f"  [PASS] {label}: {line}")
+        except (subprocess.CalledProcessError, FileNotFoundError, IndexError) as exc:
+            print(f"  [FAIL] {label}: {exc}")
+            all_pass = False
+    return all_pass
+
+
+def main() -> None:
+    argparse.ArgumentParser(description="Roll back ATM dev binaries to previous version.").parse_args()
+
+    atm_dev_root, bin_dir = resolve_dev_paths()
+    prev_txt = atm_dev_root / "previous.txt"
+    if not prev_txt.exists():
+        die("no previous version recorded — cannot rollback\nUse 'scripts/dev-use --list' to see available versions.")
+
+    prev_label = prev_txt.read_text().strip()
+    src_dir = atm_dev_root / prev_label / "bin"
+    if not src_dir.is_dir():
+        die(f"previous version backup not found: {atm_dev_root / prev_label}\nUse 'scripts/dev-use --list' to see available versions.")
+
+    cur_txt = atm_dev_root / "current.txt"
+    cur_label = cur_txt.read_text().strip() if cur_txt.exists() else "(unknown)"
+
+    print(f"[dev-rollback] {cur_label} -> {prev_label}")
+    print(f"[dev-rollback] bin: {bin_dir}")
+
+    print("\n[verify rollback binaries]")
+    for name in BINARIES:
+        if not (src_dir / name).exists():
+            die(f"binary missing from rollback version: {src_dir / name}")
+        print(f"  found {name}")
+
+    (atm_dev_root / "previous.txt").write_text(cur_label + "\n")
+
+    print(f"\n[restore binaries -> {bin_dir}]")
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    for name in BINARIES:
+        shutil.copy2(src_dir / name, bin_dir / name)
+        (bin_dir / name).chmod(0o755)
+        print(f"  restored {name}")
+
+    (atm_dev_root / "current.txt").write_text(prev_label + "\n")
+    src_manifest = atm_dev_root / prev_label / "manifest.json"
+    if src_manifest.exists():
+        shutil.copy2(src_manifest, atm_dev_root / "manifest.json")
+
+    restart_daemon()
+    all_pass = verify_install()
+
+    print("\n" + "=" * 60)
+    print("dev-rollback complete")
+    print(f"  rolled back to: {prev_label}")
+    print(f"  previous was:   {cur_label}")
+    print(f"  dev root:       {atm_dev_root}")
+    print(f"  bin:            {bin_dir}")
+    print(f"  verification: {'ALL PASS' if all_pass else 'SOME CHECKS FAILED'}")
+    if not all_pass:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

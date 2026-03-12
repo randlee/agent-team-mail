@@ -16,7 +16,7 @@ use crate::commands::logging_health::{
     build_logging_health_contract, logging_remediation, read_daemon_logging_health,
 };
 use crate::util::member_labels::{GHOST_SUFFIX, UNREGISTERED_MARKER};
-use crate::util::settings::get_home_dir;
+use crate::util::settings::{get_home_dir, teams_root_dir_for};
 
 /// Show combined team overview
 #[derive(Args, Debug)]
@@ -37,6 +37,12 @@ struct StatusMemberRow {
     in_config: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+struct InboxCounts {
+    unread: usize,
+    pending: usize,
+}
+
 /// Execute the status command
 pub fn execute(args: StatusArgs) -> Result<()> {
     // Prime daemon connectivity so daemon-backed liveness fields are available.
@@ -54,7 +60,7 @@ pub fn execute(args: StatusArgs) -> Result<()> {
     let team_name = &config.core.default_team;
 
     // Load team config
-    let team_dir = home_dir.join(".claude/teams").join(team_name);
+    let team_dir = teams_root_dir_for(&home_dir).join(team_name);
     if !team_dir.exists() {
         anyhow::bail!("Team '{team_name}' not found (directory {team_dir:?} doesn't exist)");
     }
@@ -77,11 +83,13 @@ pub fn execute(args: StatusArgs) -> Result<()> {
     let logging = read_daemon_logging_health(&home_dir);
     let logging_health = build_logging_health_contract(&logging, &home_dir);
 
-    // Count unread messages for each member
+    // Count inbox message states for each member
     let inbox_counts = count_inbox_messages(&team_dir, &member_rows)?;
 
     // Count tasks if tasks directory exists
-    let tasks_dir = home_dir.join(".claude/tasks").join(team_name);
+    let tasks_dir = crate::util::settings::claude_root_dir_for(&home_dir)
+        .join("tasks")
+        .join(team_name);
     let (pending_tasks, completed_tasks) = if tasks_dir.exists() {
         count_tasks(&tasks_dir)?
     } else {
@@ -98,14 +106,15 @@ pub fn execute(args: StatusArgs) -> Result<()> {
             "description": team_config.description,
             "createdAt": team_config.created_at,
             "members": member_rows.iter().map(|m| {
-                let unread = inbox_counts.get(&m.name).copied().unwrap_or(0);
+                let counts = inbox_counts.get(&m.name).copied().unwrap_or_default();
                 json!({
                     "name": m.name,
                     "type": m.agent_type,
                     "liveness": m.liveness,
                     "inConfig": m.in_config,
                     "ghost": !m.in_config,
-                    "unreadCount": unread,
+                    "unreadCount": counts.unread,
+                    "pendingCount": counts.pending,
                 })
             }).collect::<Vec<_>>(),
             "inboxCounts": inbox_counts,
@@ -133,14 +142,17 @@ pub fn execute(args: StatusArgs) -> Result<()> {
                 Some(false) => "Offline",
                 None => "Unknown",
             };
-            let unread = inbox_counts.get(&member.name).copied().unwrap_or(0);
+            let counts = inbox_counts.get(&member.name).copied().unwrap_or_default();
             let name = if member.in_config {
                 member.name.clone()
             } else {
                 format!("{}{}", member.name, GHOST_SUFFIX)
             };
             let agent_type = &member.agent_type;
-            println!("  {name:<20} {agent_type:<20} {active_str:<6}    {unread} unread");
+            println!(
+                "  {name:<20} {agent_type:<20} {active_str:<6}    {} pending",
+                counts.pending
+            );
         }
 
         if pending_tasks > 0 || completed_tasks > 0 {
@@ -237,11 +249,11 @@ fn build_status_member_rows(
         .collect()
 }
 
-/// Count unread messages in inboxes
+/// Count unread and pending-action messages in inboxes.
 fn count_inbox_messages(
     team_dir: &std::path::Path,
     members: &[StatusMemberRow],
-) -> Result<HashMap<String, usize>> {
+) -> Result<HashMap<String, InboxCounts>> {
     let mut counts = HashMap::new();
     let inboxes_dir = team_dir.join("inboxes");
 
@@ -256,7 +268,15 @@ fn count_inbox_messages(
                 Ok(content) => {
                     if let Ok(messages) = serde_json::from_str::<Vec<InboxMessage>>(&content) {
                         let unread_count = messages.iter().filter(|m| !m.read).count();
-                        counts.insert(member.name.clone(), unread_count);
+                        let pending_count =
+                            messages.iter().filter(|m| m.is_pending_action()).count();
+                        counts.insert(
+                            member.name.clone(),
+                            InboxCounts {
+                                unread: unread_count,
+                                pending: pending_count,
+                            },
+                        );
                     }
                 }
                 Err(_) => {
@@ -344,6 +364,7 @@ fn format_age(timestamp_ms: u64) -> String {
 mod tests {
     use super::*;
     use agent_team_mail_core::schema::{AgentMember, TeamConfig};
+    use serial_test::serial;
 
     fn member(name: &str) -> AgentMember {
         AgentMember {
@@ -401,9 +422,11 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn read_daemon_logging_health_parses_extended_fields() {
+        let original_home = std::env::var("ATM_HOME").ok();
         let tmp = tempfile::tempdir().expect("temp dir");
-        let daemon_dir = tmp.path().join(".claude/daemon");
+        let daemon_dir = tmp.path().join(".atm/daemon");
         std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
         let sys_tmp = std::env::temp_dir();
         let spool_path = sys_tmp.join("spool").to_string_lossy().into_owned();
@@ -424,6 +447,7 @@ mod tests {
             .to_string(),
         )
         .expect("write status");
+        unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
 
         let logging = read_daemon_logging_health(tmp.path());
         assert_eq!(logging.state, "degraded_spooling");
@@ -431,6 +455,13 @@ mod tests {
         assert_eq!(logging.spool_count, 3);
         assert_eq!(logging.oldest_spool_age, Some(17));
         assert_eq!(logging.canonical_log_path, log_path);
+
+        unsafe {
+            match original_home {
+                Some(value) => std::env::set_var("ATM_HOME", value),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
     }
 
     #[test]

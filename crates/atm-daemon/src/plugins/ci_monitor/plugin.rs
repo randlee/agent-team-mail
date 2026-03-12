@@ -7,7 +7,8 @@ use super::provider::ErasedCiProvider;
 use super::registry::{CiProviderFactory, CiProviderRegistry};
 use super::types::{CiFilter, CiJob, CiRunConclusion, CiRunStatus};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
-use agent_team_mail_core::context::GitProvider as GitProviderType;
+use crate::roster::RosterError;
+use agent_team_mail_core::context::{GitProvider as GitProviderType, RepoContext};
 use agent_team_mail_core::schema::{AgentMember, InboxMessage, TeamConfig};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -182,16 +183,12 @@ impl CiMonitorPlugin {
     fn create_provider_from_registry(
         &self,
         registry: &CiProviderRegistry,
-        git_provider: &GitProviderType,
+        git_provider: Option<&GitProviderType>,
         config_table: Option<&toml::Table>,
     ) -> Result<Box<dyn ErasedCiProvider>, PluginError> {
-        // If config specifies owner/repo, use those; otherwise auto-detect from git
-        let (owner, repo) = if let (Some(owner), Some(repo)) =
-            (&self.config.owner, &self.config.repo)
-        {
-            (owner.clone(), repo.clone())
-        } else {
-            // Auto-detect from git remote
+        // Prefer git auto-detection when available; only fall back to explicit
+        // plugin config owner/repo when repository context is unavailable.
+        let (owner, repo) = if let Some(git_provider) = git_provider {
             match git_provider {
                 GitProviderType::GitHub { owner, repo } => (owner.clone(), repo.clone()),
                 GitProviderType::AzureDevOps { org, project, repo } => {
@@ -225,6 +222,17 @@ impl CiMonitorPlugin {
                     });
                 }
             }
+        } else if let (Some(owner), Some(repo)) = (&self.config.owner, &self.config.repo) {
+            debug!(
+                "gh_monitor falling back to config-provided repo {}/{} because git auto-detection was unavailable",
+                owner, repo
+            );
+            (owner.clone(), repo.clone())
+        } else {
+            return Err(PluginError::Provider {
+                message: "No repository information available".to_string(),
+                source: None,
+            });
         };
 
         // For now, only GitHub is supported built-in
@@ -355,6 +363,66 @@ impl CiMonitorPlugin {
             None => true, // No filter = match all
             Some(matcher) => matcher.is_match(branch),
         }
+    }
+
+    fn resolve_repo_context(&self, ctx: &PluginContext) -> Result<RepoContext, PluginError> {
+        if let Some(repo) = ctx.system.repo.as_ref() {
+            return Ok(repo.clone());
+        }
+
+        let (owner, repo) = match (&self.config.owner, &self.config.repo) {
+            (Some(owner), Some(repo)) => (owner.clone(), repo.clone()),
+            _ => {
+                return Err(PluginError::Init {
+                    message: "No repository information available".to_string(),
+                    source: None,
+                });
+            }
+        };
+
+        let home_dir =
+            agent_team_mail_core::home::get_home_dir().map_err(|e| PluginError::Init {
+                message: format!("Could not determine home directory: {e}"),
+                source: None,
+            })?;
+        let current_dir = std::env::current_dir().map_err(|e| PluginError::Init {
+            message: format!("Could not determine current directory: {e}"),
+            source: None,
+        })?;
+
+        let config_root = std::env::var("ATM_CONFIG")
+            .ok()
+            .map(PathBuf::from)
+            .or_else(|| {
+                agent_team_mail_core::config::resolve_plugin_config_location(
+                    "gh_monitor",
+                    &current_dir,
+                    &home_dir,
+                )
+                .map(|location| location.path)
+            })
+            .and_then(|path| path.parent().map(std::path::Path::to_path_buf));
+
+        let config_root = match config_root {
+            Some(config_root) => config_root,
+            None => {
+                warn!(
+                    "gh_monitor: no git context and no config file path available; report_dir will resolve relative to daemon CWD ({})",
+                    current_dir.display()
+                );
+                current_dir
+            }
+        };
+
+        debug!(
+            "gh_monitor falling back to config-provided repo {}/{} rooted at {}",
+            owner,
+            repo,
+            config_root.display()
+        );
+
+        Ok(RepoContext::new(repo.clone(), config_root)
+            .with_remote(format!("https://github.com/{owner}/{repo}.git")))
     }
 
     /// Transform a CI failure into an InboxMessage for delivery
@@ -727,9 +795,14 @@ impl CiMonitorPlugin {
     }
 
     fn gh_monitor_state_path(ctx: &PluginContext) -> PathBuf {
-        ctx.system
-            .claude_root
-            .join("daemon")
+        let Some(home_dir) = ctx.system.claude_root.parent() else {
+            return ctx
+                .system
+                .claude_root
+                .join("daemon")
+                .join("gh-monitor-state.json");
+        };
+        agent_team_mail_core::daemon_client::daemon_runtime_dir_for(home_dir)
             .join("gh-monitor-state.json")
     }
 
@@ -776,12 +849,17 @@ impl CiMonitorPlugin {
             .unwrap_or_else(|| ctx.config.core.default_team.clone())
     }
 
-    fn write_disabled_health_record(ctx: &PluginContext, team: &str, message: &str) {
-        let path = ctx
-            .system
-            .claude_root
-            .join("daemon")
-            .join("gh-monitor-health.json");
+    fn write_health_record(
+        ctx: &PluginContext,
+        team: &str,
+        availability_state: &str,
+        message: &str,
+    ) {
+        let Some(home_dir) = ctx.system.claude_root.parent() else {
+            warn!("CI Monitor: failed to derive ATM home for health file");
+            return;
+        };
+        let path = agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(home_dir);
         let mut file = match std::fs::read_to_string(&path) {
             Ok(raw) => match serde_json::from_str::<GhMonitorHealthFile>(&raw) {
                 Ok(parsed) => parsed,
@@ -800,7 +878,7 @@ impl CiMonitorPlugin {
         let updated_record = GhMonitorHealthRecord {
             team: team.to_string(),
             lifecycle_state: "running".to_string(),
-            availability_state: "disabled_config_error".to_string(),
+            availability_state: availability_state.to_string(),
             in_flight: 0,
             updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             message: Some(message.to_string()),
@@ -884,7 +962,7 @@ impl CiMonitorPlugin {
     ) {
         let team = Self::team_for_config_error(table, ctx);
         let message = format!("invalid gh_monitor config: {reason}");
-        Self::write_disabled_health_record(ctx, &team, &message);
+        Self::write_health_record(ctx, &team, "disabled_config_error", &message);
         self.notify_disabled_transition(ctx, &team, &message);
     }
 }
@@ -930,11 +1008,16 @@ impl Plugin for CiMonitorPlugin {
             return Ok(());
         }
 
-        // Get repo info for synthetic member registration
-        let repo = ctx.system.repo.as_ref().ok_or_else(|| PluginError::Init {
-            message: "No repository information available".to_string(),
-            source: None,
-        })?;
+        // Get repo info for synthetic member registration. Prefer git
+        // auto-detection; fall back to config-provided owner/repo when daemon
+        // startup lacks repository context.
+        let repo = match self.resolve_repo_context(ctx) {
+            Ok(repo) => repo,
+            Err(err) => {
+                self.project_disabled_config_error(ctx, config_table, &err.to_string());
+                return Err(err);
+            }
+        };
 
         // Resolve report directory relative to repo root when configured as a relative path
         if !self.config.report_dir.is_absolute() {
@@ -968,17 +1051,12 @@ impl Plugin for CiMonitorPlugin {
 
         // Create provider if not already injected (for testing)
         if self.provider.is_none() {
-            let git_provider = repo.provider.as_ref().ok_or_else(|| PluginError::Init {
-                message: "No git provider configured".to_string(),
-                source: None,
-            })?;
-
             // Create the CI provider from the registry
             // Pass provider_config for external providers
             let provider_config = self.config.provider_config.as_ref();
             self.provider = Some(self.create_provider_from_registry(
                 &registry,
-                git_provider,
+                repo.provider.as_ref(),
                 provider_config,
             )?);
         }
@@ -1013,12 +1091,47 @@ impl Plugin for CiMonitorPlugin {
             unknown_fields: std::collections::HashMap::new(),
         };
 
-        ctx.roster
+        match ctx
+            .roster
             .add_member(&self.config.team, member, "gh_monitor")
-            .map_err(|e| PluginError::Init {
-                message: format!("Failed to register synthetic member: {e}"),
-                source: None,
-            })?;
+        {
+            Ok(()) => {}
+            Err(RosterError::DuplicateMember { ref name, ref team }) => {
+                // Member already exists. Only adopt if it is the expected synthetic
+                // shape (agent_type == "plugin:gh_monitor"). A non-plugin row with the
+                // same name must not be silently hijacked — cleanup_plugin only purges
+                // rows with agent_type "plugin:gh_monitor", so a mismatched row would
+                // escape cleanup and the plugin would be bound to the wrong entry.
+                let is_valid_synthetic = ctx
+                    .roster
+                    .list_members(team, Some("gh_monitor"))
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|m| &m.name == name);
+
+                if is_valid_synthetic {
+                    // Note: MembershipTracker has no entry for this triple;
+                    // cleanup_plugin uses agent_type prefix matching so shutdown
+                    // soft-cleanup still fires correctly without tracker presence.
+                    debug!(agent = %name, "gh_monitor: synthetic member already registered, adopting existing roster entry");
+                } else {
+                    return Err(PluginError::Init {
+                        message: format!(
+                            "Cannot register synthetic member '{name}': a non-plugin roster \
+                             entry with that name already exists in team '{team}'. \
+                             Remove the conflicting member to allow gh_monitor to initialize."
+                        ),
+                        source: None,
+                    });
+                }
+            }
+            Err(e) => {
+                return Err(PluginError::Init {
+                    message: format!("Failed to register synthetic member: {e}"),
+                    source: None,
+                });
+            }
+        }
 
         // Validate notify targets exist in team config (warn if not found)
         if !self.config.notify_target.is_empty() {
@@ -1298,6 +1411,47 @@ mod tests {
         assert!(plugin.provider.is_none());
         assert!(plugin.ctx.is_none());
         assert!(plugin.seen_runs.is_empty());
+    }
+
+    #[test]
+    fn test_create_provider_from_registry_prefers_git_repo_over_config_repo() {
+        let config = CiMonitorConfig {
+            owner: Some("config-owner".to_string()),
+            repo: Some("config-repo".to_string()),
+            ..Default::default()
+        };
+        let plugin = CiMonitorPlugin::new().with_config(config);
+        let registry = CiProviderRegistry::new();
+        let git_provider = GitProviderType::GitHub {
+            owner: "git-owner".to_string(),
+            repo: "git-repo".to_string(),
+        };
+
+        let provider = plugin
+            .create_provider_from_registry(&registry, Some(&git_provider), None)
+            .expect("provider");
+        let debug = format!("{provider:?}");
+        assert!(debug.contains("git-owner"));
+        assert!(debug.contains("git-repo"));
+        assert!(!debug.contains("config-owner"));
+    }
+
+    #[test]
+    fn test_create_provider_from_registry_falls_back_to_config_repo_when_git_missing() {
+        let config = CiMonitorConfig {
+            owner: Some("config-owner".to_string()),
+            repo: Some("config-repo".to_string()),
+            ..Default::default()
+        };
+        let plugin = CiMonitorPlugin::new().with_config(config);
+        let registry = CiProviderRegistry::new();
+
+        let provider = plugin
+            .create_provider_from_registry(&registry, None, None)
+            .expect("provider");
+        let debug = format!("{provider:?}");
+        assert!(debug.contains("config-owner"));
+        assert!(debug.contains("config-repo"));
     }
 
     #[test]
@@ -1756,26 +1910,35 @@ notify_target = "team-lead"
         teams_root: PathBuf,
         ci_monitor_config: Option<toml::Table>,
     ) -> PluginContext {
+        create_mock_context_with_repo_config(teams_root, ci_monitor_config, true)
+    }
+
+    fn create_mock_context_with_repo_config(
+        teams_root: PathBuf,
+        ci_monitor_config: Option<toml::Table>,
+        with_repo: bool,
+    ) -> PluginContext {
         use crate::plugin::MailService;
         use crate::roster::RosterService;
         use agent_team_mail_core::config::Config;
         use agent_team_mail_core::context::{Platform, RepoContext, SystemContext};
         use std::sync::Arc;
 
-        let repo = RepoContext::new(
-            "test-repo".to_string(),
-            std::env::temp_dir().join("test-repo"),
-        )
-        .with_remote("git@github.com:test/repo.git".to_string());
-
-        let system = SystemContext::new(
+        let mut system = SystemContext::new(
             "test-host".to_string(),
             Platform::Linux,
             teams_root.join(".claude"),
             "2.1.39".to_string(),
             "default-team".to_string(),
-        )
-        .with_repo(repo);
+        );
+        if with_repo {
+            let repo = RepoContext::new(
+                "test-repo".to_string(),
+                std::env::temp_dir().join("test-repo"),
+            )
+            .with_remote("git@github.com:test/repo.git".to_string());
+            system = system.with_repo(repo);
+        }
 
         let mut config = Config::default();
         if let Some(table) = ci_monitor_config {
@@ -1854,6 +2017,252 @@ notify_target = "nonexistent-agent"
         // but we verify it doesn't fail)
         let result = plugin.init(&ctx).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_init_falls_back_to_config_repo_when_system_repo_missing() {
+        use crate::plugins::ci_monitor::MockCiProvider;
+        use agent_team_mail_core::schema::{AgentMember, TeamConfig};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let team_dir = teams_root.join("dev-team");
+        let inboxes_dir = team_dir.join("inboxes");
+        std::fs::create_dir_all(&inboxes_dir).unwrap();
+        std::fs::write(inboxes_dir.join("ci-monitor.json"), "[]").unwrap();
+
+        let team_config = TeamConfig {
+            name: "dev-team".to_string(),
+            description: None,
+            created_at: 1234567890,
+            lead_agent_id: "lead@dev-team".to_string(),
+            lead_session_id: "session-123".to_string(),
+            members: vec![AgentMember {
+                agent_id: "lead@dev-team".to_string(),
+                name: "lead".to_string(),
+                agent_type: "general-purpose".to_string(),
+                model: "claude-opus-4-6".to_string(),
+                prompt: None,
+                color: None,
+                plan_mode_required: None,
+                joined_at: 1234567890,
+                tmux_pane_id: None,
+                cwd: ".".to_string(),
+                subscriptions: Vec::new(),
+                backend_type: None,
+                is_active: None,
+                last_active: None,
+                session_id: None,
+                external_backend_type: None,
+                external_model: None,
+                unknown_fields: std::collections::HashMap::new(),
+            }],
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        std::fs::write(
+            team_dir.join("config.json"),
+            serde_json::to_string(&team_config).unwrap(),
+        )
+        .unwrap();
+
+        let toml_str = r#"
+team = "dev-team"
+repo = "config-owner/config-repo"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let ctx = create_mock_context_with_repo_config(teams_root.clone(), Some(table), false);
+        let mut plugin = CiMonitorPlugin::new().with_provider(Box::new(MockCiProvider::new()));
+        let atm_config_path = temp_dir.path().join(".atm.toml");
+        std::fs::write(&atm_config_path, toml_str).unwrap();
+
+        struct EnvRestoreGuard {
+            key: &'static str,
+            original: Option<String>,
+        }
+
+        impl Drop for EnvRestoreGuard {
+            fn drop(&mut self) {
+                match self.original.take() {
+                    Some(value) => unsafe { std::env::set_var(self.key, value) },
+                    None => unsafe { std::env::remove_var(self.key) },
+                }
+            }
+        }
+
+        struct CurrentDirGuard(std::path::PathBuf);
+
+        impl Drop for CurrentDirGuard {
+            fn drop(&mut self) {
+                std::env::set_current_dir(&self.0).expect("restore current directory");
+            }
+        }
+
+        let _atm_config_guard = EnvRestoreGuard {
+            key: "ATM_CONFIG",
+            original: std::env::var("ATM_CONFIG").ok(),
+        };
+        let _cwd_guard = CurrentDirGuard(std::env::current_dir().unwrap());
+
+        unsafe {
+            std::env::set_var("ATM_CONFIG", &atm_config_path);
+        }
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+        let result = plugin.init(&ctx).await;
+
+        assert!(result.is_ok());
+        let roster = ctx.roster.list_members("dev-team", None).expect("members");
+        let member = roster
+            .iter()
+            .find(|member| member.name == "ci-monitor")
+            .expect("synthetic member registered");
+        assert_eq!(member.cwd, temp_dir.path().to_string_lossy());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_init_adopts_existing_ci_monitor_member_without_error() {
+        use crate::plugins::ci_monitor::MockCiProvider;
+        use agent_team_mail_core::schema::{AgentMember, TeamConfig};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let team_dir = teams_root.join("dev-team");
+        let inboxes_dir = team_dir.join("inboxes");
+        std::fs::create_dir_all(&inboxes_dir).unwrap();
+        std::fs::write(inboxes_dir.join("ci-monitor.json"), "[]").unwrap();
+
+        // Pre-populate config.json with ci-monitor already present (simulates a
+        // persisted member from a previous session that would trigger DuplicateMember).
+        let ci_monitor_member = AgentMember {
+            agent_id: "ci-monitor@dev-team".to_string(),
+            name: "ci-monitor".to_string(),
+            agent_type: "plugin:gh_monitor".to_string(),
+            model: String::new(),
+            prompt: None,
+            color: None,
+            plan_mode_required: None,
+            joined_at: 1234567890,
+            tmux_pane_id: None,
+            cwd: ".".to_string(),
+            subscriptions: Vec::new(),
+            backend_type: None,
+            is_active: None,
+            last_active: None,
+            session_id: None,
+            external_backend_type: None,
+            external_model: None,
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        let team_config = TeamConfig {
+            name: "dev-team".to_string(),
+            description: None,
+            created_at: 1234567890,
+            lead_agent_id: "lead@dev-team".to_string(),
+            lead_session_id: "session-123".to_string(),
+            members: vec![ci_monitor_member],
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        std::fs::write(
+            team_dir.join("config.json"),
+            serde_json::to_string(&team_config).unwrap(),
+        )
+        .unwrap();
+
+        let toml_str = r#"
+team = "dev-team"
+repo = "config-owner/config-repo"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let ctx = create_mock_context_with_repo_config(teams_root.clone(), Some(table), false);
+        let mut plugin = CiMonitorPlugin::new().with_provider(Box::new(MockCiProvider::new()));
+
+        let atm_config_path = temp_dir.path().join(".atm.toml");
+        std::fs::write(&atm_config_path, toml_str).unwrap();
+
+        struct EnvRestoreGuard {
+            key: &'static str,
+            original: Option<String>,
+        }
+        impl Drop for EnvRestoreGuard {
+            fn drop(&mut self) {
+                match self.original.take() {
+                    Some(value) => unsafe { std::env::set_var(self.key, value) },
+                    None => unsafe { std::env::remove_var(self.key) },
+                }
+            }
+        }
+        struct CurrentDirGuard(std::path::PathBuf);
+        impl Drop for CurrentDirGuard {
+            fn drop(&mut self) {
+                std::env::set_current_dir(&self.0).expect("restore current directory");
+            }
+        }
+
+        let _atm_config_guard = EnvRestoreGuard {
+            key: "ATM_CONFIG",
+            original: std::env::var("ATM_CONFIG").ok(),
+        };
+        let _cwd_guard = CurrentDirGuard(std::env::current_dir().unwrap());
+        unsafe { std::env::set_var("ATM_CONFIG", &atm_config_path) };
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+
+        // Init must succeed even though ci-monitor is already in the roster.
+        let result = plugin.init(&ctx).await;
+        assert!(
+            result.is_ok(),
+            "init should succeed when ci-monitor already exists: {result:?}"
+        );
+
+        // The existing member should still be present (not duplicated).
+        let roster = ctx.roster.list_members("dev-team", None).expect("members");
+        let ci_members: Vec<_> = roster.iter().filter(|m| m.name == "ci-monitor").collect();
+        assert_eq!(
+            ci_members.len(),
+            1,
+            "ci-monitor should appear exactly once in roster"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_init_without_git_or_config_repo_writes_disabled_init_health_record() {
+        use crate::plugins::ci_monitor::MockCiProvider;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let table: toml::Table = toml::from_str("team = \"dev-team\"").unwrap();
+        let ctx = create_mock_context_with_repo_config(teams_root.clone(), Some(table), false);
+        let mut plugin = CiMonitorPlugin::new().with_provider(Box::new(MockCiProvider::new()));
+
+        let err = plugin
+            .init(&ctx)
+            .await
+            .expect_err("init should fail without git or config repo");
+        assert!(
+            err.to_string()
+                .contains("No repository information available"),
+            "unexpected init error: {err}"
+        );
+
+        let health_path =
+            agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(temp_dir.path());
+        let raw = std::fs::read_to_string(&health_path).expect("health record");
+        let health: GhMonitorHealthFile = serde_json::from_str(&raw).expect("health json");
+        let record = health
+            .records
+            .iter()
+            .find(|record| record.team == "dev-team")
+            .expect("dev-team health record");
+        assert_eq!(record.availability_state, "disabled_config_error");
+        assert!(
+            record
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("No repository information available"))
+        );
     }
 
     #[tokio::test]
@@ -2016,11 +2425,7 @@ poll_interval_secs = 10
         .unwrap();
         let ctx = create_mock_context_with_config(teams_root.clone(), Some(table));
 
-        let state_path = ctx
-            .system
-            .claude_root
-            .join("daemon")
-            .join("gh-monitor-state.json");
+        let state_path = CiMonitorPlugin::gh_monitor_state_path(&ctx);
         std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         std::fs::write(
             &state_path,

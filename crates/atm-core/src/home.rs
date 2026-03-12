@@ -43,7 +43,7 @@
 //! ```
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Get the home directory for ATM operations
 ///
@@ -116,6 +116,67 @@ pub fn get_os_home_dir() -> Result<PathBuf> {
     dirs::home_dir().context("Could not determine OS home directory")
 }
 
+/// Return the canonical `{ATM_HOME}/.claude` root for ATM-managed state.
+pub fn claude_root_dir() -> Result<PathBuf> {
+    Ok(claude_root_dir_for(&get_home_dir()?))
+}
+
+/// Return the canonical `{ATM_HOME}/.claude` root for the provided home path.
+pub fn claude_root_dir_for(home: &Path) -> PathBuf {
+    home.join(".claude")
+}
+
+/// Return the canonical `{ATM_HOME}/.claude/teams` root for ATM team state.
+pub fn teams_root_dir() -> Result<PathBuf> {
+    Ok(teams_root_dir_for(&get_home_dir()?))
+}
+
+/// Return the canonical `{ATM_HOME}/.claude/teams` root for the provided home path.
+pub fn teams_root_dir_for(home: &Path) -> PathBuf {
+    claude_root_dir_for(home).join("teams")
+}
+
+/// Return the canonical team directory for the provided home and team name.
+pub fn team_dir_for(home: &Path, team: &str) -> PathBuf {
+    teams_root_dir_for(home).join(team)
+}
+
+/// Return the canonical team config path for the provided home and team name.
+pub fn team_config_path_for(home: &Path, team: &str) -> PathBuf {
+    team_dir_for(home, team).join("config.json")
+}
+
+/// Return the canonical inbox JSON path for the provided home, team, and agent.
+pub fn inbox_path_for(home: &Path, team: &str, agent: &str) -> PathBuf {
+    team_dir_for(home, team)
+        .join("inboxes")
+        .join(format!("{agent}.json"))
+}
+
+/// Return the canonical Claude settings path for the provided home.
+pub fn claude_settings_path_for(home: &Path) -> PathBuf {
+    claude_root_dir_for(home).join("settings.json")
+}
+
+/// Return the canonical Claude scripts directory for the provided home.
+pub fn claude_scripts_dir_for(home: &Path) -> PathBuf {
+    claude_root_dir_for(home).join("scripts")
+}
+
+/// Return the canonical Claude agents directory for the provided home.
+pub fn claude_agents_dir_for(home: &Path) -> PathBuf {
+    claude_root_dir_for(home).join("agents")
+}
+
+/// Return the canonical `{ATM_HOME}/.config/atm` directory for the provided home.
+pub fn atm_config_dir_for(home: &Path) -> PathBuf {
+    home.join(".config").join("atm")
+}
+
+/// Return the canonical agent session directory for the provided home.
+pub fn sessions_dir_for(home: &Path) -> PathBuf {
+    atm_config_dir_for(home).join("agent-sessions")
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,6 +345,76 @@ mod tests {
         assert_eq!(home1, home2);
 
         // Restore
+        unsafe {
+            match original {
+                Some(v) => env::set_var("ATM_HOME", v),
+                None => env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_path_helpers_build_canonical_paths() {
+        let home = PathBuf::from("test-home");
+
+        assert_eq!(claude_root_dir_for(&home), home.join(".claude"));
+        assert_eq!(
+            teams_root_dir_for(&home),
+            home.join(".claude").join("teams")
+        );
+        assert_eq!(
+            team_dir_for(&home, "atm-dev"),
+            home.join(".claude").join("teams").join("atm-dev")
+        );
+        assert_eq!(
+            team_config_path_for(&home, "atm-dev"),
+            home.join(".claude")
+                .join("teams")
+                .join("atm-dev")
+                .join("config.json")
+        );
+        assert_eq!(
+            inbox_path_for(&home, "atm-dev", "arch-ctm"),
+            home.join(".claude")
+                .join("teams")
+                .join("atm-dev")
+                .join("inboxes")
+                .join("arch-ctm.json")
+        );
+        assert_eq!(
+            claude_settings_path_for(&home),
+            home.join(".claude").join("settings.json")
+        );
+        assert_eq!(
+            claude_scripts_dir_for(&home),
+            home.join(".claude").join("scripts")
+        );
+        assert_eq!(
+            claude_agents_dir_for(&home),
+            home.join(".claude").join("agents")
+        );
+        assert_eq!(atm_config_dir_for(&home), home.join(".config").join("atm"));
+        assert_eq!(
+            sessions_dir_for(&home),
+            home.join(".config").join("atm").join("agent-sessions")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_root_dir_helpers_respect_atm_home() {
+        let original = env::var("ATM_HOME").ok();
+        unsafe { env::set_var("ATM_HOME", "test-home") };
+
+        assert_eq!(
+            claude_root_dir().unwrap(),
+            PathBuf::from("test-home/.claude")
+        );
+        assert_eq!(
+            teams_root_dir().unwrap(),
+            PathBuf::from("test-home/.claude/teams")
+        );
+
         unsafe {
             match original {
                 Some(v) => env::set_var("ATM_HOME", v),

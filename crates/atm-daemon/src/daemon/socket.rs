@@ -3,7 +3,7 @@
 //! The daemon listens on a Unix domain socket at:
 //!
 //! ```text
-//! ${ATM_HOME}/.claude/daemon/atm-daemon.sock
+//! ${ATM_HOME}/.atm/daemon/atm-daemon.sock
 //! ```
 //!
 //! Each client connection follows a simple request/response protocol:
@@ -61,7 +61,7 @@ pub type SharedDedupeStore = std::sync::Arc<std::sync::Mutex<DurableDedupeStore>
 /// Create a new [`SharedDedupeStore`] from the given home directory.
 ///
 /// Reads `ATM_DEDUP_CAPACITY` and `ATM_DEDUP_TTL_SECS` from the environment.
-/// The backing file is `{home_dir}/.claude/daemon/dedup.jsonl`.
+/// The backing file is `{home_dir}/.atm/daemon/dedup.jsonl`.
 ///
 /// # Errors
 ///
@@ -298,7 +298,7 @@ async fn start_unix_socket_server(
 ) -> Result<SocketServerHandle> {
     use tokio::net::UnixListener;
 
-    let daemon_dir = home_dir.join(".claude/daemon");
+    let daemon_dir = home_dir.join(".atm/daemon");
     let socket_path = daemon_dir.join("atm-daemon.sock");
     let pid_path = daemon_dir.join("atm-daemon.pid");
 
@@ -930,8 +930,7 @@ fn authorize_hook_event(
     let home_dir = agent_team_mail_core::home::get_home_dir()
         .map_err(|e| format!("failed to resolve home directory: {e}"))?;
 
-    let config_path = home_dir
-        .join(".claude/teams")
+    let config_path = agent_team_mail_core::home::teams_root_dir_for(&home_dir)
         .join(team)
         .join("config.json");
     let content = std::fs::read_to_string(&config_path)
@@ -1167,6 +1166,7 @@ fn session_identity_change_flags(
 fn hook_action_name(event_type: &str) -> Option<&'static str> {
     match event_type {
         "session_start" => Some("hook.session_start"),
+        "teammate_idle" => Some("hook.teammate_idle"),
         "permission_request" => Some("hook.permission_request"),
         "stop" => Some("hook.stop"),
         "notification_idle_prompt" => Some("hook.notification_idle_prompt"),
@@ -1270,14 +1270,67 @@ fn emit_hook_failure(
         session_id,
         process_id,
     };
+    let action = event_type
+        .and_then(hook_action_name)
+        .unwrap_or("hook.failure");
     emit_hook_event(
         "warn",
-        "hook.failure",
+        action,
         ctx,
-        "failure",
+        "rejected",
         Some(reason.to_string()),
         event_type,
     );
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TeammateIdleSessionOutcome {
+    NoSessionId,
+    Confirmed { effective_process_id: u32 },
+    IgnoredNoExistingSession,
+    IgnoredAgentSessionMismatch { current_session_id: String },
+    IgnoredConflictingOwner { owner_agent: String },
+}
+
+#[cfg(unix)]
+fn confirm_teammate_idle_session(
+    registry: &mut crate::daemon::session_registry::SessionRegistry,
+    team: &str,
+    agent: &str,
+    session_id: &str,
+    process_id: Option<u32>,
+) -> TeammateIdleSessionOutcome {
+    if session_id.trim().is_empty() {
+        return TeammateIdleSessionOutcome::NoSessionId;
+    }
+
+    if let Some(existing) = registry.query_for_team(team, agent).cloned() {
+        if existing.session_id != session_id {
+            return TeammateIdleSessionOutcome::IgnoredAgentSessionMismatch {
+                current_session_id: existing.session_id,
+            };
+        }
+        let effective_process_id = process_id
+            .filter(|pid| *pid > 1)
+            .unwrap_or(existing.process_id);
+        registry.upsert_for_team(team, agent, session_id, effective_process_id);
+        return TeammateIdleSessionOutcome::Confirmed {
+            effective_process_id,
+        };
+    }
+
+    if let Some(owner) = registry
+        .sessions_for_team(team)
+        .into_iter()
+        .find(|record| record.session_id == session_id)
+    {
+        return TeammateIdleSessionOutcome::IgnoredConflictingOwner {
+            owner_agent: owner.agent_name,
+        };
+    }
+
+    TeammateIdleSessionOutcome::IgnoredNoExistingSession
 }
 
 /// Handle the `"hook-event"` command, updating daemon state in real-time
@@ -1423,6 +1476,21 @@ async fn handle_hook_event_command_with_dedup(
         };
         let key = DedupeKey::new(&team, session_key, &agent, request_id);
         if dedup_store.lock().unwrap().check_and_insert(key) {
+            if let Some(action) = hook_action_name(&event_type) {
+                emit_hook_event(
+                    "info",
+                    action,
+                    HookLogContext {
+                        team: Some(team.as_str()),
+                        agent: Some(agent.as_str()),
+                        session_id: Some(session_id.as_str()),
+                        process_id,
+                    },
+                    "duplicate_ignored",
+                    None,
+                    Some(event_type.as_str()),
+                );
+            }
             info!(
                 event = %event_type,
                 team = %team,
@@ -1699,24 +1767,34 @@ async fn handle_hook_event_command_with_dedup(
             info!(agent = %agent, agent_pid = agent_pid, "hook_event notification_idle_prompt");
         }
         "teammate_idle" => {
+            let session_outcome = {
+                let mut registry = session_registry.lock().unwrap();
+                confirm_teammate_idle_session(&mut registry, &team, &agent, &session_id, process_id)
+            };
             let (old_state, new_state) = {
                 let mut tracker = state_store.lock().unwrap();
                 let current = tracker.get_state(&agent);
-                if current.is_some() {
-                    tracker.set_state_with_context(
-                        &agent,
-                        AgentState::Idle,
-                        "teammate_idle lifecycle",
-                        "hook_event",
-                    );
-                } else {
-                    tracker.register_agent(&agent);
-                    tracker.set_state_with_context(
-                        &agent,
-                        AgentState::Idle,
-                        "teammate_idle lifecycle (auto-register)",
-                        "hook_event",
-                    );
+                if matches!(
+                    session_outcome,
+                    TeammateIdleSessionOutcome::NoSessionId
+                        | TeammateIdleSessionOutcome::Confirmed { .. }
+                ) {
+                    if current.is_some() {
+                        tracker.set_state_with_context(
+                            &agent,
+                            AgentState::Idle,
+                            "teammate_idle lifecycle",
+                            "hook_event",
+                        );
+                    } else {
+                        tracker.register_agent(&agent);
+                        tracker.set_state_with_context(
+                            &agent,
+                            AgentState::Idle,
+                            "teammate_idle lifecycle (auto-register)",
+                            "hook_event",
+                        );
+                    }
                 }
                 let updated = tracker.get_state(&agent).unwrap_or(AgentState::Unknown);
                 (current, updated)
@@ -1729,6 +1807,56 @@ async fn handle_hook_event_command_with_dedup(
                 "hook_event.teammate_idle",
                 Some(session_id.as_str()),
                 process_id,
+            );
+            let (level, result, error) = match &session_outcome {
+                TeammateIdleSessionOutcome::NoSessionId => ("info", "success_no_session_id", None),
+                TeammateIdleSessionOutcome::Confirmed { effective_process_id } => (
+                    "info",
+                    "confirmed_session",
+                    Some(format!(
+                        "teammate_idle confirmed existing session ownership for agent '{}' (pid={effective_process_id})",
+                        agent
+                    )),
+                ),
+                TeammateIdleSessionOutcome::IgnoredNoExistingSession => (
+                    "info",
+                    "ignored_unowned_session",
+                    Some(
+                        "teammate_idle does not bootstrap session ownership without an existing same-agent session"
+                            .to_string(),
+                    ),
+                ),
+                TeammateIdleSessionOutcome::IgnoredAgentSessionMismatch {
+                    current_session_id,
+                } => (
+                    "warn",
+                    "ignored_session_mismatch",
+                    Some(format!(
+                        "teammate_idle session_id '{}' does not match current owned session '{}' for agent '{}'",
+                        session_id, current_session_id, agent
+                    )),
+                ),
+                TeammateIdleSessionOutcome::IgnoredConflictingOwner { owner_agent } => (
+                    "warn",
+                    "ignored_conflicting_owner",
+                    Some(format!(
+                        "teammate_idle session_id '{}' is already owned by '{}' in team '{}'",
+                        session_id, owner_agent, team
+                    )),
+                ),
+            };
+            emit_hook_event(
+                level,
+                "hook.teammate_idle",
+                HookLogContext {
+                    team: Some(team.as_str()),
+                    agent: Some(agent.as_str()),
+                    session_id: Some(session_id.as_str()),
+                    process_id,
+                },
+                result,
+                error,
+                Some(event_type.as_str()),
             );
             info!(agent = %agent, agent_pid = agent_pid, "hook_event teammate_idle");
         }
@@ -1808,6 +1936,22 @@ async fn handle_hook_event_command_with_dedup(
                     info!(agent = %agent, agent_pid = agent_pid, "hook_event session_end");
                 }
                 MarkDeadForSessionOutcome::AlreadyDead => {
+                    emit_hook_event(
+                        "info",
+                        "hook.session_end",
+                        HookLogContext {
+                            team: Some(team.as_str()),
+                            agent: Some(agent.as_str()),
+                            session_id: Some(session_id.as_str()),
+                            process_id,
+                        },
+                        "ignored_already_dead",
+                        Some(
+                            "session_end duplicate ignored because session is already dead"
+                                .to_string(),
+                        ),
+                        Some(event_type.as_str()),
+                    );
                     debug!(
                         team = %team,
                         agent = %agent,
@@ -1816,6 +1960,22 @@ async fn handle_hook_event_command_with_dedup(
                     );
                 }
                 MarkDeadForSessionOutcome::UnknownSession => {
+                    emit_hook_event(
+                        "info",
+                        "hook.session_end",
+                        HookLogContext {
+                            team: Some(team.as_str()),
+                            agent: Some(agent.as_str()),
+                            session_id: Some(session_id.as_str()),
+                            process_id,
+                        },
+                        "ignored_unknown_session",
+                        Some(
+                            "session_end ignored because no matching live session is registered"
+                                .to_string(),
+                        ),
+                        Some(event_type.as_str()),
+                    );
                     debug!(
                         team = %team,
                         agent = %agent,
@@ -1852,6 +2012,19 @@ async fn handle_hook_event_command_with_dedup(
             }
         }
         other => {
+            emit_hook_event(
+                "info",
+                "hook.unknown",
+                HookLogContext {
+                    team: Some(team.as_str()),
+                    agent: Some(agent.as_str()),
+                    session_id: Some(session_id.as_str()),
+                    process_id,
+                },
+                "ignored_unknown_event",
+                Some(format!("unknown event type: {other}")),
+                Some(other),
+            );
             debug!("hook_event unknown event type: {other}");
             emit_hook_failure(
                 Some(other),
@@ -2041,7 +2214,7 @@ fn default_gh_monitor_health(team: &str) -> GhMonitorHealth {
 
 #[cfg(unix)]
 fn gh_monitor_health_path(home: &std::path::Path) -> PathBuf {
-    home.join(".claude/daemon/gh-monitor-health.json")
+    agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(home)
 }
 
 #[cfg(unix)]
@@ -3991,7 +4164,7 @@ fn derive_pr_url(
 
 #[cfg(unix)]
 fn gh_monitor_state_path(home: &std::path::Path) -> PathBuf {
-    home.join(".claude/daemon/gh-monitor-state.json")
+    home.join(".atm/daemon/gh-monitor-state.json")
 }
 
 #[cfg(unix)]
@@ -5058,7 +5231,9 @@ fn handle_session_query_team(
                 );
             }
         };
-        let config_path = home.join(".claude/teams").join(&team).join("config.json");
+        let config_path = agent_team_mail_core::home::teams_root_dir_for(&home)
+            .join(&team)
+            .join("config.json");
         let content = match std::fs::read_to_string(&config_path) {
             Ok(c) => c,
             Err(_) => {
@@ -5120,6 +5295,23 @@ fn handle_register_hint(
     state_store: &SharedStateStore,
     session_registry: &SharedSessionRegistry,
 ) -> SocketResponse {
+    fn reject_deprecated_local_session_id(
+        request_id: &str,
+        field: &str,
+        value: &str,
+    ) -> Option<SocketResponse> {
+        if value.starts_with("local:") {
+            return Some(make_error_response(
+                request_id,
+                "INVALID_REQUEST",
+                &format!(
+                    "Deprecated register-hint {field} '{value}' is not allowed; use canonical session IDs"
+                ),
+            ));
+        }
+        None
+    }
+
     let team = match request.payload.get("team").and_then(|v| v.as_str()) {
         Some(t) if !t.trim().is_empty() => t.trim().to_string(),
         _ => {
@@ -5172,6 +5364,11 @@ fn handle_register_hint(
             );
         }
     };
+    if let Some(resp) =
+        reject_deprecated_local_session_id(&request.request_id, "session_id", &session_id)
+    {
+        return resp;
+    }
     let process_id = match request.payload.get("process_id").and_then(|v| v.as_u64()) {
         Some(pid) if pid > 1 => pid as u32,
         _ => {
@@ -5197,6 +5394,15 @@ fn handle_register_hint(
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(str::to_string);
+    if let Some(runtime_session_id) = runtime_session_id.as_deref()
+        && let Some(resp) = reject_deprecated_local_session_id(
+            &request.request_id,
+            "runtime_session_id",
+            runtime_session_id,
+        )
+    {
+        return resp;
+    }
     let pane_id = request
         .payload
         .get("pane_id")
@@ -5419,6 +5625,7 @@ fn handle_list_agents(
 
         for m in members {
             bootstrap_session_from_member_hint(team_name, &m, &mut session_guard);
+            bootstrap_session_from_session_file(&home, team_name, &m, &mut session_guard);
             let tracker_state = tracker.get_state(&m.name);
             let tracker_meta = tracker.transition_meta(&m.name);
             let session = session_guard.query_for_team_with_liveness(team_name, &m.name);
@@ -5477,7 +5684,9 @@ fn load_team_members(
     home: &std::path::Path,
     team: &str,
 ) -> Option<Vec<agent_team_mail_core::schema::AgentMember>> {
-    let config_path = home.join(".claude/teams").join(team).join("config.json");
+    let config_path = agent_team_mail_core::home::teams_root_dir_for(home)
+        .join(team)
+        .join("config.json");
     let content = std::fs::read_to_string(config_path).ok()?;
     let config: agent_team_mail_core::schema::TeamConfig = serde_json::from_str(&content).ok()?;
     Some(config.members)
@@ -5533,6 +5742,194 @@ fn runtime_for_member(member: &AgentMember) -> Option<String> {
     })
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+struct SessionFileHint {
+    session_id: String,
+    team: String,
+    identity: String,
+    pid: Option<u32>,
+    created_at: f64,
+    updated_at: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct SessionFileCandidate {
+    path: std::path::PathBuf,
+    data: SessionFileHint,
+    timestamp: f64,
+    pid: u32,
+}
+
+const SESSION_FILE_TTL_SECS: f64 = 86400.0;
+
+fn remove_session_file_best_effort(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+}
+
+fn session_file_owned_by_current_user(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(meta) = std::fs::metadata(path) else {
+            return false;
+        };
+        // SAFETY: getuid() has no preconditions and always succeeds on Unix.
+        let current_uid = unsafe { libc::getuid() };
+        meta.uid() == current_uid
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        true
+    }
+}
+
+fn session_file_timestamp(data: &SessionFileHint) -> Option<f64> {
+    let timestamp = data.updated_at.unwrap_or(data.created_at);
+    (timestamp > 0.0).then_some(timestamp)
+}
+
+fn scan_live_session_files(
+    home: &std::path::Path,
+    team: &str,
+    member_name: &str,
+) -> Vec<SessionFileCandidate> {
+    let sessions_dir = agent_team_mail_core::home::teams_root_dir_for(home)
+        .join(team)
+        .join("sessions");
+    let Ok(entries) = std::fs::read_dir(&sessions_dir) else {
+        return Vec::new();
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    let mut matches: Vec<SessionFileCandidate> = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        if !session_file_owned_by_current_user(&path) {
+            continue;
+        }
+
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(_) => {
+                remove_session_file_best_effort(&path);
+                continue;
+            }
+        };
+        let data: SessionFileHint = match serde_json::from_str(&content) {
+            Ok(data) => data,
+            Err(_) => {
+                remove_session_file_best_effort(&path);
+                continue;
+            }
+        };
+
+        if data.team != team {
+            remove_session_file_best_effort(&path);
+            continue;
+        }
+        if data.identity != member_name {
+            continue;
+        }
+
+        let Some(timestamp) = session_file_timestamp(&data) else {
+            remove_session_file_best_effort(&path);
+            continue;
+        };
+        if (now - timestamp) > SESSION_FILE_TTL_SECS {
+            remove_session_file_best_effort(&path);
+            continue;
+        }
+
+        let Some(pid) = data.pid.filter(|pid| *pid > 1) else {
+            remove_session_file_best_effort(&path);
+            continue;
+        };
+        if !agent_team_mail_core::pid::is_pid_alive(pid) {
+            remove_session_file_best_effort(&path);
+            continue;
+        }
+        if data.session_id.trim().is_empty() {
+            remove_session_file_best_effort(&path);
+            continue;
+        }
+
+        matches.push(SessionFileCandidate {
+            path,
+            data,
+            timestamp,
+            pid,
+        });
+    }
+
+    matches.sort_by(|left, right| {
+        right
+            .timestamp
+            .partial_cmp(&left.timestamp)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    if matches.len() > 1 {
+        for duplicate in matches.iter().skip(1) {
+            remove_session_file_best_effort(&duplicate.path);
+        }
+        matches.truncate(1);
+    }
+
+    matches
+}
+
+fn bootstrap_session_from_session_file(
+    home: &std::path::Path,
+    team: &str,
+    member: &AgentMember,
+    session_registry: &mut crate::daemon::session_registry::SessionRegistry,
+) {
+    let mut matches = scan_live_session_files(home, team, &member.name);
+    if session_registry
+        .query_for_team(team, &member.name)
+        .is_some()
+    {
+        return;
+    }
+    if matches.is_empty() {
+        return;
+    }
+
+    let candidate = matches.pop().expect("single live session file");
+    let data = candidate.data;
+    let pid = candidate.pid;
+    let validation = validate_pid_backend(member, pid);
+    if validation.is_alive_mismatch() {
+        emit_pid_process_mismatch(team, &member.name, &validation, "session-file-bootstrap");
+    }
+
+    let runtime = runtime_for_member(member);
+    let runtime_session_id = runtime
+        .as_deref()
+        .filter(|runtime| *runtime != "claude")
+        .map(|_| data.session_id.clone());
+
+    session_registry.upsert_runtime_for_team(
+        team,
+        &member.name,
+        &data.session_id,
+        pid,
+        runtime,
+        runtime_session_id,
+        member.tmux_pane_id.clone(),
+        None,
+    );
+}
+
 fn bootstrap_session_from_member_hint(
     team: &str,
     member: &AgentMember,
@@ -5540,7 +5937,9 @@ fn bootstrap_session_from_member_hint(
 ) {
     if session_registry
         .query_for_team(team, &member.name)
-        .is_some()
+        .is_some_and(|session| {
+            session.state == crate::daemon::session_registry::SessionState::Active
+        })
     {
         return;
     }
@@ -6234,6 +6633,30 @@ fi
         }
     }
 
+    fn write_session_file(
+        home_dir: &std::path::Path,
+        team: &str,
+        identity: &str,
+        session_id: &str,
+        pid: u32,
+        created_at: f64,
+        updated_at: Option<f64>,
+    ) -> std::path::PathBuf {
+        let sessions_dir = home_dir.join(".claude/teams").join(team).join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join(format!("{session_id}.json"));
+        let data = serde_json::json!({
+            "session_id": session_id,
+            "team": team,
+            "identity": identity,
+            "pid": pid,
+            "created_at": created_at,
+            "updated_at": updated_at,
+        });
+        std::fs::write(&path, serde_json::to_string(&data).unwrap()).unwrap();
+        path
+    }
+
     #[cfg(unix)]
     fn read_team_inbox_messages(
         home_dir: &std::path::Path,
@@ -6785,6 +7208,244 @@ notify_target = "team-lead"
 
     #[test]
     #[serial]
+    fn test_list_agents_dead_session_without_hint_stays_dead() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let home = std::env::var("ATM_HOME").expect("ATM_HOME set by fixture");
+        let config_path = std::path::Path::new(&home).join(".claude/teams/atm-dev/config.json");
+        let mut cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        let members = cfg["members"].as_array_mut().unwrap();
+        let target = members
+            .iter_mut()
+            .find(|m| m["name"].as_str() == Some("arch-ctm"))
+            .expect("arch-ctm in config");
+        target["processId"] = serde_json::json!(std::process::id());
+        target.as_object_mut().unwrap().remove("sessionId");
+        target["externalBackendType"] = serde_json::json!("external");
+        std::fs::write(&config_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert_for_team("atm-dev", "arch-ctm", "dead-session-1", std::process::id());
+            let outcome = reg.mark_dead_for_team_session("atm-dev", "arch-ctm", "dead-session-1");
+            assert_eq!(
+                outcome,
+                crate::daemon::session_registry::MarkDeadForSessionOutcome::MarkedDead
+            );
+        }
+
+        let req = make_request("list-agents", serde_json::json!({"team": "atm-dev"}));
+        let resp = handle_list_agents(&req, &store, &sr);
+        assert_eq!(resp.status, "ok");
+
+        let reg = sr.lock().unwrap();
+        let session = reg
+            .query_for_team("atm-dev", "arch-ctm")
+            .expect("dead session should remain present");
+        assert_eq!(session.session_id, "dead-session-1");
+        assert_eq!(
+            session.state,
+            crate::daemon::session_registry::SessionState::Dead
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_list_agents_dead_session_with_valid_hint_reactivates() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let home = std::env::var("ATM_HOME").expect("ATM_HOME set by fixture");
+        let config_path = std::path::Path::new(&home).join(".claude/teams/atm-dev/config.json");
+        let mut cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        let members = cfg["members"].as_array_mut().unwrap();
+        let target = members
+            .iter_mut()
+            .find(|m| m["name"].as_str() == Some("arch-ctm"))
+            .expect("arch-ctm in config");
+        target["processId"] = serde_json::json!(std::process::id());
+        target["sessionId"] = serde_json::json!("hint-session-2");
+        target["externalBackendType"] = serde_json::json!("external");
+        std::fs::write(&config_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert_for_team("atm-dev", "arch-ctm", "dead-session-1", std::process::id());
+            let outcome = reg.mark_dead_for_team_session("atm-dev", "arch-ctm", "dead-session-1");
+            assert_eq!(
+                outcome,
+                crate::daemon::session_registry::MarkDeadForSessionOutcome::MarkedDead
+            );
+        }
+
+        let req = make_request("list-agents", serde_json::json!({"team": "atm-dev"}));
+        let resp = handle_list_agents(&req, &store, &sr);
+        assert_eq!(resp.status, "ok");
+        let arr = resp.payload.unwrap().as_array().unwrap().clone();
+        let member = arr
+            .iter()
+            .find(|a| a["agent"].as_str() == Some("arch-ctm"))
+            .expect("arch-ctm entry missing");
+        assert_eq!(member["state"].as_str(), Some("active"));
+        assert_eq!(member["session_id"].as_str(), Some("hint-session-2"));
+
+        let reg = sr.lock().unwrap();
+        let session = reg
+            .query_for_team("atm-dev", "arch-ctm")
+            .expect("session registry reactivated from member hint");
+        assert_eq!(session.session_id, "hint-session-2");
+        assert_eq!(session.process_id, std::process::id());
+        assert_eq!(
+            session.state,
+            crate::daemon::session_registry::SessionState::Active
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_list_agents_bootstraps_session_from_live_session_file() {
+        let _fixture =
+            setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "atm-monitor"]);
+        let home = std::env::var("ATM_HOME").expect("ATM_HOME set by fixture");
+        let home_path = std::path::Path::new(&home);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        write_session_file(
+            home_path,
+            "atm-dev",
+            "atm-monitor",
+            "sess-monitor-1",
+            std::process::id(),
+            now,
+            Some(now),
+        );
+
+        let store = make_store();
+        let sr = make_sr();
+        let req = make_request("list-agents", serde_json::json!({"team": "atm-dev"}));
+        let resp = handle_list_agents(&req, &store, &sr);
+        assert_eq!(resp.status, "ok");
+        let arr = resp.payload.unwrap().as_array().unwrap().clone();
+        let monitor = arr
+            .iter()
+            .find(|a| a["agent"].as_str() == Some("atm-monitor"))
+            .expect("atm-monitor entry missing");
+        assert_eq!(monitor["state"].as_str(), Some("active"));
+        assert_eq!(monitor["session_id"].as_str(), Some("sess-monitor-1"));
+        assert_eq!(
+            monitor["process_id"].as_u64(),
+            Some(std::process::id() as u64)
+        );
+
+        let reg = sr.lock().unwrap();
+        let session = reg
+            .query_for_team("atm-dev", "atm-monitor")
+            .expect("session registry bootstrapped from session file");
+        assert_eq!(session.session_id, "sess-monitor-1");
+        assert_eq!(session.process_id, std::process::id());
+    }
+
+    #[test]
+    #[serial]
+    fn test_list_agents_prunes_dead_session_file() {
+        let _fixture =
+            setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "atm-monitor"]);
+        let home = std::env::var("ATM_HOME").expect("ATM_HOME set by fixture");
+        let home_path = std::path::Path::new(&home);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let dead_pid = (i32::MAX - 1) as u32;
+        let session_path = write_session_file(
+            home_path,
+            "atm-dev",
+            "atm-monitor",
+            "sess-monitor-dead",
+            dead_pid,
+            now,
+            Some(now),
+        );
+
+        let store = make_store();
+        let sr = make_sr();
+        let req = make_request("list-agents", serde_json::json!({"team": "atm-dev"}));
+        let resp = handle_list_agents(&req, &store, &sr);
+        assert_eq!(resp.status, "ok");
+
+        let reg = sr.lock().unwrap();
+        assert!(
+            reg.query_for_team("atm-dev", "atm-monitor").is_none(),
+            "dead session file must not bootstrap daemon state"
+        );
+        assert!(
+            !session_path.exists(),
+            "dead session file should be removed during bootstrap scan"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_list_agents_prunes_dead_duplicate_session_file_for_registered_member() {
+        let _fixture =
+            setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "atm-monitor"]);
+        let home = std::env::var("ATM_HOME").expect("ATM_HOME set by fixture");
+        let home_path = std::path::Path::new(&home);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+
+        let dead_pid = (i32::MAX - 1) as u32;
+        let dead_session_path = write_session_file(
+            home_path,
+            "atm-dev",
+            "team-lead",
+            "sess-team-lead-dead",
+            dead_pid,
+            now,
+            Some(now),
+        );
+
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut reg = sr.lock().unwrap();
+            reg.upsert_runtime_for_team(
+                "atm-dev",
+                "team-lead",
+                "sess-team-lead-live",
+                std::process::id(),
+                Some("claude".to_string()),
+                None,
+                None,
+                None,
+            );
+        }
+
+        let req = make_request("list-agents", serde_json::json!({"team": "atm-dev"}));
+        let resp = handle_list_agents(&req, &store, &sr);
+        assert_eq!(resp.status, "ok");
+
+        let reg = sr.lock().unwrap();
+        let session = reg
+            .query_for_team("atm-dev", "team-lead")
+            .expect("registered session should remain present");
+        assert_eq!(session.session_id, "sess-team-lead-live");
+        assert_eq!(session.process_id, std::process::id());
+        assert!(
+            !dead_session_path.exists(),
+            "dead duplicate session file should be removed even when registry already has a live record"
+        );
+    }
+
+    #[test]
+    #[serial]
     fn test_team_scoped_list_agents_isolated_between_teams() {
         use crate::plugins::worker_adapter::AgentState;
 
@@ -6830,7 +7491,7 @@ notify_target = "team-lead"
         set_member_backend(temp.path(), "team-a", "a1", "external");
         set_member_backend(temp.path(), "team-b", "b1", "external");
 
-        let persist_path = temp.path().join(".claude/daemon/session-registry.json");
+        let persist_path = temp.path().join(".atm/daemon/session-registry.json");
         {
             let mut seeded = crate::daemon::session_registry::SessionRegistry::with_persist_path(
                 persist_path.clone(),
@@ -6885,7 +7546,7 @@ notify_target = "team-lead"
         // backend validation against the cargo test process.
         set_member_backend(temp.path(), "atm-dev", "arch-ctm", "external");
 
-        let persist_path = temp.path().join(".claude/daemon/session-registry.json");
+        let persist_path = temp.path().join(".atm/daemon/session-registry.json");
         {
             let mut seeded = crate::daemon::session_registry::SessionRegistry::with_persist_path(
                 persist_path.clone(),
@@ -8033,6 +8694,37 @@ exit 1
     }
 
     #[test]
+    fn test_parse_and_dispatch_register_hint_rejects_deprecated_local_session_id() {
+        let store = make_store();
+        let ps = make_ps();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r1","command":"register-hint","payload":{"team":"atm-dev","agent":"arch-ctm","session_id":"local:arch-ctm:test:1234","process_id":0}}"#;
+        let resp =
+            parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
+        assert_eq!(resp.status, "error");
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, "INVALID_REQUEST");
+        assert!(err.message.contains("Deprecated register-hint session_id"));
+    }
+
+    #[test]
+    fn test_parse_and_dispatch_register_hint_rejects_deprecated_local_runtime_session_id() {
+        let store = make_store();
+        let ps = make_ps();
+        let sr = make_sr();
+        let req_json = r#"{"version":1,"request_id":"r1","command":"register-hint","payload":{"team":"atm-dev","agent":"arch-ctm","session_id":"sess-1234","process_id":2,"runtime":"codex","runtime_session_id":"local:arch-ctm:test:1234"}}"#;
+        let resp =
+            parse_and_dispatch(req_json, &store, &ps, &sr, &new_stream_state_store()).unwrap();
+        assert_eq!(resp.status, "error");
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, "INVALID_REQUEST");
+        assert!(
+            err.message
+                .contains("Deprecated register-hint runtime_session_id")
+        );
+    }
+
+    #[test]
     #[serial]
     fn test_handle_register_hint_registers_external_member_session() {
         let temp = TempDir::new().unwrap();
@@ -8074,10 +8766,10 @@ exit 1
             serde_json::json!({
                 "team": "atm-dev",
                 "agent": "arch-ctm",
-                "session_id": "local:arch-ctm:sess:1234",
+                "session_id": "sess-arch-ctm-1234",
                 "process_id": std::process::id(),
                 "runtime": "codex",
-                "runtime_session_id": "local:arch-ctm:sess:1234"
+                "runtime_session_id": "thread-id:arch-ctm-1234"
             }),
         );
         let resp = handle_register_hint(&req, &store, &sr);
@@ -8089,9 +8781,13 @@ exit 1
             .query_for_team("atm-dev", "arch-ctm")
             .cloned()
             .expect("session should be registered");
-        assert_eq!(session.session_id, "local:arch-ctm:sess:1234");
+        assert_eq!(session.session_id, "sess-arch-ctm-1234");
         assert_eq!(session.process_id, std::process::id());
         assert_eq!(session.runtime.as_deref(), Some("codex"));
+        assert_eq!(
+            session.runtime_session_id.as_deref(),
+            Some("thread-id:arch-ctm-1234")
+        );
 
         let tracker_state = store.lock().unwrap().get_state("arch-ctm");
         assert_eq!(tracker_state, Some(AgentState::Active));
@@ -8261,10 +8957,10 @@ exit 1
             serde_json::json!({
                 "team": "atm-dev",
                 "agent": "arch-ctm",
-                "session_id": "local:arch-ctm:recover:1",
+                "session_id": "sess-recover-1",
                 "process_id": hint_pid,
                 "runtime": "codex",
-                "runtime_session_id": "local:arch-ctm:recover:1"
+                "runtime_session_id": "thread-id:recover-1"
             }),
         );
         let resp = handle_register_hint(&req, &store, &sr);
@@ -8382,7 +9078,7 @@ exit 1
                 "team": "atm-dev",
                 "agent": "arch-ctm",
                 "identity": "team-lead",
-                "session_id": "local:arch-ctm:sess:9999",
+                "session_id": "sess-cross-9999",
                 "process_id": std::process::id(),
             }),
         );
@@ -9023,7 +9719,7 @@ exit 1
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
         let daemon_lock = {
-            let path = home_dir.join(".config/atm/daemon.lock");
+            let path = home_dir.join(".atm/daemon/daemon.lock");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
         };
@@ -9057,7 +9753,7 @@ exit 1
         .expect("Expected socket server handle on unix");
 
         // Connect and send a request
-        let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+        let socket_path = home_dir.join(".atm/daemon/atm-daemon.sock");
         let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
 
         let request = SocketRequest {
@@ -9100,7 +9796,7 @@ exit 1
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
         let daemon_lock = {
-            let path = home_dir.join(".config/atm/daemon.lock");
+            let path = home_dir.join(".atm/daemon/daemon.lock");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
         };
@@ -9132,7 +9828,7 @@ exit 1
         .unwrap()
         .expect("Expected socket server handle on unix");
 
-        let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+        let socket_path = home_dir.join(".atm/daemon/atm-daemon.sock");
         let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
 
         let request = SocketRequest {
@@ -9175,7 +9871,7 @@ exit 1
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
         let daemon_lock = {
-            let path = home_dir.join(".config/atm/daemon.lock");
+            let path = home_dir.join(".atm/daemon/daemon.lock");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
         };
@@ -9199,7 +9895,7 @@ exit 1
         .unwrap()
         .expect("Expected socket server handle on unix");
 
-        let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+        let socket_path = home_dir.join(".atm/daemon/atm-daemon.sock");
         let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
 
         let request = SocketRequest {
@@ -9238,20 +9934,19 @@ exit 1
     /// Integration-style control test over unix socket.
     #[cfg(unix)]
     #[tokio::test]
-    #[ignore = "integration coverage for control receiver over unix socket"]
     #[serial_test::serial]
     async fn test_socket_server_control_stdin_roundtrip() {
         use crate::plugins::worker_adapter::AgentState;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio_util::sync::CancellationToken;
+        use uuid::Uuid;
 
         let temp_dir = tempfile::TempDir::new().unwrap();
         let home_dir = temp_dir.path().to_path_buf();
-        // SAFETY: serialized test; env var scoped by process.
-        unsafe { std::env::set_var("ATM_HOME", &home_dir) };
+        let _home_guard = EnvGuard::set("ATM_HOME", &home_dir.to_string_lossy());
         let cancel = CancellationToken::new();
         let daemon_lock = {
-            let path = home_dir.join(".config/atm/daemon.lock");
+            let path = home_dir.join(".atm/daemon/daemon.lock");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
         };
@@ -9288,20 +9983,26 @@ exit 1
         .unwrap()
         .expect("Expected socket server handle on unix");
 
-        let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+        let socket_path = home_dir.join(".atm/daemon/atm-daemon.sock");
         let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
 
-        let control_payload = serde_json::json!({
-            "v": 1,
-            "request_id": "ctrl-intg-1",
-            "sent_at": chrono::Utc::now().to_rfc3339(),
-            "team": "atm-dev",
-            "session_id": "sess-intg-1",
-            "agent_id": "arch-ctm",
-            "sender": "team-lead",
-            "action": "stdin",
-            "payload": "integration payload"
-        });
+        let control_payload = serde_json::to_value(ControlRequest {
+            v: CONTROL_SCHEMA_VERSION,
+            request_id: Uuid::new_v4().to_string(),
+            msg_type: "control.stdin.request".to_string(),
+            signal: None,
+            sent_at: chrono::Utc::now().to_rfc3339(),
+            team: "atm-dev".to_string(),
+            session_id: "sess-intg-1".to_string(),
+            agent_id: "arch-ctm".to_string(),
+            sender: "team-lead".to_string(),
+            action: ControlAction::Stdin,
+            payload: Some("integration payload".to_string()),
+            content_ref: None,
+            elicitation_id: None,
+            decision: None,
+        })
+        .expect("serialize control request");
         let request = SocketRequest {
             version: PROTOCOL_VERSION,
             request_id: "sock-ctrl-1".to_string(),
@@ -9337,7 +10038,7 @@ exit 1
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
         let daemon_lock = {
-            let path = home_dir.join(".config/atm/daemon.lock");
+            let path = home_dir.join(".atm/daemon/daemon.lock");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
         };
@@ -9362,7 +10063,7 @@ exit 1
         .unwrap()
         .expect("Expected socket server handle on unix");
 
-        let pid_path = home_dir.join(".claude/daemon/atm-daemon.pid");
+        let pid_path = home_dir.join(".atm/daemon/atm-daemon.pid");
         assert!(
             pid_path.exists(),
             "PID file should exist after server start"
@@ -9485,6 +10186,10 @@ exit 1
             Some("hook.session_start")
         );
         assert_eq!(
+            hook_action_name("teammate_idle"),
+            Some("hook.teammate_idle")
+        );
+        assert_eq!(
             hook_action_name("permission_request"),
             Some("hook.permission_request")
         );
@@ -9499,7 +10204,6 @@ exit 1
             Some("hook.compact_complete")
         );
         assert_eq!(hook_action_name("session_end"), Some("hook.session_end"));
-        assert_eq!(hook_action_name("teammate_idle"), None);
     }
 
     #[test]
@@ -9639,7 +10343,7 @@ exit 1
             tracker.register_agent("arch-ctm");
             tracker.set_state("arch-ctm", AgentState::Active);
         }
-        let req_json = r#"{"version":1,"request_id":"r3","command":"hook-event","payload":{"event":"teammate_idle","agent":"arch-ctm","session_id":"sess-1","team":"atm-dev"}}"#;
+        let req_json = r#"{"version":1,"request_id":"r3","command":"hook-event","payload":{"event":"teammate_idle","agent":"arch-ctm","session_id":"","team":"atm-dev"}}"#;
         let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
@@ -9648,6 +10352,119 @@ exit 1
 
         let tracker = store.lock().unwrap();
         assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Idle));
+        drop(tracker);
+
+        let reg = sr.lock().unwrap();
+        assert!(
+            reg.query_for_team("atm-dev", "arch-ctm").is_none(),
+            "teammate_idle must not bootstrap a new session record"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_teammate_idle_confirms_existing_same_agent_session() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        {
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "arch-ctm", "sess-1", 4242);
+        }
+
+        let req_json = r#"{"version":1,"request_id":"r3-confirm","command":"hook-event","payload":{"event":"teammate_idle","agent":"arch-ctm","session_id":"sess-1","team":"atm-dev","process_id":6262}}"#;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+
+        let reg = sr.lock().unwrap();
+        let session = reg
+            .query_for_team("atm-dev", "arch-ctm")
+            .expect("existing same-agent session should be preserved");
+        assert_eq!(session.session_id, "sess-1");
+        assert_eq!(session.process_id, 6262);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_teammate_idle_does_not_steal_other_agent_session() {
+        let _fixture = setup_hook_auth_fixture(
+            "atm-dev",
+            "team-lead",
+            &["team-lead", "arch-ctm", "atm-monitor"],
+        );
+        let store = make_store();
+        let sr = make_sr();
+        {
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "team-lead", "sess-shared", 7777);
+        }
+
+        let req_json = r#"{"version":1,"request_id":"r3-conflict","command":"hook-event","payload":{"event":"teammate_idle","agent":"atm-monitor","session_id":"sess-shared","team":"atm-dev","process_id":8888}}"#;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+
+        let reg = sr.lock().unwrap();
+        let owner = reg
+            .query_for_team("atm-dev", "team-lead")
+            .expect("original owner should remain registered");
+        assert_eq!(owner.session_id, "sess-shared");
+        assert_eq!(owner.process_id, 7777);
+        assert!(
+            reg.query_for_team("atm-dev", "atm-monitor").is_none(),
+            "conflicting teammate_idle must not register atm-monitor"
+        );
+
+        drop(reg);
+        let tracker = store.lock().unwrap();
+        assert_eq!(
+            tracker.get_state("atm-monitor"),
+            None,
+            "IgnoredConflictingOwner must not register atm-monitor in state tracker"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_teammate_idle_does_not_replace_existing_same_agent_session() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Active);
+        }
+        {
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "arch-ctm", "sess-a", 5555);
+        }
+
+        let req_json = r#"{"version":1,"request_id":"r3-mismatch","command":"hook-event","payload":{"event":"teammate_idle","agent":"arch-ctm","session_id":"sess-b","team":"atm-dev","process_id":6666}}"#;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+
+        let reg = sr.lock().unwrap();
+        let session = reg
+            .query_for_team("atm-dev", "arch-ctm")
+            .expect("existing same-agent session should be preserved");
+        assert_eq!(session.session_id, "sess-a");
+        assert_eq!(session.process_id, 5555);
+        drop(reg);
+
+        let tracker = store.lock().unwrap();
+        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Active));
     }
 
     #[cfg(unix)]
@@ -10315,7 +11132,7 @@ exit 1
         write_hook_auth_team_config(&home_dir, "atm-dev", "team-lead", &["team-lead"]);
         let cancel = CancellationToken::new();
         let daemon_lock = {
-            let path = home_dir.join(".config/atm/daemon.lock");
+            let path = home_dir.join(".atm/daemon/daemon.lock");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
         };
@@ -10342,7 +11159,7 @@ exit 1
         .unwrap()
         .expect("Expected socket server handle on unix");
 
-        let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+        let socket_path = home_dir.join(".atm/daemon/atm-daemon.sock");
 
         // Send a hook-event/session_start
         let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
@@ -10442,7 +11259,7 @@ exit 1
         write_hook_auth_team_config(&home_dir, "atm-dev", "team-lead", &["team-lead"]);
         let cancel = CancellationToken::new();
         let daemon_lock = {
-            let path = home_dir.join(".config/atm/daemon.lock");
+            let path = home_dir.join(".atm/daemon/daemon.lock");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
         };
@@ -10485,7 +11302,7 @@ exit 1
         .unwrap()
         .expect("Expected socket server handle on unix");
 
-        let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+        let socket_path = home_dir.join(".atm/daemon/atm-daemon.sock");
 
         // ── Step 1: Send hook-event/session_end ───────────────────────────────
         let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
@@ -10594,13 +11411,13 @@ exit 1
         let home_dir = temp_dir.path().to_path_buf();
         let cancel = CancellationToken::new();
         let daemon_lock = {
-            let path = home_dir.join(".config/atm/daemon.lock");
+            let path = home_dir.join(".atm/daemon/daemon.lock");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             agent_team_mail_core::io::lock::acquire_lock(&path, 0).unwrap()
         };
         let state_store = make_store();
 
-        let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+        let socket_path = home_dir.join(".atm/daemon/atm-daemon.sock");
 
         {
             let launch_tx = new_launch_sender();

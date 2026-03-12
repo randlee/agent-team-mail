@@ -7,7 +7,7 @@ use chrono::DateTime;
 use clap::{ArgAction, Args};
 use std::path::Path;
 
-use crate::util::settings::get_home_dir;
+use crate::util::settings::{get_home_dir, teams_root_dir_for};
 use crate::util::state::{get_last_seen, load_seen_state};
 
 /// Show inbox summary for team members
@@ -50,7 +50,7 @@ pub fn execute(args: InboxArgs) -> Result<()> {
 
     let config = resolve_config(&overrides, &current_dir, &home_dir)?;
 
-    let teams_dir = home_dir.join(".claude/teams");
+    let teams_dir = teams_root_dir_for(&home_dir);
     if !teams_dir.exists() {
         anyhow::bail!("Teams directory not found at {teams_dir:?}");
     }
@@ -99,7 +99,7 @@ pub fn execute(args: InboxArgs) -> Result<()> {
 
 /// Show inbox summary for a single team
 fn show_team_summary(home_dir: &Path, team_name: &str, use_since_last_seen: bool) -> Result<()> {
-    let team_dir = home_dir.join(".claude/teams").join(team_name);
+    let team_dir = teams_root_dir_for(home_dir).join(team_name);
 
     if !team_dir.exists() {
         println!("Team: {team_name} (not found)");
@@ -133,7 +133,7 @@ fn show_team_summary(home_dir: &Path, team_name: &str, use_since_last_seen: bool
     } else {
         println!(
             "  {:<20} {:>8} {:>8} {:>12}",
-            "Agent", "Unread", "Total", "Latest"
+            "Agent", "Pending", "Total", "Latest"
         );
     }
     println!("  {}", "─".repeat(52));
@@ -148,23 +148,24 @@ fn show_team_summary(home_dir: &Path, team_name: &str, use_since_last_seen: bool
             hostname_registry.as_ref(),
         )?;
 
-        let (unread, total, latest) = if !messages.is_empty() {
-            let unread_count = if use_since_last_seen {
+        let (pending, total, latest) = if !messages.is_empty() {
+            let pending_count = if use_since_last_seen {
                 let state = load_seen_state().unwrap_or_default();
                 let last_seen = get_last_seen(&state, team_name, &member.name);
                 match last_seen {
                     Some(last_seen_dt) => messages
                         .iter()
                         .filter(|m| {
-                            DateTime::parse_from_rfc3339(&m.timestamp)
-                                .map(|dt| dt > last_seen_dt)
-                                .unwrap_or(false)
+                            m.is_pending_action()
+                                || DateTime::parse_from_rfc3339(&m.timestamp)
+                                    .map(|dt| dt > last_seen_dt)
+                                    .unwrap_or(false)
                         })
                         .count(),
-                    None => messages.len(),
+                    None => messages.iter().filter(|m| m.is_pending_action()).count(),
                 }
             } else {
-                messages.iter().filter(|m| !m.read).count()
+                messages.iter().filter(|m| m.is_pending_action()).count()
             };
             let total_count = messages.len();
             let latest_time = messages
@@ -172,17 +173,17 @@ fn show_team_summary(home_dir: &Path, team_name: &str, use_since_last_seen: bool
                 .map(|m| format_relative_time(&m.timestamp))
                 .unwrap_or_else(|| "-".to_string());
 
-            (unread_count, total_count, latest_time)
+            (pending_count, total_count, latest_time)
         } else {
             (0, 0, "-".to_string())
         };
 
-        summaries.push((member.name.clone(), unread, total, latest));
+        summaries.push((member.name.clone(), pending, total, latest));
     }
 
     // Display summaries
-    for (agent_name, unread, total, latest) in summaries {
-        println!("  {agent_name:<20} {unread:>8} {total:>8} {latest:>12}");
+    for (agent_name, pending, total, latest) in summaries {
+        println!("  {agent_name:<20} {pending:>8} {total:>8} {latest:>12}");
     }
 
     Ok(())
@@ -190,7 +191,7 @@ fn show_team_summary(home_dir: &Path, team_name: &str, use_since_last_seen: bool
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct InboxSnapshot {
-    unread: usize,
+    pending: usize,
     total: usize,
     latest: String,
 }
@@ -223,7 +224,7 @@ fn watch_inboxes(
 
     loop {
         let team_names = if all_teams {
-            let entries = std::fs::read_dir(home_dir.join(".claude/teams"))?;
+            let entries = std::fs::read_dir(teams_root_dir_for(home_dir))?;
             let mut names = Vec::new();
             for entry in entries {
                 let entry = entry?;
@@ -240,7 +241,7 @@ fn watch_inboxes(
         };
 
         for team_name in team_names {
-            let team_dir = home_dir.join(".claude/teams").join(&team_name);
+            let team_dir = teams_root_dir_for(home_dir).join(&team_name);
             let team_config_path = team_dir.join("config.json");
             if !team_config_path.exists() {
                 continue;
@@ -258,7 +259,7 @@ fn watch_inboxes(
                 )?;
 
                 let snapshot = if !messages.is_empty() {
-                    let unread = messages.iter().filter(|m| !m.read).count();
+                    let pending = messages.iter().filter(|m| m.is_pending_action()).count();
                     let total = messages.len();
                     let latest = messages
                         .last()
@@ -308,13 +309,13 @@ fn watch_inboxes(
                     }
 
                     InboxSnapshot {
-                        unread,
+                        pending,
                         total,
                         latest,
                     }
                 } else {
                     InboxSnapshot {
-                        unread: 0,
+                        pending: 0,
                         total: 0,
                         latest: "-".to_string(),
                     }
@@ -325,12 +326,12 @@ fn watch_inboxes(
                     && prev != &snapshot
                 {
                     println!(
-                        "[{}] {}@{} unread {}->{} total {}->{} latest {}",
+                        "[{}] {}@{} pending {}->{} total {}->{} latest {}",
                         chrono::Utc::now().to_rfc3339(),
                         member.name,
                         team_name,
-                        prev.unread,
-                        snapshot.unread,
+                        prev.pending,
+                        snapshot.pending,
                         prev.total,
                         snapshot.total,
                         snapshot.latest

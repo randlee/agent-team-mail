@@ -23,7 +23,7 @@ use tempfile::TempDir;
 fn acquire_test_daemon_lock(
     home_dir: &std::path::Path,
 ) -> agent_team_mail_core::io::lock::FileLock {
-    let lock_path = home_dir.join(".config/atm/daemon.lock");
+    let lock_path = home_dir.join(".atm/daemon/daemon.lock");
     std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
     agent_team_mail_core::io::lock::acquire_lock(&lock_path, 0).unwrap()
 }
@@ -142,7 +142,7 @@ async fn test_socket_query_agent_state() {
     .expect("Expected socket server handle on unix");
 
     // Connect and query
-    let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+    let socket_path = home_dir.join(".atm/daemon/atm-daemon.sock");
     let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
 
     let request = SocketRequest {
@@ -202,7 +202,7 @@ async fn test_socket_query_agent_not_found() {
     .unwrap()
     .expect("Socket server handle");
 
-    let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+    let socket_path = home_dir.join(".atm/daemon/atm-daemon.sock");
     let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
 
     let request = SocketRequest {
@@ -265,7 +265,7 @@ async fn test_pubsub_subscription_roundtrip() {
     .unwrap()
     .expect("Socket server handle");
 
-    let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+    let socket_path = home_dir.join(".atm/daemon/atm-daemon.sock");
 
     // Send subscribe request
     let sub_request = SocketRequest {
@@ -434,7 +434,7 @@ async fn test_launch_gemini_runtime_metadata_roundtrip() {
     .unwrap()
     .expect("Socket server handle");
 
-    let socket_path = home_dir.join(".claude/daemon/atm-daemon.sock");
+    let socket_path = home_dir.join(".atm/daemon/atm-daemon.sock");
     let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
     let mut reader = BufReader::new(stream);
 

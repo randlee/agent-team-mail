@@ -3,16 +3,13 @@
 use agent_team_mail_core::config::{Config, ConfigOverrides, resolve_config, resolve_identity};
 use agent_team_mail_core::daemon_client::{RegisterHintOutcome, SessionQueryResult};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
-use agent_team_mail_core::io::atomic::atomic_swap;
 use agent_team_mail_core::io::inbox::{WriteOutcome, inbox_append};
-use agent_team_mail_core::io::lock::acquire_lock;
 use agent_team_mail_core::schema::{AgentMember, BackendType, InboxMessage, TeamConfig};
 use anyhow::Result;
 use chrono::Utc;
 use clap::Args;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info};
 use uuid::Uuid;
 
@@ -24,7 +21,7 @@ use crate::util::addressing::parse_address;
 use crate::util::caller_identity::resolve_caller_session_id_optional;
 use crate::util::file_policy::check_file_reference;
 use crate::util::hook_identity::{read_hook_file, read_hook_file_identity};
-use crate::util::settings::get_home_dir;
+use crate::util::settings::{get_home_dir, teams_root_dir_for};
 
 /// Send a message to a specific agent
 #[derive(Args, Debug)]
@@ -124,7 +121,7 @@ pub fn execute(args: SendArgs) -> Result<()> {
     }
 
     // Resolve team directory
-    let team_dir = home_dir.join(".claude/teams").join(&team_name);
+    let team_dir = teams_root_dir_for(&home_dir).join(&team_name);
     if !team_dir.exists() {
         anyhow::bail!("Team '{team_name}' not found (directory {team_dir:?} doesn't exist)");
     }
@@ -207,11 +204,6 @@ pub fn execute(args: SendArgs) -> Result<()> {
     validate_message_text(&final_message_text, DEFAULT_MAX_MESSAGE_BYTES)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    // Set sender heartbeat (isActive: true, lastActive timestamp)
-    if let Err(e) = set_sender_heartbeat(&team_config_path, &config.core.identity) {
-        // Non-fatal: log warning but proceed with send
-        eprintln!("Warning: Failed to update sender activity: {e}");
-    }
     register_sender_hint(
         &team_name,
         &config.core.identity,
@@ -570,55 +562,6 @@ fn generate_summary(text: &str) -> String {
     }
 }
 
-/// Set sender heartbeat in team config (isActive: true, lastActive timestamp)
-///
-/// Uses atomic lock/swap to prevent corruption (same infrastructure as inbox writes).
-///
-/// # Arguments
-///
-/// * `team_config_path` - Path to team config.json
-/// * `sender_name` - Name of the sending agent
-///
-/// # Errors
-///
-/// Returns error if config update fails (non-fatal for send operation)
-fn set_sender_heartbeat(team_config_path: &Path, sender_name: &str) -> Result<()> {
-    let lock_path = team_config_path.with_extension("lock");
-
-    // Acquire lock with retry
-    let _lock = acquire_lock(&lock_path, 5)
-        .map_err(|e| anyhow::anyhow!("Failed to acquire lock for team config: {e}"))?;
-
-    // Read current config
-    let content = std::fs::read(team_config_path)?;
-    let mut config: TeamConfig = serde_json::from_slice(&content)?;
-
-    // Update sender's activity
-    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
-
-    if let Some(member) = config.members.iter_mut().find(|m| m.name == sender_name) {
-        member.is_active = Some(true);
-        member.last_active = Some(now_ms);
-    } else {
-        // Sender not in team members — this is unusual but not fatal
-        return Ok(());
-    }
-
-    // Write to temp file with fsync, then swap
-    let tmp_path = team_config_path.with_extension("tmp");
-    let new_content = serde_json::to_string_pretty(&config)?;
-
-    let mut file = std::fs::File::create(&tmp_path)?;
-    std::io::Write::write_all(&mut file, new_content.as_bytes())?;
-    file.sync_all()?;
-    drop(file);
-
-    // Atomic swap
-    atomic_swap(team_config_path, &tmp_path)?;
-
-    Ok(())
-}
-
 fn resolve_sender_session_id_with_context(
     team: Option<&str>,
     identity: Option<&str>,
@@ -742,22 +685,6 @@ fn process_matches_rule(rule: BackendRule, comm: &str, args: &str) -> bool {
 fn detect_sender_process_pid(member: &AgentMember) -> Option<u32> {
     use sysinfo::{Pid, System};
 
-    // If identity is already explicit, skip process-table probing.
-    // This avoids transient sysinfo failures under concurrent Windows load.
-    // Prefer hook PID when available; otherwise return this process PID so the
-    // register-hint path still has a concrete process hint.
-    if let Ok(identity) = std::env::var("ATM_IDENTITY")
-        && !identity.trim().is_empty()
-    {
-        if let Ok(Some(hook)) = read_hook_file()
-            && hook.pid > 1
-        {
-            return Some(hook.pid);
-        }
-        let pid = std::process::id();
-        return (pid > 1).then_some(pid);
-    }
-
     let expected_rule = backend_expected_rule(member)?;
 
     let sys = System::new_all();
@@ -787,6 +714,8 @@ fn detect_sender_process_pid(member: &AgentMember) -> Option<u32> {
         cursor = parent;
     }
 
+    // Never register the short-lived `atm` command process as the agent PID.
+    // If no matching runtime process is visible, skip hint registration.
     None
 }
 
@@ -915,7 +844,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_detect_sender_process_pid_skips_scan_when_identity_set() {
+    fn test_detect_sender_process_pid_does_not_fall_back_to_atm_subprocess_pid() {
         let old_identity = std::env::var("ATM_IDENTITY").ok();
         unsafe { std::env::set_var("ATM_IDENTITY", "arch-ctm") };
 
@@ -926,8 +855,8 @@ mod tests {
         );
         let detected = detect_sender_process_pid(&member);
         assert!(
-            detected.is_some(),
-            "identity-set path should avoid process scan but still provide a PID hint"
+            detected != Some(std::process::id()),
+            "sender PID detection must not register the transient atm subprocess"
         );
 
         unsafe {
@@ -1102,40 +1031,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_set_sender_heartbeat_does_not_write_session_or_pid_hints() {
-        let temp = TempDir::new().unwrap();
-        let config_path = temp.path().join("config.json");
-
-        let mut m = make_member("arch-ctm", "codex", Some(BackendType::External));
-        m.session_id = Some("existing-session".to_string());
-        m.set_process_id_hint(Some(7777));
-        let cfg = TeamConfig {
-            name: "atm-dev".to_string(),
-            description: None,
-            created_at: 0,
-            lead_agent_id: "team-lead@atm-dev".to_string(),
-            lead_session_id: "lead-session".to_string(),
-            members: vec![m],
-            unknown_fields: HashMap::new(),
-        };
-        std::fs::write(&config_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
-
-        set_sender_heartbeat(&config_path, "arch-ctm").unwrap();
-
-        let updated: TeamConfig =
-            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
-        let member = updated
-            .members
-            .iter()
-            .find(|m| m.name == "arch-ctm")
-            .expect("member present");
-        assert_eq!(member.session_id.as_deref(), Some("existing-session"));
-        assert_eq!(member.process_id_hint(), Some(7777));
-        assert_eq!(member.is_active, Some(true));
-        assert!(member.last_active.is_some());
-    }
-
     fn current_ppid_hook_path() -> std::path::PathBuf {
         let ppid = crate::util::hook_identity::get_parent_pid();
         std::env::temp_dir().join(format!("atm-hook-{ppid}.json"))
@@ -1175,7 +1070,7 @@ mod tests {
             "session_id": session_id,
             "team": team,
             "identity": identity,
-            "pid": 12345,
+            "pid": std::process::id(),
             "created_at": now,
             "updated_at": now,
         });
@@ -1199,6 +1094,8 @@ mod tests {
         unsafe {
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
+            std::env::set_var("ATM_RUNTIME", "claude");
+            std::env::remove_var("CODEX_THREAD_ID");
             std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
             std::env::set_var("ATM_TEST_ENABLE_HOOK_RESOLUTION", "1");
         }
@@ -1209,6 +1106,8 @@ mod tests {
         unsafe {
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("CODEX_THREAD_ID");
             std::env::remove_var("CLAUDE_SESSION_ID");
             std::env::remove_var("ATM_TEST_ENABLE_HOOK_RESOLUTION");
         }
@@ -1229,6 +1128,8 @@ mod tests {
         unsafe {
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
+            std::env::set_var("ATM_RUNTIME", "claude");
+            std::env::remove_var("CODEX_THREAD_ID");
             std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
         }
 
@@ -1238,6 +1139,8 @@ mod tests {
         unsafe {
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("CODEX_THREAD_ID");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
@@ -1256,6 +1159,8 @@ mod tests {
         unsafe {
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
+            std::env::set_var("ATM_RUNTIME", "claude");
+            std::env::remove_var("CODEX_THREAD_ID");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
@@ -1265,6 +1170,8 @@ mod tests {
         unsafe {
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("CODEX_THREAD_ID");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
@@ -1281,6 +1188,8 @@ mod tests {
         unsafe {
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
+            std::env::set_var("ATM_RUNTIME", "claude");
+            std::env::remove_var("CODEX_THREAD_ID");
             std::env::set_var("CLAUDE_SESSION_ID", "sid-from-env");
         }
 
@@ -1290,6 +1199,8 @@ mod tests {
         unsafe {
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("CODEX_THREAD_ID");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
@@ -1309,6 +1220,8 @@ mod tests {
         unsafe {
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
+            std::env::set_var("ATM_RUNTIME", "claude");
+            std::env::remove_var("CODEX_THREAD_ID");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 
@@ -1318,6 +1231,8 @@ mod tests {
         unsafe {
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("CODEX_THREAD_ID");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
 

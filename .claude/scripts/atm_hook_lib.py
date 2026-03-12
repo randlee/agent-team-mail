@@ -19,7 +19,7 @@ def atm_home() -> Path:
 
 def daemon_dir() -> Path:
     """Resolve daemon directory."""
-    return atm_home() / ".claude" / "daemon"
+    return atm_home() / ".atm" / "daemon"
 
 
 def send_hook_event(payload: dict[str, Any]) -> None:

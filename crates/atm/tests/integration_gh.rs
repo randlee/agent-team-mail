@@ -128,7 +128,7 @@ import time
 from pathlib import Path
 
 home = Path(os.environ["ATM_HOME"])
-daemon_dir = home / ".claude" / "daemon"
+daemon_dir = home / ".atm" / "daemon"
 daemon_dir.mkdir(parents=True, exist_ok=True)
 state_path = daemon_dir / "gh-state.json"
 health_path = daemon_dir / "gh-health.json"
@@ -358,7 +358,7 @@ finally:
 
 #[cfg(unix)]
 fn wait_for_daemon_socket(home: &Path) {
-    let socket = home.join(".claude/daemon/atm-daemon.sock");
+    let socket = home.join(".atm/daemon/atm-daemon.sock");
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
         if socket.exists() {
@@ -1318,7 +1318,9 @@ fn test_gh_monitor_list_human_output_has_one_line_rollups() {
     let text = String::from_utf8(output).unwrap();
     assert!(text.contains("GitHub PR List: atm gh pr list"));
     assert!(text.contains("#101 [ready] [ci:PENDING 1/2] [merge:clean] [review:approved]"));
-    assert!(text.contains("#102 [draft] [ci:FAIL 0/1] [merge:dirty] [review:changes_requested]"));
+    assert!(text.contains(
+        "#102 [draft] [ci:BLOCKED — merge conflict] [merge:CONFLICT ⚠] [review:changes_requested]"
+    ));
 }
 
 #[test]

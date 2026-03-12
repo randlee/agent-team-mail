@@ -170,10 +170,13 @@ impl WorkerAdapterPlugin {
 
     /// Build the path to the hook events file.
     ///
-    /// Path: `${ATM_HOME}/.claude/daemon/hooks/events.jsonl`
+    /// Path: `${ATM_HOME}/.atm/daemon/hooks/events.jsonl`
     fn hook_events_path(ctx: &PluginContext) -> PathBuf {
         ctx.system
             .claude_root
+            .parent()
+            .unwrap_or(&ctx.system.claude_root)
+            .join(".atm")
             .join("daemon")
             .join("hooks")
             .join("events.jsonl")

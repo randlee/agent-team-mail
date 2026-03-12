@@ -14,7 +14,7 @@ use agent_team_mail_core::text::{
     DEFAULT_MAX_MESSAGE_BYTES, truncate_chars_slice, validate_message_text,
 };
 
-use crate::util::settings::get_home_dir;
+use crate::util::settings::{get_home_dir, teams_root_dir_for};
 
 /// Broadcast a message to all agents in a team
 #[derive(Args, Debug)]
@@ -76,7 +76,7 @@ pub fn execute(args: BroadcastArgs) -> Result<()> {
     let team_name = args.team.as_ref().unwrap_or(&config.core.default_team);
 
     // Resolve team directory
-    let team_dir = home_dir.join(".claude/teams").join(team_name);
+    let team_dir = teams_root_dir_for(&home_dir).join(team_name);
     if !team_dir.exists() {
         anyhow::bail!("Team '{team_name}' not found (directory {team_dir:?} doesn't exist)");
     }

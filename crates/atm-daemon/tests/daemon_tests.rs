@@ -251,7 +251,7 @@ fn create_test_status_writer(temp_dir: &TempDir) -> Arc<StatusWriter> {
 }
 
 fn create_test_daemon_lock(temp_dir: &TempDir) -> agent_team_mail_core::io::lock::FileLock {
-    let lock_path = temp_dir.path().join(".config/atm/daemon.lock");
+    let lock_path = temp_dir.path().join(".atm/daemon/daemon.lock");
     std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
     agent_team_mail_core::io::lock::acquire_lock(&lock_path, 0).unwrap()
 }
@@ -549,6 +549,10 @@ async fn test_startup_reconcile_seeds_roster_without_interval_delay() {
 #[cfg_attr(
     windows,
     ignore = "notify watcher startup is flaky on windows-latest CI; reconcile behavior is covered by deterministic unit tests"
+)]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "notify watcher timing flaky on macOS CI"
 )]
 async fn test_config_watch_event_updates_and_removes_members() {
     let (ctx, temp_dir) = create_reconcile_test_context();

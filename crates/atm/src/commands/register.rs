@@ -26,7 +26,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::util::caller_identity::resolve_caller_session_id_required;
-use crate::util::settings::get_home_dir;
+use crate::util::settings::{get_home_dir, teams_root_dir_for};
 
 /// Register this agent session with a team.
 ///
@@ -48,7 +48,7 @@ pub struct RegisterArgs {
 /// Execute the register command.
 pub fn execute(args: RegisterArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
-    let team_dir = home_dir.join(".claude/teams").join(&args.team);
+    let team_dir = teams_root_dir_for(&home_dir).join(&args.team);
     let config_path = team_dir.join("config.json");
 
     if !config_path.exists() {
@@ -146,12 +146,6 @@ fn register_team_lead(
             serde_json::from_str(&std::fs::read_to_string(config_path)?)?;
         team_config.lead_session_id = session_id.to_string();
 
-        // Mark non-lead members inactive to clear stale status.
-        for member in team_config.members.iter_mut() {
-            if member.name != "team-lead" {
-                member.is_active = Some(false);
-            }
-        }
         write_team_config(config_path, &team_config)?;
     }
 
@@ -241,7 +235,6 @@ fn register_teammate(
             .find(|m| m.name == name)
             .expect("member existence already verified above");
         member.session_id = Some(session_id.to_string());
-        member.is_active = Some(true);
         let now_ms = chrono::Utc::now().timestamp_millis() as u64;
         member.last_active = Some(now_ms);
 

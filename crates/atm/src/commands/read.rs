@@ -10,15 +10,16 @@ use clap::{ArgAction, Args};
 use crate::util::addressing::parse_address;
 use crate::util::caller_identity::resolve_caller_session_id_optional;
 use crate::util::hook_identity::read_hook_file_identity;
-use crate::util::settings::get_home_dir;
+use crate::util::settings::{get_home_dir, teams_root_dir_for};
 use crate::util::state::{get_last_seen, load_seen_state, save_seen_state, update_last_seen};
 
 use super::wait::{WaitResult, wait_for_message};
 
 /// Read messages from an inbox
 ///
-/// By default, shows unread messages from your own inbox and marks them as read.
-/// Use --no-mark to read without marking, or --all to include already-read messages.
+/// By default, shows pending-action messages from your own inbox and marks them as read.
+/// Messages remain pending until explicitly acknowledged with `atm ack`.
+/// Use --no-mark to read without marking, or --all to include already-acknowledged messages.
 #[derive(Args, Debug)]
 pub struct ReadArgs {
     /// Target agent (name or name@team), omit to read own inbox
@@ -28,7 +29,7 @@ pub struct ReadArgs {
     #[arg(long)]
     team: Option<String>,
 
-    /// Show all messages (not just unread)
+    /// Show all messages (not just pending-action messages)
     #[arg(long)]
     all: bool,
 
@@ -141,7 +142,7 @@ pub fn execute(args: ReadArgs) -> Result<()> {
             .flatten();
 
     // Resolve team directory
-    let team_dir = home_dir.join(".claude/teams").join(&team_name);
+    let team_dir = teams_root_dir_for(&home_dir).join(&team_name);
     if !team_dir.exists() {
         anyhow::bail!("Team '{team_name}' not found (directory {team_dir:?} doesn't exist)");
     }
@@ -186,22 +187,14 @@ pub fn execute(args: ReadArgs) -> Result<()> {
     };
 
     // Visibility filter:
-    // - Default mode: unread only
-    // - Since-last-seen mode: unread OR newer-than-last-seen
-    if !args.all {
-        if use_since_last_seen {
-            if let Some(last_seen_dt) = last_seen {
-                filtered_messages.retain(|m| {
-                    !m.read
-                        || DateTime::parse_from_rfc3339(&m.timestamp)
-                            .map(|dt| dt > last_seen_dt)
-                            .unwrap_or(false)
-                });
-            }
-        } else {
-            filtered_messages.retain(|m| !m.read);
-        }
-    }
+    // - Default mode: pending-action only (unacknowledged, whether read or unread)
+    // - Since-last-seen mode: pending-action OR newer-than-last-seen
+    apply_visibility_filter(
+        &mut filtered_messages,
+        args.all,
+        use_since_last_seen,
+        last_seen.as_ref(),
+    );
 
     // Filter by sender
     if let Some(ref from_name) = args.from {
@@ -252,20 +245,12 @@ pub fn execute(args: ReadArgs) -> Result<()> {
                 let mut new_filtered = new_messages.clone();
 
                 // Re-apply the same filters
-                if !args.all {
-                    if use_since_last_seen {
-                        if let Some(last_seen_dt) = last_seen {
-                            new_filtered.retain(|m| {
-                                !m.read
-                                    || DateTime::parse_from_rfc3339(&m.timestamp)
-                                        .map(|dt| dt > last_seen_dt)
-                                        .unwrap_or(false)
-                            });
-                        }
-                    } else {
-                        new_filtered.retain(|m| !m.read);
-                    }
-                }
+                apply_visibility_filter(
+                    &mut new_filtered,
+                    args.all,
+                    use_since_last_seen,
+                    last_seen.as_ref(),
+                );
 
                 if let Some(ref from_name) = args.from {
                     new_filtered.retain(|m| m.from == *from_name);
@@ -340,6 +325,8 @@ pub fn execute(args: ReadArgs) -> Result<()> {
             .map(|m| m.timestamp.clone())
             .collect();
 
+        let pending_timestamp = Utc::now().to_rfc3339();
+
         // Atomically update LOCAL inbox to mark messages as read
         // Note: we only mark in the local inbox, not in origin files
         let local_inbox_path = team_dir.join("inboxes").join(format!("{agent_name}.json"));
@@ -359,6 +346,7 @@ pub fn execute(args: ReadArgs) -> Result<()> {
 
                         if should_mark {
                             msg.read = true;
+                            msg.mark_pending_ack(pending_timestamp.clone());
                             marked_count += 1;
                         }
                     }
@@ -424,8 +412,24 @@ pub fn execute(args: ReadArgs) -> Result<()> {
         for msg in &filtered_messages {
             let time_ago = format_relative_time(&msg.timestamp);
             let summary = msg.summary.as_deref().unwrap_or("[no summary]");
+            let status = if msg.is_acknowledged() {
+                "[acknowledged]"
+            } else if msg.read {
+                if msg.is_pending_action() {
+                    "[read, pending ack]"
+                } else {
+                    "[read]"
+                }
+            } else {
+                "[unread, pending ack]"
+            };
 
-            println!("From: {} | {} | {}", msg.from, time_ago, summary);
+            println!("From: {} | {} | {} {}", msg.from, time_ago, summary, status);
+            if msg.is_pending_action()
+                && let Some(message_id) = msg.message_id.as_deref()
+            {
+                println!("Message ID: {message_id}");
+            }
             println!("{}\n", msg.text);
         }
         println!("Total: {} message(s)", filtered_messages.len());
@@ -454,6 +458,34 @@ fn format_relative_time(timestamp_str: &str) -> String {
         }
     } else {
         "unknown".to_string()
+    }
+}
+
+fn apply_visibility_filter(
+    messages: &mut Vec<agent_team_mail_core::schema::InboxMessage>,
+    show_all: bool,
+    use_since_last_seen: bool,
+    last_seen: Option<&DateTime<Utc>>,
+) {
+    if show_all {
+        return;
+    }
+
+    if use_since_last_seen {
+        if let Some(last_seen_dt) = last_seen {
+            messages.retain(|m| {
+                m.is_pending_action()
+                    || DateTime::parse_from_rfc3339(&m.timestamp)
+                        .map(|dt| dt.with_timezone(&Utc) > *last_seen_dt)
+                        .unwrap_or(false)
+            });
+        } else {
+            // First run with no watermark should show actionable work, not dump
+            // the full historical inbox.
+            messages.retain(|m| m.is_pending_action());
+        }
+    } else {
+        messages.retain(|m| m.is_pending_action());
     }
 }
 

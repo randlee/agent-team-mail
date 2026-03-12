@@ -259,6 +259,40 @@ fn test_add_member_with_codex_backend_type() {
         Some("codex"),
         "externalBackendType should be 'codex'"
     );
+    assert_eq!(
+        member["agentType"].as_str(),
+        Some("codex"),
+        "agentType should stay 'codex'"
+    );
+}
+
+#[test]
+fn test_add_member_with_claude_code_backend_type_updates_agent_type() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = setup_test_team(&temp_dir, "ext-team");
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.arg("teams")
+        .arg("add-member")
+        .arg("ext-team")
+        .arg("claude-agent")
+        .arg("--backend-type")
+        .arg("claude-code")
+        .assert()
+        .success();
+
+    let member = find_member(&team_dir, "claude-agent");
+    assert_eq!(
+        member["externalBackendType"].as_str(),
+        Some("claude-code"),
+        "externalBackendType should be 'claude-code'"
+    );
+    assert_eq!(
+        member["agentType"].as_str(),
+        Some("claude-code"),
+        "agentType should follow backend type when no explicit --agent-type is provided"
+    );
 }
 
 #[test]
@@ -282,6 +316,37 @@ fn test_add_member_with_human_backend_type() {
         member["externalBackendType"].as_str(),
         Some("human:randlee"),
         "externalBackendType should be 'human:randlee'"
+    );
+    assert_eq!(
+        member["agentType"].as_str(),
+        Some("human"),
+        "agentType should normalize to 'human'"
+    );
+}
+
+#[test]
+fn test_add_member_without_backend_type_defaults_agent_type_to_codex() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = setup_test_team(&temp_dir, "ext-team");
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.arg("teams")
+        .arg("add-member")
+        .arg("ext-team")
+        .arg("default-agent")
+        .assert()
+        .success();
+
+    let member = find_member(&team_dir, "default-agent");
+    assert_eq!(
+        member["agentType"].as_str(),
+        Some("codex"),
+        "agentType should default to 'codex' when --backend-type is omitted"
+    );
+    assert!(
+        member["externalBackendType"].is_null(),
+        "externalBackendType should be absent when --backend-type is omitted"
     );
 }
 

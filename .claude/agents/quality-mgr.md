@@ -1,7 +1,7 @@
 ---
 name: quality-mgr
 version: 1.0.0
-description: Coordinates QA across multiple sprints — runs rust-qa and atm-qa background agents per sprint worktree, tracks findings, and reports to team-lead. Enforces hard PR quality gate.
+description: Coordinates QA across multiple sprints — runs rust-qa, atm-qa, and arch-qa background agents per sprint worktree, tracks findings, and reports to team-lead. Enforces hard PR quality gate.
 tools: Glob, Grep, LS, Read, Write, Edit, NotebookRead, WebFetch, TodoWrite, WebSearch, KillShell, BashOutput, Bash
 model: sonnet
 color: cyan
@@ -96,7 +96,7 @@ arch-ctm may be working on S+1 while you QA sprint S
 
 Key behaviors:
 - You may be QA-ing sprint S while arch-ctm is already on sprint S+1 or S+2
-- Run BOTH QA agents (rust-qa + atm-qa) for every sprint — no exceptions
+- Run ALL THREE QA agents (rust-qa + atm-qa + arch-qa) for every sprint — no exceptions
 - Report findings promptly so they can be batched with arch-ctm's fix passes
 - Track which sprints have passed QA and which have outstanding findings
 
@@ -124,7 +124,16 @@ Key behaviors:
      max_turns: 20
      prompt: <QA prompt with fenced JSON input, scope, phase docs>
    ```
-5. Both agents run in parallel and report findings **immediately on completion** — do NOT wait for the sibling before reporting to team-lead.
+5. **Run arch-qa-agent** (architectural fitness):
+   ```
+   Tool: Task
+     subagent_type: "arch-qa-agent"
+     run_in_background: true
+     model: "sonnet"
+     max_turns: 15
+     prompt: <fenced JSON: worktree_path, branch, commit, sprint, changed_files>
+   ```
+6. All three agents run in parallel and report findings **immediately on completion** — do NOT wait for siblings before reporting to team-lead.
 6. **Check CI status** on the PR using `atm gh monitor pr <NUMBER>` (if one exists):
    - Reports `merge_conflict` immediately if the branch has conflicts — block QA and report to team-lead
    - CI green → rust-qa assessment is sufficient, no need to run `cargo test` locally
@@ -146,6 +155,14 @@ Key behaviors:
    - Round-trip preservation of unknown JSON fields where applicable
    - **`cargo test` only if CI is not available or CI is red**
 4. **Output format**: Must report PASS or FAIL with specific findings
+
+#### arch-qa-agent prompt (fenced JSON):
+1. `worktree_path`: absolute path to the sprint worktree
+2. `branch`: branch name
+3. `commit`: HEAD commit hash
+4. `sprint`: sprint identifier (e.g. "AK.3")
+5. `changed_files`: optional list of changed files to focus on
+Output: fenced JSON verdict with RULE-NNN findings, blocking count, merge_ready flag.
 
 #### atm-qa-agent prompt:
 1. Fenced JSON input with `scope.phase`/`scope.sprint`
@@ -183,6 +200,7 @@ When reporting to team-lead, include:
 Sprint O.X QA: PASS
 - rust-qa: PASS (N tests, M findings — all non-blocking)
 - atm-qa: PASS (compliance verified)
+- arch-qa: PASS (no structural violations)
 - Worktree: <path>
 ```
 
@@ -191,6 +209,7 @@ Sprint O.X QA: PASS
 Sprint O.X QA: FAIL
 - rust-qa: PASS/FAIL (details)
 - atm-qa: PASS/FAIL (details)
+- arch-qa: PASS/FAIL (details)
 - Blocking findings:
   1. [QA-NNN] <finding summary> — <file:line>
   2. [QA-NNN] <finding summary> — <file:line>

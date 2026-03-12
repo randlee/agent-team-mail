@@ -34,6 +34,38 @@ fn new_reconcile_cycle_state() -> SharedCycleState {
     Arc::new(std::sync::Mutex::new(ReconcileCycleState::default()))
 }
 
+/// Wait for a daemon shutdown task to finish within `timeout`.
+///
+/// Shutdown tasks are expected to honor the shared [`CancellationToken`] and
+/// exit promptly once cancellation is requested. `abort()` is a last-resort
+/// fallback used only after the cooperative timeout has expired.
+///
+/// This helper is intentionally status-agnostic. Non-plugin callers use it for
+/// internal daemon tasks where the only required behavior is bounded shutdown
+/// latency plus best-effort logging. Plugin degraded-state transitions remain
+/// the responsibility of plugin lifecycle/status code, not this generic join
+/// helper.
+async fn wait_for_shutdown_task<T>(task_name: &str, mut handle: JoinHandle<T>, timeout: Duration)
+where
+    T: Send + 'static,
+{
+    match tokio::time::timeout(timeout, &mut handle).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            error!("{task_name} task failed during shutdown: {e}");
+        }
+        Err(e) => {
+            error!("{task_name} task did not complete in time: {e}");
+            handle.abort();
+            if let Err(join_err) = handle.await
+                && !join_err.is_cancelled()
+            {
+                error!("{task_name} task failed after abort: {join_err}");
+            }
+        }
+    }
+}
+
 /// Run the main daemon event loop.
 ///
 /// This function:
@@ -118,7 +150,7 @@ pub async fn run(
     info!("Starting {} plugin task(s)", plugins.len());
 
     // Spawn a task for each plugin's run() method
-    let mut plugin_tasks: Vec<JoinHandle<()>> = Vec::new();
+    let mut plugin_tasks: Vec<(String, JoinHandle<()>)> = Vec::new();
     let reconcile_cycle_state = new_reconcile_cycle_state();
 
     for (metadata, plugin_arc) in plugins.clone() {
@@ -139,12 +171,12 @@ pub async fn run(
             }
         });
 
-        plugin_tasks.push(task);
+        plugin_tasks.push((metadata.name.to_string(), task));
     }
 
     // Start the Unix socket server (CLI↔daemon IPC).
     //
-    // The socket path is ${ATM_HOME}/.claude/daemon/atm-daemon.sock.
+    // The socket path is ${ATM_HOME}/.atm/daemon/atm-daemon.sock.
     // ctx.system.claude_root is ${ATM_HOME}/.claude, so the home_dir is its
     // parent. We fall back to get_home_dir() if the parent cannot be determined
     // (e.g., claude_root is the filesystem root, which should never happen in
@@ -448,30 +480,16 @@ pub async fn run(
     info!("Cancellation signal received. Beginning shutdown...");
 
     // Wait for background tasks to complete (they should respect cancellation)
-    if let Err(e) = tokio::time::timeout(Duration::from_secs(5), spool_task).await {
-        error!("Spool task did not complete in time: {}", e);
-    }
-
-    if let Err(e) = tokio::time::timeout(Duration::from_secs(5), watcher_task).await {
-        error!("Watcher task did not complete in time: {}", e);
-    }
-
-    if let Err(e) = tokio::time::timeout(Duration::from_secs(5), dispatch_task).await {
-        error!("Dispatch task did not complete in time: {}", e);
-    }
+    wait_for_shutdown_task("Spool", spool_task, Duration::from_secs(5)).await;
+    wait_for_shutdown_task("Watcher", watcher_task, Duration::from_secs(5)).await;
+    wait_for_shutdown_task("Dispatch", dispatch_task, Duration::from_secs(5)).await;
 
     if let Some(task) = retention_task {
-        if let Err(e) = tokio::time::timeout(Duration::from_secs(5), task).await {
-            error!("Retention task did not complete in time: {}", e);
-        }
+        wait_for_shutdown_task("Retention", task, Duration::from_secs(5)).await;
     }
 
-    if let Err(e) = tokio::time::timeout(Duration::from_secs(5), status_task).await {
-        error!("Status writer task did not complete in time: {}", e);
-    }
-    if let Err(e) = tokio::time::timeout(Duration::from_secs(5), reconcile_task).await {
-        error!("Reconcile task did not complete in time: {}", e);
-    }
+    wait_for_shutdown_task("Status writer", status_task, Duration::from_secs(5)).await;
+    wait_for_shutdown_task("Reconcile", reconcile_task, Duration::from_secs(5)).await;
 
     // Graceful shutdown of all plugins
     graceful_shutdown(plugins, Duration::from_secs(5))
@@ -479,10 +497,9 @@ pub async fn run(
         .context("Plugin shutdown encountered errors")?;
 
     // Wait for plugin tasks to complete
-    for task in plugin_tasks {
-        if let Err(e) = task.await {
-            error!("Plugin task panicked: {}", e);
-        }
+    for (plugin_name, task) in plugin_tasks {
+        let label = format!("Plugin {plugin_name}");
+        wait_for_shutdown_task(&label, task, Duration::from_secs(5)).await;
     }
 
     info!("Daemon event loop shutdown complete");
@@ -697,42 +714,21 @@ fn reconcile_team_member_activity_with_mode(
                 // No live session record means member is not active.
                 false
             };
-            let reconciled_alive = alive;
-
-            if member.is_active != Some(reconciled_alive) {
-                let previous = member.is_active;
-                member.is_active = Some(reconciled_alive);
-                changed = true;
-                emit_event_best_effort(EventFields {
-                    level: "warn",
-                    source: "atm-daemon",
-                    action: "state_drift_detected",
-                    team: Some(team_name.clone()),
-                    agent_name: Some(member.name.clone()),
-                    result: Some("reconciled".to_string()),
-                    error: Some(format!(
-                        "isActive drift for {}@{}: config={:?}, reconciled={}",
-                        member.name, team_name, previous, reconciled_alive
-                    )),
-                    ..Default::default()
-                });
-
-                if reconciled_alive {
-                    member.last_active = Some(now_ms);
-                    state_store.lock().unwrap().set_state_with_context(
-                        &member.name,
-                        AgentState::Active,
-                        "session active + pid alive",
-                        "session_reconcile",
-                    );
-                } else {
-                    state_store.lock().unwrap().set_state_with_context(
-                        &member.name,
-                        AgentState::Offline,
-                        "session missing/dead during reconcile",
-                        "session_reconcile",
-                    );
-                }
+            if alive {
+                member.last_active = Some(now_ms);
+                state_store.lock().unwrap().set_state_with_context(
+                    &member.name,
+                    AgentState::Active,
+                    "session active + pid alive",
+                    "session_reconcile",
+                );
+            } else {
+                state_store.lock().unwrap().set_state_with_context(
+                    &member.name,
+                    AgentState::Offline,
+                    "session missing/dead during reconcile",
+                    "session_reconcile",
+                );
             }
 
             // Terminal non-lead members must be fully removed (roster + mailbox)
@@ -1471,6 +1467,13 @@ fn spool_metrics(spool_path: &Path) -> std::io::Result<(u64, Option<u64>)> {
         if !file_type.is_file() {
             continue;
         }
+        if !entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.ends_with(".jsonl"))
+        {
+            continue;
+        }
 
         spool_count += 1;
 
@@ -1544,7 +1547,7 @@ fn gh_monitor_plugin_status_projection(
     ctx: &PluginContext,
 ) -> Option<(PluginStatusKind, Option<String>, Option<String>)> {
     let home_dir = ctx.system.claude_root.parent()?.to_path_buf();
-    let path = home_dir.join(".claude/daemon/gh-monitor-health.json");
+    let path = agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(&home_dir);
     let raw = std::fs::read_to_string(path).ok()?;
     let value = serde_json::from_str::<Value>(&raw).ok()?;
     let records = value.get("records")?.as_array()?;
@@ -1623,6 +1626,7 @@ mod tests {
     use agent_team_mail_core::schema::InboxMessage;
     use std::collections::HashMap;
     use std::fs as stdfs;
+    use std::time::Duration;
     use tempfile::TempDir;
     use tokio::fs;
 
@@ -1658,6 +1662,20 @@ mod tests {
         assert_eq!(snapshot.state, "degraded_spooling");
         assert!(snapshot.spool_count >= 1);
         assert!(snapshot.oldest_spool_age.is_some());
+    }
+
+    #[test]
+    fn test_build_logging_health_snapshot_ignores_claiming_files() {
+        let tmp = TempDir::new().expect("temp dir");
+        let spool_dir = agent_team_mail_core::logging_event::configured_spool_dir(tmp.path());
+        stdfs::create_dir_all(&spool_dir).expect("mkdir spool");
+        stdfs::write(spool_dir.join("atm-1-1.jsonl"), "{\"v\":1}\n").expect("write spool file");
+        stdfs::write(spool_dir.join("atm-1-1.claiming"), "{\"v\":1}\n")
+            .expect("write claiming file");
+
+        let snapshot = build_logging_health_snapshot(tmp.path(), 0, false);
+        assert_eq!(snapshot.state, "degraded_spooling");
+        assert_eq!(snapshot.spool_count, 1);
     }
 
     #[test]
@@ -1965,6 +1983,14 @@ mod tests {
         )
         .unwrap();
 
+        let tracker = state_store.lock().unwrap();
+        assert_eq!(tracker.get_state("arch-gtm"), Some(AgentState::Offline));
+        let transition = tracker
+            .transition_meta("arch-gtm")
+            .expect("transition metadata should be present");
+        assert_eq!(transition.source, "session_reconcile");
+        drop(tracker);
+
         let cfg: agent_team_mail_core::schema::TeamConfig = serde_json::from_str(
             &stdfs::read_to_string(home.join(".claude/teams/atm-dev/config.json")).unwrap(),
         )
@@ -1974,7 +2000,8 @@ mod tests {
             .iter()
             .find(|m| m.name == "arch-gtm")
             .expect("member present");
-        assert_eq!(restored.is_active, Some(false));
+        assert_eq!(restored.is_active, Some(true));
+        assert!(restored.last_active.is_none());
     }
 
     #[test]
@@ -2042,7 +2069,7 @@ mod tests {
         let transition = tracker
             .transition_meta("arch-ctm")
             .expect("transition metadata should be present");
-        assert_eq!(transition.source, "config_watcher");
+        assert_eq!(transition.source, "session_reconcile");
 
         let cfg: agent_team_mail_core::schema::TeamConfig = serde_json::from_str(
             &stdfs::read_to_string(home.join(".claude/teams/atm-dev/config.json")).unwrap(),
@@ -2130,8 +2157,8 @@ mod tests {
             .iter()
             .find(|m| m.name == "arch-ctm")
             .expect("member present");
-        assert_eq!(member.is_active, Some(true));
-        assert!(member.last_active.is_some());
+        assert_eq!(member.is_active, Some(false));
+        assert!(member.last_active.is_none());
     }
 
     #[test]
@@ -2190,6 +2217,10 @@ mod tests {
 
         let tracker = state_store.lock().unwrap();
         assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Offline));
+        let transition = tracker
+            .transition_meta("arch-ctm")
+            .expect("transition metadata should be present");
+        assert_eq!(transition.source, "session_reconcile");
         drop(tracker);
 
         let cfg: agent_team_mail_core::schema::TeamConfig = serde_json::from_str(
@@ -2201,7 +2232,7 @@ mod tests {
             .iter()
             .find(|m| m.name == "arch-ctm")
             .expect("member present");
-        assert_eq!(member.is_active, Some(false));
+        assert_eq!(member.is_active, Some(true));
 
         let reg = sr.lock().unwrap();
         let record = reg.query_for_team("atm-dev", "arch-ctm").unwrap();
@@ -2813,5 +2844,21 @@ mod tests {
                 .is_some(),
             "dispatch-mode reconcile must not advance stale-prune absent cycles"
         );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_shutdown_task_aborts_timed_out_task() {
+        let handle = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+
+        super::wait_for_shutdown_task("test", handle, Duration::from_millis(10)).await;
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_shutdown_task_allows_completed_task() {
+        let handle = tokio::spawn(async {});
+
+        super::wait_for_shutdown_task("test", handle, Duration::from_secs(1)).await;
     }
 }

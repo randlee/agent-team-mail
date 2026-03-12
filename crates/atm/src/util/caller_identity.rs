@@ -13,7 +13,11 @@ use std::process::Command;
 use crate::util::hook_identity::{read_hook_file, read_session_file};
 use crate::util::settings::get_home_dir;
 
+/// Returned when multiple caller/session resolution candidates remain valid
+/// and ATM cannot choose one canonical caller identity automatically.
 pub const CALLER_AMBIGUOUS: &str = "CALLER_AMBIGUOUS";
+/// Returned when caller/session resolution exhausts all supported sources
+/// without finding a canonical caller identity.
 pub const CALLER_UNRESOLVED: &str = "CALLER_UNRESOLVED";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +81,54 @@ fn parse_runtime(value: &str) -> CallerRuntime {
     }
 }
 
+fn runtime_from_process_observation(comm: &str, args: &str) -> CallerRuntime {
+    let comm = comm
+        .rsplit('/')
+        .next()
+        .unwrap_or(comm)
+        .trim()
+        .to_ascii_lowercase();
+    let args = args.trim().to_ascii_lowercase();
+    match comm.as_str() {
+        "claude" => CallerRuntime::Claude,
+        "codex" => CallerRuntime::Codex,
+        "node" if args.contains("gemini") => CallerRuntime::Gemini,
+        _ => CallerRuntime::Unknown,
+    }
+}
+
+fn runtime_from_process_tree() -> CallerRuntime {
+    use sysinfo::{Pid, System};
+
+    let sys = System::new_all();
+    let mut cursor = Pid::from_u32(std::process::id());
+
+    for _ in 0..16 {
+        let Some(proc_info) = sys.process(cursor) else {
+            break;
+        };
+
+        let comm = proc_info.name().to_string_lossy();
+        let args = proc_info
+            .cmd()
+            .iter()
+            .map(|part| part.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let runtime = runtime_from_process_observation(&comm, &args);
+        if runtime != CallerRuntime::Unknown {
+            return runtime;
+        }
+
+        let Some(parent) = proc_info.parent() else {
+            break;
+        };
+        cursor = parent;
+    }
+
+    CallerRuntime::Unknown
+}
+
 fn daemon_resolution_enabled() -> bool {
     // Unit tests should be deterministic and not depend on an externally running daemon.
     !running_test_harness()
@@ -116,11 +168,25 @@ fn query_daemon_session(team: Option<&str>, identity: Option<&str>) -> Option<Se
 
 fn runtime_hint(daemon: Option<&SessionQueryResult>) -> CallerRuntime {
     let _ = daemon;
+    // Direct runtime signals are more specific than an ambient ancestor process.
     if let Some(runtime) = env_var_nonempty("ATM_RUNTIME") {
         let parsed = parse_runtime(&runtime);
         if parsed != CallerRuntime::Unknown {
             return parsed;
         }
+    }
+
+    if env_var_nonempty("CODEX_THREAD_ID").is_some() {
+        return CallerRuntime::Codex;
+    }
+
+    let traced = runtime_from_process_tree();
+    if traced != CallerRuntime::Unknown {
+        return traced;
+    }
+
+    if env_var_nonempty("CLAUDE_SESSION_ID").is_some() {
+        return CallerRuntime::Claude;
     }
 
     CallerRuntime::Unknown
@@ -211,7 +277,9 @@ fn read_session_file_scoped(team: &str, identity: &str) -> Result<Option<String>
 
 fn resolve_runtime_native_env(runtime: CallerRuntime) -> Option<String> {
     match runtime {
-        CallerRuntime::Claude => env_var_nonempty("CLAUDE_SESSION_ID"),
+        // Claude: do NOT short-circuit here — hook file takes priority over
+        // CLAUDE_SESSION_ID and is resolved inside resolve_claude_session().
+        CallerRuntime::Claude => None,
         CallerRuntime::Codex => env_var_nonempty("CODEX_THREAD_ID"),
         CallerRuntime::Gemini | CallerRuntime::Opencode => None,
         CallerRuntime::Unknown => None,
@@ -548,8 +616,8 @@ where
 ///
 /// Precedence:
 /// 1) `ATM_SESSION_ID`
-/// 2) runtime-native env (`CLAUDE_SESSION_ID` / `CODEX_THREAD_ID`)
-/// 3) runtime-specific resolution path
+/// 2) runtime-native env for non-Claude runtimes (`CODEX_THREAD_ID`)
+/// 3) runtime-specific resolution path (`hook > CLAUDE_SESSION_ID > session file` for Claude)
 /// 4) daemon session registry (team+identity scoped, alive only)
 pub fn resolve_caller_session_id_optional(
     team: Option<&str>,
@@ -629,7 +697,7 @@ mod tests {
             "session_id": session_id,
             "team": team,
             "identity": identity,
-            "pid": 12345,
+            "pid": std::process::id(),
             "created_at": now,
             "updated_at": now,
         });
@@ -754,9 +822,13 @@ mod tests {
     #[test]
     #[serial]
     fn daemon_ambiguity_surfaces_stable_code() {
+        let temp = TempDir::new().unwrap();
         let hook_path = current_ppid_hook_path();
         let _ = std::fs::remove_file(&hook_path);
         unsafe {
+            std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("ATM_TEST_HOME", temp.path());
+            std::env::remove_var("ATM_RUNTIME");
             std::env::remove_var("ATM_SESSION_ID");
             std::env::remove_var("CLAUDE_SESSION_ID");
             std::env::remove_var("CODEX_THREAD_ID");
@@ -768,6 +840,15 @@ mod tests {
             |_team, _identity| bail!("Ambiguous: daemon found multiple sessions"),
         )
         .expect_err("expected ambiguity");
+
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("ATM_TEST_HOME");
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("ATM_SESSION_ID");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+            std::env::remove_var("CODEX_THREAD_ID");
+        }
 
         assert!(err.to_string().contains(CALLER_AMBIGUOUS));
     }
@@ -914,6 +995,138 @@ mod tests {
         assert!(
             !query_called,
             "daemon query should not run when CODEX_THREAD_ID is set"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn codex_thread_id_implies_codex_runtime_without_atm_runtime() {
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+
+        unsafe {
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::set_var("CODEX_THREAD_ID", "codex-env-implicit-123");
+            std::env::remove_var("ATM_SESSION_ID");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        let mut query_called = false;
+        let resolved = resolve_caller_session_id_optional_with_query(
+            Some("atm-dev"),
+            Some("arch-ctm"),
+            |_team, _identity| {
+                query_called = true;
+                // Return a live daemon session to prove CODEX_THREAD_ID beats it even when
+                // ATM_RUNTIME is absent — implicit Codex detection takes priority.
+                Ok(Some(SessionQueryResult {
+                    session_id: "session_id:daemon-should-not-win-implicit".to_string(),
+                    process_id: std::process::id(),
+                    alive: true,
+                    last_seen_at: None,
+                    runtime: Some("codex".to_string()),
+                    runtime_session_id: Some("thread-id:daemon-implicit-thread".to_string()),
+                    pane_id: None,
+                    runtime_home: None,
+                }))
+            },
+        )
+        .expect("resolve");
+
+        unsafe {
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("CODEX_THREAD_ID");
+            std::env::remove_var("ATM_SESSION_ID");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        assert_eq!(resolved.as_deref(), Some("codex-env-implicit-123"));
+        assert!(
+            !query_called,
+            "daemon query should not run when CODEX_THREAD_ID implies runtime"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn implicit_claude_session_resolved_from_env_when_no_runtime_or_codex_thread_id() {
+        // No ATM_RUNTIME, no CODEX_THREAD_ID, no hook file — only CLAUDE_SESSION_ID set.
+        // The resolver must detect Claude runtime via the env var and return that session ID.
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+
+        unsafe {
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("CODEX_THREAD_ID");
+            std::env::remove_var("ATM_SESSION_ID");
+            std::env::set_var("CLAUDE_SESSION_ID", "claude-implicit-session-abc");
+        }
+
+        let resolved = resolve_caller_session_id_optional_with_query(
+            Some("atm-dev"),
+            Some("team-lead"),
+            |_team, _identity| Ok(None),
+        )
+        .expect("resolve");
+
+        unsafe {
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("CODEX_THREAD_ID");
+            std::env::remove_var("ATM_SESSION_ID");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        assert_eq!(
+            resolved.as_deref(),
+            Some("claude-implicit-session-abc"),
+            "CLAUDE_SESSION_ID must resolve when it is the only session signal"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn codex_thread_id_precedence_holds_even_when_live_daemon_session_exists() {
+        let hook_path = current_ppid_hook_path();
+        let _ = std::fs::remove_file(&hook_path);
+
+        unsafe {
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::set_var("CODEX_THREAD_ID", "codex-env-live-123");
+            std::env::remove_var("ATM_SESSION_ID");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        let mut query_called = false;
+        let resolved = resolve_caller_session_id_optional_with_query(
+            Some("atm-dev"),
+            Some("arch-ctm"),
+            |_team, _identity| {
+                query_called = true;
+                Ok(Some(SessionQueryResult {
+                    session_id: "session_id:daemon-live-session".to_string(),
+                    process_id: std::process::id(),
+                    alive: true,
+                    last_seen_at: None,
+                    runtime: Some("codex".to_string()),
+                    runtime_session_id: Some("thread-id:daemon-live-thread".to_string()),
+                    pane_id: None,
+                    runtime_home: None,
+                }))
+            },
+        )
+        .expect("resolve");
+
+        unsafe {
+            std::env::remove_var("ATM_RUNTIME");
+            std::env::remove_var("CODEX_THREAD_ID");
+            std::env::remove_var("ATM_SESSION_ID");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+        }
+
+        assert_eq!(resolved.as_deref(), Some("codex-env-live-123"));
+        assert!(
+            !query_called,
+            "daemon query should not run when CODEX_THREAD_ID already resolves the caller session"
         );
     }
 

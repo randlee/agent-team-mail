@@ -28,7 +28,7 @@ use std::str::FromStr;
 use tracing::warn;
 
 use crate::commands::runtime_adapter::{RuntimeKind, SpawnSpec, adapter_for_runtime};
-use crate::util::settings::get_home_dir;
+use crate::util::settings::{claude_root_dir_for, get_home_dir, teams_root_dir_for};
 use crate::util::state::{SeenState, get_last_seen, load_seen_state};
 
 /// Number of backups to retain per team. Older snapshots are pruned after
@@ -395,7 +395,7 @@ pub fn execute(args: TeamsArgs) -> Result<()> {
     }
 
     let home_dir = get_home_dir()?;
-    let teams_dir = home_dir.join(".claude/teams");
+    let teams_dir = teams_root_dir_for(&home_dir);
 
     // Check if teams directory exists
     if !teams_dir.exists() {
@@ -891,7 +891,7 @@ fn ensure_spawn_member_metadata(
     launch_dir: &Path,
 ) -> Result<()> {
     let home_dir = get_home_dir()?;
-    let team_dir = home_dir.join(".claude/teams").join(team);
+    let team_dir = teams_root_dir_for(&home_dir).join(team);
     let config_path = team_dir.join("config.json");
     if !config_path.exists() {
         // Spawn must remain resilient when team config does not yet exist.
@@ -1110,8 +1110,7 @@ fn resolve_spawn_caller_identity(
     }
 
     let session_id = env_var_nonempty("CLAUDE_SESSION_ID")?;
-    let config_path = home_dir
-        .join(".claude/teams")
+    let config_path = teams_root_dir_for(home_dir)
         .join(team_name)
         .join("config.json");
     if !config_path.exists() {
@@ -1299,9 +1298,7 @@ fn resolve_spawn_system_prompt(
         )
     })?;
 
-    let runtime_home = context
-        .home_dir
-        .join(".claude")
+    let runtime_home = claude_root_dir_for(context.home_dir)
         .join("runtime")
         .join("compose")
         .join(context.team_name)
@@ -1371,8 +1368,7 @@ fn resolve_caller_team_context(home_dir: &Path, current_dir: &Path) -> Result<Op
         return Ok(None);
     }
 
-    let config_path = home_dir
-        .join(".claude/teams")
+    let config_path = teams_root_dir_for(home_dir)
         .join(&configured_team)
         .join("config.json");
     if !config_path.exists() {
@@ -1419,7 +1415,7 @@ fn join_member(args: JoinArgs) -> Result<()> {
         (JoinMode::SelfJoin, explicit_team)
     };
 
-    let team_dir = home_dir.join(".claude/teams").join(&target_team);
+    let team_dir = teams_root_dir_for(&home_dir).join(&target_team);
     if !team_dir.exists() {
         anyhow::bail!(
             "Team '{}' not found (directory {} doesn't exist)",
@@ -1514,9 +1510,24 @@ fn add_member(args: AddMemberArgs) -> Result<()> {
     Ok(())
 }
 
+fn effective_add_member_agent_type(agent_type: &str, backend_type: Option<&BackendType>) -> String {
+    if agent_type != "codex" {
+        return agent_type.to_string();
+    }
+
+    match backend_type {
+        Some(BackendType::ClaudeCode) => "claude-code".to_string(),
+        Some(BackendType::Codex) => "codex".to_string(),
+        Some(BackendType::Gemini) => "gemini".to_string(),
+        Some(BackendType::External) => "external".to_string(),
+        Some(BackendType::Human(_)) => "human".to_string(),
+        None => "codex".to_string(),
+    }
+}
+
 fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
     let home_dir = get_home_dir()?;
-    let team_dir = home_dir.join(".claude/teams").join(&args.team);
+    let team_dir = teams_root_dir_for(&home_dir).join(&args.team);
     if !team_dir.exists() {
         anyhow::bail!(
             "Team '{}' not found (directory {} doesn't exist)",
@@ -1543,6 +1554,8 @@ fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
     } else {
         None
     };
+    let effective_agent_type =
+        effective_add_member_agent_type(&args.agent_type, parsed_backend_type.as_ref());
 
     let lock_path = config_path.with_extension("lock");
     let _lock = acquire_lock(&lock_path, 5)
@@ -1594,7 +1607,7 @@ fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
         let now_ms = chrono::Utc::now().timestamp_millis() as u64;
         let m = &mut team_config.members[idx];
         m.agent_id = agent_id;
-        m.agent_type = args.agent_type.clone();
+        m.agent_type = effective_agent_type.clone();
         m.model = args.model.clone();
         m.cwd = cwd;
         m.is_active = Some(!args.inactive);
@@ -1629,7 +1642,7 @@ fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
     let member = agent_team_mail_core::schema::AgentMember {
         agent_id,
         name: args.agent.clone(),
-        agent_type: args.agent_type.clone(),
+        agent_type: effective_agent_type,
         model: args.model.clone(),
         prompt: None,
         color: None,
@@ -1751,7 +1764,7 @@ fn sync_member_session_hint(
 /// value unchanged.
 fn update_member(args: UpdateMemberArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
-    let team_dir = home_dir.join(".claude/teams").join(&args.team);
+    let team_dir = teams_root_dir_for(&home_dir).join(&args.team);
     let config_path = team_dir.join("config.json");
 
     if !config_path.exists() {
@@ -1850,7 +1863,7 @@ fn update_member(args: UpdateMemberArgs) -> Result<()> {
 
 fn remove_member(args: RemoveMemberArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
-    let team_dir = home_dir.join(".claude/teams").join(&args.team);
+    let team_dir = teams_root_dir_for(&home_dir).join(&args.team);
     let config_path = team_dir.join("config.json");
 
     if !config_path.exists() {
@@ -1980,7 +1993,7 @@ fn remove_member(args: RemoveMemberArgs) -> Result<()> {
 ///   active team directory, prompting the caller to re-establish via TeamCreate.
 fn resume(args: ResumeArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
-    let team_dir = home_dir.join(".claude/teams").join(&args.team);
+    let team_dir = teams_root_dir_for(&home_dir).join(&args.team);
 
     // Check team exists
     let config_path = team_dir.join("config.json");
@@ -2258,7 +2271,7 @@ fn external_agent_missing_state_is_stale(
 /// and writes the updated `config.json`.
 fn cleanup(args: CleanupArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
-    let team_dir = home_dir.join(".claude/teams").join(&args.team);
+    let team_dir = teams_root_dir_for(&home_dir).join(&args.team);
     let config_path = team_dir.join("config.json");
 
     if !config_path.exists() {
@@ -2620,8 +2633,7 @@ fn remove_member_mailbox_artifacts(team_dir: &Path, member_name: &str) {
 }
 
 fn archive_member_inbox(home_dir: &Path, team: &str, member_name: &str) -> Result<Option<PathBuf>> {
-    let inbox_path = home_dir
-        .join(".claude/teams")
+    let inbox_path = teams_root_dir_for(home_dir)
         .join(team)
         .join("inboxes")
         .join(format!("{member_name}.json"));
@@ -2630,8 +2642,8 @@ fn archive_member_inbox(home_dir: &Path, team: &str, member_name: &str) -> Resul
     }
 
     let timestamp = Utc::now().format("%Y%m%dT%H%M%S%fZ").to_string();
-    let archive_dir = home_dir
-        .join(".claude/teams/.archives")
+    let archive_dir = teams_root_dir_for(home_dir)
+        .join(".archives")
         .join(team)
         .join(format!("removed-{member_name}-{timestamp}"))
         .join("inboxes");
@@ -2794,7 +2806,7 @@ fn recompute_highwatermark(tasks_dir: &Path) -> Result<u64> {
 }
 
 fn do_backup(home_dir: &Path, team: &str, project: Option<&str>, json: bool) -> Result<PathBuf> {
-    let team_dir = home_dir.join(".claude/teams").join(team);
+    let team_dir = teams_root_dir_for(home_dir).join(team);
 
     if !team_dir.exists() {
         anyhow::bail!(
@@ -2817,8 +2829,8 @@ fn do_backup(home_dir: &Path, team: &str, project: Option<&str>, json: bool) -> 
         now.format("%Y%m%dT%H%M%S"),
         now.timestamp_subsec_nanos()
     );
-    let backup_dir = home_dir
-        .join(".claude/teams/.backups")
+    let backup_dir = teams_root_dir_for(home_dir)
+        .join(".backups")
         .join(team)
         .join(&timestamp);
 
@@ -2908,7 +2920,7 @@ fn backup(args: BackupArgs) -> Result<()> {
 /// Backup directories are named with ISO timestamps so lexicographic sort equals
 /// chronological order.  All but the last `keep` entries are removed.
 fn prune_old_backups(home_dir: &Path, team: &str, keep: usize) -> Result<()> {
-    let backups_dir = home_dir.join(".claude/teams/.backups").join(team);
+    let backups_dir = teams_root_dir_for(home_dir).join(".backups").join(team);
     if !backups_dir.exists() {
         return Ok(());
     }
@@ -2936,7 +2948,7 @@ fn prune_old_backups(home_dir: &Path, team: &str, keep: usize) -> Result<()> {
 /// The current `leadSessionId` is never overwritten.
 fn restore(args: RestoreArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
-    let team_dir = home_dir.join(".claude/teams").join(&args.team);
+    let team_dir = teams_root_dir_for(&home_dir).join(&args.team);
     let config_path = team_dir.join("config.json");
 
     if !config_path.exists() {
@@ -2952,7 +2964,9 @@ fn restore(args: RestoreArgs) -> Result<()> {
         from_path.clone()
     } else {
         // Find the latest backup by lexicographic sort of timestamps
-        let backups_root = home_dir.join(".claude/teams/.backups").join(&args.team);
+        let backups_root = teams_root_dir_for(&home_dir)
+            .join(".backups")
+            .join(&args.team);
 
         if !backups_root.exists() {
             anyhow::bail!("No backup found for team '{}'", args.team);
@@ -3306,7 +3320,7 @@ mod tests {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixListener;
 
-        let daemon_dir = home.join(".claude/daemon");
+        let daemon_dir = home.join(".atm/daemon");
         fs::create_dir_all(&daemon_dir).unwrap();
         let socket_path = daemon_dir.join("atm-daemon.sock");
         if socket_path.exists() {

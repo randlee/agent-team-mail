@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use agent_team_mail_core::daemon_client::daemon_status_path_for;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct LoggingHealthSnapshot {
@@ -72,7 +74,7 @@ struct DaemonStatusSnapshot {
 }
 
 pub(crate) fn read_daemon_logging_health(home_dir: &Path) -> LoggingHealthSnapshot {
-    let status_path = home_dir.join(".claude/daemon/status.json");
+    let status_path = daemon_status_path_for(home_dir);
     let Ok(content) = fs::read_to_string(status_path) else {
         return LoggingHealthSnapshot::default();
     };

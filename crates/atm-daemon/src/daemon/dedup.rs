@@ -13,6 +13,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use agent_team_mail_core::daemon_client::daemon_dedup_path;
 use chrono::{DateTime, Utc};
 
 /// Default max in-memory dedupe keys when `ATM_DEDUP_CAPACITY` is unset.
@@ -170,7 +171,7 @@ impl DurableEntry {
 ///
 /// # File location
 ///
-/// Default: `{home_dir}/.claude/daemon/dedup.jsonl`
+/// Default: `{home_dir}/.atm/daemon/dedup.jsonl`
 ///
 /// Each line is a JSON object:
 /// ```text
@@ -224,12 +225,12 @@ impl DurableDedupeStore {
     /// - `ATM_DEDUP_CAPACITY` (default `1000`)
     /// - `ATM_DEDUP_TTL_SECS` (default `600`)
     ///
-    /// File path: `{home_dir}/.claude/daemon/dedup.jsonl`
+    /// File path: `{home_dir}/.atm/daemon/dedup.jsonl`
     ///
     /// # Errors
     ///
     /// Propagates I/O errors from [`Self::new`].
-    pub fn from_env(home_dir: &Path) -> io::Result<Self> {
+    pub fn from_env(_home_dir: &Path) -> io::Result<Self> {
         let capacity = std::env::var("ATM_DEDUP_CAPACITY")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -241,7 +242,7 @@ impl DurableDedupeStore {
             .filter(|v| *v > 0)
             .unwrap_or(DEFAULT_TTL_SECS);
 
-        let path = home_dir.join(".claude/daemon/dedup.jsonl");
+        let path = daemon_dedup_path().map_err(io::Error::other)?;
         Self::new(path, Duration::from_secs(ttl_secs), capacity)
     }
 

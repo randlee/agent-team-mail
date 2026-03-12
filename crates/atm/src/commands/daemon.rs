@@ -8,10 +8,13 @@ use chrono::Utc;
 use clap::{Args, Subcommand};
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
+use sysinfo::System;
 use uuid::Uuid;
 
-use crate::commands::logging_health::LoggingHealthSnapshot;
-use crate::util::settings::get_home_dir;
+use crate::commands::logging_health::{LoggingHealthSnapshot, build_logging_health_contract};
+use crate::util::settings::{get_home_dir, teams_root_dir_for};
+use agent_team_mail_core::daemon_client::daemon_status_path_for;
+use std::path::{Path, PathBuf};
 
 /// Daemon management commands
 #[derive(Args, Debug)]
@@ -230,8 +233,7 @@ fn send_shutdown_request(
         message_id: Some(Uuid::new_v4().to_string()),
         unknown_fields: HashMap::new(),
     };
-    let inbox_path = home_dir
-        .join(".claude/teams")
+    let inbox_path = teams_root_dir_for(home_dir)
         .join(team_name)
         .join("inboxes")
         .join(format!("{agent_name}.json"));
@@ -245,63 +247,43 @@ fn send_shutdown_request(
 fn execute_stop(timeout_secs: u64) -> Result<()> {
     #[cfg(unix)]
     {
-        let pid_path = agent_team_mail_core::daemon_client::daemon_pid_path()
-            .context("failed to resolve daemon PID file path")?;
+        let runtime = daemon_runtime_paths()?;
 
-        if !pid_path.exists() {
+        if !runtime.pid_path.exists() {
             println!(
                 "Daemon is not running (no PID file at {}).",
-                pid_path.display()
+                runtime.pid_path.display()
             );
             return Ok(());
         }
 
-        let content = std::fs::read_to_string(&pid_path)
-            .with_context(|| format!("failed to read daemon PID file {}", pid_path.display()))?;
-        let pid: i32 = content.trim().parse().with_context(|| {
-            format!(
-                "daemon PID file {} contains non-integer content",
-                pid_path.display()
-            )
-        })?;
-
-        if pid <= 1 {
-            anyhow::bail!(
-                "daemon PID file contains invalid PID {}; refusing to send signal",
-                pid
-            );
-        }
-
-        // SAFETY: SIGTERM requests cooperative shutdown of the daemon process.
-        let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
-        if rc != 0 {
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::ESRCH) {
-                println!("Daemon process {pid} no longer exists; cleaning up PID file.");
-                let _ = std::fs::remove_file(&pid_path);
-                return Ok(());
+        match stop_daemon_with(
+            &runtime,
+            timeout_secs,
+            signal_pid,
+            is_pid_alive,
+            Duration::from_millis(200),
+        )? {
+            StopOutcome::Stopped { pid, already_dead } => {
+                if already_dead {
+                    println!("Daemon process {pid} no longer exists; cleaning up runtime files.");
+                } else {
+                    println!(
+                        "Sent SIGTERM to daemon (PID {pid}); waiting up to {timeout_secs}s for exit..."
+                    );
+                    println!("Daemon (PID {pid}) has stopped.");
+                }
+                Ok(())
             }
-            return Err(anyhow::anyhow!(
-                "failed to send SIGTERM to daemon process {pid}: {err}"
-            ));
-        }
-
-        println!("Sent SIGTERM to daemon (PID {pid}); waiting up to {timeout_secs}s for exit...");
-
-        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-        while Instant::now() < deadline {
-            // SAFETY: kill(pid, 0) checks if the process is alive without sending a signal.
-            let alive = unsafe { libc::kill(pid, 0) == 0 };
-            if !alive {
-                println!("Daemon (PID {pid}) has stopped.");
-                return Ok(());
+            StopOutcome::TimedOut { pid } => {
+                println!(
+                    "Sent SIGTERM to daemon (PID {pid}); waiting up to {timeout_secs}s for exit..."
+                );
+                println!("Daemon (PID {pid}) did not stop within {timeout_secs}s after SIGTERM.");
+                println!("You may force-kill it with: kill -9 {pid}");
+                std::process::exit(1);
             }
-            std::thread::sleep(Duration::from_millis(200));
         }
-
-        println!("Daemon (PID {pid}) did not stop within {timeout_secs}s after SIGTERM.");
-        println!("You may force-kill it with: kill -9 {pid}");
-        std::process::exit(1);
     }
 
     #[cfg(not(unix))]
@@ -313,12 +295,373 @@ fn execute_stop(timeout_secs: u64) -> Result<()> {
 
 /// Restart the daemon: stop the running instance then trigger autostart.
 fn execute_restart(timeout_secs: u64) -> Result<()> {
-    execute_stop(timeout_secs)?;
-    // Brief pause to let socket and PID files be cleaned up before autostart.
-    std::thread::sleep(Duration::from_millis(500));
-    agent_team_mail_core::daemon_client::ensure_daemon_running()
-        .context("failed to autostart daemon after stop")?;
-    if agent_team_mail_core::daemon_client::daemon_is_running() {
+    #[cfg(unix)]
+    {
+        let runtime = daemon_runtime_paths()?;
+        if let Some(expected_bin) = expected_daemon_binary_path() {
+            stop_matching_daemon_processes(
+                &expected_bin,
+                &runtime,
+                signal_pid,
+                is_pid_alive,
+                RestartTiming::DEFAULT,
+            )?;
+        } else {
+            eprintln!(
+                "warning: unable to resolve expected daemon binary path; skipping pre-restart daemon cleanup"
+            );
+        }
+        restart_daemon_with(
+            &runtime,
+            timeout_secs,
+            signal_pid,
+            is_pid_alive,
+            agent_team_mail_core::daemon_client::ensure_daemon_running,
+            agent_team_mail_core::daemon_client::daemon_is_running,
+            RestartTiming::DEFAULT,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+struct DaemonRuntimePaths {
+    pid_path: PathBuf,
+    socket_path: PathBuf,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopOutcome {
+    Stopped { pid: i32, already_dead: bool },
+    TimedOut { pid: i32 },
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy)]
+struct RestartTiming {
+    stop_poll_interval: Duration,
+    runtime_absent_timeout: Duration,
+    runtime_absent_poll_interval: Duration,
+}
+
+#[cfg(unix)]
+impl RestartTiming {
+    const DEFAULT: Self = Self {
+        stop_poll_interval: Duration::from_millis(200),
+        runtime_absent_timeout: Duration::from_secs(2),
+        runtime_absent_poll_interval: Duration::from_millis(50),
+    };
+}
+
+#[cfg(unix)]
+fn daemon_runtime_paths() -> Result<DaemonRuntimePaths> {
+    Ok(DaemonRuntimePaths {
+        pid_path: agent_team_mail_core::daemon_client::daemon_pid_path()
+            .context("failed to resolve daemon PID file path")?,
+        socket_path: agent_team_mail_core::daemon_client::daemon_socket_path()
+            .context("failed to resolve daemon socket path")?,
+    })
+}
+
+#[cfg(unix)]
+fn read_daemon_pid(pid_path: &Path) -> Result<i32> {
+    let content = std::fs::read_to_string(pid_path)
+        .with_context(|| format!("failed to read daemon PID file {}", pid_path.display()))?;
+    let pid: i32 = content.trim().parse().with_context(|| {
+        format!(
+            "daemon PID file {} contains non-integer content",
+            pid_path.display()
+        )
+    })?;
+    if pid <= 1 {
+        anyhow::bail!(
+            "daemon PID file contains invalid PID {}; refusing to send signal",
+            pid
+        );
+    }
+    Ok(pid)
+}
+
+#[cfg(unix)]
+fn signal_pid(pid: i32, signal: i32) -> std::io::Result<()> {
+    // SAFETY: signal delivery is delegated to libc; caller controls pid/signal.
+    let rc = unsafe { libc::kill(pid, signal) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(unix)]
+fn is_pid_alive(pid: i32) -> bool {
+    // SAFETY: kill(pid, 0) checks liveness without delivering a signal.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[cfg(unix)]
+fn expected_daemon_binary_path() -> Option<PathBuf> {
+    std::env::var_os("ATM_DAEMON_BIN")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(|dir| dir.join("atm-daemon")))
+        })
+}
+
+#[cfg(unix)]
+fn process_executable_matches_parts(
+    exe: Option<&Path>,
+    cmd0: Option<&std::ffi::OsString>,
+    expected: &Path,
+) -> bool {
+    exe.is_some_and(|exe| exe == expected)
+        || cmd0.map(|arg| Path::new(arg) == expected).unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn process_executable_matches(process: &sysinfo::Process, expected: &Path) -> bool {
+    process_executable_matches_parts(process.exe(), process.cmd().first(), expected)
+}
+
+#[cfg(unix)]
+fn matching_daemon_process_ids(expected: &Path) -> Vec<i32> {
+    let system = System::new_all();
+    let mut pids = system
+        .processes()
+        .iter()
+        .filter_map(|(pid, process)| {
+            process_executable_matches(process, expected).then_some(pid.as_u32() as i32)
+        })
+        .filter(|pid| *pid > 1)
+        .collect::<Vec<_>>();
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
+
+#[cfg(unix)]
+fn stop_matching_daemon_processes<FSignal, FAlive>(
+    expected: &Path,
+    runtime: &DaemonRuntimePaths,
+    send_signal: FSignal,
+    is_alive: FAlive,
+    timing: RestartTiming,
+) -> Result<Vec<i32>>
+where
+    FSignal: Fn(i32, i32) -> std::io::Result<()>,
+    FAlive: Fn(i32) -> bool,
+{
+    let pids = matching_daemon_process_ids(expected);
+    stop_matching_daemon_processes_for_pids(pids, runtime, send_signal, is_alive, timing)
+}
+
+#[cfg(unix)]
+fn stop_matching_daemon_processes_for_pids<FSignal, FAlive>(
+    pids: Vec<i32>,
+    runtime: &DaemonRuntimePaths,
+    send_signal: FSignal,
+    is_alive: FAlive,
+    timing: RestartTiming,
+) -> Result<Vec<i32>>
+where
+    FSignal: Fn(i32, i32) -> std::io::Result<()>,
+    FAlive: Fn(i32) -> bool,
+{
+    if pids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    for pid in &pids {
+        if let Err(err) = send_signal(*pid, libc::SIGTERM)
+            && err.raw_os_error() != Some(libc::ESRCH)
+        {
+            return Err(anyhow::anyhow!(
+                "failed to send SIGTERM to daemon process {pid}: {err}"
+            ));
+        }
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if pids.iter().all(|pid| !is_alive(*pid)) {
+            cleanup_runtime_files(runtime);
+            return Ok(pids);
+        }
+        std::thread::sleep(timing.stop_poll_interval);
+    }
+
+    for pid in &pids {
+        if is_alive(*pid) {
+            send_signal(*pid, libc::SIGKILL)
+                .with_context(|| format!("failed to send SIGKILL to daemon process {pid}"))?;
+        }
+    }
+
+    let kill_deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < kill_deadline {
+        if pids.iter().all(|pid| !is_alive(*pid)) {
+            cleanup_runtime_files(runtime);
+            return Ok(pids);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let survivors = pids
+        .into_iter()
+        .filter(|pid| is_alive(*pid))
+        .collect::<Vec<_>>();
+    if survivors.is_empty() {
+        cleanup_runtime_files(runtime);
+        Ok(Vec::new())
+    } else {
+        anyhow::bail!(
+            "daemon process(es) remained alive after cleanup: {}",
+            survivors
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+#[cfg(unix)]
+fn cleanup_runtime_files(paths: &DaemonRuntimePaths) {
+    let _ = std::fs::remove_file(&paths.pid_path);
+    let _ = std::fs::remove_file(&paths.socket_path);
+}
+
+#[cfg(unix)]
+fn wait_for_runtime_files_absent(
+    paths: &DaemonRuntimePaths,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !paths.pid_path.exists() && !paths.socket_path.exists() {
+            return true;
+        }
+        std::thread::sleep(poll_interval);
+    }
+    !paths.pid_path.exists() && !paths.socket_path.exists()
+}
+
+#[cfg(unix)]
+fn stop_daemon_with<FSignal, FAlive>(
+    paths: &DaemonRuntimePaths,
+    timeout_secs: u64,
+    send_signal: FSignal,
+    is_alive: FAlive,
+    poll_interval: Duration,
+) -> Result<StopOutcome>
+where
+    FSignal: Fn(i32, i32) -> std::io::Result<()>,
+    FAlive: Fn(i32) -> bool,
+{
+    let pid = read_daemon_pid(&paths.pid_path)?;
+
+    if let Err(err) = send_signal(pid, libc::SIGTERM) {
+        if err.raw_os_error() == Some(libc::ESRCH) {
+            cleanup_runtime_files(paths);
+            return Ok(StopOutcome::Stopped {
+                pid,
+                already_dead: true,
+            });
+        }
+        return Err(anyhow::anyhow!(
+            "failed to send SIGTERM to daemon process {pid}: {err}"
+        ));
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    while Instant::now() < deadline {
+        if !is_alive(pid) {
+            cleanup_runtime_files(paths);
+            return Ok(StopOutcome::Stopped {
+                pid,
+                already_dead: false,
+            });
+        }
+        std::thread::sleep(poll_interval);
+    }
+
+    Ok(StopOutcome::TimedOut { pid })
+}
+
+#[cfg(unix)]
+fn restart_daemon_with<FSignal, FAlive, FEnsure, FDaemonRunning>(
+    runtime: &DaemonRuntimePaths,
+    timeout_secs: u64,
+    send_signal: FSignal,
+    is_alive: FAlive,
+    ensure_running: FEnsure,
+    daemon_running: FDaemonRunning,
+    timing: RestartTiming,
+) -> Result<()>
+where
+    FSignal: Fn(i32, i32) -> std::io::Result<()>,
+    FAlive: Fn(i32) -> bool,
+    FEnsure: Fn() -> Result<()>,
+    FDaemonRunning: Fn() -> bool,
+{
+    if runtime.pid_path.exists() {
+        match stop_daemon_with(
+            runtime,
+            timeout_secs,
+            &send_signal,
+            &is_alive,
+            timing.stop_poll_interval,
+        )? {
+            StopOutcome::Stopped { pid, already_dead } => {
+                if already_dead {
+                    println!("Daemon process {pid} no longer exists; cleaning up runtime files.");
+                } else {
+                    println!(
+                        "Sent SIGTERM to daemon (PID {pid}); waiting up to {timeout_secs}s for exit..."
+                    );
+                    println!("Daemon (PID {pid}) has stopped.");
+                }
+            }
+            StopOutcome::TimedOut { pid } => {
+                println!(
+                    "Sent SIGTERM to daemon (PID {pid}); waiting up to {timeout_secs}s for exit..."
+                );
+                println!(
+                    "Daemon (PID {pid}) did not stop within {timeout_secs}s after SIGTERM; escalating to SIGKILL."
+                );
+                send_signal(pid, libc::SIGKILL)
+                    .with_context(|| format!("failed to send SIGKILL to daemon process {pid}"))?;
+                let deadline = Instant::now() + Duration::from_secs(timeout_secs.max(1));
+                while Instant::now() < deadline {
+                    if !is_alive(pid) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                if is_alive(pid) {
+                    anyhow::bail!("daemon process {pid} remained alive after SIGKILL escalation");
+                }
+                cleanup_runtime_files(runtime);
+            }
+        }
+
+        if !wait_for_runtime_files_absent(
+            runtime,
+            timing.runtime_absent_timeout,
+            timing.runtime_absent_poll_interval,
+        ) {
+            cleanup_runtime_files(runtime);
+        }
+    }
+
+    ensure_running().context("failed to autostart daemon after stop")?;
+    if daemon_running() {
         println!("Daemon restarted successfully.");
     } else {
         anyhow::bail!("daemon did not come back online after restart");
@@ -343,7 +686,7 @@ fn wait_for_session_dead(team_name: &str, agent_name: &str, timeout_secs: u64) -
 /// Execute daemon status command
 fn execute_status(args: StatusArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
-    let status_path = home_dir.join(".claude/daemon/status.json");
+    let status_path = daemon_status_path_for(&home_dir);
 
     // Check if status file exists
     if !status_path.exists() {
@@ -367,10 +710,17 @@ fn execute_status(args: StatusArgs) -> Result<()> {
     let stale_threshold_secs = 60;
     let is_stale = is_status_stale(&status.timestamp, stale_threshold_secs);
 
+    let logging_health = build_logging_health_contract(&status.logging, &home_dir);
+
     if args.json {
-        // Output as JSON with stale flag
+        // Output as JSON with stale flag and canonical logging schema.
         let mut output = serde_json::to_value(&status)?;
         if let Some(obj) = output.as_object_mut() {
+            obj.remove("logging");
+            obj.insert(
+                "logging_health".to_string(),
+                serde_json::to_value(&logging_health)?,
+            );
             obj.insert("stale".to_string(), serde_json::Value::Bool(is_stale));
         }
         println!("{}", serde_json::to_string_pretty(&output)?);
@@ -446,6 +796,25 @@ fn execute_status(args: StatusArgs) -> Result<()> {
         }
         if let Some(last_error) = &status.logging.last_error {
             println!("  last_error:      {last_error}");
+        }
+        println!("  schema_version:  {}", logging_health.schema_version);
+        println!("  log_root:        {}", logging_health.log_root);
+        println!(
+            "  dropped_events_total: {}",
+            logging_health.dropped_events_total
+        );
+        println!("  spool_file_count: {}", logging_health.spool_file_count);
+        if let Some(oldest_spool_age) = logging_health.oldest_spool_age_seconds {
+            println!("  oldest_spool_age_seconds: {oldest_spool_age}s");
+        }
+        if let Some(last_code) = &logging_health.last_error.code {
+            println!("  last_error.code: {last_code}");
+        }
+        if let Some(last_message) = &logging_health.last_error.message {
+            println!("  last_error.message: {last_message}");
+        }
+        if let Some(last_at) = &logging_health.last_error.at {
+            println!("  last_error.at:   {last_at}");
         }
     }
 
@@ -531,6 +900,8 @@ enum PluginStatusKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+    use tempfile::TempDir;
 
     #[test]
     fn test_format_duration() {
@@ -565,5 +936,346 @@ mod tests {
     #[test]
     fn test_is_status_stale_invalid() {
         assert!(is_status_stale("not-a-timestamp", 60));
+    }
+
+    #[cfg(unix)]
+    fn temp_runtime_paths(tmp: &TempDir) -> DaemonRuntimePaths {
+        DaemonRuntimePaths {
+            pid_path: tmp.path().join("atm-daemon.pid"),
+            socket_path: tmp.path().join("atm-daemon.sock"),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_stop_daemon_cleans_socket_when_sigterm_reports_esrch() {
+        let tmp = TempDir::new().expect("temp dir");
+        let runtime = temp_runtime_paths(&tmp);
+        std::fs::write(&runtime.pid_path, "4242\n").expect("write pid");
+        std::fs::write(&runtime.socket_path, "").expect("write socket");
+
+        let outcome = stop_daemon_with(
+            &runtime,
+            1,
+            |_pid, _signal| Err(std::io::Error::from_raw_os_error(libc::ESRCH)),
+            |_pid| true,
+            Duration::from_millis(1),
+        )
+        .expect("stop should succeed");
+
+        assert_eq!(
+            outcome,
+            StopOutcome::Stopped {
+                pid: 4242,
+                already_dead: true
+            }
+        );
+        assert!(!runtime.pid_path.exists(), "pid file should be removed");
+        assert!(
+            !runtime.socket_path.exists(),
+            "socket file should be removed on ESRCH cleanup"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_stop_daemon_times_out_when_pid_stays_alive() {
+        let tmp = TempDir::new().expect("temp dir");
+        let runtime = temp_runtime_paths(&tmp);
+        std::fs::write(&runtime.pid_path, "4242\n").expect("write pid");
+
+        let outcome = stop_daemon_with(
+            &runtime,
+            1,
+            |_pid, _signal| Ok(()),
+            |_pid| true,
+            Duration::from_millis(1),
+        )
+        .expect("stop should return timeout outcome");
+
+        assert_eq!(outcome, StopOutcome::TimedOut { pid: 4242 });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_stop_daemon_removes_runtime_files() {
+        let tmp = TempDir::new().expect("temp dir");
+        let runtime = temp_runtime_paths(&tmp);
+        std::fs::write(&runtime.pid_path, "4242\n").expect("write pid");
+        std::fs::write(&runtime.socket_path, "").expect("write socket");
+
+        let checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let outcome = stop_daemon_with(
+            &runtime,
+            1,
+            |_pid, _signal| Ok(()),
+            {
+                let checks = std::sync::Arc::clone(&checks);
+                move |_pid| checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+            },
+            Duration::from_millis(1),
+        )
+        .expect("stop should succeed");
+
+        assert_eq!(
+            outcome,
+            StopOutcome::Stopped {
+                pid: 4242,
+                already_dead: false
+            }
+        );
+        assert!(!runtime.pid_path.exists(), "pid file should be removed");
+        assert!(
+            !runtime.socket_path.exists(),
+            "socket file should be removed"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_wait_for_runtime_files_absent_returns_true_after_cleanup() {
+        let tmp = TempDir::new().expect("temp dir");
+        let runtime = temp_runtime_paths(&tmp);
+        std::fs::write(&runtime.pid_path, "4242\n").expect("write pid");
+        std::fs::write(&runtime.socket_path, "").expect("write socket");
+
+        let pid_path = runtime.pid_path.clone();
+        let socket_path = runtime.socket_path.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            let _ = std::fs::remove_file(pid_path);
+            let _ = std::fs::remove_file(socket_path);
+        });
+
+        assert!(wait_for_runtime_files_absent(
+            &runtime,
+            Duration::from_millis(200),
+            Duration::from_millis(5),
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_daemon_restart_produces_new_pid() {
+        let tmp = TempDir::new().expect("temp dir");
+        let runtime = temp_runtime_paths(&tmp);
+        std::fs::write(&runtime.pid_path, "4242\n").expect("write pid");
+        std::fs::write(&runtime.socket_path, "").expect("write socket");
+
+        let signals = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let alive_checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let restarted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        restart_daemon_with(
+            &runtime,
+            1,
+            {
+                let signals = std::sync::Arc::clone(&signals);
+                move |pid, signal| {
+                    signals.lock().unwrap().push((pid, signal));
+                    Ok(())
+                }
+            },
+            {
+                let alive_checks = std::sync::Arc::clone(&alive_checks);
+                move |_pid| alive_checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+            },
+            {
+                let runtime = runtime.clone();
+                let restarted = std::sync::Arc::clone(&restarted);
+                move || {
+                    std::fs::write(&runtime.pid_path, "5252\n").expect("write new pid");
+                    std::fs::write(&runtime.socket_path, "").expect("write new socket");
+                    restarted.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+            || true,
+            RestartTiming {
+                stop_poll_interval: Duration::from_millis(1),
+                runtime_absent_timeout: Duration::from_millis(50),
+                runtime_absent_poll_interval: Duration::from_millis(1),
+            },
+        )
+        .expect("restart should succeed");
+
+        assert_eq!(*signals.lock().unwrap(), vec![(4242, libc::SIGTERM)]);
+        assert_eq!(
+            std::fs::read_to_string(&runtime.pid_path).unwrap(),
+            "5252\n",
+            "restart should leave the new daemon pid file in place"
+        );
+        assert!(
+            runtime.socket_path.exists(),
+            "restart should recreate socket"
+        );
+        assert!(restarted.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[serial]
+    fn test_expected_daemon_binary_path_honors_atm_daemon_bin_override() {
+        let old = std::env::var_os("ATM_DAEMON_BIN");
+        let expected = std::env::temp_dir().join("custom-atm-daemon");
+        unsafe {
+            std::env::set_var("ATM_DAEMON_BIN", &expected);
+        }
+        assert_eq!(expected_daemon_binary_path(), Some(expected));
+        match old {
+            Some(value) => unsafe { std::env::set_var("ATM_DAEMON_BIN", value) },
+            None => unsafe { std::env::remove_var("ATM_DAEMON_BIN") },
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_process_executable_matches_parts_checks_exe_and_cmd() {
+        let expected = std::env::temp_dir().join("atm-daemon");
+        let other = std::env::temp_dir().join("other");
+        assert!(process_executable_matches_parts(
+            Some(&expected),
+            None,
+            &expected
+        ));
+        assert!(process_executable_matches_parts(
+            None,
+            Some(&std::ffi::OsString::from(expected.clone())),
+            &expected
+        ));
+        assert!(!process_executable_matches_parts(
+            None,
+            Some(&std::ffi::OsString::from(other)),
+            &expected
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_matching_daemon_process_ids_empty_for_missing_path() {
+        let missing = PathBuf::from("/definitely/missing/atm-daemon-test");
+        assert!(matching_daemon_process_ids(&missing).is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_stop_matching_daemon_processes_fast_path_when_no_pids() {
+        let tmp = TempDir::new().expect("temp dir");
+        let runtime = temp_runtime_paths(&tmp);
+
+        let killed = stop_matching_daemon_processes_for_pids(
+            Vec::new(),
+            &runtime,
+            |_pid, _signal| Ok(()),
+            |_pid| true,
+            RestartTiming {
+                stop_poll_interval: Duration::from_millis(1),
+                runtime_absent_timeout: Duration::from_millis(1),
+                runtime_absent_poll_interval: Duration::from_millis(1),
+            },
+        )
+        .expect("empty pid list should be a no-op");
+
+        assert!(killed.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_stop_matching_daemon_processes_all_exit_before_sigkill() {
+        let tmp = TempDir::new().expect("temp dir");
+        let runtime = temp_runtime_paths(&tmp);
+        std::fs::write(&runtime.pid_path, "1111\n").expect("write pid");
+        std::fs::write(&runtime.socket_path, "").expect("write socket");
+
+        let signals = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let alive_checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pids = vec![1111, 2222];
+
+        let stopped = stop_matching_daemon_processes_for_pids(
+            pids.clone(),
+            &runtime,
+            {
+                let signals = std::sync::Arc::clone(&signals);
+                move |pid, signal| {
+                    signals.lock().unwrap().push((pid, signal));
+                    Ok(())
+                }
+            },
+            {
+                let alive_checks = std::sync::Arc::clone(&alive_checks);
+                move |_pid| alive_checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2
+            },
+            RestartTiming {
+                stop_poll_interval: Duration::from_millis(1),
+                runtime_absent_timeout: Duration::from_millis(1),
+                runtime_absent_poll_interval: Duration::from_millis(1),
+            },
+        )
+        .expect("all pids should exit after SIGTERM");
+
+        assert_eq!(stopped, pids);
+        assert_eq!(
+            *signals.lock().unwrap(),
+            vec![(1111, libc::SIGTERM), (2222, libc::SIGTERM)]
+        );
+        assert!(!runtime.pid_path.exists());
+        assert!(!runtime.socket_path.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_stop_matching_daemon_processes_bails_when_sigkill_survivor_remains() {
+        let tmp = TempDir::new().expect("temp dir");
+        let runtime = temp_runtime_paths(&tmp);
+        let signals = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let err = stop_matching_daemon_processes_for_pids(
+            vec![3333],
+            &runtime,
+            {
+                let signals = std::sync::Arc::clone(&signals);
+                move |pid, signal| {
+                    signals.lock().unwrap().push((pid, signal));
+                    Ok(())
+                }
+            },
+            |_pid| true,
+            RestartTiming {
+                stop_poll_interval: Duration::from_millis(1),
+                runtime_absent_timeout: Duration::from_millis(1),
+                runtime_absent_poll_interval: Duration::from_millis(1),
+            },
+        )
+        .expect_err("surviving pid should fail cleanup");
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains("3333"));
+        assert_eq!(
+            *signals.lock().unwrap(),
+            vec![(3333, libc::SIGTERM), (3333, libc::SIGKILL)]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_stop_matching_daemon_processes_errors_on_non_esrch_sigterm_failure() {
+        let tmp = TempDir::new().expect("temp dir");
+        let runtime = temp_runtime_paths(&tmp);
+
+        let err = stop_matching_daemon_processes_for_pids(
+            vec![4444],
+            &runtime,
+            |_pid, _signal| Err(std::io::Error::from_raw_os_error(libc::EPERM)),
+            |_pid| true,
+            RestartTiming {
+                stop_poll_interval: Duration::from_millis(1),
+                runtime_absent_timeout: Duration::from_millis(1),
+                runtime_absent_poll_interval: Duration::from_millis(1),
+            },
+        )
+        .expect_err("unexpected SIGTERM error should fail");
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains("failed to send SIGTERM to daemon process 4444"));
     }
 }

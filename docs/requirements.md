@@ -1274,9 +1274,12 @@ Required behavior:
   `process_id`) directly in team `config.json`; these are daemon-owned via
   session registry.
 - On daemon cold start (or when no live registry record exists for a configured
-  member), daemon may bootstrap a session-registry record from roster hints only
-  when `processId` is present and alive. Backend validation mismatch is
-  diagnostic-only and must not block bootstrap registration.
+  member), daemon bootstraps a session-registry record via two strategies: (1)
+  from roster hints when `processId` is present and alive (primary path), and
+  (2) from existing session files when roster hints are absent (secondary path).
+  During the session-file bootstrap scan, daemon prunes dead, stale, or corrupt
+  session files as a side-effect. Backend validation mismatch is diagnostic-only
+  and must not block bootstrap registration.
 - `atm send` PID fallback detection must use the same strict backend rules as the
   daemon validator (`claude=basename(comm):claude`,
   `codex=basename(comm):codex`, `gemini=basename(comm):node+args~gemini`) and
@@ -1293,9 +1296,9 @@ Required behavior:
 |----------|-------|----------------------|----------------|-----------|
 | `isActive` | Hook/CLI activity writers + daemon timeout reconciler | Team `config.json` member field (`isActive`) | `true`, `false`, `null` | Busy/idle hint only. Not a liveness source. |
 | `lastActive` | Hook/CLI activity writers + daemon timeout reconciler | Team `config.json` member field (`lastActive`) | `u64` epoch-millis or `null` | Last activity timestamp only. Not a liveness source. |
-| `session_id` | Daemon session registry (`session_start`/`session_end`) | `.claude/daemon/session-registry.json` | Non-empty string or absent | Session identity tracked by daemon lifecycle registry. |
-| `process_id` | Daemon session registry | `.claude/daemon/session-registry.json` | Integer PID (`>1`) or absent | Process identity used for liveness checks. |
-| `last_alive_at` | Daemon session registry + liveness reconciler | `.claude/daemon/session-registry.json` and daemon canonical snapshot | RFC3339 UTC timestamp or absent | Most recent point-in-time where daemon confirmed process alive. |
+| `session_id` | Daemon session registry (`session_start`/`session_end`) | `.atm/daemon/session-registry.json` | Non-empty string or absent | Session identity tracked by daemon lifecycle registry. |
+| `process_id` | Daemon session registry | `.atm/daemon/session-registry.json` | Integer PID (`>1`) or absent | Process identity used for liveness checks. |
+| `last_alive_at` | Daemon session registry + liveness reconciler | `.atm/daemon/session-registry.json` and daemon canonical snapshot | RFC3339 UTC timestamp or absent | Most recent point-in-time where daemon confirmed process alive. |
 | `status` (`state`) | Daemon canonical snapshot derivation | Daemon socket payload (`list-agents` team-scoped) | `active`, `idle`, `offline`, `unknown` | Canonical liveness/status consumed by doctor/status/members. |
 | `activity` | Daemon canonical snapshot derivation | Daemon socket payload (`list-agents` team-scoped) | `busy`, `idle`, `unknown` | Canonical activity hint exposed separately from liveness. |
 
@@ -1640,7 +1643,7 @@ co_leaders = ["arch-atm", "quality-mgr"]
 
 | Variable | Description |
 |----------|-------------|
-| `ATM_HOME` | Home-root override used by canonical path resolution (`{ATM_HOME}/.config/atm`, `{ATM_HOME}/.claude`, etc.) |
+| `ATM_HOME` | Home-root override used by canonical path resolution (`{ATM_HOME}/.config/atm`, `{ATM_HOME}/.claude`, `{ATM_HOME}/.atm/daemon`, etc.) |
 | `ATM_TEAM` | Default team name |
 | `ATM_IDENTITY` | Sender identity |
 | `ATM_RUNTIME` | Runtime identity (`claude|codex|gemini|opencode`) set by `atm teams spawn` |
@@ -1690,7 +1693,7 @@ Rationale:
 
 Recommended policy:
 - Emit a lightweight JSON event for daemon consumption (for example:
-  `${ATM_HOME:-$HOME}/.claude/daemon/hooks/events.jsonl`).
+  `${ATM_HOME:-$HOME}/.atm/daemon/hooks/events.jsonl`).
 - Include at least: `type`, `agent`, `team`, `session_id`, `received_at`.
 - Keep this hook non-blocking and fail-open (`exit 0` on relay errors).
 
@@ -1886,14 +1889,22 @@ CLI must ensure daemon availability before executing daemon-backed commands, inc
 
 If daemon is unreachable, CLI attempts auto-start once per command invocation.
 
+#### Directory Taxonomy
+
+ATM runtime data is split across three root directories under `ATM_HOME`:
+
+- `${ATM_HOME}/.atm/daemon/` — ATM daemon runtime files: process lock (`daemon.lock`, `daemon.lock.meta.json`), startup lock (`daemon-start.lock`), Unix socket (`atm-daemon.sock`), PID file (`atm-daemon.pid`), status snapshot (`status.json`), dedup state, session registry (`session-registry.json`), and lifecycle event spool (`hooks/events.jsonl`).
+- `${ATM_HOME}/.claude/` — Claude Code team and task data: team inboxes, team `config.json`, Claude Code task files.
+- `${ATM_HOME}/.config/atm/` — User configuration (`config.toml`), persistent logs (`atm.log.jsonl`), message spool, and archive.
+
 #### Single-Instance Contract
 
 - Daemon startup acquires an exclusive process lock in
-  `${home_dir}/.config/atm/daemon.lock`, where `home_dir` is resolved via
+  `${home_dir}/.atm/daemon/daemon.lock`, where `home_dir` is resolved via
   `get_home_dir()` (`ATM_HOME` when set, otherwise platform home directory).
 - If lock acquisition fails, new daemon process exits immediately (existing daemon is authoritative).
 - Socket path is fixed per user scope:
-  - Unix/macOS: `${ATM_HOME:-$HOME/.claude}/daemon/atm-daemon.sock` (existing convention)
+  - Unix/macOS: `${ATM_HOME}/.atm/daemon/atm-daemon.sock`
   - Windows: named-pipe equivalent (canonical path documented in daemon crate)
 - CLI must never spawn a second daemon when lock/socket indicate an existing healthy instance.
 - Daemon startup MUST acquire `daemon.lock` before mutating socket or PID files.
@@ -1963,7 +1974,7 @@ Scalability expectation:
 `teams resume` handoff logic depends on daemon truth for active lead session
 identity and liveness.
 
-- **Storage path**: `${ATM_HOME:-$HOME}/.claude/daemon/session-registry.json`
+- **Storage path**: `${ATM_HOME:-$HOME}/.atm/daemon/session-registry.json`
 - **Ownership**: daemon is sole writer; CLI reads via daemon socket API only.
 - **Update sources**:
   - `hook-event` `session_start`: upsert record (`session_id`, `process_id`, `state=active`, `updated_at`)
@@ -2584,10 +2595,17 @@ Core behavior contract:
 Connectivity and availability contract:
 - Invalid plugin configuration disables monitoring (`disabled_config_error`)
   and must consume zero polling CPU until configuration is corrected.
-- `validate_gh_monitor_config` MUST return `CONFIG_ERROR` when the `repo` field
-  is absent or empty in `[plugins.gh_monitor]`. A config with `enabled = true`
-  but no `repo` is invalid and MUST transition availability to
-  `disabled_config_error`. (See issue #471.)
+- `validate_gh_monitor_config` MUST return `CONFIG_ERROR` only when **both**
+  `ctx.system.repo` (git auto-detection) and `config.repo` (explicit config
+  field) are absent or empty. The repo requirement is satisfied by either path:
+  (1) git context resolved at daemon startup populates `ctx.system.repo` and
+  `[plugins.gh_monitor] repo` may remain unset — init proceeds using the
+  detected repo; (2) `[plugins.gh_monitor] repo` is explicitly configured and
+  git context is unavailable — init proceeds using the config-provided value
+  with the config file's directory as the report root. A config with
+  `enabled = true` where neither git context nor `config.repo` is present is
+  invalid and MUST transition availability to `disabled_config_error`.
+  (See issues #471 and #676.)
 - Transient provider/connectivity/auth/rate-limit failures transition monitor
   state to degraded and must emit both structured logs and ATM notifications to
   designated monitor recipients.

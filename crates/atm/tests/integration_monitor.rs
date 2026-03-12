@@ -10,6 +10,7 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     let workdir = temp_dir.path().join("workdir");
     std::fs::create_dir_all(&workdir).ok();
     cmd.env("ATM_HOME", temp_dir.path())
+        .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
         .env_remove("ATM_IDENTITY")
         .env_remove("ATM_CONFIG")
@@ -299,7 +300,7 @@ fn test_monitor_survives_daemon_unavailable() {
     setup_team(&temp_dir, "test-team");
 
     // Explicitly ensure no daemon artifacts exist in the test home.
-    let daemon_dir = temp_dir.path().join(".claude/daemon");
+    let daemon_dir = temp_dir.path().join(".atm/daemon");
     fs::create_dir_all(&daemon_dir).unwrap();
     // Do not create atm-daemon.pid or atm-daemon.sock — daemon is absent.
 

@@ -99,10 +99,8 @@ impl SchemaVersion {
     }
 
     fn cache_path() -> PathBuf {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home)
+        crate::home::get_home_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
             .join(".config")
             .join("atm")
             .join("claude-version.json")
@@ -137,6 +135,8 @@ impl SchemaVersion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+    use tempfile::TempDir;
 
     #[test]
     fn test_parse_version_pre_release() {
@@ -154,5 +154,26 @@ mod tests {
     fn test_parse_version_unknown() {
         let version = SchemaVersion::parse_version("invalid");
         assert_eq!(version, SchemaVersion::Unknown);
+    }
+
+    #[test]
+    #[serial]
+    fn test_cache_path_respects_atm_home() {
+        let temp = TempDir::new().expect("temp dir");
+        let original = std::env::var("ATM_HOME").ok();
+        unsafe {
+            std::env::set_var("ATM_HOME", temp.path());
+        }
+
+        let path = SchemaVersion::cache_path();
+
+        unsafe {
+            match original {
+                Some(value) => std::env::set_var("ATM_HOME", value),
+                None => std::env::remove_var("ATM_HOME"),
+            }
+        }
+
+        assert_eq!(path, temp.path().join(".config/atm/claude-version.json"));
     }
 }

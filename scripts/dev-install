@@ -1,0 +1,490 @@
+#!/usr/bin/env python3
+"""dev-install: Copy prebuilt ATM binaries into the active dev channel bin dir.
+
+This script does not build binaries and does not manage shell environment files.
+It simply copies a chosen binary source directory into the active dev install.
+
+Default source:
+    <repo>/target/release
+
+Examples:
+    dev-install
+    dev-install --source /opt/homebrew/bin --label release-0.43.4
+    dev-install --homebrew --label release-latest
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+BINARIES = [
+    "atm",
+    "atm-daemon",
+    "atm-agent-mcp",
+    "atm-tui",
+    "sc-compose",
+]
+
+ATM_DEV_ROOT = None
+BIN_DIR = None
+SEMVER_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+# Matches labels of the form "X.Y.Z-dev.N"
+DEV_LABEL_RE = re.compile(r"^(\d+\.\d+\.\d+)-dev\.(\d+)$")
+
+
+def die(msg: str) -> None:
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def run(cmd: list, *, capture: bool = False) -> subprocess.CompletedProcess:
+    display = " ".join(str(c) for c in cmd)
+    print(f"  $ {display}")
+    try:
+        return subprocess.run(cmd, check=True, capture_output=capture, text=True)
+    except subprocess.CalledProcessError as exc:
+        msg = f"command failed (exit {exc.returncode}): {display}"
+        if capture and exc.stderr:
+            msg += f"\n{exc.stderr.strip()}"
+        die(msg)
+
+
+def run_capture(cmd: list) -> str:
+    return run(cmd, capture=True).stdout.strip()
+
+
+def resolve_dev_paths() -> tuple:
+    global ATM_DEV_ROOT, BIN_DIR
+
+    if ATM_DEV_ROOT is not None and BIN_DIR is not None:
+        return ATM_DEV_ROOT, BIN_DIR
+
+    daemon_bin = os.environ.get("ATM_DAEMON_BIN", "").strip()
+    if not daemon_bin:
+        die("ATM_DAEMON_BIN must be set in the environment before running dev-install")
+
+    BIN_DIR = Path(daemon_bin).expanduser().resolve().parent
+    ATM_DEV_ROOT = BIN_DIR.parent
+    return ATM_DEV_ROOT, BIN_DIR
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def parse_semver(text: str) -> tuple[int, int, int] | None:
+    match = SEMVER_RE.search(text)
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def format_semver(version: tuple[int, int, int]) -> str:
+    major, minor, patch = version
+    return f"{major}.{minor}.{patch}"
+
+
+def read_binary_version(binary_path: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            [str(binary_path), "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+    output = (result.stdout or result.stderr).strip()
+    parsed = parse_semver(output)
+    return format_semver(parsed) if parsed else None
+
+
+def read_workspace_version() -> str:
+    """Return the version declared in [workspace.package] of the root Cargo.toml.
+
+    Uses ``cargo metadata`` so the result is always authoritative even when
+    workspace inheritance is involved.  The script's own directory is used as
+    the working directory so the correct workspace is always resolved.
+    """
+    scripts_dir = Path(__file__).resolve().parent
+    repo_root = scripts_dir.parent
+    try:
+        result = subprocess.run(
+            ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=str(repo_root),
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        die(f"cargo metadata failed: {exc}")
+
+    try:
+        meta = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        die(f"failed to parse cargo metadata output: {exc}")
+
+    # Find the package named "agent-team-mail" (the main CLI crate).
+    # All workspace members share this version via version.workspace = true.
+    packages = meta.get("packages", [])
+    for pkg in packages:
+        if pkg.get("name") == "agent-team-mail":
+            return pkg["version"]
+
+    # Fallback: use the first workspace member's version.
+    if packages:
+        return packages[0]["version"]
+
+    die("could not determine workspace version from cargo metadata")
+
+
+def next_milestone_version(source_dir: Path, current_manifest: Path) -> str:
+    """Return the next dev-build label derived from the workspace Cargo version.
+
+    Format: ``{cargo_version}-dev.{N}`` where N increments from the last
+    installed label.  If the workspace version has changed since the last
+    install the counter resets to 1.
+
+    Examples:
+        workspace=0.44.0, last label=0.44.0-dev.2  -> ``0.44.0-dev.3``
+        workspace=0.44.1, last label=0.44.0-dev.2  -> ``0.44.1-dev.1``
+        workspace=0.44.0, no prior install          -> ``0.44.0-dev.1``
+    """
+    cargo_version = read_workspace_version()
+
+    last_n = 0
+    atm_dev_root = current_manifest.parent
+
+    if atm_dev_root.exists():
+        for entry in atm_dev_root.iterdir():
+            if not entry.is_dir():
+                continue
+            m = DEV_LABEL_RE.match(entry.name)
+            if m and m.group(1) == cargo_version:
+                last_n = max(last_n, int(m.group(2)))
+
+    if current_manifest.exists():
+        try:
+            current = json.loads(current_manifest.read_text())
+            prev_label = current.get("milestone_version") or current.get("label", "")
+            if prev_label:
+                m = DEV_LABEL_RE.match(str(prev_label))
+                if m and m.group(1) == cargo_version:
+                    last_n = max(last_n, int(m.group(2)))
+        except (json.JSONDecodeError, OSError, ValueError):
+            pass
+
+    return f"{cargo_version}-dev.{last_n + 1}"
+
+
+def restart_daemon() -> None:
+    print("\n[restart daemon]")
+    _, bin_dir = resolve_dev_paths()
+    atm_bin = bin_dir / "atm"
+    daemon_bin = bin_dir / "atm-daemon"
+    if not atm_bin.exists():
+        die(f"atm binary not found at {atm_bin}")
+    if daemon_bin.exists():
+        kill_matching_daemons(daemon_bin)
+    try:
+        run([str(atm_bin), "daemon", "restart"])
+    except SystemExit:
+        print("  note: daemon restart returned non-zero (first-time start ok)")
+
+
+def matching_pids_for_binary(binary_path: Path) -> list[int]:
+    result = subprocess.run(
+        ["ps", "-Ao", "pid=,args="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        die(f"ps failed while searching for {binary_path}: {result.stderr.strip()}")
+    pids = []
+    for line in result.stdout.splitlines():
+        line = line.strip("\n")
+        if not line or str(binary_path) not in line:
+            continue
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        pid_str, args = parts
+        if args.strip() != str(binary_path):
+            continue
+        try:
+            pid = int(pid_str)
+        except ValueError:
+            continue
+        if pid > 1:
+            pids.append(pid)
+    return pids
+
+
+def kill_matching_daemons(binary_path: Path) -> None:
+    pids = matching_pids_for_binary(binary_path)
+    if not pids:
+        print(f"  no existing daemon processes match {binary_path}")
+        return
+
+    print(f"  killing {len(pids)} existing daemon process(es) for {binary_path}")
+    for sig in ("TERM", "KILL"):
+        if sig == "TERM":
+            for pid in pids:
+                result = subprocess.run(["kill", f"-{sig}", str(pid)], check=False)
+                if result.returncode not in (0, 1):
+                    die(f"kill -{sig} {pid} failed with exit {result.returncode}")
+            time.sleep(1)
+        remaining = []
+        for pid in pids:
+            if sig == "KILL":
+                result = subprocess.run(["kill", f"-{sig}", str(pid)], check=False)
+                if result.returncode not in (0, 1):
+                    die(f"kill -{sig} {pid} failed with exit {result.returncode}")
+            poll = subprocess.run(["kill", "-0", str(pid)], check=False)
+            if poll.returncode == 0:
+                remaining.append(pid)
+        pids = remaining
+        if not pids:
+            break
+    if pids:
+        die(f"failed to stop existing daemon process(es): {', '.join(str(pid) for pid in pids)}")
+
+
+def verify_install() -> bool:
+    print("\n[post-install verification]")
+    _, bin_dir = resolve_dev_paths()
+    checks = [
+        ([str(bin_dir / "atm"), "daemon", "status"], "daemon status"),
+        ([str(bin_dir / "atm"), "--version"], "atm --version"),
+        ([str(bin_dir / "atm-daemon"), "--version"], "atm-daemon --version"),
+        ([str(bin_dir / "sc-compose"), "--version"], "sc-compose --version"),
+    ]
+    all_pass = True
+    for cmd, label in checks:
+        try:
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            line = (result.stdout or result.stderr).strip().splitlines()[0]
+            print(f"  [PASS] {label}: {line}")
+        except (subprocess.CalledProcessError, FileNotFoundError, IndexError) as exc:
+            print(f"  [FAIL] {label}: {exc}")
+            all_pass = False
+
+    # Smoke-check that the installed binaries report the workspace Cargo version.
+    # This is non-fatal: pre-release builds may intentionally carry a different
+    # embedded version, but a mismatch is worth surfacing clearly.
+    print("\n[version consistency check]")
+    try:
+        cargo_version = read_workspace_version()
+        for binary_name in ("atm", "atm-daemon"):
+            binary_path = bin_dir / binary_name
+            installed_version = read_binary_version(binary_path)
+            if installed_version is None:
+                print(f"  [WARN] {binary_name} --version: could not parse version string")
+            elif installed_version == cargo_version:
+                print(f"  [PASS] {binary_name} version matches workspace: {installed_version}")
+            else:
+                print(
+                    f"  [WARN] {binary_name} version mismatch: "
+                    f"binary={installed_version}, workspace={cargo_version}"
+                )
+    except SystemExit:
+        # read_workspace_version() calls die() on failure; treat as non-fatal here.
+        print("  [WARN] could not read workspace Cargo version for consistency check")
+
+    return all_pass
+
+
+def codesign_binary(path: Path) -> None:
+    """Re-sign with ad-hoc signature on macOS to satisfy AMFI CT requirements."""
+    if sys.platform != "darwin":
+        return
+    codesign = shutil.which("codesign")
+    if not codesign:
+        return
+    result = subprocess.run(
+        [codesign, "--sign", "-", "--force", str(path)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"  warning: codesign failed for {path.name}: {result.stderr.strip()}")
+    else:
+        print(f"  codesigned {path.name}")
+
+
+def copy_binaries(src_dir: Path, dst_dir: Path) -> None:
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for name in BINARIES:
+        src = src_dir / name
+        dst = dst_dir / name
+        shutil.copy2(src, dst)
+        dst.chmod(0o755)
+        codesign_binary(dst)
+        print(f"  installed {name}")
+
+
+def save_current_backup(current_label: str) -> None:
+    atm_dev_root, bin_dir = resolve_dev_paths()
+    backup_dir = atm_dev_root / current_label / "bin"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    for name in BINARIES:
+        src = bin_dir / name
+        if src.exists():
+            shutil.copy2(src, backup_dir / name)
+    current_manifest = atm_dev_root / "manifest.json"
+    if current_manifest.exists():
+        shutil.copy2(current_manifest, atm_dev_root / current_label / "manifest.json")
+    print(f"  saved to {atm_dev_root / current_label}/")
+
+
+def write_version_snapshot(label: str, src_dir: Path, manifest: dict, source_dir: Path) -> None:
+    atm_dev_root, _ = resolve_dev_paths()
+    version_dir = atm_dev_root / label
+    snapshot_bin = version_dir / "bin"
+    snapshot_bin.mkdir(parents=True, exist_ok=True)
+    for name in BINARIES:
+        shutil.copy2(src_dir / name, snapshot_bin / name)
+        (snapshot_bin / name).chmod(0o755)
+    (version_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    (version_dir / "source.txt").write_text(str(source_dir) + "\n")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Copy prebuilt ATM binaries into the active dev channel.",
+    )
+    scripts_dir = Path(__file__).resolve().parent
+    default_repo = scripts_dir.parent
+    parser.add_argument(
+        "--source",
+        type=Path,
+        default=default_repo / "target" / "release",
+        metavar="PATH",
+        help="directory containing prebuilt binaries to install",
+    )
+    parser.add_argument(
+        "--homebrew",
+        "--restore",
+        action="store_true",
+        help="copy binaries from the installed Homebrew release instead of --source",
+    )
+    parser.add_argument(
+        "--label",
+        metavar="LABEL",
+        help="version label to record for this install (default: incremented milestone version)",
+    )
+    return parser.parse_args()
+
+
+def resolve_source_dir(args: argparse.Namespace) -> Path:
+    if not args.homebrew:
+        return args.source.expanduser().resolve()
+
+    if shutil.which("brew") is None:
+        die("brew is not installed or not on PATH")
+
+    prefix = run_capture(["brew", "--prefix", "agent-team-mail"])
+    if not prefix:
+        die("failed to resolve Homebrew prefix for agent-team-mail")
+
+    source_dir = Path(prefix).expanduser().resolve() / "bin"
+    if not source_dir.is_dir():
+        die(f"Homebrew bin directory not found: {source_dir}")
+    return source_dir
+
+
+def main() -> None:
+    args = parse_args()
+    source_dir = resolve_source_dir(args)
+    atm_dev_root, bin_dir = resolve_dev_paths()
+
+    if not source_dir.is_dir():
+        die(f"source directory not found: {source_dir}")
+
+    binary_version = read_binary_version(source_dir / "atm")
+    milestone_version = next_milestone_version(source_dir, atm_dev_root / "manifest.json")
+    label = args.label or milestone_version
+
+    print(f"[dev-install] source: {source_dir}")
+    print(f"[dev-install] bin:    {bin_dir}")
+    print(f"[dev-install] label:  {label}")
+    if binary_version:
+        print(f"[dev-install] binary version:    {binary_version}")
+    print(f"[dev-install] milestone version: {milestone_version}")
+
+    print("\n[verify source binaries]")
+    binary_entries = []
+    for name in BINARIES:
+        src = source_dir / name
+        if not src.exists():
+            die(f"expected binary not found: {src}")
+        print(f"  found {name}")
+        binary_entries.append({"name": name, "sha256": sha256_file(src)})
+
+    current_manifest = atm_dev_root / "manifest.json"
+    if bin_dir.exists() and any((bin_dir / name).exists() for name in BINARIES):
+        if current_manifest.exists():
+            try:
+                current = json.loads(current_manifest.read_text())
+                previous_label = current.get("label", "unknown")
+            except (json.JSONDecodeError, OSError):
+                previous_label = "unknown"
+        else:
+            previous_label = f"pre-{label}"
+
+        print(f"\n[backup current -> {previous_label}/]")
+        save_current_backup(previous_label)
+        (atm_dev_root / "previous.txt").write_text(previous_label + "\n")
+
+    manifest = {
+        "label": label,
+        "source_dir": str(source_dir),
+        "installed_at": datetime.now(timezone.utc).isoformat(),
+        "binary_version": binary_version,
+        "milestone_version": milestone_version,
+        "binaries": binary_entries,
+    }
+
+    print(f"\n[save version snapshot -> {atm_dev_root / label}]")
+    write_version_snapshot(label, source_dir, manifest, source_dir)
+
+    print(f"\n[install binaries -> {bin_dir}]")
+    copy_binaries(source_dir, bin_dir)
+
+    (atm_dev_root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    (atm_dev_root / "current.txt").write_text(label + "\n")
+
+    restart_daemon()
+    all_pass = verify_install()
+
+    print("\n" + "=" * 60)
+    print("dev-install complete")
+    print(f"  label:        {label}")
+    print(f"  binary:       {binary_version or 'unknown'}")
+    print(f"  milestone:    {milestone_version}")
+    print(f"  source:       {source_dir}")
+    print(f"  dev root:     {atm_dev_root}")
+    print(f"  bin:          {bin_dir}")
+    print(f"  verification: {'ALL PASS' if all_pass else 'SOME CHECKS FAILED'}")
+    if not all_pass:
+        print("\nTo rollback:  scripts/dev-rollback")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

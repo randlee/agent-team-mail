@@ -964,15 +964,11 @@ fn print_pr_list_summary(summary: &GhPrListSummary) {
 
     for item in &summary.items {
         let draft = if item.draft { "draft" } else { "ready" };
-        let ci_label = format!(
-            "{} {}/{}",
-            item.ci.state.to_uppercase(),
-            item.ci.pass,
-            ci_effective_total(&item.ci)
-        );
+        let ci_label = render_pr_list_ci_label(&item.ci, &item.merge);
+        let merge_label = render_pr_list_merge_label(&item.merge);
         println!(
             "#{} [{}] [ci:{}] [merge:{}] [review:{}] {}",
-            item.number, draft, ci_label, item.merge, item.review, item.title
+            item.number, draft, ci_label, merge_label, item.review, item.title
         );
     }
 }
@@ -1049,6 +1045,33 @@ fn print_pr_report_summary(report: &GhPrReportSummary) {
 
 fn ci_effective_total(ci: &GhCiRollup) -> u64 {
     ci.total.saturating_sub(ci.skip)
+}
+
+fn is_merge_conflict_status(merge: &str) -> bool {
+    matches!(
+        merge.trim().to_ascii_lowercase().as_str(),
+        "dirty" | "conflicting" | "conflict"
+    )
+}
+
+fn render_pr_list_merge_label(merge: &str) -> String {
+    if is_merge_conflict_status(merge) {
+        "CONFLICT ⚠".to_string()
+    } else {
+        merge.to_string()
+    }
+}
+
+fn render_pr_list_ci_label(ci: &GhCiRollup, merge: &str) -> String {
+    if ci.state == "fail" && is_merge_conflict_status(merge) && ci.fail > 0 && ci.pass == 0 {
+        return "BLOCKED — merge conflict".to_string();
+    }
+    format!(
+        "{} {}/{}",
+        ci.state.to_uppercase(),
+        ci.pass,
+        ci_effective_total(ci)
+    )
 }
 
 fn render_ci_summary(ci: &GhCiRollup) -> String {
@@ -2057,6 +2080,39 @@ mod tests {
                 .iter()
                 .any(|reason| reason.contains("UNKNOWN"))
         );
+    }
+
+    #[test]
+    fn render_pr_list_labels_highlight_merge_conflicts() {
+        let ci = GhCiRollup {
+            state: "fail".to_string(),
+            total: 1,
+            pass: 0,
+            fail: 1,
+            pending: 0,
+            skip: 0,
+            neutral: 0,
+        };
+        assert_eq!(render_pr_list_merge_label("dirty"), "CONFLICT ⚠");
+        assert_eq!(
+            render_pr_list_ci_label(&ci, "dirty"),
+            "BLOCKED — merge conflict"
+        );
+    }
+
+    #[test]
+    fn render_pr_list_labels_preserve_non_conflict_ci_summary() {
+        let ci = GhCiRollup {
+            state: "pending".to_string(),
+            total: 2,
+            pass: 1,
+            fail: 0,
+            pending: 1,
+            skip: 0,
+            neutral: 0,
+        };
+        assert_eq!(render_pr_list_merge_label("clean"), "clean");
+        assert_eq!(render_pr_list_ci_label(&ci, "clean"), "PENDING 1/2");
     }
 
     #[test]
