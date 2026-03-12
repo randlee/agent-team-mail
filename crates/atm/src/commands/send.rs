@@ -21,7 +21,7 @@ use crate::util::addressing::parse_address;
 use crate::util::caller_identity::resolve_caller_session_id_optional;
 use crate::util::file_policy::check_file_reference;
 use crate::util::hook_identity::{read_hook_file, read_hook_file_identity};
-use crate::util::settings::get_home_dir;
+use crate::util::settings::{get_home_dir, teams_root_dir_for};
 
 /// Send a message to a specific agent
 #[derive(Args, Debug)]
@@ -121,7 +121,7 @@ pub fn execute(args: SendArgs) -> Result<()> {
     }
 
     // Resolve team directory
-    let team_dir = home_dir.join(".claude/teams").join(&team_name);
+    let team_dir = teams_root_dir_for(&home_dir).join(&team_name);
     if !team_dir.exists() {
         anyhow::bail!("Team '{team_name}' not found (directory {team_dir:?} doesn't exist)");
     }

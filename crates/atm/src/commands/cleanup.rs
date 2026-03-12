@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::commands::teams;
-use crate::util::settings::get_home_dir;
+use crate::util::settings::{get_home_dir, teams_root_dir_for};
 
 /// Apply retention policies to clean up old messages
 #[derive(Args, Debug)]
@@ -81,7 +81,7 @@ pub fn execute(args: CleanupArgs) -> Result<()> {
         );
     }
 
-    let teams_dir = home_dir.join(".claude/teams");
+    let teams_dir = teams_root_dir_for(&home_dir);
     if !teams_dir.exists() {
         let display = teams_dir.display();
         anyhow::bail!("Teams directory not found at {display}");
@@ -289,8 +289,7 @@ fn send_shutdown_request(home_dir: &Path, team_name: &str, agent_name: &str) -> 
         unknown_fields: HashMap::new(),
     };
 
-    let inbox_path = home_dir
-        .join(".claude/teams")
+    let inbox_path = teams_root_dir_for(home_dir)
         .join(team_name)
         .join("inboxes")
         .join(format!("{agent_name}.json"));
@@ -355,7 +354,7 @@ fn cleanup_team(
     retention_config: &agent_team_mail_core::config::RetentionConfig,
     dry_run: bool,
 ) -> Result<()> {
-    let team_dir = home_dir.join(".claude/teams").join(team_name);
+    let team_dir = teams_root_dir_for(home_dir).join(team_name);
 
     if !team_dir.exists() {
         println!("Team '{team_name}' not found, skipping");

@@ -930,8 +930,7 @@ fn authorize_hook_event(
     let home_dir = agent_team_mail_core::home::get_home_dir()
         .map_err(|e| format!("failed to resolve home directory: {e}"))?;
 
-    let config_path = home_dir
-        .join(".claude/teams")
+    let config_path = agent_team_mail_core::home::teams_root_dir_for(&home_dir)
         .join(team)
         .join("config.json");
     let content = std::fs::read_to_string(&config_path)
@@ -5058,7 +5057,9 @@ fn handle_session_query_team(
                 );
             }
         };
-        let config_path = home.join(".claude/teams").join(&team).join("config.json");
+        let config_path = agent_team_mail_core::home::teams_root_dir_for(&home)
+            .join(&team)
+            .join("config.json");
         let content = match std::fs::read_to_string(&config_path) {
             Ok(c) => c,
             Err(_) => {
@@ -5478,7 +5479,9 @@ fn load_team_members(
     home: &std::path::Path,
     team: &str,
 ) -> Option<Vec<agent_team_mail_core::schema::AgentMember>> {
-    let config_path = home.join(".claude/teams").join(team).join("config.json");
+    let config_path = agent_team_mail_core::home::teams_root_dir_for(home)
+        .join(team)
+        .join("config.json");
     let content = std::fs::read_to_string(config_path).ok()?;
     let config: agent_team_mail_core::schema::TeamConfig = serde_json::from_str(&content).ok()?;
     Some(config.members)
@@ -5587,7 +5590,9 @@ fn scan_live_session_files(
     team: &str,
     member_name: &str,
 ) -> Vec<SessionFileCandidate> {
-    let sessions_dir = home.join(".claude/teams").join(team).join("sessions");
+    let sessions_dir = agent_team_mail_core::home::teams_root_dir_for(home)
+        .join(team)
+        .join("sessions");
     let Ok(entries) = std::fs::read_dir(&sessions_dir) else {
         return Vec::new();
     };

@@ -2113,7 +2113,11 @@ Key commits:
 
 | Sprint | Name | PR | Branch | Issues | Status |
 |---|---|---|---|---|---|
-| BF.1 | Backup/Restore Hardening | - | `fix/backup-restore-hardening` | #649, #650, #651 | IN PROGRESS |
+| BF.1 | Backup/Restore Hardening | [#653](https://github.com/randlee/agent-team-mail/pull/653) | `fix/backup-restore-hardening` | #649, #650, #651 | MERGED |
+| BF.2 | SSoT Path Helpers + ATM_LOG_PATH Removal | [#674](https://github.com/randlee/agent-team-mail/pull/674) | `fix/ssot-path-helpers-663-664-665` | #663, #664, #665 | IN PROGRESS (CI) |
+| BF.3 | UX/Docs/Test Backlog | [#675](https://github.com/randlee/agent-team-mail/pull/675) | `fix/ux-docs-test-652-645-656` | #652, #645, #656 | MERGED |
+| BF.4 | gh_monitor config fallback | [#677](https://github.com/randlee/agent-team-mail/pull/677) | `fix/issue-676-gh-monitor-config-repo-fallback` | #676 | QA FAIL (fix pass 2) |
+| BF.5 | AJ deferred test improvements | — | `fix/test-improvements-627-642-643` | #627, #642, #643 | IN PROGRESS |
 
 ---
 

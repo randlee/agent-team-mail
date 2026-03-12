@@ -12,7 +12,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs;
 
 use crate::util::member_labels::{GHOST_SUFFIX, UNREGISTERED_MARKER};
-use crate::util::settings::get_home_dir;
+use crate::util::settings::{get_home_dir, teams_root_dir_for};
 
 /// List agents in a team
 #[derive(Args, Debug)]
@@ -95,7 +95,7 @@ pub fn execute(args: MembersArgs) -> Result<()> {
     let team_name = &config.core.default_team;
 
     // Load team config
-    let team_dir = home_dir.join(".claude/teams").join(team_name);
+    let team_dir = teams_root_dir_for(&home_dir).join(team_name);
     if !team_dir.exists() {
         anyhow::bail!("Team '{team_name}' not found (directory {team_dir:?} doesn't exist)");
     }

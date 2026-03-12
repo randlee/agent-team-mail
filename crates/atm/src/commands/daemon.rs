@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 
 use crate::commands::logging_health::{LoggingHealthSnapshot, build_logging_health_contract};
-use crate::util::settings::get_home_dir;
+use crate::util::settings::{get_home_dir, teams_root_dir_for};
 use agent_team_mail_core::daemon_client::daemon_status_path_for;
 
 /// Daemon management commands
@@ -231,8 +231,7 @@ fn send_shutdown_request(
         message_id: Some(Uuid::new_v4().to_string()),
         unknown_fields: HashMap::new(),
     };
-    let inbox_path = home_dir
-        .join(".claude/teams")
+    let inbox_path = teams_root_dir_for(home_dir)
         .join(team_name)
         .join("inboxes")
         .join(format!("{agent_name}.json"));

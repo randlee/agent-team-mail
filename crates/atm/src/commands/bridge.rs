@@ -5,7 +5,7 @@ use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::util::settings::get_home_dir;
+use crate::util::settings::{get_home_dir, teams_root_dir_for};
 
 /// Bridge metrics (subset needed for CLI display)
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -82,7 +82,7 @@ fn execute_status(args: BridgeStatusArgs) -> Result<()> {
     let team_name = &config.core.default_team;
 
     // Load bridge metrics
-    let team_dir = home_dir.join(".claude/teams").join(team_name);
+    let team_dir = teams_root_dir_for(&home_dir).join(team_name);
     let metrics_path = team_dir.join(".bridge-metrics.json");
 
     let metrics = if metrics_path.exists() {
@@ -165,7 +165,7 @@ fn execute_sync(args: BridgeSyncArgs) -> Result<()> {
     println!();
 
     // Trigger sync by touching a sentinel file that the daemon watches
-    let team_dir = home_dir.join(".claude/teams").join(team_name);
+    let team_dir = teams_root_dir_for(&home_dir).join(team_name);
     let sync_trigger_path = team_dir.join(".bridge-sync-trigger");
 
     std::fs::create_dir_all(&team_dir)?;
