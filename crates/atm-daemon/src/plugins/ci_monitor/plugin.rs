@@ -1008,8 +1008,7 @@ impl Plugin for CiMonitorPlugin {
         let repo = match self.resolve_repo_context(ctx) {
             Ok(repo) => repo,
             Err(err) => {
-                let team = Self::team_for_config_error(config_table, ctx);
-                Self::write_health_record(ctx, &team, "disabled_init_error", &err.to_string());
+                self.project_disabled_config_error(ctx, config_table, &err.to_string());
                 return Err(err);
             }
         };
@@ -2110,7 +2109,7 @@ repo = "config-owner/config-repo"
             .iter()
             .find(|record| record.team == "dev-team")
             .expect("dev-team health record");
-        assert_eq!(record.availability_state, "disabled_init_error");
+        assert_eq!(record.availability_state, "disabled_config_error");
         assert!(
             record
                 .message
