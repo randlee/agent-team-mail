@@ -3,7 +3,7 @@ issue: 681
 title: "Daemon SIGTERM / Restart / Autostart Stop-Path Hardening"
 date: 2026-03-12
 worktree: fix/issue-681-sigterm-dogfood-verification
-status: ready-to-implement
+status: partially-implemented
 ---
 
 # Issue #681: Daemon Restart Stop-Path — Root Cause & Fix Blueprint
@@ -79,10 +79,10 @@ exists. Parallel shutdown bounds worst case to one 5s window.
 ## Implementation Sequence
 
 **Phase 1 — Critical fixes (correctness):**
-- [ ] H1: Clean up socket file on ESRCH in `execute_stop` (`daemon.rs:282`)
-- [ ] H2: `execute_restart` escalates to SIGKILL on stop timeout (`daemon.rs:305`)
-- [ ] H3: Replace fixed 500ms sleep with poll loop for runtime file absence (`daemon.rs:319`)
-- [ ] Add tests: GAP-1, GAP-2, GAP-5
+- [x] H1: Clean up socket file on ESRCH in `execute_stop` (`daemon.rs:282`)
+- [x] H2: `execute_restart` escalates to SIGKILL on stop timeout (`daemon.rs:305`)
+- [x] H3: Replace fixed 500ms sleep with poll loop for runtime file absence (`daemon.rs:319`)
+- [x] Add tests: GAP-1, GAP-2, GAP-5
 
 **Phase 2 — Robustness hardening:**
 - [ ] H4: 30s watchdog thread (`main.rs:289`)
@@ -96,7 +96,7 @@ exists. Parallel shutdown bounds worst case to one 5s window.
 
 4 layers proposed in ADR `docs/adr/issue-539-stale-daemon-fix-plan.md`:
 - Layer 1 (startup orphan sweep): Partial — `cleanup_stale_daemon_runtime_files()` handles stale files but no pgrep scan
-- Layer 2 (SIGTERM hardening): Not implemented — H4+H5 above
+- Layer 2 (SIGTERM hardening): Partially implemented — CLI restart/stop path fixes are in; daemon-side H4+H5 remain
 - Layer 3 (CLI+Doctor enrichment): Not implemented
 - Layer 4 (test daemon isolation): Not implemented
 
