@@ -17,7 +17,7 @@ use serde::Deserialize;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::util::settings::get_home_dir;
+use crate::util::settings::{get_home_dir, teams_root_dir_for};
 
 /// Maximum age in seconds before a hook file is considered stale.
 const HOOK_FILE_TTL_SECS: f64 = 5.0;
@@ -177,11 +177,7 @@ fn session_file_owned_by_current_user(path: &Path) -> bool {
 ///   set `CLAUDE_SESSION_ID` explicitly.
 pub fn read_session_file(team: &str, identity: &str) -> Result<Option<String>> {
     let home = get_home_dir()?;
-    let sessions_dir = home
-        .join(".claude")
-        .join("teams")
-        .join(team)
-        .join("sessions");
+    let sessions_dir = teams_root_dir_for(&home).join(team).join("sessions");
     if !sessions_dir.is_dir() {
         return Ok(None);
     }

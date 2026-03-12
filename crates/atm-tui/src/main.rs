@@ -71,9 +71,6 @@ use agent_team_mail_tui::{events, ui};
 
 // ── Module-level statics ──────────────────────────────────────────────────────
 
-/// Guards the one-time deprecation warning for `ATM_LOG_PATH`.
-static ATM_LOG_PATH_WARNED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 /// Replay window size used when attaching/reconnecting to watch feed.
 const WATCH_ATTACH_REPLAY_MAX_FRAMES: usize = 50;
 /// Max bytes scanned from the watch file tail to build attach replay.
@@ -136,11 +133,6 @@ async fn main() -> Result<()> {
     // Resolve unified log file path BEFORE terminal setup so any eprintln! warnings
     // reach the user's terminal (stderr) before the alternate screen is activated.
     let log_file_path: std::path::PathBuf = if let Ok(p) = std::env::var("ATM_LOG_FILE") {
-        std::path::PathBuf::from(p)
-    } else if let Ok(p) = std::env::var("ATM_LOG_PATH") {
-        if !ATM_LOG_PATH_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            eprintln!("atm-tui: warning: ATM_LOG_PATH is deprecated; use ATM_LOG_FILE instead");
-        }
         std::path::PathBuf::from(p)
     } else {
         get_home_dir()
@@ -264,7 +256,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                 }
                 app.reset_stream();
                 app.streaming_agent = Some(agent_name.clone());
-                app.session_log_path = Some(session_log_path(&team, &agent_name));
+                app.session_log_path = session_log_path(&team, &agent_name);
                 app.watch_stream_path = watch_feed_path();
                 app.selected_message_index = 0;
                 app.inbox_detail_open = false;

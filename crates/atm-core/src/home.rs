@@ -43,7 +43,7 @@
 //! ```
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Get the home directory for ATM operations
 ///
@@ -114,6 +114,26 @@ pub fn get_home_dir() -> Result<PathBuf> {
 /// Returns an error if the platform cannot determine a home directory.
 pub fn get_os_home_dir() -> Result<PathBuf> {
     dirs::home_dir().context("Could not determine OS home directory")
+}
+
+/// Return the canonical `{ATM_HOME}/.claude` root for ATM-managed state.
+pub fn claude_root_dir() -> Result<PathBuf> {
+    Ok(claude_root_dir_for(&get_home_dir()?))
+}
+
+/// Return the canonical `{ATM_HOME}/.claude` root for the provided home path.
+pub fn claude_root_dir_for(home: &Path) -> PathBuf {
+    home.join(".claude")
+}
+
+/// Return the canonical `{ATM_HOME}/.claude/teams` root for ATM team state.
+pub fn teams_root_dir() -> Result<PathBuf> {
+    Ok(teams_root_dir_for(&get_home_dir()?))
+}
+
+/// Return the canonical `{ATM_HOME}/.claude/teams` root for the provided home path.
+pub fn teams_root_dir_for(home: &Path) -> PathBuf {
+    claude_root_dir_for(home).join("teams")
 }
 
 #[cfg(test)]

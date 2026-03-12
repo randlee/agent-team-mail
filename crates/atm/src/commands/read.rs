@@ -10,7 +10,7 @@ use clap::{ArgAction, Args};
 use crate::util::addressing::parse_address;
 use crate::util::caller_identity::resolve_caller_session_id_optional;
 use crate::util::hook_identity::read_hook_file_identity;
-use crate::util::settings::get_home_dir;
+use crate::util::settings::{get_home_dir, teams_root_dir_for};
 use crate::util::state::{get_last_seen, load_seen_state, save_seen_state, update_last_seen};
 
 use super::wait::{WaitResult, wait_for_message};
@@ -141,7 +141,7 @@ pub fn execute(args: ReadArgs) -> Result<()> {
             .flatten();
 
     // Resolve team directory
-    let team_dir = home_dir.join(".claude/teams").join(&team_name);
+    let team_dir = teams_root_dir_for(&home_dir).join(&team_name);
     if !team_dir.exists() {
         anyhow::bail!("Team '{team_name}' not found (directory {team_dir:?} doesn't exist)");
     }
