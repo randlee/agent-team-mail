@@ -21,6 +21,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -194,12 +195,69 @@ def restart_daemon() -> None:
     print("\n[restart daemon]")
     _, bin_dir = resolve_dev_paths()
     atm_bin = bin_dir / "atm"
+    daemon_bin = bin_dir / "atm-daemon"
     if not atm_bin.exists():
         die(f"atm binary not found at {atm_bin}")
+    if daemon_bin.exists():
+        kill_matching_daemons(daemon_bin)
     try:
         run([str(atm_bin), "daemon", "restart"])
     except SystemExit:
         print("  note: daemon restart returned non-zero (first-time start ok)")
+
+
+def matching_pids_for_binary(binary_path: Path) -> list[int]:
+    result = subprocess.run(
+        ["ps", "-Ao", "pid=,args="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        die(f"ps failed while searching for {binary_path}: {result.stderr.strip()}")
+    pids = []
+    for line in result.stdout.splitlines():
+        line = line.strip("\n")
+        if not line or str(binary_path) not in line:
+            continue
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        pid_str, args = parts
+        if args.strip() != str(binary_path):
+            continue
+        try:
+            pid = int(pid_str)
+        except ValueError:
+            continue
+        if pid > 1:
+            pids.append(pid)
+    return pids
+
+
+def kill_matching_daemons(binary_path: Path) -> None:
+    pids = matching_pids_for_binary(binary_path)
+    if not pids:
+        print(f"  no existing daemon processes match {binary_path}")
+        return
+
+    print(f"  killing {len(pids)} existing daemon process(es) for {binary_path}")
+    for sig in ("TERM", "KILL"):
+        remaining = []
+        for pid in pids:
+            result = subprocess.run(["kill", f"-{sig}", str(pid)], check=False)
+            if result.returncode not in (0, 1):
+                die(f"kill -{sig} {pid} failed with exit {result.returncode}")
+            poll = subprocess.run(["kill", "-0", str(pid)], check=False)
+            if poll.returncode == 0:
+                remaining.append(pid)
+        pids = remaining
+        if not pids:
+            break
+        if sig == "TERM":
+            time.sleep(1)
+    if pids:
+        die(f"failed to stop existing daemon process(es): {', '.join(str(pid) for pid in pids)}")
 
 
 def verify_install() -> bool:

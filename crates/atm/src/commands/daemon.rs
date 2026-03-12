@@ -8,6 +8,7 @@ use chrono::Utc;
 use clap::{Args, Subcommand};
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
+use sysinfo::System;
 use uuid::Uuid;
 
 use crate::commands::logging_health::{LoggingHealthSnapshot, build_logging_health_contract};
@@ -297,6 +298,15 @@ fn execute_restart(timeout_secs: u64) -> Result<()> {
     #[cfg(unix)]
     {
         let runtime = daemon_runtime_paths()?;
+        if let Some(expected_bin) = expected_daemon_binary_path() {
+            stop_matching_daemon_processes(
+                &expected_bin,
+                &runtime,
+                signal_pid,
+                is_pid_alive,
+                RestartTiming::DEFAULT,
+            )?;
+        }
         restart_daemon_with(
             &runtime,
             timeout_secs,
@@ -385,6 +395,115 @@ fn signal_pid(pid: i32, signal: i32) -> std::io::Result<()> {
 fn is_pid_alive(pid: i32) -> bool {
     // SAFETY: kill(pid, 0) checks liveness without delivering a signal.
     unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[cfg(unix)]
+fn expected_daemon_binary_path() -> Option<PathBuf> {
+    std::env::var_os("ATM_DAEMON_BIN")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(|dir| dir.join("atm-daemon")))
+        })
+}
+
+#[cfg(unix)]
+fn process_executable_matches(process: &sysinfo::Process, expected: &Path) -> bool {
+    process.exe().is_some_and(|exe| exe == expected)
+        || process
+            .cmd()
+            .first()
+            .map(|arg| Path::new(arg) == expected)
+            .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn matching_daemon_process_ids(expected: &Path) -> Vec<i32> {
+    let system = System::new_all();
+    let mut pids = system
+        .processes()
+        .iter()
+        .filter_map(|(pid, process)| {
+            process_executable_matches(process, expected).then_some(pid.as_u32() as i32)
+        })
+        .filter(|pid| *pid > 1)
+        .collect::<Vec<_>>();
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
+
+#[cfg(unix)]
+fn stop_matching_daemon_processes<FSignal, FAlive>(
+    expected: &Path,
+    runtime: &DaemonRuntimePaths,
+    send_signal: FSignal,
+    is_alive: FAlive,
+    timing: RestartTiming,
+) -> Result<Vec<i32>>
+where
+    FSignal: Fn(i32, i32) -> std::io::Result<()>,
+    FAlive: Fn(i32) -> bool,
+{
+    let pids = matching_daemon_process_ids(expected);
+    if pids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    for pid in &pids {
+        if let Err(err) = send_signal(*pid, libc::SIGTERM)
+            && err.raw_os_error() != Some(libc::ESRCH)
+        {
+            return Err(anyhow::anyhow!(
+                "failed to send SIGTERM to daemon process {pid}: {err}"
+            ));
+        }
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if pids.iter().all(|pid| !is_alive(*pid)) {
+            cleanup_runtime_files(runtime);
+            return Ok(pids);
+        }
+        std::thread::sleep(timing.stop_poll_interval);
+    }
+
+    for pid in &pids {
+        if is_alive(*pid) {
+            send_signal(*pid, libc::SIGKILL)
+                .with_context(|| format!("failed to send SIGKILL to daemon process {pid}"))?;
+        }
+    }
+
+    let kill_deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < kill_deadline {
+        if pids.iter().all(|pid| !is_alive(*pid)) {
+            cleanup_runtime_files(runtime);
+            return Ok(pids);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let survivors = pids
+        .into_iter()
+        .filter(|pid| is_alive(*pid))
+        .collect::<Vec<_>>();
+    if survivors.is_empty() {
+        cleanup_runtime_files(runtime);
+        Ok(Vec::new())
+    } else {
+        anyhow::bail!(
+            "daemon process(es) remained alive after cleanup: {}",
+            survivors
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
 }
 
 #[cfg(unix)]
@@ -967,4 +1086,5 @@ mod tests {
         );
         assert!(restarted.load(std::sync::atomic::Ordering::SeqCst));
     }
+
 }
