@@ -34,6 +34,43 @@ pub struct InboxMessage {
     pub unknown_fields: HashMap<String, serde_json::Value>,
 }
 
+impl InboxMessage {
+    pub fn pending_ack_at(&self) -> Option<&str> {
+        self.unknown_fields
+            .get("pendingAckAt")
+            .and_then(|value| value.as_str())
+    }
+
+    pub fn acknowledged_at(&self) -> Option<&str> {
+        self.unknown_fields
+            .get("acknowledgedAt")
+            .and_then(|value| value.as_str())
+    }
+
+    pub fn is_acknowledged(&self) -> bool {
+        self.acknowledged_at().is_some()
+    }
+
+    pub fn is_pending_action(&self) -> bool {
+        !self.read || (self.pending_ack_at().is_some() && !self.is_acknowledged())
+    }
+
+    pub fn mark_pending_ack(&mut self, timestamp: impl Into<String>) {
+        self.unknown_fields.insert(
+            "pendingAckAt".to_string(),
+            serde_json::Value::String(timestamp.into()),
+        );
+    }
+
+    pub fn mark_acknowledged(&mut self, timestamp: impl Into<String>) {
+        self.unknown_fields.remove("pendingAckAt");
+        self.unknown_fields.insert(
+            "acknowledgedAt".to_string(),
+            serde_json::Value::String(timestamp.into()),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +172,61 @@ mod tests {
         assert_eq!(messages[1].from, "ci-fix-agent");
         assert!(!messages[0].read);
         assert!(messages[1].read);
+    }
+
+    #[test]
+    fn test_acknowledged_at_roundtrip_via_unknown_fields() {
+        let json = r#"{
+            "from": "team-lead",
+            "text": "Task assigned",
+            "timestamp": "2026-02-11T14:30:00.000Z",
+            "read": true,
+            "pendingAckAt": "2026-02-11T14:30:30.000Z",
+            "acknowledgedAt": "2026-02-11T14:31:00.000Z"
+        }"#;
+
+        let msg: InboxMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.acknowledged_at(), Some("2026-02-11T14:31:00.000Z"));
+        assert_eq!(msg.pending_ack_at(), Some("2026-02-11T14:30:30.000Z"));
+        assert!(msg.is_acknowledged());
+        assert!(!msg.is_pending_action());
+
+        let serialized = serde_json::to_string(&msg).unwrap();
+        let reparsed: InboxMessage = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(reparsed.acknowledged_at(), Some("2026-02-11T14:31:00.000Z"));
+    }
+
+    #[test]
+    fn test_mark_acknowledged_sets_unknown_field() {
+        let mut msg = InboxMessage {
+            from: "team-lead".to_string(),
+            text: "Task assigned".to_string(),
+            timestamp: "2026-02-11T14:30:00.000Z".to_string(),
+            read: true,
+            summary: None,
+            message_id: Some("msg-1".to_string()),
+            unknown_fields: HashMap::new(),
+        };
+
+        msg.mark_pending_ack("2026-02-11T14:30:30.000Z");
+        msg.mark_acknowledged("2026-02-11T14:31:00.000Z");
+        assert_eq!(msg.pending_ack_at(), None);
+        assert_eq!(msg.acknowledged_at(), Some("2026-02-11T14:31:00.000Z"));
+    }
+
+    #[test]
+    fn test_legacy_read_message_is_not_pending_without_pending_marker() {
+        let msg: InboxMessage = serde_json::from_str(
+            r#"{
+                "from": "team-lead",
+                "text": "Legacy",
+                "timestamp": "2026-02-11T14:30:00.000Z",
+                "read": true
+            }"#,
+        )
+        .unwrap();
+
+        assert!(!msg.is_pending_action());
+        assert!(!msg.is_acknowledged());
     }
 }

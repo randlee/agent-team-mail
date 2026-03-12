@@ -17,8 +17,9 @@ use super::wait::{WaitResult, wait_for_message};
 
 /// Read messages from an inbox
 ///
-/// By default, shows unread messages from your own inbox and marks them as read.
-/// Use --no-mark to read without marking, or --all to include already-read messages.
+/// By default, shows pending-action messages from your own inbox and marks them as read.
+/// Messages remain pending until explicitly acknowledged with `atm ack`.
+/// Use --no-mark to read without marking, or --all to include already-acknowledged messages.
 #[derive(Args, Debug)]
 pub struct ReadArgs {
     /// Target agent (name or name@team), omit to read own inbox
@@ -28,7 +29,7 @@ pub struct ReadArgs {
     #[arg(long)]
     team: Option<String>,
 
-    /// Show all messages (not just unread)
+    /// Show all messages (not just pending-action messages)
     #[arg(long)]
     all: bool,
 
@@ -186,20 +187,20 @@ pub fn execute(args: ReadArgs) -> Result<()> {
     };
 
     // Visibility filter:
-    // - Default mode: unread only
-    // - Since-last-seen mode: unread OR newer-than-last-seen
+    // - Default mode: pending-action only (unacknowledged, whether read or unread)
+    // - Since-last-seen mode: pending-action OR newer-than-last-seen
     if !args.all {
         if use_since_last_seen {
             if let Some(last_seen_dt) = last_seen {
                 filtered_messages.retain(|m| {
-                    !m.read
+                    m.is_pending_action()
                         || DateTime::parse_from_rfc3339(&m.timestamp)
                             .map(|dt| dt > last_seen_dt)
                             .unwrap_or(false)
                 });
             }
         } else {
-            filtered_messages.retain(|m| !m.read);
+            filtered_messages.retain(|m| m.is_pending_action());
         }
     }
 
@@ -256,14 +257,14 @@ pub fn execute(args: ReadArgs) -> Result<()> {
                     if use_since_last_seen {
                         if let Some(last_seen_dt) = last_seen {
                             new_filtered.retain(|m| {
-                                !m.read
+                                m.is_pending_action()
                                     || DateTime::parse_from_rfc3339(&m.timestamp)
                                         .map(|dt| dt > last_seen_dt)
                                         .unwrap_or(false)
                             });
                         }
                     } else {
-                        new_filtered.retain(|m| !m.read);
+                        new_filtered.retain(|m| m.is_pending_action());
                     }
                 }
 
@@ -340,6 +341,8 @@ pub fn execute(args: ReadArgs) -> Result<()> {
             .map(|m| m.timestamp.clone())
             .collect();
 
+        let pending_timestamp = Utc::now().to_rfc3339();
+
         // Atomically update LOCAL inbox to mark messages as read
         // Note: we only mark in the local inbox, not in origin files
         let local_inbox_path = team_dir.join("inboxes").join(format!("{agent_name}.json"));
@@ -357,8 +360,9 @@ pub fn execute(args: ReadArgs) -> Result<()> {
                             filtered_timestamps.contains(&msg.timestamp) && !msg.read
                         };
 
-                        if should_mark {
+                        if should_mark && !msg.read {
                             msg.read = true;
+                            msg.mark_pending_ack(pending_timestamp.clone());
                             marked_count += 1;
                         }
                     }
@@ -424,8 +428,24 @@ pub fn execute(args: ReadArgs) -> Result<()> {
         for msg in &filtered_messages {
             let time_ago = format_relative_time(&msg.timestamp);
             let summary = msg.summary.as_deref().unwrap_or("[no summary]");
+            let status = if msg.is_acknowledged() {
+                "[acknowledged]"
+            } else if msg.read {
+                if msg.is_pending_action() {
+                    "[read, pending ack]"
+                } else {
+                    "[read]"
+                }
+            } else {
+                "[unread, pending ack]"
+            };
 
-            println!("From: {} | {} | {}", msg.from, time_ago, summary);
+            println!("From: {} | {} | {} {}", msg.from, time_ago, summary, status);
+            if msg.is_pending_action()
+                && let Some(message_id) = msg.message_id.as_deref()
+            {
+                println!("Message ID: {message_id}");
+            }
             println!("{}\n", msg.text);
         }
         println!("Total: {} message(s)", filtered_messages.len());
