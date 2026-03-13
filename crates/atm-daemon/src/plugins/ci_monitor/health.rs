@@ -15,7 +15,7 @@ use anyhow::Result;
 use tracing::warn;
 
 #[cfg(unix)]
-use super::gh_monitor::resolve_ci_alert_routing;
+use super::gh_alerts::resolve_ci_alert_routing;
 #[cfg(unix)]
 use super::types::{GhMonitorHealthFile, GhMonitorHealthUpdate};
 
