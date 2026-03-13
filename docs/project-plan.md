@@ -177,6 +177,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AM | CI Monitor Subsystem Refactor | Extract CI-monitor subsystem boundaries out of `socket.rs`, split provider-neutral logic from GitHub-specific adapter logic, and stabilize routing/health/test support on `integrate/phase-AM` | IN-PROGRESS |
 | AJ | Session-ID SSoT Normalization | Canonical `session_id` naming, shared caller resolver, runtime session resolution closure, doctor/session consistency | PLANNED |
 | AK | Mandatory OTel Rollout | Non-optional OTel across in-scope tools with canonical correlation and health/reporting contracts | PLANNED |
+| AM | CI Monitor Refactor | Extract CI monitoring from `socket.rs` into subsystem/service/provider/routing/health boundaries on `integrate/phase-AM` | IN-PROGRESS |
 
 ---
 
@@ -1576,13 +1577,13 @@ GitHub-specific adapter logic, routing, and health handling live under
 `plugins/ci_monitor`.
 **Prerequisites**: Phase AI baseline complete.
 
-**Integration branch**: `integrate/phase-AM`  
+**Integration branch**: `integrate/phase-AM`
 **Planning doc**: `docs/phase-am-planning.md`
 
 ### Planned Sprint Map
 | Sprint | Focus | Primary Branch | Status |
 |---|---|---|---|
-| AM.1 | Extract CI domain types, helpers, and shared test support | `feature/pAM-s1-extract-ci-types` | IN-PROGRESS |
+| AM.1 | Extract CI domain types, helpers, and shared test support | `feature/pAM-s1-extract-ci-types` | MERGED |
 | AM.2 | Introduce CI monitor service layer and thin socket dispatch | `feature/pAM-s2-ci-monitor-service` | IN-PROGRESS |
 | AM.3 | Split provider-neutral logic from GitHub adapter | `feature/pAM-s3-provider-split` | IN-PROGRESS |
 | AM.4 | Extract routing and notification policy | `feature/pAM-s4-routing-split` | IN-PROGRESS |
