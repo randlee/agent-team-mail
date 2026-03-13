@@ -5,9 +5,9 @@ use super::github::GitHubActionsProvider;
 use super::loader::CiProviderLoader;
 use super::provider::ErasedCiProvider;
 use super::registry::{CiProviderFactory, CiProviderRegistry};
-use super::types::{CiFilter, CiJob, CiRunConclusion, CiRunStatus};
 #[cfg(unix)]
 use super::types::GhMonitorHealthFile;
+use super::types::{CiFilter, CiJob, CiRunConclusion, CiRunStatus};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use agent_team_mail_core::context::{GitProvider as GitProviderType, RepoContext};
 use agent_team_mail_core::daemon_client::GhMonitorHealth;
