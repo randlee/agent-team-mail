@@ -1,6 +1,8 @@
 //! Integration tests for `atm gh ...` daemon-routed commands.
 
 use assert_cmd::cargo;
+#[cfg(unix)]
+use serial_test::serial;
 use predicates::prelude::PredicateBooleanExt;
 use std::fs;
 #[cfg(unix)]
@@ -635,6 +637,7 @@ fn test_gh_monitor_and_control_allow_daemon_responses_over_500ms() {
 
 #[test]
 #[cfg(unix)]
+#[serial]
 fn test_gh_monitor_workflow_roundtrip_json() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
@@ -760,6 +763,7 @@ fn test_gh_monitor_lifecycle_status_roundtrip_json() {
 
 #[test]
 #[cfg(unix)]
+#[serial]
 fn test_gh_status_preflight_disabled_config_shows_atm_gh_init_remediation() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
@@ -792,6 +796,7 @@ fn test_gh_status_preflight_disabled_config_shows_atm_gh_init_remediation() {
 
 #[test]
 #[cfg(unix)]
+#[serial]
 fn test_gh_monitor_status_accepts_json_flag_after_subcommand() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
@@ -822,6 +827,7 @@ fn test_gh_monitor_status_accepts_json_flag_after_subcommand() {
 
 #[test]
 #[cfg(unix)]
+#[serial]
 fn test_gh_monitor_status_human_output_is_single_block() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
@@ -892,6 +898,7 @@ fn init_git_repo_with_origin(workdir: &Path, origin_url: &str) {
 
 #[test]
 #[cfg(unix)]
+#[serial]
 fn test_gh_namespace_status_no_subcommand_returns_json_status() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
@@ -1075,6 +1082,7 @@ fn test_gh_init_auto_populates_repo_from_git_remote() {
 
 #[test]
 #[cfg(unix)]
+#[serial]
 fn test_gh_namespace_status_missing_repo_is_actionable() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
@@ -1178,6 +1186,7 @@ fn test_gh_status_surfaces_consistent_when_daemon_unreachable() {
 
 #[test]
 #[cfg(unix)]
+#[serial]
 fn test_gh_monitor_status_json_has_stable_schema() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
