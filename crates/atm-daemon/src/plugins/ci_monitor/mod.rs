@@ -2,15 +2,17 @@
 
 mod config;
 #[cfg(unix)]
+pub(crate) mod gh_alerts;
+#[cfg(unix)]
 pub(crate) mod gh_monitor;
 mod github;
+mod github_schema;
 pub(crate) mod helpers;
 mod loader;
 mod mock_provider;
 mod plugin;
 mod provider;
 mod registry;
-#[cfg(unix)]
 pub(crate) mod service;
 #[cfg(test)]
 pub(crate) mod test_support;

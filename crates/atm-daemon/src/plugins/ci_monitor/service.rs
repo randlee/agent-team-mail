@@ -10,13 +10,15 @@ use super::helpers::{
     apply_config_state_to_status, count_in_flight_monitors, evaluate_gh_monitor_config,
     gh_monitor_key, load_gh_monitor_state_map,
 };
-use super::types::GhMonitorHealthUpdate;
+use super::provider::ErasedCiProvider;
+use super::types::{CiFilter, CiRun, CiRunStatus, GhMonitorHealthUpdate};
 use agent_team_mail_core::daemon_client::{
     GhMonitorControlRequest, GhMonitorHealth, GhMonitorLifecycleAction, GhMonitorRequest,
     GhMonitorStatus, GhMonitorTargetKind, GhStatusRequest,
 };
-use sc_observability::SOCKET_ERROR_INTERNAL_ERROR;
 use tracing::warn;
+
+const CI_MONITOR_INTERNAL_ERROR: &str = "INTERNAL_ERROR";
 
 #[derive(Debug, Clone)]
 pub(crate) struct CiMonitorServiceError {
@@ -33,11 +35,36 @@ impl CiMonitorServiceError {
     }
 
     fn internal(message: impl Into<String>) -> Self {
-        Self::new(SOCKET_ERROR_INTERNAL_ERROR, message)
+        Self::new(CI_MONITOR_INTERNAL_ERROR, message)
     }
 }
 
 pub(crate) type CiMonitorServiceResult<T> = std::result::Result<T, CiMonitorServiceError>;
+
+pub(crate) async fn list_completed_runs(
+    provider: &dyn ErasedCiProvider,
+) -> CiMonitorServiceResult<Vec<CiRun>> {
+    let filter = CiFilter {
+        status: Some(CiRunStatus::Completed),
+        per_page: Some(20),
+        ..Default::default()
+    };
+
+    provider
+        .list_runs(&filter)
+        .await
+        .map_err(|e| CiMonitorServiceError::internal(format!("Failed to list runs: {e}")))
+}
+
+pub(crate) async fn fetch_run_details(
+    provider: &dyn ErasedCiProvider,
+    run_id: u64,
+) -> CiMonitorServiceResult<CiRun> {
+    provider
+        .get_run(run_id)
+        .await
+        .map_err(|e| CiMonitorServiceError::internal(format!("Failed to fetch run details: {e}")))
+}
 
 #[cfg(unix)]
 pub(crate) async fn monitor_request(
@@ -548,4 +575,62 @@ pub(crate) fn status_request(
         "MONITOR_NOT_FOUND",
         "No gh monitor state found for requested target",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugins::ci_monitor::{
+        CiRunConclusion, MockCall, MockCiProvider, create_test_job, create_test_run,
+    };
+
+    #[tokio::test]
+    async fn test_list_completed_runs_uses_completed_filter() {
+        let run = create_test_run(
+            7,
+            "CI",
+            "main",
+            CiRunStatus::Completed,
+            Some(CiRunConclusion::Success),
+        );
+        let provider = MockCiProvider::with_runs(vec![run.clone()]);
+
+        let runs = list_completed_runs(&provider).await.unwrap();
+
+        assert_eq!(runs, vec![run]);
+        assert_eq!(
+            provider.get_calls(),
+            vec![MockCall::ListRuns(CiFilter {
+                status: Some(CiRunStatus::Completed),
+                per_page: Some(20),
+                ..Default::default()
+            })]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_run_details_uses_provider_boundary() {
+        let run = create_test_run(
+            42,
+            "CI",
+            "develop",
+            CiRunStatus::Completed,
+            Some(CiRunConclusion::Failure),
+        );
+        let provider = MockCiProvider::with_runs_and_jobs(
+            vec![run],
+            vec![create_test_job(
+                9001,
+                "unit",
+                CiRunStatus::Completed,
+                Some(CiRunConclusion::Failure),
+            )],
+        );
+
+        let full_run = fetch_run_details(&provider, 42).await.unwrap();
+
+        assert_eq!(full_run.id, 42);
+        assert_eq!(full_run.jobs.as_ref().map(Vec::len), Some(1));
+        assert_eq!(provider.get_calls(), vec![MockCall::GetRun(42)]);
+    }
 }
