@@ -3,9 +3,10 @@ use agent_team_mail_core::daemon_client::{
     GhMonitorControlRequest, GhMonitorRequest, GhStatusRequest, PROTOCOL_VERSION, SocketError,
     SocketRequest, SocketResponse,
 };
-use sc_observability::{
-    SOCKET_ERROR_INTERNAL_ERROR, SOCKET_ERROR_INVALID_PAYLOAD, SOCKET_ERROR_VERSION_MISMATCH,
-};
+
+const SOCKET_ERROR_INTERNAL_ERROR: &str = "INTERNAL_ERROR";
+const SOCKET_ERROR_INVALID_PAYLOAD: &str = "INVALID_PAYLOAD";
+const SOCKET_ERROR_VERSION_MISMATCH: &str = "VERSION_MISMATCH";
 
 pub(crate) fn is_gh_monitor_command(request_str: &str) -> bool {
     request_str.contains(r#""command":"gh-monitor""#)

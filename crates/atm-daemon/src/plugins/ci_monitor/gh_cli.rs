@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use super::provider::ErasedCiProvider;
 use super::types::{CiFilter, CiPullRequest, CiRun};
 use crate::plugin::PluginError;

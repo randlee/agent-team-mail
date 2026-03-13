@@ -6,11 +6,11 @@ pub(crate) use super::gh_alerts::{
     repo_scope_matches, resolve_ci_alert_routing,
 };
 #[allow(unused_imports)]
-pub(crate) use super::health::emit_gh_monitor_health_transition;
-#[allow(unused_imports)]
 pub(crate) use super::github_schema::{
     GhPrLookupView, GhPrView, GhPullRequest, GhRunJob, GhRunListEntry, GhRunStep, GhRunView,
 };
+#[allow(unused_imports)]
+pub(crate) use super::health::emit_gh_monitor_health_transition;
 use super::helpers::upsert_gh_monitor_status;
 use agent_team_mail_core::daemon_client::{GhMonitorRequest, GhMonitorStatus, GhMonitorTargetKind};
 use anyhow::Result;

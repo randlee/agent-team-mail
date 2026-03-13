@@ -1,7 +1,7 @@
 //! CI Monitor plugin implementation
 
 use super::config::{CiMonitorConfig, DedupStrategy};
-use super::github::GitHubActionsProvider;
+use super::github_provider::GitHubActionsProvider;
 #[cfg(unix)]
 use super::health;
 #[cfg(unix)]
@@ -12,11 +12,11 @@ use super::registry::{CiProviderFactory, CiProviderRegistry};
 use super::service::{fetch_run_details, list_completed_runs};
 #[cfg(all(test, unix))]
 use super::types::GhMonitorHealthFile;
+#[cfg(unix)]
+use super::types::GhMonitorHealthUpdate;
 #[cfg(test)]
 use super::types::{CiFilter, CiRunStatus};
 use super::types::{CiJob, CiRunConclusion};
-#[cfg(unix)]
-use super::types::GhMonitorHealthUpdate;
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use agent_team_mail_core::context::{GitProvider as GitProviderType, RepoContext};
 use agent_team_mail_core::schema::{AgentMember, InboxMessage};
@@ -830,6 +830,7 @@ impl CiMonitorPlugin {
         })
     }
 
+    #[cfg(unix)]
     fn team_for_config_error(
         table: Option<&agent_team_mail_core::toml::Table>,
         ctx: &PluginContext,
@@ -842,6 +843,7 @@ impl CiMonitorPlugin {
             .unwrap_or_else(|| ctx.config.core.default_team.clone())
     }
 
+    #[cfg(unix)]
     fn project_disabled_config_error(
         &self,
         ctx: &PluginContext,
@@ -898,6 +900,7 @@ impl Plugin for CiMonitorPlugin {
             match CiMonitorConfig::from_toml(table) {
                 Ok(config) => config,
                 Err(e) => {
+                    #[cfg(unix)]
                     self.project_disabled_config_error(ctx, config_table, &e.to_string());
                     return Err(e);
                 }
@@ -918,6 +921,7 @@ impl Plugin for CiMonitorPlugin {
         let repo = match self.resolve_repo_context(ctx) {
             Ok(repo) => repo,
             Err(err) => {
+                #[cfg(unix)]
                 self.project_disabled_config_error(ctx, config_table, &err.to_string());
                 return Err(err);
             }
@@ -1989,6 +1993,9 @@ repo = "config-owner/config-repo"
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
+        let inbox_dir = temp_dir.path().join(".claude/teams/dev-team/inboxes");
+        std::fs::create_dir_all(&inbox_dir).unwrap();
+        std::fs::write(inbox_dir.join("team-lead.json"), "[]").unwrap();
         let teams_root = temp_dir.path().to_path_buf();
         let table: toml::Table = toml::from_str("team = \"dev-team\"").unwrap();
         let ctx = create_mock_context_with_repo_config(teams_root.clone(), Some(table), false);
@@ -2019,6 +2026,21 @@ repo = "config-owner/config-repo"
                 .message
                 .as_deref()
                 .is_some_and(|message| message.contains("No repository information available"))
+        );
+
+        let inbox_raw =
+            std::fs::read_to_string(inbox_dir.join("team-lead.json")).expect("team-lead inbox");
+        let inbox: Vec<agent_team_mail_core::schema::InboxMessage> =
+            serde_json::from_str(&inbox_raw).expect("team-lead inbox json");
+        assert!(
+            inbox.iter().any(|message| {
+                message
+                    .summary
+                    .as_deref()
+                    .is_some_and(|summary| summary.contains("gh_monitor: disabled_config_error"))
+                    && message.text.contains("No repository information available")
+            }),
+            "expected disabled_config_error alert in team-lead inbox"
         );
     }
 
