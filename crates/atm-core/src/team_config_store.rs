@@ -1,4 +1,7 @@
-use crate::io::{atomic::atomic_swap, lock::{FileLock, acquire_lock}};
+use crate::io::{
+    atomic::atomic_swap,
+    lock::{FileLock, acquire_lock},
+};
 use crate::schema::TeamConfig;
 use anyhow::{Context, Result, anyhow};
 use std::io::Write;
@@ -100,8 +103,12 @@ impl TeamConfigStore {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        acquire_lock(&self.lock_path, 10)
-            .map_err(|e| anyhow!("failed to acquire config lock {}: {e}", self.lock_path.display()))
+        acquire_lock(&self.lock_path, 10).map_err(|e| {
+            anyhow!(
+                "failed to acquire config lock {}: {e}",
+                self.lock_path.display()
+            )
+        })
     }
 
     fn write_locked(&self, config: &TeamConfig) -> Result<()> {
@@ -111,7 +118,8 @@ impl TeamConfigStore {
         }
 
         let tmp_path = self.config_path.with_extension("tmp");
-        let serialized = serde_json::to_string_pretty(config).context("failed to serialize TeamConfig")?;
+        let serialized =
+            serde_json::to_string_pretty(config).context("failed to serialize TeamConfig")?;
         let mut tmp = std::fs::File::create(&tmp_path)
             .with_context(|| format!("failed to create {}", tmp_path.display()))?;
         tmp.write_all(serialized.as_bytes())
@@ -128,8 +136,12 @@ impl TeamConfigStore {
                 .with_context(|| format!("failed to sync {}", self.config_path.display()))?;
         }
 
-        atomic_swap(&self.config_path, &tmp_path)
-            .map_err(|e| anyhow!("failed to atomically swap {}: {e}", self.config_path.display()))?;
+        atomic_swap(&self.config_path, &tmp_path).map_err(|e| {
+            anyhow!(
+                "failed to atomically swap {}: {e}",
+                self.config_path.display()
+            )
+        })?;
 
         if tmp_path.exists() {
             std::fs::remove_file(&tmp_path)

@@ -88,18 +88,19 @@ impl RosterService {
                 .parent()
                 .expect("team config path must have a parent directory"),
         );
-        store.update(|mut config| {
-            // Check for duplicate
-            if config.members.iter().any(|m| m.name == member_name) {
-                return Err(anyhow::anyhow!(RosterError::DuplicateMember {
-                    team: team.to_string(),
-                    name: member_name.clone(),
-                }));
-            }
-            config.members.push(member);
-            Ok(Some(config))
-        })
-        .map_err(map_store_error)?;
+        store
+            .update(|mut config| {
+                // Check for duplicate
+                if config.members.iter().any(|m| m.name == member_name) {
+                    return Err(anyhow::anyhow!(RosterError::DuplicateMember {
+                        team: team.to_string(),
+                        name: member_name.clone(),
+                    }));
+                }
+                config.members.push(member);
+                Ok(Some(config))
+            })
+            .map_err(map_store_error)?;
 
         // Track the membership
         self.tracker
@@ -143,18 +144,19 @@ impl RosterService {
                 .parent()
                 .expect("team config path must have a parent directory"),
         );
-        store.update(|mut config| {
-            let initial_len = config.members.len();
-            config.members.retain(|m| m.name != agent_name);
-            if config.members.len() == initial_len {
-                return Err(anyhow::anyhow!(RosterError::MemberNotFound {
-                    team: team.to_string(),
-                    name: agent_name.to_string(),
-                }));
-            }
-            Ok(Some(config))
-        })
-        .map_err(map_store_error)?;
+        store
+            .update(|mut config| {
+                let initial_len = config.members.len();
+                config.members.retain(|m| m.name != agent_name);
+                if config.members.len() == initial_len {
+                    return Err(anyhow::anyhow!(RosterError::MemberNotFound {
+                        team: team.to_string(),
+                        name: agent_name.to_string(),
+                    }));
+                }
+                Ok(Some(config))
+            })
+            .map_err(map_store_error)?;
 
         // Untrack the membership
         self.tracker
@@ -251,29 +253,30 @@ impl RosterService {
                 .parent()
                 .expect("team config path must have a parent directory"),
         );
-        store.update(|mut config| {
-            match mode {
-                CleanupMode::Soft => {
-                    for member in &mut config.members {
-                        if member.agent_type == prefix && member.is_active != Some(false) {
-                            member.is_active = Some(false);
-                            affected_count += 1;
+        store
+            .update(|mut config| {
+                match mode {
+                    CleanupMode::Soft => {
+                        for member in &mut config.members {
+                            if member.agent_type == prefix && member.is_active != Some(false) {
+                                member.is_active = Some(false);
+                                affected_count += 1;
+                            }
                         }
                     }
+                    CleanupMode::Hard => {
+                        let initial_len = config.members.len();
+                        config.members.retain(|m| m.agent_type != prefix);
+                        affected_count = initial_len - config.members.len();
+                    }
                 }
-                CleanupMode::Hard => {
-                    let initial_len = config.members.len();
-                    config.members.retain(|m| m.agent_type != prefix);
-                    affected_count = initial_len - config.members.len();
+                if affected_count > 0 {
+                    Ok(Some(config))
+                } else {
+                    Ok(None)
                 }
-            }
-            if affected_count > 0 {
-                Ok(Some(config))
-            } else {
-                Ok(None)
-            }
-        })
-        .map_err(map_store_error)?;
+            })
+            .map_err(map_store_error)?;
 
         // Clear tracking for this plugin in this team
         if affected_count > 0 {

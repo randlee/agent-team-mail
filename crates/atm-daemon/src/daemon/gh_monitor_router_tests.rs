@@ -1,11 +1,11 @@
 use super::*;
-use crate::plugins::ci_monitor::routing::resolve_ci_alert_routing;
 use crate::plugins::ci_monitor::gh_monitor;
 #[cfg(unix)]
 use crate::plugins::ci_monitor::health::set_gh_monitor_health_state;
 use crate::plugins::ci_monitor::helpers::{
     gh_monitor_key, load_gh_monitor_state_map, upsert_gh_monitor_status,
 };
+use crate::plugins::ci_monitor::routing::resolve_ci_alert_routing;
 use crate::plugins::ci_monitor::test_support::{
     EnvGuard, install_fake_gh_script, read_team_inbox_messages, write_gh_monitor_config,
     write_hook_auth_team_config, write_invalid_gh_monitor_config, write_repo_gh_monitor_config,
