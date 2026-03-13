@@ -109,7 +109,10 @@ The GitHub CI Monitor plugin replaces this with:
 
 **Deployment model**:
 - `atm-daemon` is started by CLI when needed or at system login.
-- Should run once per machine (multi-repo support is deferred).
+- Should run once per machine.
+- Multi-repo `atm gh` command behavior is a daemon-adapter concern; explicit
+  repo-selection rules are defined during Phase AN rather than inside the
+  reusable CI-monitor core.
 - Daemon should be resilient: auto-restart on failure (service templates deferred).
 
 **Operational assumptions**:

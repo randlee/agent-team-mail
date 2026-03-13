@@ -1625,6 +1625,7 @@ standalone crate by separating reusable CI-monitor core from daemon adapters.
 | AN.4 | `mod.rs` narrowing | PLANNED |
 | AN.5 | Transport adapter boundary | PLANNED |
 | AN.6 | Crate extraction | PLANNED |
+| AN.7 | Multi-repo `atm gh` command contract | PLANNED |
 
 ---
 

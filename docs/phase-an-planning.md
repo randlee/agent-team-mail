@@ -107,10 +107,11 @@ Acceptance:
 | AN.4 | Production-surface narrowing | S/M |
 | AN.5 | Transport adapter split | M |
 | AN.6 | Crate extraction | M/L |
+| AN.7 | Multi-repo `atm gh` command contract | M |
 
 ## Issue Tracking Note
 
-GitHub issues for AN.0a-AN.6 may be filed at kickoff rather than before plan
+ GitHub issues for AN.0a-AN.7 may be filed at kickoff rather than before plan
 approval, but each sprint must have a tracked issue before implementation
 begins.
 
@@ -236,6 +237,34 @@ Acceptance:
 - daemon adapter builds cleanly against the extracted core
 - tests are split cleanly between crate-core tests and daemon-adapter tests
 
+### AN.7 — Multi-repo `atm gh` Command Contract
+
+Define the daemon-side multi-repo command contract for `atm gh` without pushing
+repo selection or cwd discovery into the extracted CI-monitor core.
+
+Scope:
+- define how `atm gh` resolves repo/root context in single-repo and multi-repo
+  daemon mode
+- keep repo discovery, config lookup, and cwd/default resolution in the daemon
+  adapter layer
+- require reusable CI-monitor core APIs to receive explicit resolved repo
+  context rather than discovering repo ownership themselves
+- align planning and requirements docs on ambiguous-repo behavior
+
+Deliverables:
+- explicit multi-repo `atm gh` command contract
+- documented daemon-adapter repo-selection boundary
+- no reusable CI-monitor core module performs cwd/home/repo autodiscovery
+
+Acceptance:
+- commands that require repo context either resolve it deterministically or
+  fail with an actionable ambiguous-repo error
+- `atm gh` status surfaces report whether repo context came from an explicit
+  selector, current repo, or single configured default
+- extracted CI-monitor core accepts resolved repo context as input and does not
+  own repo/root discovery logic
+- requirements and planning docs agree on multi-repo `atm gh` behavior
+
 ## Dependency Ordering
 
 - AN.0 is required before AN.1 because Phase AN needs a clean production surface
@@ -248,6 +277,9 @@ Acceptance:
   service dependencies are already injectable.
 - AN.4 is serial after AN.3; they must not run in parallel.
 - AN.6 is last; crate extraction is a packaging step after boundaries stabilize.
+- AN.7 follows AN.6 because the multi-repo `atm gh` command contract should be
+  defined against the extracted-core boundary, not against pre-extraction
+  internals.
 
 ## Hidden Coupling Risks
 
@@ -283,6 +315,8 @@ will look better in tests than it is in production.
 4. Production module exports are minimal and test helpers are behind `#[cfg(test)]`.
 5. Crate extraction in AN.6 is mechanical because the architectural boundary
    was already enforced in AN.1–AN.5.
+6. Multi-repo `atm gh` behavior is defined at the daemon-adapter boundary and
+   does not leak repo-selection concerns into the reusable core.
 
 ## Recommended Worktree Sequence
 
@@ -294,6 +328,7 @@ will look better in tests than it is in production.
 6. `feature/pAN-s4-mod-narrowing`
 7. `feature/pAN-s5-transport-adapter`
 8. `feature/pAN-s6-crate-extraction`
+9. `feature/pAN-s7-multi-repo-gh`
 
 ## Exit Criteria
 
@@ -301,3 +336,5 @@ will look better in tests than it is in production.
 - CI-monitor production surface is intentionally documented
 - daemon adapter responsibilities are explicit
 - new crate extraction no longer requires design decisions, only code motion
+- multi-repo `atm gh` behavior is documented as a daemon-adapter concern rather
+  than an implicit responsibility of the reusable CI-monitor core

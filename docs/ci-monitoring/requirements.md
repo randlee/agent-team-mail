@@ -123,6 +123,17 @@ No-target status requirements:
 - This behavior must conform to the global plugin namespace gating contract in
   `docs/requirements.md` §5.8.
 
+Multi-repo requirements:
+- `atm gh` command surfaces must work when one daemon hosts multiple repos.
+- Commands that require repo context must either:
+  - accept an explicit repo selector,
+  - resolve a single deterministic repo from current repo/config state, or
+  - fail with an actionable ambiguous-repo error.
+- Status output must indicate whether repo context came from an explicit
+  selector, current repo, or single configured default.
+- Repo selection remains a daemon-adapter concern; reusable CI-monitor core
+  modules must accept resolved repo context as input rather than discover it.
+
 ---
 
 ## 6. Monitor Semantics

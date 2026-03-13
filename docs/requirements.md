@@ -2551,6 +2551,23 @@ One-shot PR query commands (no daemon required):
 - `atm gh pr report <pr-number> [--json] [--template <path>]` returns detailed per-PR check report.
 - `atm gh pr init-report [--output <path>]` writes a starter report template for customization.
 
+Multi-repo command contract:
+- `atm gh` command behavior must remain correct when one daemon hosts multiple
+  repos/roots.
+- Commands that require repo context must either:
+  - use an explicit repo selector, or
+  - resolve a single deterministic repo from current context/config, or
+  - fail with an actionable ambiguous-repo error that tells the operator how to
+    disambiguate.
+- `atm gh` and `atm gh status` must report how repo context was chosen:
+  explicit selector, current repo, or single configured default.
+- `atm gh init` must update the selected repo-scoped CI-monitor config only; it
+  must not silently mutate sibling repo configs in multi-repo mode.
+- Reusable CI-monitor core code must not discover repo/root context from cwd,
+  home-directory scans, or daemon-global config. Repo selection is a daemon
+  adapter responsibility, and resolved repo context must be passed into the
+  core explicitly.
+
 Operator status UX contract:
 - `atm gh` must not fail argument parsing and must always return a concise status
   summary for the namespace.
