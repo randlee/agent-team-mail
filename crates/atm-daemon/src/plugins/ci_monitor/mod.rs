@@ -18,7 +18,7 @@ mod plugin;
 mod provider;
 mod registry;
 pub(crate) mod service;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) mod test_support;
 pub(crate) mod types;
 
