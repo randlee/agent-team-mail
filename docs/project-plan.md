@@ -2,7 +2,7 @@
 
 **Version**: 0.7
 **Date**: 2026-03-10
-**Status**: Phase AJ planning in progress. Phase AK queued.
+**Status**: Phase AN planning in progress. Phases AJ and AK remain queued.
 
 ---
 
@@ -176,6 +176,9 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AI | GH Monitor Dashboard + Detailed PR Reporting | `atm gh pr list`, `atm gh pr report`, `--template` rendering, `init-report`; CI rollup neutral/skipped fix | IN-PROGRESS |
 | AJ | Session-ID SSoT Normalization | Canonical `session_id` naming, shared caller resolver, runtime session resolution closure, doctor/session consistency | PLANNED |
 | AK | Mandatory OTel Rollout | Non-optional OTel across in-scope tools with canonical correlation and health/reporting contracts | PLANNED |
+| AL | Daemon Modularization | Decompose daemon `socket.rs` into bounded modules and extract daemon handler domains | COMPLETE |
+| AM | CI Monitor Extraction Baseline + Config Write Gate | Land the CI-monitor daemon extraction baseline and `TeamConfigStore` write gate | COMPLETE |
+| AN | CI Monitor Extraction Readiness | Prepare `ci_monitor` for standalone crate extraction via core/adapter separation | PLANNED |
 
 ---
 
@@ -1479,8 +1482,8 @@ the current tranche focused on onboarding contract closure.
 
 **Completed**: 133+ sprints across 29 phases (CI green)
 **Current version**: v0.42.0
-**Current planning phase**: Phase AJ
-**Next planned phase**: Phase AK (mandatory OTel rollout)
+**Current planning phase**: Phase AN
+**Queued planning phases**: Phase AJ, Phase AK
 
 ---
 
@@ -1564,6 +1567,64 @@ local structured logging always-on and fail-open.
 | AK.3 | Producer integration (`atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `scmux`, `schook`, `sc-compose`, `sc-composer`) | OTel rollout | PLANNED |
 | AK.4 | Doctor/status observability health + runbook finalization | health/reporting | PLANNED |
 | AK.5 | End-to-end QA, release gates, and cross-platform validation | release confidence | PLANNED |
+
+---
+
+## 17.21 Phase AL: Daemon Modularization
+
+**Goal**: Decompose `daemon/socket.rs` into bounded modules without changing
+behavior, so daemon domains stop accumulating inside one monolithic file.
+
+**Planning doc**: `docs/phase-al-planning.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Status |
+|---|---|---|
+| AL.1 | Shared state + helpers extraction | COMPLETE |
+| AL.2 | GH monitor subsystem extraction | COMPLETE |
+| AL.3 | Handler module extraction | COMPLETE |
+| AL.4 | Server + dispatch extraction | COMPLETE |
+| AL.5 | Eliminate `socket.rs` shim | COMPLETE |
+| AL.6 | Cleanup + documentation | COMPLETE |
+
+---
+
+## 17.22 Phase AM: CI Monitor Extraction Baseline + Config Write Gate
+
+**Goal**: Finish the first usable CI-monitor daemon decomposition boundary and
+land the canonical `TeamConfigStore` write gate for `config.json`.
+
+**Traceable review artifact**: `docs/adr/phase-am-ci-monitor-extraction-review.md`
+
+### Delivered Focus Areas
+| Area | Result | Status |
+|---|---|---|
+| CI monitor module split | CI-monitor modules extracted from the daemon monolith into a coherent subsystem baseline | COMPLETE |
+| GH monitor routing split | Routing moved out of `socket.rs` into dedicated daemon-side adapters | COMPLETE |
+| Config write gate | `TeamConfigStore` landed as the single atomic-write gate | COMPLETE |
+| Extraction review | Phase-ending readiness review captured for AN planning | COMPLETE |
+
+---
+
+## 17.23 Phase AN: CI Monitor Extraction Readiness
+
+**Goal**: Prepare the CI-monitor subsystem for clean extraction into a
+standalone crate by separating reusable CI-monitor core from daemon adapters.
+
+**Planning doc**: `docs/phase-an-planning.md`
+**Prerequisites**: Phase AL complete; Phase AM merged to `develop` before AN.1 kickoff.
+
+### Planned Sprint Map
+| Sprint | Focus | Status |
+|---|---|---|
+| AN.0a | Init error propagation (`ARCH-003`) | PLANNED |
+| AN.0b | Production-surface narrowing (`ARCH-004`) | PLANNED |
+| AN.1 | Domain types extraction boundary | PLANNED |
+| AN.2 | Service split from `plugin.rs` | PLANNED |
+| AN.3 | Trait injection and daemon decoupling | PLANNED |
+| AN.4 | `mod.rs` narrowing | PLANNED |
+| AN.5 | Transport adapter boundary | PLANNED |
+| AN.6 | Crate extraction | PLANNED |
 
 ---
 
@@ -1791,7 +1852,7 @@ daemon-safe lifecycle behavior, actionable `atm gh` command UX, and complete
 progress/failure observability.
 
 **Requirements references**:
-- `docs/plugins/ci-monitor/requirements.md`
+- `docs/ci-monitoring/requirements.md`
 - `docs/requirements.md` §4.11 and §5.8–§5.10
 
 **Integration branch**: `integrate/phase-AB` (planned)
@@ -1842,7 +1903,7 @@ progress/failure observability.
 1. `atm gh monitor pr <n>` reports `ci_not_started` when timeout expires with no run.
 2. Workflow and run monitor commands resolve and track expected run targets.
 3. `atm gh` and `atm gh status` (no target) provide actionable non-error plugin status output.
-4. Coverage maps to `GH-CI-TR-2` in `docs/plugins/ci-monitor/requirements.md`.
+4. Coverage maps to `GH-CI-TR-2` in `docs/ci-monitoring/requirements.md`.
 
 ### AB.3 — Progress + Final Reporting Payloads
 **Deliverables**
@@ -1854,7 +1915,7 @@ progress/failure observability.
 1. Progress is rate-limited under active monitoring.
 2. Terminal completion/failure message is immediate and complete.
 3. Failure notifications include required URLs and identifying metadata.
-4. Coverage maps to `GH-CI-TR-3` in `docs/plugins/ci-monitor/requirements.md`.
+4. Coverage maps to `GH-CI-TR-3` in `docs/ci-monitoring/requirements.md`.
 
 ### AB.4 — Availability State + Connectivity Recovery Signals
 **Deliverables**
@@ -1868,8 +1929,8 @@ progress/failure observability.
 2. Invalid configuration does not run polling and status is visible in
    `atm status` / `atm doctor`.
 3. Transient failures do not crash daemon.
-4. Coverage maps to `GH-CI-TR-1` in `docs/plugins/ci-monitor/requirements.md`.
-5. Coverage maps to `GH-CI-TR-4` in `docs/plugins/ci-monitor/requirements.md`.
+4. Coverage maps to `GH-CI-TR-1` in `docs/ci-monitoring/requirements.md`.
+5. Coverage maps to `GH-CI-TR-4` in `docs/ci-monitoring/requirements.md`.
 
 ### AB.5 — Runtime Drift Baselines (Optional Enhancement)
 **Deliverables**
@@ -1880,7 +1941,7 @@ progress/failure observability.
 **Acceptance Criteria**
 1. Drift alert can be reproduced in deterministic integration tests.
 2. Baseline calculations are stable across restarts.
-3. Coverage maps to `GH-CI-TR-5` in `docs/plugins/ci-monitor/requirements.md`.
+3. Coverage maps to `GH-CI-TR-5` in `docs/ci-monitoring/requirements.md`.
 
 ### AB.6 — PR Merge-Conflict + CI Gap Detection
 **Deliverables**
@@ -1890,7 +1951,7 @@ progress/failure observability.
 **Acceptance Criteria**
 1. Post-completion merge-conflict alert emitted when PR becomes DIRTY during a CI run.
 2. Pre-run merge-conflict alert emitted when PR is DIRTY before any run starts (distinct message from `ci_not_started`).
-3. Coverage maps to GH-CI-TR-2 and GH-CI-TR-4 in `docs/plugins/ci-monitor/requirements.md`.
+3. Coverage maps to GH-CI-TR-2 and GH-CI-TR-4 in `docs/ci-monitoring/requirements.md`.
 
 ### AB.7 — Architecture Review Findings Hardening
 **Deliverables**

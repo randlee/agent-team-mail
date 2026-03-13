@@ -18,12 +18,17 @@ Phase AN is not a "split files for their own sake" phase. Its purpose is to:
 
 ## Inputs
 
-- AM-REVIEW-1 findings on `integrate/phase-AM`
+- `docs/adr/phase-am-ci-monitor-extraction-review.md`
 - `docs/requirements.md` plugin and CI monitor requirements
-- `docs/ci-monitor-integration.md`
+- `docs/ci-monitoring/architecture.md`
 - `docs/adr/runtime-path-consistency-audit.md`
 - `ARCH-003`: `plugin.rs` init path still uses `.unwrap()` in an extraction-sensitive path
 - `ARCH-004`: `mod.rs` still exposes mocks/builders in the production surface
+
+## Prerequisites
+
+- Phase AL complete
+- Phase AM merged to `develop` before AN.1 kickoff
 
 ## Phase Fit Decision
 
@@ -60,6 +65,8 @@ These are mandatory cleanup items before the main extraction track:
 
 ### AN.0a — ARCH-003 Init Error Propagation
 
+**Branch**: `feature/pAN-s0a-init-propagation`
+
 Replace `plugin.rs` init-path `.unwrap()` calls with explicit error
 propagation/state transition handling.
 
@@ -74,6 +81,8 @@ Acceptance:
 - plugin init errors remain operator-visible in status/doctor surfaces
 
 ### AN.0b — ARCH-004 Surface Narrowing
+
+**Branch**: `feature/pAN-s0b-surface-narrowing`
 
 Move `MockCiProvider`, `MockCall`, `create_test_*`, and similar helpers behind
 `#[cfg(test)]` or into test-only modules.
@@ -90,13 +99,20 @@ Acceptance:
 
 | Sprint | Scope | Rough Size |
 |---|---|---|
-| AN.0 | Cleanup gates (`ARCH-003`, `ARCH-004`) | S |
+| AN.0a | Init error propagation (`ARCH-003`) | S |
+| AN.0b | Surface narrowing (`ARCH-004`) | S |
 | AN.1 | Domain types extraction boundary | M |
 | AN.2 | Service split from `plugin.rs` | M |
 | AN.3 | Trait injection and daemon decoupling | M |
 | AN.4 | Production-surface narrowing | S/M |
 | AN.5 | Transport adapter split | M |
 | AN.6 | Crate extraction | M/L |
+
+## Issue Tracking Note
+
+GitHub issues for AN.0a-AN.6 may be filed at kickoff rather than before plan
+approval, but each sprint must have a tracked issue before implementation
+begins.
 
 ## Sprint Plan
 
@@ -179,6 +195,8 @@ Acceptance:
 - production builds do not expose `MockCiProvider`, `MockCall`, or
   `create_test_*`
 - module surface is small enough to serve as a future crate `lib.rs`
+- AN.4 begins only after AN.3 lands; these sprints are intentionally serial
+  because both reshape the CI-monitor module surface
 
 ### AN.5 — Transport Adapter
 
@@ -228,7 +246,7 @@ Acceptance:
   service boundary, not before it exists.
 - AN.3 must land before AN.5 because the transport adapter can only be thin if
   service dependencies are already injectable.
-- AN.4 can begin after AN.1, but must complete before AN.6.
+- AN.4 is serial after AN.3; they must not run in parallel.
 - AN.6 is last; crate extraction is a packaging step after boundaries stabilize.
 
 ## Hidden Coupling Risks
@@ -268,13 +286,14 @@ will look better in tests than it is in production.
 
 ## Recommended Worktree Sequence
 
-1. `feature/pAN-s0-cleanup`
-2. `feature/pAN-s1-domain-types`
-3. `feature/pAN-s2-service-split`
-4. `feature/pAN-s3-trait-injection`
-5. `feature/pAN-s4-mod-narrowing`
-6. `feature/pAN-s5-transport-adapter`
-7. `feature/pAN-s6-crate-extraction`
+1. `feature/pAN-s0a-init-propagation`
+2. `feature/pAN-s0b-surface-narrowing`
+3. `feature/pAN-s1-domain-types`
+4. `feature/pAN-s2-service-split`
+5. `feature/pAN-s3-trait-injection`
+6. `feature/pAN-s4-mod-narrowing`
+7. `feature/pAN-s5-transport-adapter`
+8. `feature/pAN-s6-crate-extraction`
 
 ## Exit Criteria
 
