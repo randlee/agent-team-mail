@@ -1525,7 +1525,6 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     use crate::event_log::{EventFields, emit_event_best_effort};
     use crate::io::InboxError;
     use std::io::ErrorKind;
-    use std::io::Read;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
@@ -1603,7 +1602,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     let mut child = match Command::new(&daemon_bin)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
     {
         Ok(child) => child,
@@ -1646,28 +1645,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
             return Ok(());
         }
         if let Some(status) = child.try_wait()? {
-            let stderr_tail = child.stderr.take().and_then(|mut stderr| {
-                let mut buf = Vec::new();
-                stderr.read_to_end(&mut buf).ok()?;
-                if buf.is_empty() {
-                    return None;
-                }
-                let trimmed = if buf.len() > 4096 {
-                    &buf[buf.len() - 4096..]
-                } else {
-                    &buf
-                };
-                let text = String::from_utf8_lossy(trimmed).trim().to_string();
-                if text.is_empty() { None } else { Some(text) }
-            });
-            let error = match stderr_tail {
-                Some(tail) => {
-                    format!(
-                        "daemon process exited during startup with status {status}; stderr_tail={tail}"
-                    )
-                }
-                None => format!("daemon process exited during startup with status {status}"),
-            };
+            let error = format!("daemon process exited during startup with status {status}");
             emit_event_best_effort(EventFields {
                 level: "error",
                 source: "atm",
@@ -2446,7 +2424,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     #[serial]
-    fn test_ensure_daemon_running_includes_stderr_tail_on_startup_exit() {
+    fn test_ensure_daemon_running_reports_startup_exit_without_stderr_tail() {
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
 
@@ -2475,12 +2453,8 @@ exit 42
         let err = ensure_daemon_running_unix().expect_err("startup should fail");
         let msg = err.to_string();
         assert!(
-            msg.contains("stderr_tail="),
-            "error must include captured stderr tail: {msg}"
-        );
-        assert!(
-            msg.contains("invalid plugin config"),
-            "stderr tail should include daemon stderr content: {msg}"
+            msg.contains("daemon process exited during startup with status"),
+            "startup exit must still be reported clearly: {msg}"
         );
 
         unsafe {
