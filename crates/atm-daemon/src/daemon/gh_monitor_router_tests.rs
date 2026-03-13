@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use super::*;
 use crate::plugins::ci_monitor::gh_monitor;
 #[cfg(unix)]
@@ -696,6 +698,7 @@ fn test_classify_failure_infra_when_runner_failure_detected() {
 }
 
 #[tokio::test]
+#[serial]
 #[cfg(unix)]
 async fn test_gh_monitor_run_target_success_status_roundtrip() {
     let temp = TempDir::new().unwrap();

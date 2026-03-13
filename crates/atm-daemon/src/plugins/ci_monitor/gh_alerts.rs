@@ -1,6 +1,7 @@
+//! GitHub monitor routing and notification helpers.
+
 use super::CiMonitorConfig;
 use super::helpers::normalize_repo_scope;
-use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{GhMonitorStatus, GhMonitorTargetKind};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::schema::InboxMessage;
@@ -33,7 +34,11 @@ pub(crate) fn emit_ci_monitor_message(
         if let Err(e) =
             agent_team_mail_core::io::inbox::inbox_append(&inbox_path, &message, team, agent)
         {
-            warn!(team = %team, agent = %agent, "failed to emit ci monitor message: {e}");
+            warn!(
+                team = %team,
+                agent = %agent,
+                "failed to emit ci monitor message: {e}"
+            );
         }
     }
 }
@@ -55,14 +60,32 @@ pub(crate) fn emit_ci_not_started_alert(
         status.target,
         status.message.clone().unwrap_or_default()
     );
-    emit_ci_monitor_message(
-        home,
-        &from_agent,
-        &targets,
-        &format!("ci_not_started: {}", status.target),
-        &text,
-        Some(uuid::Uuid::new_v4().to_string()),
-    );
+    let summary = format!("ci_not_started: {}", status.target);
+    for (agent, team) in targets {
+        let inbox_path = home
+            .join(".claude/teams")
+            .join(&team)
+            .join("inboxes")
+            .join(format!("{agent}.json"));
+        let message = InboxMessage {
+            from: from_agent.clone(),
+            text: text.clone(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            read: false,
+            summary: Some(summary.clone()),
+            message_id: Some(uuid::Uuid::new_v4().to_string()),
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        if let Err(e) =
+            agent_team_mail_core::io::inbox::inbox_append(&inbox_path, &message, &team, &agent)
+        {
+            warn!(
+                team = %team,
+                agent = %agent,
+                "failed to emit ci_not_started alert: {e}"
+            );
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -74,7 +97,7 @@ pub(crate) fn emit_merge_conflict_alert(
     run_conclusion: Option<&str>,
     config_cwd: Option<&str>,
 ) {
-    let expected_repo = pr_url.and_then(super::polling::extract_repo_slug_from_url);
+    let expected_repo = pr_url.and_then(super::gh_monitor::extract_repo_slug_from_url);
     let (from_agent, targets) =
         resolve_ci_alert_routing(home, &status.team, config_cwd, expected_repo.as_deref());
     let target_kind = match status.target_kind {
@@ -97,6 +120,7 @@ pub(crate) fn emit_merge_conflict_alert(
         text.push_str(&format!("\nreason: {message}"));
     }
 
+    let summary = format!("merge_conflict: {}", status.target);
     let mut extra_fields = serde_json::Map::new();
     extra_fields.insert(
         "classification".to_string(),
@@ -138,14 +162,32 @@ pub(crate) fn emit_merge_conflict_alert(
         extra_fields,
         ..Default::default()
     });
-    emit_ci_monitor_message(
-        home,
-        &from_agent,
-        &targets,
-        &format!("merge_conflict: {}", status.target),
-        &text,
-        Some(uuid::Uuid::new_v4().to_string()),
-    );
+
+    for (agent, team) in targets {
+        let inbox_path = home
+            .join(".claude/teams")
+            .join(&team)
+            .join("inboxes")
+            .join(format!("{agent}.json"));
+        let message = InboxMessage {
+            from: from_agent.clone(),
+            text: text.clone(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            read: false,
+            summary: Some(summary.clone()),
+            message_id: Some(uuid::Uuid::new_v4().to_string()),
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        if let Err(e) =
+            agent_team_mail_core::io::inbox::inbox_append(&inbox_path, &message, &team, &agent)
+        {
+            warn!(
+                team = %team,
+                agent = %agent,
+                "failed to emit merge_conflict alert: {e}"
+            );
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -160,8 +202,8 @@ pub(crate) fn resolve_ci_alert_routing(
         .filter(|cwd| !cwd.is_empty())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| home.to_path_buf());
-    let config = match resolve_config(
-        &ConfigOverrides {
+    let config = match agent_team_mail_core::config::resolve_config(
+        &agent_team_mail_core::config::ConfigOverrides {
             team: Some(team.to_string()),
             ..Default::default()
         },
@@ -177,7 +219,8 @@ pub(crate) fn resolve_ci_alert_routing(
         }
     };
 
-    let Some(plugin_table) = config.plugin_config("gh_monitor") else {
+    let plugin_table = config.plugin_config("gh_monitor");
+    let Some(plugin_table) = plugin_table else {
         return (
             "gh-monitor".to_string(),
             vec![("team-lead".to_string(), team.to_string())],
@@ -260,44 +303,108 @@ pub(crate) fn repo_scope_matches(configured: &str, expected: &str) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(unix)]
-pub(crate) fn emit_gh_monitor_health_transition(
-    home: &std::path::Path,
-    team: &str,
-    config_cwd: Option<&str>,
-    old_state: &str,
-    new_state: &str,
-    reason: &str,
-) {
-    if old_state == new_state {
-        return;
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{emit_merge_conflict_alert, resolve_ci_alert_routing};
+    use agent_team_mail_core::daemon_client::{GhMonitorStatus, GhMonitorTargetKind};
+    use agent_team_mail_core::schema::InboxMessage;
+    use tempfile::TempDir;
+
+    fn read_inbox(path: &std::path::Path) -> Vec<InboxMessage> {
+        let raw = std::fs::read_to_string(path).unwrap();
+        serde_json::from_str(&raw).unwrap()
     }
 
-    emit_event_best_effort(EventFields {
-        level: if new_state == "healthy" {
-            "info"
-        } else {
-            "warn"
-        },
-        source: "atm-daemon",
-        action: "gh_monitor_health_transition",
-        team: Some(team.to_string()),
-        result: Some(format!("{old_state}->{new_state}")),
-        error: Some(reason.to_string()),
-        ..Default::default()
-    });
+    #[test]
+    fn gh_ci_fr_2_default_routing_targets_team_lead_when_notify_target_missing() {
+        let temp = TempDir::new().unwrap();
+        let repo_dir = temp.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::fs::write(
+            repo_dir.join(".atm.toml"),
+            r#"[core]
+default_team = "atm-dev"
+identity = "team-lead"
 
-    let (from_agent, targets) = resolve_ci_alert_routing(home, team, config_cwd, None);
-    let text = format!(
-        "[gh_monitor] availability transition {} -> {}\nreason: {}",
-        old_state, new_state, reason
-    );
-    emit_ci_monitor_message(
-        home,
-        &from_agent,
-        &targets,
-        &format!("gh_monitor: {new_state}"),
-        &text,
-        Some(uuid::Uuid::new_v4().to_string()),
-    );
+[plugins.gh_monitor]
+enabled = true
+team = "atm-dev"
+agent = "gh-monitor"
+repo = "randlee/agent-team-mail"
+"#,
+        )
+        .unwrap();
+
+        let (from_agent, targets) = resolve_ci_alert_routing(
+            temp.path(),
+            "atm-dev",
+            Some(repo_dir.to_string_lossy().as_ref()),
+            Some("randlee/agent-team-mail"),
+        );
+
+        assert_eq!(from_agent, "gh-monitor");
+        assert_eq!(
+            targets,
+            vec![("team-lead".to_string(), "atm-dev".to_string())]
+        );
+    }
+
+    #[test]
+    fn gh_ci_fr_17_merge_conflict_alert_includes_required_payload_fields() {
+        let temp = TempDir::new().unwrap();
+        let repo_dir = temp.path().join("repo");
+        let inbox_dir = temp.path().join(".claude/teams/atm-dev/inboxes");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::fs::create_dir_all(&inbox_dir).unwrap();
+        std::fs::write(
+            repo_dir.join(".atm.toml"),
+            r#"[core]
+default_team = "atm-dev"
+identity = "team-lead"
+
+[plugins.gh_monitor]
+enabled = true
+team = "atm-dev"
+agent = "gh-monitor"
+repo = "randlee/agent-team-mail"
+notify_target = "team-lead"
+"#,
+        )
+        .unwrap();
+
+        let status = GhMonitorStatus {
+            team: "atm-dev".to_string(),
+            configured: true,
+            enabled: true,
+            config_source: Some("repo".to_string()),
+            config_path: Some(repo_dir.join(".atm.toml").to_string_lossy().to_string()),
+            target_kind: GhMonitorTargetKind::Pr,
+            target: "123".to_string(),
+            state: "merge_conflict".to_string(),
+            run_id: Some(99),
+            reference: None,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            message: Some("preflight dirty".to_string()),
+        };
+
+        emit_merge_conflict_alert(
+            temp.path(),
+            &status,
+            Some("https://github.com/randlee/agent-team-mail/pull/123"),
+            "DIRTY",
+            Some("failure"),
+            Some(repo_dir.to_string_lossy().as_ref()),
+        );
+
+        let inbox = read_inbox(&inbox_dir.join("team-lead.json"));
+        let message = inbox.last().expect("merge conflict alert");
+        assert!(message.text.contains("classification: merge_conflict"));
+        assert!(message.text.contains("status: merge_conflict"));
+        assert!(
+            message
+                .text
+                .contains("pr_url: https://github.com/randlee/agent-team-mail/pull/123")
+        );
+        assert!(message.text.contains("merge_state_status: DIRTY"));
+    }
 }

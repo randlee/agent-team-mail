@@ -4,7 +4,9 @@
 //! socket/plugin call sites onto the routed CI-monitor surface.
 #![allow(dead_code)]
 
-use super::alerts::{emit_ci_monitor_message, emit_merge_conflict_alert, resolve_ci_alert_routing};
+use super::gh_alerts::{
+    emit_ci_monitor_message, emit_merge_conflict_alert, resolve_ci_alert_routing,
+};
 use super::gh_cli::{
     fetch_failed_log_excerpt, fetch_pull_request, fetch_run, is_pr_merge_state_dirty,
 };

@@ -1,6 +1,6 @@
 //! GitHub-specific gh_monitor provider logic.
 
-pub(crate) use super::alerts::emit_ci_monitor_message;
+pub(crate) use super::gh_alerts::emit_ci_monitor_message;
 // These schema re-exports keep the legacy gh_monitor tests/builders compiling
 // while AM.6 finishes moving the remaining provider helpers behind the routed surface.
 #[allow(unused_imports)]

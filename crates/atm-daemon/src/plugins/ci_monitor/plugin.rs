@@ -5,6 +5,7 @@ use super::github_provider::GitHubActionsProvider;
 use super::loader::CiProviderLoader;
 use super::provider::ErasedCiProvider;
 use super::registry::{CiProviderFactory, CiProviderRegistry};
+#[cfg(unix)]
 use super::service::{fetch_run_details, list_completed_runs};
 #[cfg(unix)]
 use super::types::GhMonitorHealthFile;
@@ -910,6 +911,15 @@ impl CiMonitorPlugin {
         }
     }
 
+    #[cfg(not(unix))]
+    fn write_health_record(
+        _ctx: &PluginContext,
+        _team: &str,
+        _availability_state: &str,
+        _message: &str,
+    ) {
+    }
+
     fn notify_disabled_transition(&self, ctx: &PluginContext, team: &str, message: &str) {
         let lead_agent =
             std::fs::read_to_string(ctx.mail.teams_root().join(team).join("config.json"))
@@ -1175,22 +1185,22 @@ impl Plugin for CiMonitorPlugin {
             return Ok(());
         }
 
-        // Clone context for use in loop (Arc, so cheap)
-        let ctx = self
-            .ctx
-            .as_ref()
-            .ok_or_else(|| PluginError::Runtime {
-                message: "Plugin not initialized".to_string(),
-                source: None,
-            })?
-            .clone();
-
-        let base_interval_secs = self.config.poll_interval_secs.max(10);
-        let max_backoff_secs = MAX_ERROR_BACKOFF_SECS.max(base_interval_secs);
-        let mut next_delay_secs: u64 = 0;
-
         #[cfg(unix)]
         {
+            // Clone context for use in loop (Arc, so cheap)
+            let ctx = self
+                .ctx
+                .as_ref()
+                .ok_or_else(|| PluginError::Runtime {
+                    message: "Plugin not initialized".to_string(),
+                    source: None,
+                })?
+                .clone();
+
+            let base_interval_secs = self.config.poll_interval_secs.max(10);
+            let max_backoff_secs = MAX_ERROR_BACKOFF_SECS.max(base_interval_secs);
+            let mut next_delay_secs: u64 = 0;
+
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => {
@@ -1199,7 +1209,6 @@ impl Plugin for CiMonitorPlugin {
                     _ = sleep(Duration::from_secs(next_delay_secs)) => {
                         // Evict old dedup cache entries
                         self.evict_old_dedup_entries();
-
                         // Fetch all completed runs
                         let runs = match self.provider.as_ref() {
                             Some(provider) => list_completed_runs(provider.as_ref()).await,
@@ -1305,9 +1314,9 @@ impl Plugin for CiMonitorPlugin {
                     }
                 }
             }
-        }
 
-        Ok(())
+            Ok(())
+        }
     }
 
     async fn shutdown(&mut self) -> Result<(), PluginError> {
@@ -2080,6 +2089,7 @@ repo = "config-owner/config-repo"
         assert_eq!(member.cwd, temp_dir.path().to_string_lossy());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_init_without_git_or_config_repo_writes_disabled_init_health_record() {
         use crate::plugins::ci_monitor::MockCiProvider;

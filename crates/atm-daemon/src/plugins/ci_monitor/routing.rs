@@ -1,12 +1,16 @@
 //! Routing and notification policy for CI monitor alerts.
 
 #[cfg(unix)]
-use super::alerts;
-#[cfg(unix)]
 use agent_team_mail_core::daemon_client::GhMonitorStatus;
+#[cfg(unix)]
+use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+#[cfg(unix)]
+use agent_team_mail_core::schema::InboxMessage;
+#[cfg(unix)]
+use tracing::warn;
 
 #[cfg(unix)]
-pub(crate) use super::alerts::repo_scope_matches;
+pub(crate) use super::gh_alerts::repo_scope_matches;
 
 #[cfg(unix)]
 pub(crate) fn resolve_ci_alert_routing(
@@ -15,7 +19,7 @@ pub(crate) fn resolve_ci_alert_routing(
     config_cwd: Option<&str>,
     expected_repo_slug: Option<&str>,
 ) -> (String, Vec<(String, String)>) {
-    alerts::resolve_ci_alert_routing(home, team, config_cwd, expected_repo_slug)
+    super::gh_alerts::resolve_ci_alert_routing(home, team, config_cwd, expected_repo_slug)
 }
 
 #[cfg(unix)]
@@ -24,7 +28,7 @@ pub(crate) fn notify_ci_not_started(
     status: &GhMonitorStatus,
     config_cwd: Option<&str>,
 ) {
-    alerts::emit_ci_not_started_alert(home, status, config_cwd);
+    super::gh_alerts::emit_ci_not_started_alert(home, status, config_cwd);
 }
 
 #[cfg(unix)]
@@ -36,7 +40,7 @@ pub(crate) fn notify_merge_conflict(
     run_conclusion: Option<&str>,
     config_cwd: Option<&str>,
 ) {
-    alerts::emit_merge_conflict_alert(
+    super::gh_alerts::emit_merge_conflict_alert(
         home,
         status,
         pr_url,
@@ -56,7 +60,64 @@ pub(crate) fn notify_gh_monitor_health_transition(
     new_state: &str,
     reason: &str,
 ) {
-    alerts::emit_gh_monitor_health_transition(home, team, config_cwd, old_state, new_state, reason);
+    if old_state == new_state {
+        return;
+    }
+
+    let level = if new_state == "healthy" {
+        "info"
+    } else {
+        "warn"
+    };
+    emit_event_best_effort(EventFields {
+        level,
+        source: "atm-daemon",
+        action: "gh_monitor_health_transition",
+        team: Some(team.to_string()),
+        result: Some(format!("{old_state}->{new_state}")),
+        error: Some(reason.to_string()),
+        ..Default::default()
+    });
+
+    let (from_agent, targets) = resolve_ci_alert_routing(home, team, config_cwd, None);
+    let text = format!(
+        "[gh_monitor] availability transition {} -> {}\nreason: {}",
+        old_state, new_state, reason
+    );
+    for (agent, target_team) in targets {
+        let inbox_path = home
+            .join(".claude/teams")
+            .join(&target_team)
+            .join("inboxes")
+            .join(format!("{agent}.json"));
+        if let Some(parent) = inbox_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if !inbox_path.exists() {
+            let _ = std::fs::write(&inbox_path, "[]");
+        }
+        let message = InboxMessage {
+            from: from_agent.clone(),
+            text: text.clone(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            read: false,
+            summary: Some(format!("gh_monitor: {new_state}")),
+            message_id: Some(uuid::Uuid::new_v4().to_string()),
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        if let Err(e) = agent_team_mail_core::io::inbox::inbox_append(
+            &inbox_path,
+            &message,
+            &target_team,
+            &agent,
+        ) {
+            warn!(
+                team = %target_team,
+                agent = %agent,
+                "failed to emit gh_monitor transition alert: {e}"
+            );
+        }
+    }
 }
 
 #[cfg(all(test, unix))]

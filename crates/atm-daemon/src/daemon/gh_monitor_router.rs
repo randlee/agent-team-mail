@@ -375,6 +375,6 @@ fn make_error_response(request_id: &str, code: &str, message: &str) -> SocketRes
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "gh_monitor_router_tests.rs"]
 mod tests;
