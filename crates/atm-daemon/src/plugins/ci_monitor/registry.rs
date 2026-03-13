@@ -113,7 +113,7 @@ impl Default for CiProviderRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::ci_monitor::github::GitHubActionsProvider;
+    use crate::plugins::ci_monitor::GitHubActionsProvider;
 
     fn create_test_factory(name: &str, description: &str) -> CiProviderFactory {
         CiProviderFactory {

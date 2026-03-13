@@ -341,6 +341,7 @@ async fn test_invalid_config_provider() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 #[serial]
 async fn test_invalid_config_sets_disabled_health_at_init() {

@@ -47,10 +47,10 @@ use crate::daemon::pid_backend_validation::{
 
 use crate::daemon::dedup::{DedupeKey, DurableDedupeStore};
 use crate::daemon::session_registry::{MarkDeadForSessionOutcome, SharedSessionRegistry};
-#[cfg(all(test, unix))]
-use crate::plugins::ci_monitor::gh_monitor;
 #[cfg(unix)]
 use crate::plugins::ci_monitor::service;
+#[cfg(all(test, unix))]
+use crate::plugins::ci_monitor::{gh_alerts, gh_monitor};
 use crate::plugins::worker_adapter::AgentState;
 
 #[cfg(test)]
@@ -2036,7 +2036,7 @@ fn emit_gh_monitor_health_transition(
     new_state: &str,
     reason: &str,
 ) {
-    gh_monitor::emit_gh_monitor_health_transition(
+    gh_alerts::emit_gh_monitor_health_transition(
         home, team, config_cwd, old_state, new_state, reason,
     )
 }
@@ -2482,7 +2482,7 @@ fn emit_ci_monitor_message(
     text: &str,
     message_id: Option<String>,
 ) {
-    gh_monitor::emit_ci_monitor_message(home, from_agent, targets, summary, text, message_id)
+    gh_alerts::emit_ci_monitor_message(home, from_agent, targets, summary, text, message_id)
 }
 
 #[cfg(all(test, unix))]
@@ -2548,7 +2548,7 @@ fn emit_ci_not_started_alert(
     status: &GhMonitorStatus,
     config_cwd: Option<&str>,
 ) {
-    gh_monitor::emit_ci_not_started_alert(home, status, config_cwd)
+    gh_alerts::emit_ci_not_started_alert(home, status, config_cwd)
 }
 
 #[cfg(all(test, unix))]
@@ -2561,7 +2561,7 @@ fn emit_merge_conflict_alert(
     run_conclusion: Option<&str>,
     config_cwd: Option<&str>,
 ) {
-    gh_monitor::emit_merge_conflict_alert(
+    gh_alerts::emit_merge_conflict_alert(
         home,
         status,
         pr_url,
@@ -2578,13 +2578,13 @@ fn resolve_ci_alert_routing(
     config_cwd: Option<&str>,
     expected_repo_slug: Option<&str>,
 ) -> (String, Vec<(String, String)>) {
-    gh_monitor::resolve_ci_alert_routing(home, team, config_cwd, expected_repo_slug)
+    gh_alerts::resolve_ci_alert_routing(home, team, config_cwd, expected_repo_slug)
 }
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
 fn repo_scope_matches(configured: &str, expected: &str) -> bool {
-    gh_monitor::repo_scope_matches(configured, expected)
+    gh_alerts::repo_scope_matches(configured, expected)
 }
 
 /// Handle the `"control"` command asynchronously.
