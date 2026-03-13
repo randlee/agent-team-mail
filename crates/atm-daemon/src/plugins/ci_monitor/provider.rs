@@ -1,6 +1,6 @@
 //! Provider trait for CI operations across platforms
 
-use super::types::{CiFilter, CiRun};
+use super::types::{CiFilter, CiPullRequest, CiRun};
 use crate::plugin::PluginError;
 use std::future::Future;
 use std::pin::Pin;
@@ -21,6 +21,12 @@ pub trait CiProvider: Send + Sync + std::fmt::Debug {
 
     /// Get job log output
     fn get_job_log(&self, job_id: u64) -> impl Future<Output = Result<String, PluginError>> + Send;
+
+    /// Get pull request metadata needed for CI correlation.
+    fn get_pull_request(
+        &self,
+        pr_number: u64,
+    ) -> impl Future<Output = Result<Option<CiPullRequest>, PluginError>> + Send;
 
     /// Provider name for logging/display
     fn provider_name(&self) -> &str;
@@ -46,6 +52,11 @@ pub trait ErasedCiProvider: Send + Sync + std::fmt::Debug {
         job_id: u64,
     ) -> Pin<Box<dyn Future<Output = Result<String, PluginError>> + Send + 'a>>;
 
+    fn get_pull_request<'a>(
+        &'a self,
+        pr_number: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<CiPullRequest>, PluginError>> + Send + 'a>>;
+
     fn provider_name(&self) -> &str;
 }
 
@@ -70,6 +81,13 @@ impl<T: CiProvider> ErasedCiProvider for T {
         job_id: u64,
     ) -> Pin<Box<dyn Future<Output = Result<String, PluginError>> + Send + 'a>> {
         Box::pin(CiProvider::get_job_log(self, job_id))
+    }
+
+    fn get_pull_request<'a>(
+        &'a self,
+        pr_number: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<CiPullRequest>, PluginError>> + Send + 'a>> {
+        Box::pin(CiProvider::get_pull_request(self, pr_number))
     }
 
     fn provider_name(&self) -> &str {

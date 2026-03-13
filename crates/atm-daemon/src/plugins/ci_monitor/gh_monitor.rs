@@ -1,15 +1,18 @@
 //! GitHub-specific gh_monitor provider logic.
 
-#[allow(unused_imports)]
-pub(crate) use super::gh_alerts::{
-    emit_ci_monitor_message, emit_ci_not_started_alert, emit_gh_monitor_health_transition,
-    emit_merge_conflict_alert, repo_scope_matches, resolve_ci_alert_routing,
-};
+pub(crate) use super::alerts::emit_ci_monitor_message;
 #[allow(unused_imports)]
 pub(crate) use super::github_schema::{
     GhPrLookupView, GhPrView, GhPullRequest, GhRunJob, GhRunListEntry, GhRunStep, GhRunView,
 };
 use super::helpers::{read_gh_monitor_health, upsert_gh_monitor_health, upsert_gh_monitor_status};
+#[allow(unused_imports)]
+pub(crate) use super::routing::{
+    notify_ci_not_started as emit_ci_not_started_alert,
+    notify_gh_monitor_health_transition as emit_gh_monitor_health_transition,
+    notify_merge_conflict as emit_merge_conflict_alert, repo_scope_matches,
+    resolve_ci_alert_routing,
+};
 use super::types::GhMonitorHealthUpdate;
 use agent_team_mail_core::daemon_client::{
     GhMonitorHealth, GhMonitorRequest, GhMonitorStatus, GhMonitorTargetKind,

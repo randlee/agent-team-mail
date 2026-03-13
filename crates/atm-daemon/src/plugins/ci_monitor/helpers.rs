@@ -262,3 +262,60 @@ pub(crate) fn upsert_gh_monitor_status(home: &Path, status: GhMonitorStatus) -> 
     std::fs::write(path, serde_json::to_string_pretty(&state)?)?;
     Ok(())
 }
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{gh_monitor_key, normalize_repo_scope};
+    use agent_team_mail_core::daemon_client::GhMonitorTargetKind;
+
+    #[test]
+    #[cfg(unix)]
+    fn test_normalize_repo_scope_combines_owner_and_repo() {
+        assert_eq!(
+            normalize_repo_scope(Some("OpenAI"), Some("Agent-Team-Mail")),
+            Some("openai/agent-team-mail".to_string())
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_normalize_repo_scope_preserves_repo_slug_without_owner() {
+        assert_eq!(
+            normalize_repo_scope(None, Some("OpenAI/Agent-Team-Mail")),
+            Some("openai/agent-team-mail".to_string())
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_normalize_repo_scope_rejects_missing_repo() {
+        assert_eq!(normalize_repo_scope(Some("OpenAI"), Some("   ")), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_gh_monitor_key_includes_kind_target_and_reference() {
+        assert_eq!(
+            gh_monitor_key(
+                "atm-dev",
+                GhMonitorTargetKind::Workflow,
+                "ci",
+                Some("release/v1")
+            ),
+            "atm-dev|workflow|ci|release/v1"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_gh_monitor_key_trims_inputs() {
+        assert_eq!(
+            gh_monitor_key(
+                " atm-dev ",
+                GhMonitorTargetKind::Pr,
+                " 123 ",
+                Some(" main ")
+            ),
+            "atm-dev|pr|123|main"
+        );
+    }
+}

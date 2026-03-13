@@ -41,8 +41,8 @@
 
 use agent_team_mail_daemon::plugin::PluginError;
 use agent_team_mail_daemon::plugins::ci_monitor::{
-    CiFilter, CiJob, CiProvider, CiProviderFactory, CiRun, CiRunConclusion, CiRunStatus, CiStep,
-    ErasedCiProvider,
+    CiFilter, CiJob, CiProvider, CiProviderFactory, CiPullRequest, CiRun, CiRunConclusion,
+    CiRunStatus, CiStep, ErasedCiProvider,
 };
 use std::sync::Arc;
 
@@ -78,6 +78,8 @@ impl AzurePipelinesProvider {
             ),
             created_at: "2026-02-13T10:00:00Z".to_string(),
             updated_at: "2026-02-13T10:05:00Z".to_string(),
+            attempt: Some(1),
+            pull_requests: Some(vec![]),
             jobs: None,
         }
     }
@@ -91,6 +93,10 @@ impl AzurePipelinesProvider {
             conclusion: Some(CiRunConclusion::Success),
             started_at: Some("2026-02-13T10:01:00Z".to_string()),
             completed_at: Some("2026-02-13T10:04:00Z".to_string()),
+            url: Some(format!(
+                "https://dev.azure.com/{}/{}/_build/results?view=logs&j={id}",
+                self.organization, self.project
+            )),
             steps: Some(vec![
                 CiStep {
                     name: "Checkout".to_string(),
@@ -142,6 +148,20 @@ impl CiProvider for AzurePipelinesProvider {
              [Step 2] Build...\n\
              [Step 3] Test...\n"
         ))
+    }
+
+    async fn get_pull_request(&self, pr_number: u64) -> Result<Option<CiPullRequest>, PluginError> {
+        Ok(Some(CiPullRequest {
+            number: pr_number,
+            url: Some(format!(
+                "https://dev.azure.com/{}/{}/_git/{}/pullrequest/{pr_number}",
+                self.organization, self.project, self.repo
+            )),
+            head_ref_name: Some("feature/stub".to_string()),
+            head_ref_oid: Some(format!("stub-pr-sha-{pr_number}")),
+            created_at: Some("2026-02-13T10:00:00Z".to_string()),
+            merge_state_status: Some("CLEAN".to_string()),
+        }))
     }
 
     fn provider_name(&self) -> &str {
