@@ -11,7 +11,7 @@ use anyhow::Result;
 use tracing::warn;
 
 #[cfg(unix)]
-use super::gh_alerts::emit_gh_monitor_health_transition;
+use super::alerts::emit_gh_monitor_health_transition;
 #[cfg(unix)]
 use super::types::{GhMonitorHealthFile, GhMonitorHealthUpdate};
 

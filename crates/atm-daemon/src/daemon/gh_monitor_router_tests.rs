@@ -1,5 +1,5 @@
 use super::*;
-use crate::plugins::ci_monitor::gh_alerts::resolve_ci_alert_routing;
+use crate::plugins::ci_monitor::routing::resolve_ci_alert_routing;
 use crate::plugins::ci_monitor::gh_monitor;
 #[cfg(unix)]
 use crate::plugins::ci_monitor::health::set_gh_monitor_health_state;

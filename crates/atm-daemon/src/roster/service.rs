@@ -1,8 +1,9 @@
 //! Roster service for managing synthetic team members
 
 use crate::roster::tracking::MembershipTracker;
-use agent_team_mail_core::schema::{AgentMember, TeamConfig};
-use std::path::{Path, PathBuf};
+use agent_team_mail_core::schema::AgentMember;
+use agent_team_mail_core::team_config_store::TeamConfigStore;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /// Cleanup mode for plugin shutdown
@@ -82,17 +83,23 @@ impl RosterService {
         }
 
         let member_name = member.name.clone();
-        atomic_config_update(&config_path, |config| {
+        let store = TeamConfigStore::open(
+            config_path
+                .parent()
+                .expect("team config path must have a parent directory"),
+        );
+        store.update(|mut config| {
             // Check for duplicate
             if config.members.iter().any(|m| m.name == member_name) {
-                return Err(RosterError::DuplicateMember {
+                return Err(anyhow::anyhow!(RosterError::DuplicateMember {
                     team: team.to_string(),
                     name: member_name.clone(),
-                });
+                }));
             }
             config.members.push(member);
-            Ok(true)
-        })?;
+            Ok(Some(config))
+        })
+        .map_err(map_store_error)?;
 
         // Track the membership
         self.tracker
@@ -131,17 +138,23 @@ impl RosterService {
             return Err(RosterError::TeamNotFound(team.to_string()));
         }
 
-        atomic_config_update(&config_path, |config| {
+        let store = TeamConfigStore::open(
+            config_path
+                .parent()
+                .expect("team config path must have a parent directory"),
+        );
+        store.update(|mut config| {
             let initial_len = config.members.len();
             config.members.retain(|m| m.name != agent_name);
             if config.members.len() == initial_len {
-                return Err(RosterError::MemberNotFound {
+                return Err(anyhow::anyhow!(RosterError::MemberNotFound {
                     team: team.to_string(),
                     name: agent_name.to_string(),
-                });
+                }));
             }
-            Ok(true)
-        })?;
+            Ok(Some(config))
+        })
+        .map_err(map_store_error)?;
 
         // Untrack the membership
         self.tracker
@@ -178,10 +191,12 @@ impl RosterService {
             return Err(RosterError::TeamNotFound(team.to_string()));
         }
 
-        let content = std::fs::read(&config_path)
-            .map_err(|e| RosterError::Io(format!("read failed: {e}")))?;
-        let config: TeamConfig = serde_json::from_slice(&content)
-            .map_err(|e| RosterError::Json(format!("parse failed: {e}")))?;
+        let store = TeamConfigStore::open(
+            config_path
+                .parent()
+                .expect("team config path must have a parent directory"),
+        );
+        let config = store.read().map_err(map_store_error)?;
 
         let mut members: Vec<AgentMember> = config
             .members
@@ -231,7 +246,12 @@ impl RosterService {
         let prefix = format!("plugin:{plugin_name}");
         let mut affected_count = 0;
 
-        atomic_config_update(&config_path, |config| {
+        let store = TeamConfigStore::open(
+            config_path
+                .parent()
+                .expect("team config path must have a parent directory"),
+        );
+        store.update(|mut config| {
             match mode {
                 CleanupMode::Soft => {
                     for member in &mut config.members {
@@ -247,8 +267,13 @@ impl RosterService {
                     affected_count = initial_len - config.members.len();
                 }
             }
-            Ok(affected_count > 0)
-        })?;
+            if affected_count > 0 {
+                Ok(Some(config))
+            } else {
+                Ok(None)
+            }
+        })
+        .map_err(map_store_error)?;
 
         // Clear tracking for this plugin in this team
         if affected_count > 0 {
@@ -284,40 +309,24 @@ impl RosterService {
 /// # Returns
 ///
 /// Returns Ok(()) if successful, or RosterError on failure.
-fn atomic_config_update<F>(config_path: &Path, modify_fn: F) -> Result<(), RosterError>
-where
-    F: FnOnce(&mut TeamConfig) -> Result<bool, RosterError>,
-{
-    let lock_path = config_path.with_extension("lock");
-    // Use 10 retries (max ~51s backoff) to handle slow I/O on Windows CI and
-    // high-concurrency scenarios where multiple threads compete for the same lock.
-    let _lock = agent_team_mail_core::io::lock::acquire_lock(&lock_path, 10)
-        .map_err(|e| RosterError::Io(format!("lock failed: {e}")))?;
-
-    // Read current config
-    let content =
-        std::fs::read(config_path).map_err(|e| RosterError::Io(format!("read failed: {e}")))?;
-    let mut config: TeamConfig = serde_json::from_slice(&content)
-        .map_err(|e| RosterError::Json(format!("parse failed: {e}")))?;
-
-    // Apply modification
-    let changed = modify_fn(&mut config)?;
-    if !changed {
-        return Ok(());
+fn map_store_error(error: anyhow::Error) -> RosterError {
+    if let Some(roster_error) = error.downcast_ref::<RosterError>() {
+        return match roster_error {
+            RosterError::Io(message) => RosterError::Io(message.clone()),
+            RosterError::Json(message) => RosterError::Json(message.clone()),
+            RosterError::DuplicateMember { team, name } => RosterError::DuplicateMember {
+                team: team.clone(),
+                name: name.clone(),
+            },
+            RosterError::MemberNotFound { team, name } => RosterError::MemberNotFound {
+                team: team.clone(),
+                name: name.clone(),
+            },
+            RosterError::TeamNotFound(team) => RosterError::TeamNotFound(team.clone()),
+        };
     }
 
-    // Write back atomically (write to tmp, then rename)
-    let tmp_path = config_path.with_extension("tmp");
-    let new_content = serde_json::to_vec_pretty(&config)
-        .map_err(|e| RosterError::Json(format!("serialize failed: {e}")))?;
-
-    std::fs::write(&tmp_path, &new_content)
-        .map_err(|e| RosterError::Io(format!("write tmp failed: {e}")))?;
-    std::fs::rename(&tmp_path, config_path)
-        .map_err(|e| RosterError::Io(format!("rename failed: {e}")))?;
-
-    Ok(())
-    // Lock released on drop
+    RosterError::Io(error.to_string())
 }
 
 #[cfg(test)]

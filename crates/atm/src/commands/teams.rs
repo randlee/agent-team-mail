@@ -6,11 +6,10 @@ use agent_team_mail_core::daemon_client::{
     query_list_agents, query_session_for_team, query_team_member_states, register_hint,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
-use agent_team_mail_core::io::atomic::atomic_swap;
 use agent_team_mail_core::io::inbox::inbox_update;
-use agent_team_mail_core::io::lock::acquire_lock;
 use agent_team_mail_core::model_registry::ModelId;
 use agent_team_mail_core::schema::{BackendType, TeamConfig};
+use agent_team_mail_core::team_config_store::TeamConfigStore;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use clap::Args;
@@ -21,7 +20,6 @@ use sc_composer::{
 use serde_json::json;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -899,57 +897,53 @@ fn ensure_spawn_member_metadata(
         return Ok(());
     }
 
-    let lock_path = config_path.with_extension("lock");
-    let _lock = acquire_lock(&lock_path, 5)
-        .map_err(|e| anyhow::anyhow!("Failed to acquire lock for team config: {e}"))?;
-
-    let mut team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
+    let store = TeamConfigStore::open(&team_dir);
     let backend = backend_type_for_runtime(runtime);
     let parsed_model_override = model_override.map(|model| {
         ModelId::from_str(model).unwrap_or_else(|_| ModelId::Custom(model.to_string()))
     });
-
-    if let Some(member) = team_config.members.iter_mut().find(|m| m.name == agent) {
-        if let Some(model) = model_override
-            && let Some(parsed_model) = parsed_model_override
-        {
-            member.model = model.to_string();
-            member.external_model = Some(parsed_model);
-        } else if member.external_model.is_none() {
-            member.external_model =
-                Some(ModelId::from_str(&member.model).unwrap_or(ModelId::Unknown));
+    store.update(|mut team_config| {
+        if let Some(member) = team_config.members.iter_mut().find(|m| m.name == agent) {
+            if let Some(model) = model_override
+                && let Some(parsed_model) = parsed_model_override
+            {
+                member.model = model.to_string();
+                member.external_model = Some(parsed_model);
+            } else if member.external_model.is_none() {
+                member.external_model =
+                    Some(ModelId::from_str(&member.model).unwrap_or(ModelId::Unknown));
+            }
+            member.external_backend_type = Some(backend);
+            if member.cwd.trim().is_empty() {
+                member.cwd = launch_dir.to_string_lossy().to_string();
+            }
+        } else {
+            let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+            team_config
+                .members
+                .push(agent_team_mail_core::schema::AgentMember {
+                    agent_id: format!("{agent}@{team}"),
+                    name: agent.to_string(),
+                    agent_type: runtime_name(runtime).to_string(),
+                    model: model_override.unwrap_or("unknown").to_string(),
+                    prompt: None,
+                    color: None,
+                    plan_mode_required: None,
+                    joined_at: now_ms,
+                    tmux_pane_id: None,
+                    cwd: launch_dir.to_string_lossy().to_string(),
+                    subscriptions: Vec::new(),
+                    backend_type: None,
+                    is_active: Some(false),
+                    last_active: None,
+                    session_id: None,
+                    external_backend_type: Some(backend),
+                    external_model: Some(parsed_model_override.unwrap_or(ModelId::Unknown)),
+                    unknown_fields: std::collections::HashMap::new(),
+                });
         }
-        member.external_backend_type = Some(backend);
-        if member.cwd.trim().is_empty() {
-            member.cwd = launch_dir.to_string_lossy().to_string();
-        }
-    } else {
-        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
-        team_config
-            .members
-            .push(agent_team_mail_core::schema::AgentMember {
-                agent_id: format!("{agent}@{team}"),
-                name: agent.to_string(),
-                agent_type: runtime_name(runtime).to_string(),
-                model: model_override.unwrap_or("unknown").to_string(),
-                prompt: None,
-                color: None,
-                plan_mode_required: None,
-                joined_at: now_ms,
-                tmux_pane_id: None,
-                cwd: launch_dir.to_string_lossy().to_string(),
-                subscriptions: Vec::new(),
-                backend_type: None,
-                is_active: Some(false),
-                last_active: None,
-                session_id: None,
-                external_backend_type: Some(backend),
-                external_model: Some(parsed_model_override.unwrap_or(ModelId::Unknown)),
-                unknown_fields: std::collections::HashMap::new(),
-            });
-    }
-
-    write_team_config(&config_path, &team_config)?;
+        Ok(Some(team_config))
+    })?;
     ensure_member_inbox_atomic(&team_dir, team, agent)?;
     Ok(())
 }
@@ -1557,11 +1551,8 @@ fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
     let effective_agent_type =
         effective_add_member_agent_type(&args.agent_type, parsed_backend_type.as_ref());
 
-    let lock_path = config_path.with_extension("lock");
-    let _lock = acquire_lock(&lock_path, 5)
-        .map_err(|e| anyhow::anyhow!("Failed to acquire lock for team config: {e}"))?;
-
-    let mut team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
+    let store = TeamConfigStore::open(&team_dir);
+    let mut team_config = store.read()?;
 
     let agent_id = format!("{}@{}", args.agent, args.team);
 
@@ -1578,7 +1569,7 @@ fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
             // If --pane-id provided, update it on the existing member and return.
             if let Some(ref pane_id) = args.pane_id {
                 team_config.members[idx].tmux_pane_id = Some(pane_id.clone());
-                write_team_config(&config_path, &team_config)?;
+                store.update(|_| Ok(Some(team_config.clone())))?;
                 ensure_member_inbox_atomic(&team_dir, &args.team, &args.agent)?;
                 return Ok(AddMemberOutcome::UpdatedPaneId);
             } else {
@@ -1618,7 +1609,7 @@ fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
         if let Some(ref pane_id) = args.pane_id {
             m.tmux_pane_id = Some(pane_id.clone());
         }
-        write_team_config(&config_path, &team_config)?;
+        store.update(|_| Ok(Some(team_config.clone())))?;
         ensure_member_inbox_atomic(&team_dir, &args.team, &args.agent)?;
         if let Some(ref session_id) = args.session_id {
             sync_member_session_hint_from_config(
@@ -1661,7 +1652,7 @@ fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
     };
 
     team_config.members.push(member);
-    write_team_config(&config_path, &team_config)?;
+    store.update(|_| Ok(Some(team_config.clone())))?;
     ensure_member_inbox_atomic(&team_dir, &args.team, &args.agent)?;
     if let Some(ref session_id) = args.session_id {
         sync_member_session_hint_from_config(&config_path, &args.team, &args.agent, session_id)?;
@@ -1791,11 +1782,8 @@ fn update_member(args: UpdateMemberArgs) -> Result<()> {
         None
     };
 
-    let lock_path = config_path.with_extension("lock");
-    let _lock = acquire_lock(&lock_path, 5)
-        .map_err(|e| anyhow::anyhow!("Failed to acquire lock for team config: {e}"))?;
-
-    let mut team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
+    let store = TeamConfigStore::open(&team_dir);
+    let mut team_config = store.read()?;
 
     let member = team_config
         .members
@@ -1846,7 +1834,7 @@ fn update_member(args: UpdateMemberArgs) -> Result<()> {
         return Ok(());
     }
 
-    write_team_config(&config_path, &team_config)?;
+    store.update(|_| Ok(Some(team_config.clone())))?;
     if let Some(ref session_id) = session_id_to_sync {
         sync_member_session_hint_from_config(&config_path, &args.team, &args.agent, session_id)?;
     }
@@ -1870,11 +1858,8 @@ fn remove_member(args: RemoveMemberArgs) -> Result<()> {
         anyhow::bail!("No team '{}' found.", args.team);
     }
 
-    let lock_path = config_path.with_extension("lock");
-    let _lock = acquire_lock(&lock_path, 5)
-        .map_err(|e| anyhow::anyhow!("Failed to acquire lock for team config: {e}"))?;
-
-    let mut team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
+    let store = TeamConfigStore::open(&team_dir);
+    let mut team_config = store.read()?;
     let member = team_config
         .members
         .iter()
@@ -1961,7 +1946,7 @@ fn remove_member(args: RemoveMemberArgs) -> Result<()> {
     }
 
     team_config.members.retain(|m| m.name != args.agent);
-    write_team_config(&config_path, &team_config)?;
+    store.update(|_| Ok(Some(team_config.clone())))?;
     remove_member_mailbox_artifacts(&team_dir, &args.agent);
 
     emit_event_best_effort(EventFields {
@@ -2278,11 +2263,8 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         return Err(anyhow::anyhow!("No team '{}' found.", args.team));
     }
 
-    let lock_path = config_path.with_extension("lock");
-    let _lock = acquire_lock(&lock_path, 5)
-        .map_err(|e| anyhow::anyhow!("Failed to acquire lock for team config: {e}"))?;
-
-    let mut team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
+    let store = TeamConfigStore::open(&team_dir);
+    let mut team_config = store.read()?;
 
     let mut removed_names: Vec<String> = Vec::new();
     let mut removed_orphan_mailboxes: Vec<String> = Vec::new();
@@ -2521,7 +2503,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
         team_config
             .members
             .retain(|m| !removed_names.contains(&m.name));
-        write_team_config(&config_path, &team_config)?;
+        store.update(|_| Ok(Some(team_config.clone())))?;
     }
 
     // Full-team cleanup mode: purge orphan mailbox artifacts that no longer
@@ -3082,20 +3064,11 @@ fn restore(args: RestoreArgs) -> Result<()> {
     }
 
     // Restore members by updating config under lock
-    let lock_path = config_path.with_extension("lock");
     let member_count = restore_members.len();
-    {
-        let _lock = acquire_lock(&lock_path, 5)
-            .map_err(|e| anyhow::anyhow!("Failed to acquire lock for team config: {e}"))?;
-
-        let mut config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
-
-        // NEVER overwrite leadSessionId
+    TeamConfigStore::open(&team_dir).update(|mut config| {
         for member in restore_members {
             if !config.members.iter().any(|m| m.name == member.name) {
                 let mut restored = member.clone();
-                // Restored members have no active runtime session until they
-                // explicitly re-register with the daemon.
                 restored.is_active = Some(false);
                 restored.last_active = None;
                 restored.session_id = None;
@@ -3103,9 +3076,8 @@ fn restore(args: RestoreArgs) -> Result<()> {
                 config.members.push(restored);
             }
         }
-
-        write_team_config(&config_path, &config)?;
-    }
+        Ok(Some(config))
+    })?;
 
     // Restore inbox files
     if !team_inboxes_dir.exists() {
@@ -3171,23 +3143,24 @@ fn restore(args: RestoreArgs) -> Result<()> {
     Ok(())
 }
 
-/// Atomically write a `TeamConfig` to `config_path` via tmp file + swap.
-fn write_team_config(config_path: &Path, config: &TeamConfig) -> Result<()> {
-    let serialized = serde_json::to_string_pretty(config)?;
-    let tmp_path = config_path.with_extension("tmp");
-    let mut file = std::fs::File::create(&tmp_path)?;
-    file.write_all(serialized.as_bytes())?;
-    file.sync_all()?;
-    drop(file);
-    atomic_swap(config_path, &tmp_path)?;
-    Ok(())
+/// Read team config from file
+fn read_team_config(path: &Path) -> Result<TeamConfig> {
+    TeamConfigStore::open(
+        path.parent()
+            .expect("team config path must have a parent directory"),
+    )
+    .read()
 }
 
-/// Read team config from file
-fn read_team_config(path: &PathBuf) -> Result<TeamConfig> {
-    let content = fs::read_to_string(path)?;
-    let config: TeamConfig = serde_json::from_str(&content)?;
-    Ok(config)
+#[cfg(test)]
+fn write_team_config(config_path: &Path, config: &TeamConfig) -> Result<()> {
+    TeamConfigStore::open(
+        config_path
+            .parent()
+            .expect("config_path must have a parent directory"),
+    )
+    .create_or_update(|| config.clone(), |_| Ok(Some(config.clone())))
+    .map(|_| ())
 }
 
 /// Format age as human-readable string (e.g., "2 days ago")
@@ -4405,9 +4378,6 @@ mod tests {
             members: vec![],
             unknown_fields: HashMap::new(),
         };
-
-        // Create placeholder so atomic_swap has both files present (required on macOS)
-        fs::write(&config_path, "{}").unwrap();
 
         write_team_config(&config_path, &cfg).unwrap();
         assert!(config_path.exists());
