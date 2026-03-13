@@ -7,6 +7,7 @@ use super::provider::ErasedCiProvider;
 use super::registry::{CiProviderFactory, CiProviderRegistry};
 use super::types::{CiFilter, CiJob, CiRunConclusion, CiRunStatus};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
+use crate::roster::RosterError;
 use agent_team_mail_core::context::{GitProvider as GitProviderType, RepoContext};
 use agent_team_mail_core::schema::{AgentMember, InboxMessage, TeamConfig};
 use chrono::{DateTime, Utc};
@@ -89,6 +90,12 @@ pub struct CiMonitorPlugin {
     runtime_history: RuntimeHistory,
     /// Persisted runtime history path (initialized in init when enabled).
     runtime_history_path: Option<PathBuf>,
+    /// Test-only: when set, `list_members` inside the DuplicateMember adoption arm
+    /// returns this error message as a `PluginError::Init` instead of calling the
+    /// real roster service.  Allows regression coverage of the `map_err` path without
+    /// filesystem timing tricks.
+    #[cfg(test)]
+    list_members_error: Option<String>,
 }
 
 impl CiMonitorPlugin {
@@ -103,6 +110,8 @@ impl CiMonitorPlugin {
             seen_runs: HashMap::new(),
             runtime_history: RuntimeHistory::default(),
             runtime_history_path: None,
+            #[cfg(test)]
+            list_members_error: None,
         }
     }
 
@@ -127,6 +136,17 @@ impl CiMonitorPlugin {
     #[cfg(test)]
     fn with_runtime_history(mut self, runtime_history: RuntimeHistory) -> Self {
         self.runtime_history = runtime_history;
+        self
+    }
+
+    /// Inject a simulated `list_members` error for the `DuplicateMember` adoption path.
+    ///
+    /// When set, the `init()` roster-verify step returns `PluginError::Init` with the
+    /// supplied message instead of calling the real `RosterService::list_members`.
+    /// This provides a deterministic test seam without filesystem timing tricks.
+    #[cfg(test)]
+    fn with_list_members_error(mut self, msg: impl Into<String>) -> Self {
+        self.list_members_error = Some(msg.into());
         self
     }
 
@@ -1090,12 +1110,63 @@ impl Plugin for CiMonitorPlugin {
             unknown_fields: std::collections::HashMap::new(),
         };
 
-        ctx.roster
+        match ctx
+            .roster
             .add_member(&self.config.team, member, "gh_monitor")
-            .map_err(|e| PluginError::Init {
-                message: format!("Failed to register synthetic member: {e}"),
-                source: None,
-            })?;
+        {
+            Ok(()) => {}
+            Err(RosterError::DuplicateMember { ref name, ref team }) => {
+                // Member already exists. Only adopt if it is the expected synthetic
+                // shape (agent_type == "plugin:gh_monitor"). A non-plugin row with the
+                // same name must not be silently hijacked — cleanup_plugin only purges
+                // rows with agent_type "plugin:gh_monitor", so a mismatched row would
+                // escape cleanup and the plugin would be bound to the wrong entry.
+                #[cfg(test)]
+                if let Some(ref err_msg) = self.list_members_error {
+                    return Err(PluginError::Init {
+                        message: format!(
+                            "Failed to verify existing roster entry for '{name}' in team '{team}': {err_msg}"
+                        ),
+                        source: None,
+                    });
+                }
+                let existing = ctx
+                    .roster
+                    .list_members(team, Some("gh_monitor"))
+                    .map_err(|e| PluginError::Init {
+                        message: format!(
+                            "Failed to verify existing roster entry for '{name}' in team '{team}': {e}"
+                        ),
+                        source: None,
+                    })?;
+
+                let is_valid_synthetic = existing.iter().any(|m| &m.name == name);
+
+                if is_valid_synthetic {
+                    // Note: MembershipTracker has no entry for this triple;
+                    // cleanup_plugin uses agent_type prefix matching so shutdown
+                    // soft-cleanup still fires correctly without tracker presence.
+                    debug!(agent = %name, "gh_monitor: synthetic member already registered, adopting existing roster entry");
+                } else {
+                    let msg = format!(
+                        "Cannot register synthetic member '{name}': a non-plugin roster \
+                         entry with that name already exists in team '{team}'. \
+                         Remove the conflicting member to allow gh_monitor to initialize."
+                    );
+                    self.project_disabled_config_error(ctx, config_table, &msg);
+                    return Err(PluginError::Init {
+                        message: msg,
+                        source: None,
+                    });
+                }
+            }
+            Err(e) => {
+                return Err(PluginError::Init {
+                    message: format!("Failed to register synthetic member: {e}"),
+                    source: None,
+                });
+            }
+        }
 
         // Validate notify targets exist in team config (warn if not found)
         if !self.config.notify_target.is_empty() {
@@ -2085,6 +2156,233 @@ repo = "config-owner/config-repo"
     }
 
     #[tokio::test]
+    #[serial_test::serial]
+    async fn test_init_adopts_existing_ci_monitor_member_without_error() {
+        use crate::plugins::ci_monitor::MockCiProvider;
+        use agent_team_mail_core::schema::{AgentMember, TeamConfig};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let team_dir = teams_root.join("dev-team");
+        let inboxes_dir = team_dir.join("inboxes");
+        std::fs::create_dir_all(&inboxes_dir).unwrap();
+        std::fs::write(inboxes_dir.join("ci-monitor.json"), "[]").unwrap();
+
+        // Pre-populate config.json with ci-monitor already present (simulates a
+        // persisted member from a previous session that would trigger DuplicateMember).
+        let ci_monitor_member = AgentMember {
+            agent_id: "ci-monitor@dev-team".to_string(),
+            name: "ci-monitor".to_string(),
+            agent_type: "plugin:gh_monitor".to_string(),
+            model: String::new(),
+            prompt: None,
+            color: None,
+            plan_mode_required: None,
+            joined_at: 1234567890,
+            tmux_pane_id: None,
+            cwd: ".".to_string(),
+            subscriptions: Vec::new(),
+            backend_type: None,
+            is_active: None,
+            last_active: None,
+            session_id: None,
+            external_backend_type: None,
+            external_model: None,
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        let team_config = TeamConfig {
+            name: "dev-team".to_string(),
+            description: None,
+            created_at: 1234567890,
+            lead_agent_id: "lead@dev-team".to_string(),
+            lead_session_id: "session-123".to_string(),
+            members: vec![ci_monitor_member],
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        std::fs::write(
+            team_dir.join("config.json"),
+            serde_json::to_string(&team_config).unwrap(),
+        )
+        .unwrap();
+
+        let toml_str = r#"
+team = "dev-team"
+repo = "config-owner/config-repo"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let ctx = create_mock_context_with_repo_config(teams_root.clone(), Some(table), false);
+        let mut plugin = CiMonitorPlugin::new().with_provider(Box::new(MockCiProvider::new()));
+
+        let atm_config_path = temp_dir.path().join(".atm.toml");
+        std::fs::write(&atm_config_path, toml_str).unwrap();
+
+        struct EnvRestoreGuard {
+            key: &'static str,
+            original: Option<String>,
+        }
+        impl Drop for EnvRestoreGuard {
+            fn drop(&mut self) {
+                match self.original.take() {
+                    Some(value) => unsafe { std::env::set_var(self.key, value) },
+                    None => unsafe { std::env::remove_var(self.key) },
+                }
+            }
+        }
+        struct CurrentDirGuard(std::path::PathBuf);
+        impl Drop for CurrentDirGuard {
+            fn drop(&mut self) {
+                std::env::set_current_dir(&self.0).expect("restore current directory");
+            }
+        }
+
+        let _atm_config_guard = EnvRestoreGuard {
+            key: "ATM_CONFIG",
+            original: std::env::var("ATM_CONFIG").ok(),
+        };
+        let _cwd_guard = CurrentDirGuard(std::env::current_dir().unwrap());
+        unsafe { std::env::set_var("ATM_CONFIG", &atm_config_path) };
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+
+        // Init must succeed even though ci-monitor is already in the roster.
+        let result = plugin.init(&ctx).await;
+        assert!(
+            result.is_ok(),
+            "init should succeed when ci-monitor already exists: {result:?}"
+        );
+
+        // The existing member should still be present (not duplicated).
+        let roster = ctx.roster.list_members("dev-team", None).expect("members");
+        let ci_members: Vec<_> = roster.iter().filter(|m| m.name == "ci-monitor").collect();
+        assert_eq!(
+            ci_members.len(),
+            1,
+            "ci-monitor should appear exactly once in roster"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_init_rejects_non_plugin_member_with_same_name() {
+        use crate::plugins::ci_monitor::MockCiProvider;
+        use agent_team_mail_core::schema::{AgentMember, TeamConfig};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let team_dir = teams_root.join("dev-team");
+        let inboxes_dir = team_dir.join("inboxes");
+        std::fs::create_dir_all(&inboxes_dir).unwrap();
+        std::fs::write(inboxes_dir.join("ci-monitor.json"), "[]").unwrap();
+
+        // Pre-populate config.json with a non-plugin member named "ci-monitor".
+        // This simulates a human or other non-plugin roster entry that should NOT
+        // be silently hijacked by gh_monitor.
+        let conflicting_member = AgentMember {
+            agent_id: "ci-monitor@dev-team".to_string(),
+            name: "ci-monitor".to_string(),
+            agent_type: "general-purpose".to_string(), // NOT plugin:gh_monitor
+            model: String::new(),
+            prompt: None,
+            color: None,
+            plan_mode_required: None,
+            joined_at: 1234567890,
+            tmux_pane_id: None,
+            cwd: ".".to_string(),
+            subscriptions: Vec::new(),
+            backend_type: None,
+            is_active: None,
+            last_active: None,
+            session_id: None,
+            external_backend_type: None,
+            external_model: None,
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        let team_config = TeamConfig {
+            name: "dev-team".to_string(),
+            description: None,
+            created_at: 1234567890,
+            lead_agent_id: "lead@dev-team".to_string(),
+            lead_session_id: "session-123".to_string(),
+            members: vec![conflicting_member],
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        std::fs::write(
+            team_dir.join("config.json"),
+            serde_json::to_string(&team_config).unwrap(),
+        )
+        .unwrap();
+
+        let toml_str = r#"
+team = "dev-team"
+repo = "config-owner/config-repo"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let ctx = create_mock_context_with_repo_config(teams_root.clone(), Some(table), false);
+        let mut plugin = CiMonitorPlugin::new().with_provider(Box::new(MockCiProvider::new()));
+
+        let atm_config_path = temp_dir.path().join(".atm.toml");
+        std::fs::write(&atm_config_path, toml_str).unwrap();
+
+        struct EnvRestoreGuard {
+            key: &'static str,
+            original: Option<String>,
+        }
+        impl Drop for EnvRestoreGuard {
+            fn drop(&mut self) {
+                match self.original.take() {
+                    Some(value) => unsafe { std::env::set_var(self.key, value) },
+                    None => unsafe { std::env::remove_var(self.key) },
+                }
+            }
+        }
+        struct CurrentDirGuard(std::path::PathBuf);
+        impl Drop for CurrentDirGuard {
+            fn drop(&mut self) {
+                std::env::set_current_dir(&self.0).expect("restore current directory");
+            }
+        }
+
+        let _atm_config_guard = EnvRestoreGuard {
+            key: "ATM_CONFIG",
+            original: std::env::var("ATM_CONFIG").ok(),
+        };
+        let _cwd_guard = CurrentDirGuard(std::env::current_dir().unwrap());
+        unsafe { std::env::set_var("ATM_CONFIG", &atm_config_path) };
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+
+        // Init must fail because "ci-monitor" is a non-plugin member.
+        let err = plugin
+            .init(&ctx)
+            .await
+            .expect_err("init should fail when ci-monitor name is taken by a non-plugin member");
+        assert!(
+            err.to_string().contains("non-plugin roster entry"),
+            "error should mention non-plugin roster entry conflict: {err}"
+        );
+
+        // Health record must be written as disabled_config_error.
+        let health_path =
+            agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(temp_dir.path());
+        let raw = std::fs::read_to_string(&health_path).expect("health record should be written");
+        let health: GhMonitorHealthFile = serde_json::from_str(&raw).expect("health json");
+        let record = health
+            .records
+            .iter()
+            .find(|r| r.team == "dev-team")
+            .expect("dev-team health record");
+        assert_eq!(
+            record.availability_state, "disabled_config_error",
+            "non-plugin conflict should write disabled_config_error health record"
+        );
+        let msg = record.message.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("non-plugin roster entry"),
+            "health record message should describe the conflict: {msg}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_init_without_git_or_config_repo_writes_disabled_init_health_record() {
         use crate::plugins::ci_monitor::MockCiProvider;
         use tempfile::TempDir;
@@ -2336,6 +2634,91 @@ notify_target = ["lead", "qa-bot@qa-team"]
 
         // Verify multi-recipient note is included
         assert!(msg.text.contains("Notified: lead@dev-team, qa-bot@qa-team"));
+    }
+
+    /// Regression test: when `add_member` returns `DuplicateMember` and the
+    /// subsequent `list_members` call fails, `init()` must propagate the error
+    /// as `PluginError::Init` with a message containing
+    /// "Failed to verify existing roster entry".
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_init_propagates_list_members_error_on_duplicate() {
+        use crate::plugins::ci_monitor::MockCiProvider;
+        use agent_team_mail_core::schema::{AgentMember, TeamConfig};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let team_name = "dev-team";
+        let team_dir = teams_root.join(team_name);
+        let inboxes_dir = team_dir.join("inboxes");
+        std::fs::create_dir_all(&inboxes_dir).unwrap();
+
+        // Create ci-monitor inbox (required for synthetic member registration).
+        std::fs::write(inboxes_dir.join("ci-monitor.json"), "[]").unwrap();
+
+        // Pre-seed config.json with the synthetic member already present so that
+        // `add_member` detects a duplicate (DuplicateMember) without writing.
+        let synthetic_member = AgentMember {
+            agent_id: format!("ci-monitor@{team_name}"),
+            name: "ci-monitor".to_string(),
+            agent_type: "plugin:gh_monitor".to_string(),
+            model: "synthetic".to_string(),
+            prompt: None,
+            color: None,
+            plan_mode_required: None,
+            joined_at: 1_234_567_890,
+            tmux_pane_id: None,
+            cwd: ".".to_string(),
+            subscriptions: Vec::new(),
+            backend_type: None,
+            is_active: Some(true),
+            last_active: None,
+            session_id: None,
+            external_backend_type: None,
+            external_model: None,
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        let team_config = TeamConfig {
+            name: team_name.to_string(),
+            description: None,
+            created_at: 1_234_567_890,
+            lead_agent_id: format!("lead@{team_name}"),
+            lead_session_id: "session-test".to_string(),
+            members: vec![synthetic_member],
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        std::fs::write(
+            team_dir.join("config.json"),
+            serde_json::to_string(&team_config).unwrap(),
+        )
+        .unwrap();
+
+        // Build a plugin config that points at the pre-seeded team.
+        let toml_str = format!(
+            r#"
+team = "{team_name}"
+agent = "ci-monitor"
+"#
+        );
+        let table: toml::Table = toml::from_str(&toml_str).unwrap();
+        let ctx = create_mock_context_with_repo_config(teams_root.clone(), Some(table), true);
+
+        // Inject the test seam: list_members will return this error message
+        // instead of reading config.json, simulating an I/O failure between
+        // add_member detecting DuplicateMember and the follow-up roster verify.
+        let mut plugin = CiMonitorPlugin::new()
+            .with_provider(Box::new(MockCiProvider::new()))
+            .with_list_members_error("simulated read failure");
+
+        let result = plugin.init(&ctx).await;
+
+        assert!(result.is_err(), "init() must fail when list_members errors");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Failed to verify existing roster entry"),
+            "error message must contain 'Failed to verify existing roster entry', got: {err_msg}"
+        );
     }
 
     #[test]

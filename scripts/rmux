@@ -1,0 +1,346 @@
+#!/usr/bin/env zsh
+# rmux — TOML-driven tmux session launcher
+# Reads [rmux] section from .atm.toml (or --config) and .env in CWD,
+# then creates a named tmux session with multiple windows and panes.
+#
+# Install: cp scripts/rmux ~/.local/bin/rmux && chmod +x ~/.local/bin/rmux
+# Usage:   rmux [--config <path>] [--dry-run] [-v] [-h]
+
+setopt ERR_EXIT PIPE_FAIL NO_UNSET
+
+# ── Defaults ──────────────────────────────────────────────────────────
+CONFIG_FILE=".atm.toml"
+DRY_RUN=false
+VERBOSE=false
+
+# ── Argument parsing ──────────────────────────────────────────────────
+usage() {
+  cat <<'EOF'
+Usage: rmux [OPTIONS]
+
+Create a tmux session from [rmux] config in .atm.toml.
+
+Options:
+  --config <path>   Path to TOML config (default: .atm.toml in CWD)
+  --dry-run         Print planned tmux commands without executing
+  -v, --verbose     Log each tmux command to stderr
+  -h, --help        Show this help
+EOF
+  exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --config)   CONFIG_FILE="$2"; shift 2 ;;
+    --dry-run)  DRY_RUN=true; shift ;;
+    -v|--verbose) VERBOSE=true; shift ;;
+    -h|--help)  usage ;;
+    *)          echo "rmux: unknown option '$1'" >&2; exit 1 ;;
+  esac
+done
+
+# ── Helpers ───────────────────────────────────────────────────────────
+log()  { if $VERBOSE; then echo "  [rmux] $*" >&2; fi }
+info() { echo "$*" }
+err()  { echo "rmux: $*" >&2 }
+
+run_tmux() {
+  log "tmux $*"
+  if ! $DRY_RUN; then
+    tmux "$@"
+  fi
+}
+
+# ── Dependency checks ─────────────────────────────────────────────────
+for cmd in tmux jq python3; do
+  if ! command -v $cmd &>/dev/null; then
+    err "$cmd is required but not found in PATH"
+    exit 1
+  fi
+done
+
+# ── Config loading ────────────────────────────────────────────────────
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  err "config not found: $CONFIG_FILE"
+  exit 1
+fi
+
+# Parse [rmux] section from TOML → JSON via Python
+RMUX_JSON=$(python3 -c "
+import json, sys
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        print('rmux: neither tomllib nor tomli available', file=sys.stderr)
+        sys.exit(1)
+
+with open(sys.argv[1], 'rb') as f:
+    data = tomllib.load(f)
+
+rmux = data.get('rmux')
+if rmux is None:
+    print('rmux: no [rmux] section in config', file=sys.stderr)
+    sys.exit(1)
+
+print(json.dumps(rmux))
+" "$CONFIG_FILE") || exit 1
+
+# ── Resolve repo env file for pane initialization ────────────────────
+typeset ENV_DIR ENV_FILE
+ENV_DIR="${CONFIG_FILE:h}"
+[[ "$ENV_DIR" == "." ]] && ENV_DIR="$(pwd)"
+ENV_FILE="${ENV_DIR}/.env"
+
+log "Using repo env file: $ENV_FILE"
+
+# ── Resolve claude binary path (aliases not available in fresh panes) ─
+typeset CLAUDE_BIN
+CLAUDE_BIN=$(whence -p claude 2>/dev/null || echo "claude")
+log "Claude binary: $CLAUDE_BIN"
+
+# ── Extract ATM_TEAM from .env for agent expansion ──────────────────
+typeset ATM_TEAM_DEFAULT=""
+if [[ -f "$ENV_FILE" ]]; then
+  ATM_TEAM_DEFAULT=$(grep -E '^ATM_TEAM=' "$ENV_FILE" | head -1 | cut -d= -f2- | tr -d "'" | tr -d '"')
+fi
+
+# ── Extract session config ────────────────────────────────────────────
+local session num_windows
+session=$(echo "$RMUX_JSON" | jq -r '.session // "default"')
+num_windows=$(echo "$RMUX_JSON" | jq '.windows | length')
+
+if [[ "$num_windows" -eq 0 ]]; then
+  err "no windows defined in [rmux] config"
+  exit 1
+fi
+
+# ── Check for existing session ────────────────────────────────────────
+if ! $DRY_RUN && tmux has-session -t "$session" 2>/dev/null; then
+  if [[ -n "${TMUX:-}" ]]; then
+    err "Session '$session' already exists, but you are inside tmux."
+    err "Cannot attach from a nested session. From outside tmux, run:"
+    err "  tmux attach -t $session"
+    exit 1
+  fi
+  info "Session '$session' already exists — attaching."
+  exec tmux attach-session -t "$session"
+fi
+
+# ── Dry-run header ────────────────────────────────────────────────────
+if $DRY_RUN; then
+  echo "=== rmux dry-run: $session ==="
+  echo
+  if [[ -f "$ENV_FILE" ]]; then
+    echo "Repo env file: $ENV_FILE"
+  else
+    echo "Repo env file missing: $ENV_FILE"
+  fi
+  echo
+fi
+
+# ── Build pane init command ───────────────────────────────────────────
+build_init_command() {
+  local pane_env_json="$1"
+  local pane_dir="${2:-}"
+  local cmd_parts=()
+  local work_dir="${pane_dir:-$ENV_DIR}"
+
+  cmd_parts+=("cd ${(q)work_dir}")
+  if [[ -f "$ENV_FILE" ]]; then
+    cmd_parts+=("set -a")
+    cmd_parts+=("source ${(q)ENV_FILE}")
+    cmd_parts+=("set +a")
+    cmd_parts+=("hash -r")
+  fi
+
+  if [[ "$pane_env_json" != "null" && "$pane_env_json" != "{}" ]]; then
+    local kv_line key val
+    while IFS= read -r kv_line; do
+      [[ -z "$kv_line" ]] && continue
+      key="${kv_line%%=*}"
+      val="${kv_line#*=}"
+      cmd_parts+=("export ${key}=${(q)val}")
+    done < <(echo "$pane_env_json" | jq -r 'to_entries[] | "\(.key)=\(.value)"')
+  fi
+
+  echo "${(j:; :)cmd_parts}"
+}
+
+# ── Create session, windows, panes ────────────────────────────────────
+local w p win_name win_layout num_panes pane_name pane_cmd pane_env_json init_cmd pane_target
+local pane_id first_win_name pane_agent pane_prompt pane_model pane_dir full_cmd atm_team
+local agent_name pane_identity dry_identity
+
+for (( w=0; w<num_windows; w++ )); do
+  win_name=$(echo "$RMUX_JSON" | jq -r ".windows[$w].name // \"win-$w\"")
+  win_layout=$(echo "$RMUX_JSON" | jq -r ".windows[$w].layout // \"tiled\"")
+  num_panes=$(echo "$RMUX_JSON" | jq ".windows[$w].panes | length")
+
+  if [[ "$num_panes" -eq 0 ]]; then
+    log "Window '$win_name' has no panes — skipping"
+    continue
+  fi
+
+  if $DRY_RUN; then
+    echo "Window $w: \"$win_name\" (layout: $win_layout)"
+  fi
+
+  # Create window (first window comes with the session)
+  if [[ $w -eq 0 ]]; then
+    first_win_name="$win_name"
+    run_tmux new-session -d -s "$session" -n "$win_name" -x 200 -y 50
+  else
+    run_tmux new-window -t "${session}:" -n "$win_name"
+  fi
+
+  for (( p=0; p<num_panes; p++ )); do
+    pane_name=$(echo "$RMUX_JSON" | jq -r ".windows[$w].panes[$p].name // \"pane-$p\"")
+    pane_cmd=$(echo "$RMUX_JSON" | jq -r ".windows[$w].panes[$p].command // \"\"")
+    pane_env_json=$(echo "$RMUX_JSON" | jq ".windows[$w].panes[$p].env // {}")
+    pane_agent=$(echo "$RMUX_JSON" | jq -r ".windows[$w].panes[$p].agent // \"\"")
+    pane_prompt=$(echo "$RMUX_JSON" | jq -r ".windows[$w].panes[$p].prompt // \"\"")
+    pane_model=$(echo "$RMUX_JSON" | jq -r ".windows[$w].panes[$p].model // \"\"")
+    pane_dir=$(echo "$RMUX_JSON" | jq -r ".windows[$w].panes[$p].dir // \"\"")
+
+    # Build full command
+    if [[ -n "$pane_model" ]]; then
+      # Claude model mode: build full claude command with flags
+      full_cmd="${CLAUDE_BIN} --model ${pane_model} --dangerously-skip-permissions --teammate-mode tmux"
+
+      # Determine agent identity for team flags:
+      #   - Primary agent (team-lead): no trio flags, starts the team
+      #   - Secondary agents: need --agent-id/--agent-name/--team-name for team comms
+      #   - Agent name from: explicit 'agent' field → ATM_IDENTITY from env
+      agent_name=""
+      if [[ -n "$pane_agent" ]]; then
+        agent_name="$pane_agent"
+      else
+        pane_identity=$(echo "$pane_env_json" | jq -r '.ATM_IDENTITY // ""')
+        if [[ -n "$pane_identity" && "$pane_identity" != "team-lead" ]]; then
+          agent_name="$pane_identity"
+        fi
+      fi
+
+      if [[ -n "$agent_name" ]]; then
+        atm_team=$(echo "$pane_env_json" | jq -r '.ATM_TEAM // ""')
+        [[ -z "$atm_team" ]] && atm_team="$ATM_TEAM_DEFAULT"
+        if [[ -n "$atm_team" ]]; then
+          full_cmd="${full_cmd} --agent-id ${agent_name}@${atm_team} --agent-name ${agent_name} --team-name ${atm_team}"
+        else
+          err "agent '${agent_name}' needs ATM_TEAM but none found in pane env or .env"
+        fi
+      fi
+
+      if [[ -n "$pane_prompt" ]]; then
+        full_cmd="${full_cmd} ${pane_prompt}"
+      fi
+    else
+      # Raw command mode: use command as-is, append prompt if set
+      full_cmd="$pane_cmd"
+      if [[ -n "$pane_prompt" ]]; then
+        full_cmd="${full_cmd} ${pane_prompt}"
+      fi
+    fi
+
+    init_cmd=$(build_init_command "$pane_env_json" "$pane_dir")
+
+    if $DRY_RUN; then
+      echo "  Pane $p: \"$pane_name\""
+      if [[ -n "$pane_dir" ]]; then
+        echo "    dir: $pane_dir"
+      fi
+      if [[ -n "$init_cmd" ]]; then
+        echo "    init: $init_cmd"
+      fi
+      if [[ -n "$pane_model" ]]; then
+        echo "    model: $pane_model"
+      fi
+      if [[ -n "$pane_agent" ]]; then
+        echo "    agent: $pane_agent (explicit)"
+      elif [[ -n "$pane_model" ]]; then
+        dry_identity=$(echo "$pane_env_json" | jq -r '.ATM_IDENTITY // ""')
+        if [[ -n "$dry_identity" && "$dry_identity" != "team-lead" ]]; then
+          echo "    agent: $dry_identity (from ATM_IDENTITY)"
+        elif [[ -n "$dry_identity" && "$dry_identity" == "team-lead" ]]; then
+          echo "    role: primary (team-lead, no agent trio)"
+        fi
+      fi
+      if [[ -n "$pane_prompt" ]]; then
+        echo "    prompt: $pane_prompt"
+      fi
+      if [[ -n "$full_cmd" ]]; then
+        echo "    cmd: $full_cmd"
+      fi
+      continue
+    fi
+
+    # Create pane and capture its actual ID (handles any pane-base-index)
+    if [[ $p -eq 0 ]]; then
+      # First pane already exists — get its ID
+      pane_id=$(tmux list-panes -t "${session}:${win_name}" -F '#{pane_id}' | head -1)
+    else
+      # Split and capture new pane ID
+      pane_id=$(tmux split-window -t "${session}:${win_name}" -P -F '#{pane_id}')
+    fi
+    log "pane '$pane_name' → $pane_id"
+
+    # Set pane title (non-fatal if tmux version lacks -T)
+    run_tmux select-pane -t "$pane_id" -T "$pane_name" || true
+
+    # Send commands via paste-buffer for reliability with long/special strings
+    if [[ -n "$init_cmd" ]]; then
+      if ! $DRY_RUN; then
+        log "paste → $pane_id: $init_cmd"
+        tmux set-buffer -- "$init_cmd"
+        tmux paste-buffer -t "$pane_id"
+        tmux send-keys -t "$pane_id" Enter
+      fi
+    fi
+    if [[ -n "$full_cmd" ]]; then
+      if ! $DRY_RUN; then
+        log "paste → $pane_id: $full_cmd"
+        tmux set-buffer -- "$full_cmd"
+        tmux paste-buffer -t "$pane_id"
+        tmux send-keys -t "$pane_id" Enter
+      fi
+    fi
+  done
+
+  # Apply layout after all panes exist
+  if [[ "$num_panes" -gt 1 ]]; then
+    run_tmux select-layout -t "${session}:${win_name}" "$win_layout" || {
+      err "select-layout '$win_layout' failed for window '$win_name' — continuing"
+    }
+  fi
+
+  if $DRY_RUN; then
+    echo
+  fi
+done
+
+# Select first window
+if ! $DRY_RUN; then
+  run_tmux select-window -t "${session}:${first_win_name}"
+fi
+
+# ── Summary ───────────────────────────────────────────────────────────
+if $DRY_RUN; then
+  echo "Run without --dry-run to create session."
+else
+  echo "Session '$session' created."
+  echo
+  for (( w=0; w<num_windows; w++ )); do
+    win_name=$(echo "$RMUX_JSON" | jq -r ".windows[$w].name // \"win-$w\"")
+    num_panes=$(echo "$RMUX_JSON" | jq ".windows[$w].panes | length")
+    echo "  Window: $win_name"
+    for (( p=0; p<num_panes; p++ )); do
+      pane_name=$(echo "$RMUX_JSON" | jq -r ".windows[$w].panes[$p].name // \"pane-$p\"")
+      echo "    Pane: $pane_name ($session:$win_name.$p)"
+    done
+  done
+  echo
+  echo "  Attach: tmux attach -t $session"
+fi

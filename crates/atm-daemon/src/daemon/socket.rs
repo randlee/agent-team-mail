@@ -1166,6 +1166,7 @@ fn session_identity_change_flags(
 fn hook_action_name(event_type: &str) -> Option<&'static str> {
     match event_type {
         "session_start" => Some("hook.session_start"),
+        "teammate_idle" => Some("hook.teammate_idle"),
         "permission_request" => Some("hook.permission_request"),
         "stop" => Some("hook.stop"),
         "notification_idle_prompt" => Some("hook.notification_idle_prompt"),
@@ -1269,14 +1270,67 @@ fn emit_hook_failure(
         session_id,
         process_id,
     };
+    let action = event_type
+        .and_then(hook_action_name)
+        .unwrap_or("hook.failure");
     emit_hook_event(
         "warn",
-        "hook.failure",
+        action,
         ctx,
-        "failure",
+        "rejected",
         Some(reason.to_string()),
         event_type,
     );
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TeammateIdleSessionOutcome {
+    NoSessionId,
+    Confirmed { effective_process_id: u32 },
+    IgnoredNoExistingSession,
+    IgnoredAgentSessionMismatch { current_session_id: String },
+    IgnoredConflictingOwner { owner_agent: String },
+}
+
+#[cfg(unix)]
+fn confirm_teammate_idle_session(
+    registry: &mut crate::daemon::session_registry::SessionRegistry,
+    team: &str,
+    agent: &str,
+    session_id: &str,
+    process_id: Option<u32>,
+) -> TeammateIdleSessionOutcome {
+    if session_id.trim().is_empty() {
+        return TeammateIdleSessionOutcome::NoSessionId;
+    }
+
+    if let Some(existing) = registry.query_for_team(team, agent).cloned() {
+        if existing.session_id != session_id {
+            return TeammateIdleSessionOutcome::IgnoredAgentSessionMismatch {
+                current_session_id: existing.session_id,
+            };
+        }
+        let effective_process_id = process_id
+            .filter(|pid| *pid > 1)
+            .unwrap_or(existing.process_id);
+        registry.upsert_for_team(team, agent, session_id, effective_process_id);
+        return TeammateIdleSessionOutcome::Confirmed {
+            effective_process_id,
+        };
+    }
+
+    if let Some(owner) = registry
+        .sessions_for_team(team)
+        .into_iter()
+        .find(|record| record.session_id == session_id)
+    {
+        return TeammateIdleSessionOutcome::IgnoredConflictingOwner {
+            owner_agent: owner.agent_name,
+        };
+    }
+
+    TeammateIdleSessionOutcome::IgnoredNoExistingSession
 }
 
 /// Handle the `"hook-event"` command, updating daemon state in real-time
@@ -1422,6 +1476,21 @@ async fn handle_hook_event_command_with_dedup(
         };
         let key = DedupeKey::new(&team, session_key, &agent, request_id);
         if dedup_store.lock().unwrap().check_and_insert(key) {
+            if let Some(action) = hook_action_name(&event_type) {
+                emit_hook_event(
+                    "info",
+                    action,
+                    HookLogContext {
+                        team: Some(team.as_str()),
+                        agent: Some(agent.as_str()),
+                        session_id: Some(session_id.as_str()),
+                        process_id,
+                    },
+                    "duplicate_ignored",
+                    None,
+                    Some(event_type.as_str()),
+                );
+            }
             info!(
                 event = %event_type,
                 team = %team,
@@ -1698,24 +1767,34 @@ async fn handle_hook_event_command_with_dedup(
             info!(agent = %agent, agent_pid = agent_pid, "hook_event notification_idle_prompt");
         }
         "teammate_idle" => {
+            let session_outcome = {
+                let mut registry = session_registry.lock().unwrap();
+                confirm_teammate_idle_session(&mut registry, &team, &agent, &session_id, process_id)
+            };
             let (old_state, new_state) = {
                 let mut tracker = state_store.lock().unwrap();
                 let current = tracker.get_state(&agent);
-                if current.is_some() {
-                    tracker.set_state_with_context(
-                        &agent,
-                        AgentState::Idle,
-                        "teammate_idle lifecycle",
-                        "hook_event",
-                    );
-                } else {
-                    tracker.register_agent(&agent);
-                    tracker.set_state_with_context(
-                        &agent,
-                        AgentState::Idle,
-                        "teammate_idle lifecycle (auto-register)",
-                        "hook_event",
-                    );
+                if matches!(
+                    session_outcome,
+                    TeammateIdleSessionOutcome::NoSessionId
+                        | TeammateIdleSessionOutcome::Confirmed { .. }
+                ) {
+                    if current.is_some() {
+                        tracker.set_state_with_context(
+                            &agent,
+                            AgentState::Idle,
+                            "teammate_idle lifecycle",
+                            "hook_event",
+                        );
+                    } else {
+                        tracker.register_agent(&agent);
+                        tracker.set_state_with_context(
+                            &agent,
+                            AgentState::Idle,
+                            "teammate_idle lifecycle (auto-register)",
+                            "hook_event",
+                        );
+                    }
                 }
                 let updated = tracker.get_state(&agent).unwrap_or(AgentState::Unknown);
                 (current, updated)
@@ -1728,6 +1807,56 @@ async fn handle_hook_event_command_with_dedup(
                 "hook_event.teammate_idle",
                 Some(session_id.as_str()),
                 process_id,
+            );
+            let (level, result, error) = match &session_outcome {
+                TeammateIdleSessionOutcome::NoSessionId => ("info", "success_no_session_id", None),
+                TeammateIdleSessionOutcome::Confirmed { effective_process_id } => (
+                    "info",
+                    "confirmed_session",
+                    Some(format!(
+                        "teammate_idle confirmed existing session ownership for agent '{}' (pid={effective_process_id})",
+                        agent
+                    )),
+                ),
+                TeammateIdleSessionOutcome::IgnoredNoExistingSession => (
+                    "info",
+                    "ignored_unowned_session",
+                    Some(
+                        "teammate_idle does not bootstrap session ownership without an existing same-agent session"
+                            .to_string(),
+                    ),
+                ),
+                TeammateIdleSessionOutcome::IgnoredAgentSessionMismatch {
+                    current_session_id,
+                } => (
+                    "warn",
+                    "ignored_session_mismatch",
+                    Some(format!(
+                        "teammate_idle session_id '{}' does not match current owned session '{}' for agent '{}'",
+                        session_id, current_session_id, agent
+                    )),
+                ),
+                TeammateIdleSessionOutcome::IgnoredConflictingOwner { owner_agent } => (
+                    "warn",
+                    "ignored_conflicting_owner",
+                    Some(format!(
+                        "teammate_idle session_id '{}' is already owned by '{}' in team '{}'",
+                        session_id, owner_agent, team
+                    )),
+                ),
+            };
+            emit_hook_event(
+                level,
+                "hook.teammate_idle",
+                HookLogContext {
+                    team: Some(team.as_str()),
+                    agent: Some(agent.as_str()),
+                    session_id: Some(session_id.as_str()),
+                    process_id,
+                },
+                result,
+                error,
+                Some(event_type.as_str()),
             );
             info!(agent = %agent, agent_pid = agent_pid, "hook_event teammate_idle");
         }
@@ -1807,6 +1936,22 @@ async fn handle_hook_event_command_with_dedup(
                     info!(agent = %agent, agent_pid = agent_pid, "hook_event session_end");
                 }
                 MarkDeadForSessionOutcome::AlreadyDead => {
+                    emit_hook_event(
+                        "info",
+                        "hook.session_end",
+                        HookLogContext {
+                            team: Some(team.as_str()),
+                            agent: Some(agent.as_str()),
+                            session_id: Some(session_id.as_str()),
+                            process_id,
+                        },
+                        "ignored_already_dead",
+                        Some(
+                            "session_end duplicate ignored because session is already dead"
+                                .to_string(),
+                        ),
+                        Some(event_type.as_str()),
+                    );
                     debug!(
                         team = %team,
                         agent = %agent,
@@ -1815,6 +1960,22 @@ async fn handle_hook_event_command_with_dedup(
                     );
                 }
                 MarkDeadForSessionOutcome::UnknownSession => {
+                    emit_hook_event(
+                        "info",
+                        "hook.session_end",
+                        HookLogContext {
+                            team: Some(team.as_str()),
+                            agent: Some(agent.as_str()),
+                            session_id: Some(session_id.as_str()),
+                            process_id,
+                        },
+                        "ignored_unknown_session",
+                        Some(
+                            "session_end ignored because no matching live session is registered"
+                                .to_string(),
+                        ),
+                        Some(event_type.as_str()),
+                    );
                     debug!(
                         team = %team,
                         agent = %agent,
@@ -1851,6 +2012,19 @@ async fn handle_hook_event_command_with_dedup(
             }
         }
         other => {
+            emit_hook_event(
+                "info",
+                "hook.unknown",
+                HookLogContext {
+                    team: Some(team.as_str()),
+                    agent: Some(agent.as_str()),
+                    session_id: Some(session_id.as_str()),
+                    process_id,
+                },
+                "ignored_unknown_event",
+                Some(format!("unknown event type: {other}")),
+                Some(other),
+            );
             debug!("hook_event unknown event type: {other}");
             emit_hook_failure(
                 Some(other),
@@ -10012,6 +10186,10 @@ exit 1
             Some("hook.session_start")
         );
         assert_eq!(
+            hook_action_name("teammate_idle"),
+            Some("hook.teammate_idle")
+        );
+        assert_eq!(
             hook_action_name("permission_request"),
             Some("hook.permission_request")
         );
@@ -10026,7 +10204,6 @@ exit 1
             Some("hook.compact_complete")
         );
         assert_eq!(hook_action_name("session_end"), Some("hook.session_end"));
-        assert_eq!(hook_action_name("teammate_idle"), None);
     }
 
     #[test]
@@ -10166,7 +10343,7 @@ exit 1
             tracker.register_agent("arch-ctm");
             tracker.set_state("arch-ctm", AgentState::Active);
         }
-        let req_json = r#"{"version":1,"request_id":"r3","command":"hook-event","payload":{"event":"teammate_idle","agent":"arch-ctm","session_id":"sess-1","team":"atm-dev"}}"#;
+        let req_json = r#"{"version":1,"request_id":"r3","command":"hook-event","payload":{"event":"teammate_idle","agent":"arch-ctm","session_id":"","team":"atm-dev"}}"#;
         let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
         assert_eq!(resp.status, "ok");
         let payload = resp.payload.unwrap();
@@ -10175,6 +10352,119 @@ exit 1
 
         let tracker = store.lock().unwrap();
         assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Idle));
+        drop(tracker);
+
+        let reg = sr.lock().unwrap();
+        assert!(
+            reg.query_for_team("atm-dev", "arch-ctm").is_none(),
+            "teammate_idle must not bootstrap a new session record"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_teammate_idle_confirms_existing_same_agent_session() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        {
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "arch-ctm", "sess-1", 4242);
+        }
+
+        let req_json = r#"{"version":1,"request_id":"r3-confirm","command":"hook-event","payload":{"event":"teammate_idle","agent":"arch-ctm","session_id":"sess-1","team":"atm-dev","process_id":6262}}"#;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+
+        let reg = sr.lock().unwrap();
+        let session = reg
+            .query_for_team("atm-dev", "arch-ctm")
+            .expect("existing same-agent session should be preserved");
+        assert_eq!(session.session_id, "sess-1");
+        assert_eq!(session.process_id, 6262);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_teammate_idle_does_not_steal_other_agent_session() {
+        let _fixture = setup_hook_auth_fixture(
+            "atm-dev",
+            "team-lead",
+            &["team-lead", "arch-ctm", "atm-monitor"],
+        );
+        let store = make_store();
+        let sr = make_sr();
+        {
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "team-lead", "sess-shared", 7777);
+        }
+
+        let req_json = r#"{"version":1,"request_id":"r3-conflict","command":"hook-event","payload":{"event":"teammate_idle","agent":"atm-monitor","session_id":"sess-shared","team":"atm-dev","process_id":8888}}"#;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+
+        let reg = sr.lock().unwrap();
+        let owner = reg
+            .query_for_team("atm-dev", "team-lead")
+            .expect("original owner should remain registered");
+        assert_eq!(owner.session_id, "sess-shared");
+        assert_eq!(owner.process_id, 7777);
+        assert!(
+            reg.query_for_team("atm-dev", "atm-monitor").is_none(),
+            "conflicting teammate_idle must not register atm-monitor"
+        );
+
+        drop(reg);
+        let tracker = store.lock().unwrap();
+        assert_eq!(
+            tracker.get_state("atm-monitor"),
+            None,
+            "IgnoredConflictingOwner must not register atm-monitor in state tracker"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_hook_event_teammate_idle_does_not_replace_existing_same_agent_session() {
+        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let store = make_store();
+        let sr = make_sr();
+        {
+            let mut tracker = store.lock().unwrap();
+            tracker.register_agent("arch-ctm");
+            tracker.set_state("arch-ctm", AgentState::Active);
+        }
+        {
+            sr.lock()
+                .unwrap()
+                .upsert_for_team("atm-dev", "arch-ctm", "sess-a", 5555);
+        }
+
+        let req_json = r#"{"version":1,"request_id":"r3-mismatch","command":"hook-event","payload":{"event":"teammate_idle","agent":"arch-ctm","session_id":"sess-b","team":"atm-dev","process_id":6666}}"#;
+        let resp = handle_hook_event_with_transient_retry(req_json, &store, &sr).await;
+        assert_eq!(resp.status, "ok");
+        let payload = resp.payload.unwrap();
+        assert!(payload["processed"].as_bool().unwrap());
+
+        let reg = sr.lock().unwrap();
+        let session = reg
+            .query_for_team("atm-dev", "arch-ctm")
+            .expect("existing same-agent session should be preserved");
+        assert_eq!(session.session_id, "sess-a");
+        assert_eq!(session.process_id, 5555);
+        drop(reg);
+
+        let tracker = store.lock().unwrap();
+        assert_eq!(tracker.get_state("arch-ctm"), Some(AgentState::Active));
     }
 
     #[cfg(unix)]
