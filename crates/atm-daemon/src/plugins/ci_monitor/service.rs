@@ -9,16 +9,21 @@ use super::gh_monitor::{
 };
 #[cfg(unix)]
 use super::health::{read_gh_monitor_health, set_gh_monitor_health_state};
+#[cfg(unix)]
 use super::helpers::{
     apply_config_state_to_status, count_in_flight_monitors, evaluate_gh_monitor_config,
     gh_monitor_key, load_gh_monitor_state_map,
 };
 use super::provider::ErasedCiProvider;
-use super::types::{CiFilter, CiRun, CiRunStatus, GhMonitorHealthUpdate};
+#[cfg(unix)]
+use super::types::GhMonitorHealthUpdate;
+use super::types::{CiFilter, CiRun, CiRunStatus};
+#[cfg(unix)]
 use agent_team_mail_core::daemon_client::{
     GhMonitorControlRequest, GhMonitorHealth, GhMonitorLifecycleAction, GhMonitorRequest,
     GhMonitorStatus, GhMonitorTargetKind, GhStatusRequest,
 };
+#[cfg(unix)]
 use tracing::warn;
 
 const CI_MONITOR_INTERNAL_ERROR: &str = "INTERNAL_ERROR";
