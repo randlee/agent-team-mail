@@ -4,6 +4,8 @@ mod config;
 #[cfg(unix)]
 pub(crate) mod gh_monitor;
 mod github;
+#[cfg(unix)]
+pub(crate) mod health;
 pub(crate) mod helpers;
 mod loader;
 mod mock_provider;

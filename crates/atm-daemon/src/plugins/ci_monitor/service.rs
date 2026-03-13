@@ -3,9 +3,10 @@
 #[cfg(unix)]
 use super::gh_monitor::{
     emit_ci_not_started_alert, emit_merge_conflict_alert, fetch_pr_merge_state,
-    is_pr_merge_state_dirty, monitor_gh_run, set_gh_monitor_health_state, try_find_workflow_run_id,
-    wait_for_pr_run_start,
+    is_pr_merge_state_dirty, monitor_gh_run, try_find_workflow_run_id, wait_for_pr_run_start,
 };
+#[cfg(unix)]
+use super::health::{read_gh_monitor_health, set_gh_monitor_health_state};
 use super::helpers::{
     apply_config_state_to_status, count_in_flight_monitors, evaluate_gh_monitor_config,
     gh_monitor_key, load_gh_monitor_state_map,
@@ -58,10 +59,9 @@ pub(crate) async fn monitor_request(
         ));
     }
 
-    let current_health =
-        super::helpers::read_gh_monitor_health(home, &gh_request.team).map_err(|e| {
-            CiMonitorServiceError::internal(format!("Failed to read gh monitor health: {e}"))
-        })?;
+    let current_health = read_gh_monitor_health(home, &gh_request.team).map_err(|e| {
+        CiMonitorServiceError::internal(format!("Failed to read gh monitor health: {e}"))
+    })?;
     if current_health.lifecycle_state != "running" {
         return Err(CiMonitorServiceError::new(
             "MONITOR_STOPPED",
@@ -480,7 +480,7 @@ pub(crate) fn health_request(
     }
 
     let config_state = evaluate_gh_monitor_config(home, team, config_cwd);
-    let mut health = super::helpers::read_gh_monitor_health(home, team).map_err(|e| {
+    let mut health = read_gh_monitor_health(home, team).map_err(|e| {
         CiMonitorServiceError::internal(format!("Failed to read gh monitor health: {e}"))
     })?;
     health.in_flight = count_in_flight_monitors(home, team);

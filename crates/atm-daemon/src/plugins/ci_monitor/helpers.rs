@@ -4,72 +4,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
-use agent_team_mail_core::daemon_client::{GhMonitorHealth, GhMonitorStatus, GhMonitorTargetKind};
+use agent_team_mail_core::daemon_client::{GhMonitorStatus, GhMonitorTargetKind};
 #[cfg(unix)]
 use anyhow::Result;
 
 #[cfg(unix)]
-use super::types::{GhMonitorConfigState, GhMonitorHealthFile, GhMonitorStateFile};
-
-#[cfg(unix)]
-pub(crate) fn default_gh_monitor_health(team: &str) -> GhMonitorHealth {
-    GhMonitorHealth {
-        team: team.to_string(),
-        configured: false,
-        enabled: false,
-        config_source: None,
-        config_path: None,
-        lifecycle_state: "running".to_string(),
-        availability_state: "healthy".to_string(),
-        in_flight: 0,
-        updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        message: None,
-    }
-}
-
-#[cfg(unix)]
-fn gh_monitor_health_path(home: &Path) -> PathBuf {
-    agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(home)
-}
-
-#[cfg(unix)]
-pub(crate) fn load_gh_monitor_health_map(home: &Path) -> Result<HashMap<String, GhMonitorHealth>> {
-    let path = gh_monitor_health_path(home);
-    if !path.exists() {
-        return Ok(HashMap::new());
-    }
-    let raw = std::fs::read_to_string(&path)?;
-    let file = serde_json::from_str::<GhMonitorHealthFile>(&raw)?;
-    let mut map = HashMap::new();
-    for record in file.records {
-        map.insert(record.team.clone(), record);
-    }
-    Ok(map)
-}
-
-#[cfg(unix)]
-pub(crate) fn upsert_gh_monitor_health(home: &Path, health: GhMonitorHealth) -> Result<()> {
-    let mut map = load_gh_monitor_health_map(home)?;
-    map.insert(health.team.clone(), health);
-    let mut records: Vec<GhMonitorHealth> = map.into_values().collect();
-    records.sort_by(|a, b| a.team.cmp(&b.team));
-    let file = GhMonitorHealthFile { records };
-    let path = gh_monitor_health_path(home);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, serde_json::to_string_pretty(&file)?)?;
-    Ok(())
-}
-
-#[cfg(unix)]
-pub(crate) fn read_gh_monitor_health(home: &Path, team: &str) -> Result<GhMonitorHealth> {
-    let map = load_gh_monitor_health_map(home)?;
-    Ok(map
-        .get(team)
-        .cloned()
-        .unwrap_or_else(|| default_gh_monitor_health(team)))
-}
+use super::types::{GhMonitorConfigState, GhMonitorStateFile};
 
 #[cfg(unix)]
 pub(crate) fn count_in_flight_monitors(home: &Path, team: &str) -> u64 {

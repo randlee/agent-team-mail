@@ -1,14 +1,8 @@
 //! GitHub-specific gh_monitor provider logic.
 
 use super::CiMonitorConfig;
-use super::helpers::{
-    normalize_repo_scope, read_gh_monitor_health, upsert_gh_monitor_health,
-    upsert_gh_monitor_status,
-};
-use super::types::GhMonitorHealthUpdate;
-use agent_team_mail_core::daemon_client::{
-    GhMonitorHealth, GhMonitorRequest, GhMonitorStatus, GhMonitorTargetKind,
-};
+use super::helpers::{normalize_repo_scope, upsert_gh_monitor_status};
+use agent_team_mail_core::daemon_client::{GhMonitorRequest, GhMonitorStatus, GhMonitorTargetKind};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::schema::InboxMessage;
 use anyhow::Result;
@@ -1145,113 +1139,4 @@ pub(crate) fn repo_scope_matches(configured: &str, expected: &str) -> bool {
         .split_once('/')
         .map(|(_, repo)| repo == configured)
         .unwrap_or(false)
-}
-
-#[cfg(unix)]
-pub(crate) fn emit_gh_monitor_health_transition(
-    home: &std::path::Path,
-    team: &str,
-    config_cwd: Option<&str>,
-    old_state: &str,
-    new_state: &str,
-    reason: &str,
-) {
-    if old_state == new_state {
-        return;
-    }
-
-    let level = if new_state == "healthy" {
-        "info"
-    } else {
-        "warn"
-    };
-    emit_event_best_effort(EventFields {
-        level,
-        source: "atm-daemon",
-        action: "gh_monitor_health_transition",
-        team: Some(team.to_string()),
-        result: Some(format!("{old_state}->{new_state}")),
-        error: Some(reason.to_string()),
-        ..Default::default()
-    });
-
-    let (from_agent, targets) = resolve_ci_alert_routing(home, team, config_cwd, None);
-    let text = format!(
-        "[gh_monitor] availability transition {} -> {}\nreason: {}",
-        old_state, new_state, reason
-    );
-    for (agent, target_team) in targets {
-        let inbox_path = home
-            .join(".claude/teams")
-            .join(&target_team)
-            .join("inboxes")
-            .join(format!("{agent}.json"));
-        let message = InboxMessage {
-            from: from_agent.clone(),
-            text: text.clone(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            read: false,
-            summary: Some(format!("gh_monitor: {new_state}")),
-            message_id: Some(uuid::Uuid::new_v4().to_string()),
-            unknown_fields: std::collections::HashMap::new(),
-        };
-        if let Err(e) = agent_team_mail_core::io::inbox::inbox_append(
-            &inbox_path,
-            &message,
-            &target_team,
-            &agent,
-        ) {
-            warn!(
-                team = %target_team,
-                agent = %agent,
-                "failed to emit gh_monitor transition alert: {e}"
-            );
-        }
-    }
-}
-
-#[cfg(unix)]
-pub(crate) fn set_gh_monitor_health_state(
-    home: &std::path::Path,
-    team: &str,
-    update: GhMonitorHealthUpdate<'_>,
-) -> Result<GhMonitorHealth> {
-    let mut current = read_gh_monitor_health(home, team)?;
-    let old_availability = current.availability_state.clone();
-
-    if let Some(lifecycle_state) = update.lifecycle_state {
-        current.lifecycle_state = lifecycle_state.to_string();
-    }
-    if let Some(availability_state) = update.availability_state {
-        current.availability_state = availability_state.to_string();
-    }
-    if let Some(in_flight) = update.in_flight {
-        current.in_flight = in_flight;
-    }
-    if let Some(config_state) = update.config_state {
-        current.configured = config_state.configured;
-        current.enabled = config_state.enabled;
-        current.config_source = config_state.config_source.clone();
-        current.config_path = config_state.config_path.clone();
-    }
-    current.updated_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    current.message = update.message;
-
-    if old_availability != current.availability_state {
-        let reason = current
-            .message
-            .clone()
-            .unwrap_or_else(|| "availability changed".to_string());
-        emit_gh_monitor_health_transition(
-            home,
-            team,
-            update.config_cwd,
-            &old_availability,
-            &current.availability_state,
-            &reason,
-        );
-    }
-
-    upsert_gh_monitor_health(home, current.clone())?;
-    Ok(current)
 }

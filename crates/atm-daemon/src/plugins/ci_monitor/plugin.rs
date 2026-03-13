@@ -2,15 +2,16 @@
 
 use super::config::{CiMonitorConfig, DedupStrategy};
 use super::github::GitHubActionsProvider;
+#[cfg(unix)]
+use super::health;
 use super::loader::CiProviderLoader;
 use super::provider::ErasedCiProvider;
 use super::registry::{CiProviderFactory, CiProviderRegistry};
-use super::types::{CiFilter, CiJob, CiRunConclusion, CiRunStatus};
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 use super::types::GhMonitorHealthFile;
+use super::types::{CiFilter, CiJob, CiRunConclusion, CiRunStatus};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use agent_team_mail_core::context::{GitProvider as GitProviderType, RepoContext};
-use agent_team_mail_core::daemon_client::GhMonitorHealth;
 use agent_team_mail_core::schema::{AgentMember, InboxMessage, TeamConfig};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -845,66 +846,7 @@ impl CiMonitorPlugin {
             warn!("CI Monitor: failed to derive ATM home for health file");
             return;
         };
-        let path = agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(home_dir);
-        let mut file = match std::fs::read_to_string(&path) {
-            Ok(raw) => match serde_json::from_str::<GhMonitorHealthFile>(&raw) {
-                Ok(parsed) => parsed,
-                Err(e) => {
-                    warn!(
-                        "CI Monitor: failed parsing health file {}: {}",
-                        path.display(),
-                        e
-                    );
-                    GhMonitorHealthFile::default()
-                }
-            },
-            Err(_) => GhMonitorHealthFile::default(),
-        };
-
-        let updated_record = GhMonitorHealth {
-            team: team.to_string(),
-            configured: false,
-            enabled: false,
-            config_source: None,
-            config_path: None,
-            lifecycle_state: "running".to_string(),
-            availability_state: availability_state.to_string(),
-            in_flight: 0,
-            updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            message: Some(message.to_string()),
-        };
-
-        if let Some(existing) = file.records.iter_mut().find(|record| record.team == team) {
-            *existing = updated_record;
-        } else {
-            file.records.push(updated_record);
-        }
-        file.records.sort_by(|a, b| a.team.cmp(&b.team));
-
-        if let Some(parent) = path.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            warn!(
-                "CI Monitor: failed to create health directory {}: {}",
-                parent.display(),
-                e
-            );
-            return;
-        }
-        match serde_json::to_string_pretty(&file) {
-            Ok(serialized) => {
-                if let Err(e) = std::fs::write(&path, serialized) {
-                    warn!(
-                        "CI Monitor: failed writing health file {}: {}",
-                        path.display(),
-                        e
-                    );
-                }
-            }
-            Err(e) => {
-                warn!("CI Monitor: failed serializing health file: {}", e);
-            }
-        }
+        health::write_health_record(home_dir, team, availability_state, message);
     }
 
     fn notify_disabled_transition(&self, ctx: &PluginContext, team: &str, message: &str) {

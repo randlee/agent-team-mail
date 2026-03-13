@@ -24,9 +24,7 @@
 use agent_team_mail_core::control::{
     CONTROL_SCHEMA_VERSION, ContentRef, ControlAck, ControlAction, ControlRequest, ControlResult,
 };
-use agent_team_mail_core::daemon_client::{
-    CanonicalMemberState, LaunchConfig, LaunchResult,
-};
+use agent_team_mail_core::daemon_client::{CanonicalMemberState, LaunchConfig, LaunchResult};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::logging_event::LogEventV1;
 use agent_team_mail_core::schema::{AgentMember, TeamConfig};
@@ -2032,7 +2030,7 @@ fn emit_gh_monitor_health_transition(
     new_state: &str,
     reason: &str,
 ) {
-    gh_monitor::emit_gh_monitor_health_transition(
+    crate::plugins::ci_monitor::health::emit_gh_monitor_health_transition(
         home, team, config_cwd, old_state, new_state, reason,
     )
 }
@@ -2043,7 +2041,7 @@ fn set_gh_monitor_health_state(
     team: &str,
     update: GhMonitorHealthUpdate<'_>,
 ) -> Result<GhMonitorHealth> {
-    gh_monitor::set_gh_monitor_health_state(home, team, update)
+    crate::plugins::ci_monitor::health::set_gh_monitor_health_state(home, team, update)
 }
 
 #[cfg(all(test, unix))]
