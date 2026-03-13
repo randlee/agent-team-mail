@@ -262,7 +262,6 @@ pub(crate) fn upsert_gh_monitor_status(home: &Path, status: GhMonitorStatus) -> 
     std::fs::write(path, serde_json::to_string_pretty(&state)?)?;
     Ok(())
 }
-
 #[cfg(all(test, unix))]
 mod tests {
     use super::{gh_monitor_key, normalize_repo_scope};

@@ -1,13 +1,21 @@
 //! CI Monitor plugin — provider abstraction for CI/CD platforms
 
+#[cfg(unix)]
+mod alerts;
 mod config;
+#[cfg(unix)]
+mod gh_cli;
 mod github;
 pub(crate) mod helpers;
 mod loader;
 mod mock_provider;
 mod plugin;
+#[cfg(unix)]
+mod polling;
 mod provider;
 mod registry;
+#[cfg(unix)]
+pub(crate) mod service;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) mod types;
@@ -21,4 +29,4 @@ pub use mock_provider::{
 pub use plugin::CiMonitorPlugin;
 pub use provider::{CiProvider, ErasedCiProvider};
 pub use registry::{CiFactoryFn, CiProviderFactory, CiProviderRegistry};
-pub use types::{CiFilter, CiJob, CiRun, CiRunConclusion, CiRunStatus, CiStep};
+pub use types::{CiFilter, CiJob, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep};
