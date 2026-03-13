@@ -2,12 +2,15 @@
 
 mod config;
 mod github;
+pub(crate) mod helpers;
 mod loader;
 mod mock_provider;
 mod plugin;
 mod provider;
 mod registry;
-mod types;
+#[cfg(test)]
+pub(crate) mod test_support;
+pub(crate) mod types;
 
 pub use config::{CiMonitorConfig, DedupStrategy, NotifyTarget};
 pub use github::GitHubActionsProvider;
