@@ -300,7 +300,7 @@ impl CiProvider for GitHubActionsProvider {
         if ci_pr
             .merge_state_status
             .as_deref()
-            .is_some_and(is_pr_merge_state_dirty)
+            .is_some_and(super::gh_cli::is_pr_merge_state_dirty)
         {
             return Ok(Some(ci_pr));
         }
@@ -343,13 +343,6 @@ impl CiProvider for GitHubActionsProvider {
     fn provider_name(&self) -> &str {
         "GitHub Actions"
     }
-}
-
-fn is_pr_merge_state_dirty(merge_state_status: &str) -> bool {
-    matches!(
-        merge_state_status.trim().to_ascii_uppercase().as_str(),
-        "DIRTY" | "BEHIND" | "BLOCKED" | "DRAFT"
-    )
 }
 
 /// GitHub run JSON schema (from `gh run list --json`)

@@ -3,7 +3,6 @@
 mod config;
 #[cfg(unix)]
 pub(crate) mod gh_alerts;
-#[cfg(unix)]
 pub(crate) mod gh_cli;
 #[cfg(unix)]
 pub(crate) mod gh_monitor;
@@ -11,12 +10,18 @@ mod github_provider;
 mod github_schema;
 #[cfg(unix)]
 pub(crate) mod health;
+#[cfg(unix)]
 pub(crate) mod helpers;
 mod loader;
 mod mock_provider;
 mod plugin;
+#[cfg(unix)]
+pub(crate) mod polling;
 mod provider;
 mod registry;
+#[cfg(unix)]
+pub(crate) mod routing;
+#[cfg(unix)]
 pub(crate) mod service;
 #[cfg(all(test, unix))]
 pub(crate) mod test_support;

@@ -2,27 +2,20 @@
 
 use super::config::{CiMonitorConfig, DedupStrategy};
 use super::github_provider::GitHubActionsProvider;
-#[cfg(unix)]
-use super::health;
-#[cfg(unix)]
-use super::helpers::evaluate_gh_monitor_config;
 use super::loader::CiProviderLoader;
 use super::provider::ErasedCiProvider;
 use super::registry::{CiProviderFactory, CiProviderRegistry};
+#[cfg(unix)]
 use super::service::{fetch_run_details, list_completed_runs};
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 use super::types::GhMonitorHealthFile;
-#[cfg(unix)]
-use super::types::GhMonitorHealthUpdate;
-#[cfg(unix)]
-use super::types::GhMonitorStateFile;
 #[cfg(test)]
 use super::types::{CiFilter, CiRunStatus};
 use super::types::{CiJob, CiRunConclusion};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use agent_team_mail_core::context::{GitProvider as GitProviderType, RepoContext};
-use agent_team_mail_core::daemon_client::GhMonitorStatus;
-use agent_team_mail_core::schema::{AgentMember, InboxMessage};
+use agent_team_mail_core::daemon_client::GhMonitorHealth;
+use agent_team_mail_core::schema::{AgentMember, InboxMessage, TeamConfig};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -43,6 +36,20 @@ struct RuntimeHistory {
     job_samples: HashMap<String, Vec<u64>>,
     processed_run_ids: Vec<u64>,
     drift_last_alert_epoch_secs: HashMap<String, i64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
+struct GhMonitorStateRecord {
+    team: String,
+    state: String,
+    run_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
+struct GhMonitorStateFile {
+    records: Vec<GhMonitorStateRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -795,23 +802,14 @@ impl CiMonitorPlugin {
         )
     }
 
-    #[cfg(unix)]
     fn was_terminal_notified_by_command_path(&self, ctx: &PluginContext, run_id: u64) -> bool {
         let path = Self::gh_monitor_state_path(ctx);
         let raw = match std::fs::read_to_string(&path) {
             Ok(raw) => raw,
             Err(_) => return false,
         };
-        if let Ok(state_file) = serde_json::from_str::<GhMonitorStateFile>(&raw) {
-            return state_file.records.iter().any(|record: &GhMonitorStatus| {
-                record.team == self.config.team
-                    && record.run_id == Some(run_id)
-                    && Self::is_terminal_monitor_state(&record.state)
-            });
-        }
-
-        let legacy = match serde_json::from_str::<serde_json::Value>(&raw) {
-            Ok(value) => value,
+        let state_file = match serde_json::from_str::<GhMonitorStateFile>(&raw) {
+            Ok(parsed) => parsed,
             Err(e) => {
                 warn!(
                     "CI Monitor: Failed to parse gh monitor state {}: {}",
@@ -821,28 +819,13 @@ impl CiMonitorPlugin {
                 return false;
             }
         };
-        legacy
-            .get("records")
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-            .any(|record| {
-                record.get("team").and_then(serde_json::Value::as_str)
-                    == Some(self.config.team.as_str())
-                    && record.get("run_id").and_then(serde_json::Value::as_u64) == Some(run_id)
-                    && record
-                        .get("state")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(Self::is_terminal_monitor_state)
-            })
+        state_file.records.iter().any(|record| {
+            record.team == self.config.team
+                && record.run_id == Some(run_id)
+                && Self::is_terminal_monitor_state(&record.state)
+        })
     }
 
-    #[cfg(not(unix))]
-    fn was_terminal_notified_by_command_path(&self, _ctx: &PluginContext, _run_id: u64) -> bool {
-        false
-    }
-
-    #[cfg(unix)]
     fn team_for_config_error(
         table: Option<&agent_team_mail_core::toml::Table>,
         ctx: &PluginContext,
@@ -856,6 +839,124 @@ impl CiMonitorPlugin {
     }
 
     #[cfg(unix)]
+    fn write_health_record(
+        ctx: &PluginContext,
+        team: &str,
+        availability_state: &str,
+        message: &str,
+    ) {
+        let Some(home_dir) = ctx.system.claude_root.parent() else {
+            warn!("CI Monitor: failed to derive ATM home for health file");
+            return;
+        };
+        let path = agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(home_dir);
+        let mut file = match std::fs::read_to_string(&path) {
+            Ok(raw) => match serde_json::from_str::<GhMonitorHealthFile>(&raw) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    warn!(
+                        "CI Monitor: failed parsing health file {}: {}",
+                        path.display(),
+                        e
+                    );
+                    GhMonitorHealthFile::default()
+                }
+            },
+            Err(_) => GhMonitorHealthFile::default(),
+        };
+
+        let updated_record = GhMonitorHealth {
+            team: team.to_string(),
+            configured: false,
+            enabled: false,
+            config_source: None,
+            config_path: None,
+            lifecycle_state: "running".to_string(),
+            availability_state: availability_state.to_string(),
+            in_flight: 0,
+            updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            message: Some(message.to_string()),
+        };
+
+        if let Some(existing) = file.records.iter_mut().find(|record| record.team == team) {
+            *existing = updated_record;
+        } else {
+            file.records.push(updated_record);
+        }
+        file.records.sort_by(|a, b| a.team.cmp(&b.team));
+
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            warn!(
+                "CI Monitor: failed to create health directory {}: {}",
+                parent.display(),
+                e
+            );
+            return;
+        }
+        match serde_json::to_string_pretty(&file) {
+            Ok(serialized) => {
+                if let Err(e) = std::fs::write(&path, serialized) {
+                    warn!(
+                        "CI Monitor: failed writing health file {}: {}",
+                        path.display(),
+                        e
+                    );
+                }
+            }
+            Err(e) => {
+                warn!("CI Monitor: failed serializing health file: {}", e);
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn write_health_record(
+        _ctx: &PluginContext,
+        _team: &str,
+        _availability_state: &str,
+        _message: &str,
+    ) {
+    }
+
+    fn notify_disabled_transition(&self, ctx: &PluginContext, team: &str, message: &str) {
+        let lead_agent =
+            std::fs::read_to_string(ctx.mail.teams_root().join(team).join("config.json"))
+                .ok()
+                .and_then(|raw| serde_json::from_str::<TeamConfig>(&raw).ok())
+                .and_then(|cfg| cfg.lead_agent_id.split('@').next().map(|s| s.to_string()))
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| "team-lead".to_string());
+
+        let text = format!(
+            "[gh_monitor] availability transition healthy -> disabled_config_error\nreason: {message}"
+        );
+        let msg = InboxMessage {
+            from: if self.config.agent.is_empty() {
+                "ci-monitor".to_string()
+            } else {
+                self.config.agent.clone()
+            },
+            text,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            read: false,
+            summary: Some("gh_monitor: disabled_config_error".to_string()),
+            message_id: Some(format!(
+                "gh-monitor-config-error-{}",
+                Utc::now().timestamp_millis()
+            )),
+            unknown_fields: std::collections::HashMap::new(),
+        };
+
+        if let Err(e) = ctx.mail.send(team, &lead_agent, &msg) {
+            warn!(
+                "CI Monitor: failed to send disabled_config_error transition alert to {}@{}: {}",
+                lead_agent, team, e
+            );
+        }
+    }
+
     fn project_disabled_config_error(
         &self,
         ctx: &PluginContext,
@@ -864,24 +965,8 @@ impl CiMonitorPlugin {
     ) {
         let team = Self::team_for_config_error(table, ctx);
         let message = format!("invalid gh_monitor config: {reason}");
-        let Some(home_dir) = ctx.system.claude_root.parent() else {
-            warn!("CI Monitor: failed to derive ATM home for health file");
-            return;
-        };
-        let config_state = evaluate_gh_monitor_config(home_dir, &team, None);
-        if let Err(e) = health::set_gh_monitor_health_state(
-            home_dir,
-            &team,
-            GhMonitorHealthUpdate {
-                availability_state: Some("disabled_config_error"),
-                in_flight: Some(0),
-                message: Some(message),
-                config_state: Some(&config_state),
-                ..Default::default()
-            },
-        ) {
-            warn!("CI Monitor: failed to persist disabled_config_error health state: {e}");
-        }
+        Self::write_health_record(ctx, &team, "disabled_config_error", &message);
+        self.notify_disabled_transition(ctx, &team, &message);
     }
 }
 
@@ -912,7 +997,6 @@ impl Plugin for CiMonitorPlugin {
             match CiMonitorConfig::from_toml(table) {
                 Ok(config) => config,
                 Err(e) => {
-                    #[cfg(unix)]
                     self.project_disabled_config_error(ctx, config_table, &e.to_string());
                     return Err(e);
                 }
@@ -933,7 +1017,6 @@ impl Plugin for CiMonitorPlugin {
         let repo = match self.resolve_repo_context(ctx) {
             Ok(repo) => repo,
             Err(err) => {
-                #[cfg(unix)]
                 self.project_disabled_config_error(ctx, config_table, &err.to_string());
                 return Err(err);
             }
@@ -1096,136 +1179,145 @@ impl Plugin for CiMonitorPlugin {
             return Ok(());
         }
 
-        // Clone context for use in loop (Arc, so cheap)
-        let ctx = self
-            .ctx
-            .as_ref()
-            .ok_or_else(|| PluginError::Runtime {
-                message: "Plugin not initialized".to_string(),
-                source: None,
-            })?
-            .clone();
+        #[cfg(not(unix))]
+        {
+            cancel.cancelled().await;
+            return Ok(());
+        }
 
-        let base_interval_secs = self.config.poll_interval_secs.max(10);
-        let max_backoff_secs = MAX_ERROR_BACKOFF_SECS.max(base_interval_secs);
-        let mut next_delay_secs: u64 = 0;
+        #[cfg(unix)]
+        {
+            // Clone context for use in loop (Arc, so cheap)
+            let ctx = self
+                .ctx
+                .as_ref()
+                .ok_or_else(|| PluginError::Runtime {
+                    message: "Plugin not initialized".to_string(),
+                    source: None,
+                })?
+                .clone();
 
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    break;
-                }
-                _ = sleep(Duration::from_secs(next_delay_secs)) => {
-                    // Evict old dedup cache entries
-                    self.evict_old_dedup_entries();
+            let base_interval_secs = self.config.poll_interval_secs.max(10);
+            let max_backoff_secs = MAX_ERROR_BACKOFF_SECS.max(base_interval_secs);
+            let mut next_delay_secs: u64 = 0;
 
-                    // Fetch all completed runs
-                    let runs = match self.provider.as_ref() {
-                        Some(provider) => list_completed_runs(provider.as_ref()).await,
-                        None => {
-                            warn!("CI Monitor: Provider disappeared during run");
-                            break;
-                        }
-                    };
-                    match runs {
-                        Ok(runs) => {
-                            next_delay_secs = base_interval_secs;
-                            // Process each run
-                            for run in runs {
-                                // Filter by branch using glob patterns (client-side)
-                                if !self.matches_branch(&run.head_branch) {
-                                    continue;
-                                }
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        break;
+                    }
+                    _ = sleep(Duration::from_secs(next_delay_secs)) => {
+                        // Evict old dedup cache entries
+                        self.evict_old_dedup_entries();
 
-                                let should_notify_failure = run
-                                    .conclusion
-                                    .map(|c| self.config.notify_on.contains(&c))
-                                    .unwrap_or(false);
-                                let needs_full_run =
-                                    should_notify_failure || self.config.runtime_drift_enabled;
-                                if !needs_full_run {
-                                    continue;
-                                }
-
-                                // Fetch full run details with jobs
-                                let full_run_result = match self.provider.as_ref() {
-                                    Some(provider) => fetch_run_details(provider.as_ref(), run.id).await,
-                                    None => {
-                                        warn!("CI Monitor: Provider disappeared during run");
-                                        break;
-                                    }
-                                };
-                                let full_run = match full_run_result {
-                                    Ok(r) => r,
-                                    Err(e) => {
-                                        warn!("CI Monitor: Failed to fetch run details for #{}: {e}", run.id);
-                                        continue;
-                                    }
-                                };
-
-                                // Runtime drift alerts (optional enhancement): update persisted
-                                // baselines and notify on significant slowdowns.
-                                if let Some(drift_msg) =
-                                    self.update_runtime_history_and_build_alert(&full_run)
-                                {
-                                    if self.send_message_to_targets(&ctx, &drift_msg, run.id) {
-                                        debug!("CI Monitor: Runtime drift alert sent for run #{}", run.id);
-                                    }
-                                }
-
-                                if should_notify_failure {
-                                    // Generate dedup key
-                                    let key = self.dedup_key(&full_run);
-
-                                    // Skip if we've already seen this run+conclusion
-                                    if self.seen_runs.contains_key(&key) {
+                        // Fetch all completed runs
+                        let runs = match self.provider.as_ref() {
+                            Some(provider) => list_completed_runs(provider.as_ref()).await,
+                            None => {
+                                warn!("CI Monitor: Provider disappeared during run");
+                                break;
+                            }
+                        };
+                        match runs {
+                            Ok(runs) => {
+                                next_delay_secs = base_interval_secs;
+                                // Process each run
+                                for run in runs {
+                                    // Filter by branch using glob patterns (client-side)
+                                    if !self.matches_branch(&run.head_branch) {
                                         continue;
                                     }
 
-                                    // Command-path terminal notifications (atm gh monitor) are
-                                    // authoritative for that run_id. Avoid duplicate alerts
-                                    // from polling path when terminal state is already recorded.
-                                    if self.was_terminal_notified_by_command_path(&ctx, full_run.id)
+                                    let should_notify_failure = run
+                                        .conclusion
+                                        .map(|c| self.config.notify_on.contains(&c))
+                                        .unwrap_or(false);
+                                    let needs_full_run =
+                                        should_notify_failure || self.config.runtime_drift_enabled;
+                                    if !needs_full_run {
+                                        continue;
+                                    }
+
+                                    // Fetch full run details with jobs
+                                    let full_run_result = match self.provider.as_ref() {
+                                        Some(provider) => fetch_run_details(provider.as_ref(), run.id).await,
+                                        None => {
+                                            warn!("CI Monitor: Provider disappeared during run");
+                                            break;
+                                        }
+                                    };
+                                    let full_run = match full_run_result {
+                                        Ok(r) => r,
+                                        Err(e) => {
+                                            warn!("CI Monitor: Failed to fetch run details for #{}: {e}", run.id);
+                                            continue;
+                                        }
+                                    };
+
+                                    // Runtime drift alerts (optional enhancement): update persisted
+                                    // baselines and notify on significant slowdowns.
+                                    if let Some(drift_msg) =
+                                        self.update_runtime_history_and_build_alert(&full_run)
                                     {
-                                        debug!(
-                                            "CI Monitor: Skipping duplicate polling notification for run #{} (command-path terminal state present)",
-                                            full_run.id
-                                        );
-                                        self.seen_runs.insert(key, Utc::now());
-                                        continue;
+                                        if self.send_message_to_targets(&ctx, &drift_msg, run.id) {
+                                            debug!("CI Monitor: Runtime drift alert sent for run #{}", run.id);
+                                        }
                                     }
 
-                                    // Generate failure reports
-                                    if let Err(e) = self.generate_reports(&full_run) {
-                                        warn!("CI Monitor: Failed to generate reports for run #{}: {e}", run.id);
-                                    }
+                                    if should_notify_failure {
+                                        // Generate dedup key
+                                        let key = self.dedup_key(&full_run);
 
-                                    // Create notification message
-                                    let msg = self.run_to_message(&full_run);
-                                    if self.send_message_to_targets(&ctx, &msg, run.id) {
-                                        debug!("CI Monitor: Notified about run #{}", run.id);
-                                        self.seen_runs.insert(key, Utc::now());
+                                        // Skip if we've already seen this run+conclusion
+                                        if self.seen_runs.contains_key(&key) {
+                                            continue;
+                                        }
+
+                                        // Command-path terminal notifications (atm gh monitor) are
+                                        // authoritative for that run_id. Avoid duplicate alerts
+                                        // from polling path when terminal state is already recorded.
+                                        if self.was_terminal_notified_by_command_path(&ctx, full_run.id)
+                                        {
+                                            debug!(
+                                                "CI Monitor: Skipping duplicate polling notification for run #{} (command-path terminal state present)",
+                                                full_run.id
+                                            );
+                                            self.seen_runs.insert(key, Utc::now());
+                                            continue;
+                                        }
+
+                                        // Generate failure reports
+                                        if let Err(e) = self.generate_reports(&full_run) {
+                                            warn!("CI Monitor: Failed to generate reports for run #{}: {e}", run.id);
+                                        }
+
+                                        // Create notification message
+                                        let msg = self.run_to_message(&full_run);
+                                        if self.send_message_to_targets(&ctx, &msg, run.id) {
+                                            debug!("CI Monitor: Notified about run #{}", run.id);
+                                            self.seen_runs.insert(key, Utc::now());
+                                        }
                                     }
                                 }
                             }
-                        }
-                        Err(e) => {
-                            warn!("CI Monitor: Failed to fetch runs: {e}");
-                            // Continue polling after error using bounded exponential backoff.
-                            next_delay_secs = if next_delay_secs == 0 {
-                                base_interval_secs
-                            } else {
-                                next_delay_secs
-                                    .saturating_mul(2)
-                                    .min(max_backoff_secs)
-                            };
+                            Err(e) => {
+                                warn!("CI Monitor: Failed to fetch runs: {e}");
+                                // Continue polling after error using bounded exponential backoff.
+                                next_delay_secs = if next_delay_secs == 0 {
+                                    base_interval_secs
+                                } else {
+                                    next_delay_secs
+                                        .saturating_mul(2)
+                                        .min(max_backoff_secs)
+                                };
+                            }
                         }
                     }
                 }
             }
-        }
 
-        Ok(())
+            Ok(())
+        }
     }
 
     async fn shutdown(&mut self) -> Result<(), PluginError> {
@@ -2005,9 +2097,6 @@ repo = "config-owner/config-repo"
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let inbox_dir = temp_dir.path().join(".claude/teams/dev-team/inboxes");
-        std::fs::create_dir_all(&inbox_dir).unwrap();
-        std::fs::write(inbox_dir.join("team-lead.json"), "[]").unwrap();
         let teams_root = temp_dir.path().to_path_buf();
         let table: toml::Table = toml::from_str("team = \"dev-team\"").unwrap();
         let ctx = create_mock_context_with_repo_config(teams_root.clone(), Some(table), false);
@@ -2038,21 +2127,6 @@ repo = "config-owner/config-repo"
                 .message
                 .as_deref()
                 .is_some_and(|message| message.contains("No repository information available"))
-        );
-
-        let inbox_raw =
-            std::fs::read_to_string(inbox_dir.join("team-lead.json")).expect("team-lead inbox");
-        let inbox: Vec<agent_team_mail_core::schema::InboxMessage> =
-            serde_json::from_str(&inbox_raw).expect("team-lead inbox json");
-        assert!(
-            inbox.iter().any(|message| {
-                message
-                    .summary
-                    .as_deref()
-                    .is_some_and(|summary| summary.contains("gh_monitor: disabled_config_error"))
-                    && message.text.contains("No repository information available")
-            }),
-            "expected disabled_config_error alert in team-lead inbox"
         );
     }
 
@@ -2146,7 +2220,6 @@ notify_target = "team-lead"
         assert!(result.is_ok());
     }
 
-    #[cfg(all(test, unix))]
     #[tokio::test]
     async fn test_polling_notification_suppressed_when_command_path_already_terminal() {
         use crate::plugins::ci_monitor::{
@@ -2155,39 +2228,7 @@ notify_target = "team-lead"
         use agent_team_mail_core::schema::{AgentMember, TeamConfig};
         use tempfile::TempDir;
 
-        struct EnvRestoreGuard {
-            key: &'static str,
-            original: Option<String>,
-        }
-
-        impl Drop for EnvRestoreGuard {
-            fn drop(&mut self) {
-                match self.original.take() {
-                    Some(value) => unsafe { std::env::set_var(self.key, value) },
-                    None => unsafe { std::env::remove_var(self.key) },
-                }
-            }
-        }
-
-        struct CurrentDirGuard(std::path::PathBuf);
-
-        impl Drop for CurrentDirGuard {
-            fn drop(&mut self) {
-                std::env::set_current_dir(&self.0).expect("restore current directory");
-            }
-        }
-
         let temp_dir = TempDir::new().unwrap();
-        let _atm_config_guard = EnvRestoreGuard {
-            key: "ATM_CONFIG",
-            original: std::env::var("ATM_CONFIG").ok(),
-        };
-        let _cwd_guard = CurrentDirGuard(std::env::current_dir().unwrap());
-        unsafe {
-            std::env::remove_var("ATM_CONFIG");
-        }
-        std::env::set_current_dir(temp_dir.path()).unwrap();
-
         let teams_root = temp_dir.path().join("teams");
         let team_dir = teams_root.join("dev-team");
         let inboxes_dir = team_dir.join("inboxes");

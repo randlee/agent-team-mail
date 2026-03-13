@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use crate::plugins::ci_monitor::service;
 use agent_team_mail_core::daemon_client::{
     GhMonitorControlRequest, GhMonitorRequest, GhStatusRequest, PROTOCOL_VERSION, SocketError,
@@ -373,3 +374,7 @@ fn make_error_response(request_id: &str, code: &str, message: &str) -> SocketRes
         }),
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "gh_monitor_router_tests.rs"]
+mod tests;

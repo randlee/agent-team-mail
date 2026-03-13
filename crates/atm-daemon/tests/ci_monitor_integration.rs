@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Integration tests for the CI Monitor plugin
 
 use agent_team_mail_core::config::Config;
