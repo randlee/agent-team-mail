@@ -8,6 +8,8 @@ mod mock_provider;
 mod plugin;
 mod provider;
 mod registry;
+#[cfg(unix)]
+pub(crate) mod service;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) mod types;
