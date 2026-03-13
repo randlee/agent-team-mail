@@ -48,11 +48,13 @@ use crate::daemon::pid_backend_validation::{
 
 use crate::daemon::dedup::{DedupeKey, DurableDedupeStore};
 use crate::daemon::session_registry::{MarkDeadForSessionOutcome, SharedSessionRegistry};
+#[cfg(unix)]
 use crate::plugins::ci_monitor::helpers::{
     apply_config_state_to_status, count_in_flight_monitors, evaluate_gh_monitor_config,
     gh_monitor_key, load_gh_monitor_state_map, normalize_repo_scope, read_gh_monitor_health,
     upsert_gh_monitor_health, upsert_gh_monitor_status,
 };
+#[cfg(unix)]
 use crate::plugins::ci_monitor::types::GhMonitorHealthUpdate;
 use crate::plugins::worker_adapter::AgentState;
 

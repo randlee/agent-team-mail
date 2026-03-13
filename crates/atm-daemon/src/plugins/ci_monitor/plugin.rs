@@ -5,7 +5,9 @@ use super::github::GitHubActionsProvider;
 use super::loader::CiProviderLoader;
 use super::provider::ErasedCiProvider;
 use super::registry::{CiProviderFactory, CiProviderRegistry};
-use super::types::{CiFilter, CiJob, CiRunConclusion, CiRunStatus, GhMonitorHealthFile};
+#[cfg(unix)]
+use super::types::GhMonitorHealthFile;
+use super::types::{CiFilter, CiJob, CiRunConclusion, CiRunStatus};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use agent_team_mail_core::context::{GitProvider as GitProviderType, RepoContext};
 use agent_team_mail_core::daemon_client::GhMonitorHealth;
@@ -34,7 +36,7 @@ struct RuntimeHistory {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 #[serde(default)]
-struct GhMonitorStateRecord {
+struct PluginMonitorStateRecord {
     team: String,
     state: String,
     run_id: Option<u64>,
@@ -42,8 +44,8 @@ struct GhMonitorStateRecord {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 #[serde(default)]
-struct GhMonitorStateFile {
-    records: Vec<GhMonitorStateRecord>,
+struct PluginMonitorStateFile {
+    records: Vec<PluginMonitorStateRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -802,7 +804,7 @@ impl CiMonitorPlugin {
             Ok(raw) => raw,
             Err(_) => return false,
         };
-        let state_file = match serde_json::from_str::<GhMonitorStateFile>(&raw) {
+        let state_file = match serde_json::from_str::<PluginMonitorStateFile>(&raw) {
             Ok(parsed) => parsed,
             Err(e) => {
                 warn!(
