@@ -1,6 +1,8 @@
 //! GitHub Actions provider using the `gh` CLI
 
-use super::github_schema::{GhJob, GhRun, GhStep};
+#[cfg(test)]
+use super::github_schema::GhStep;
+use super::github_schema::{GhJob, GhRun};
 use super::provider::CiProvider;
 use super::types::{CiFilter, CiJob, CiRun, CiRunConclusion, CiRunStatus, CiStep};
 use crate::plugin::PluginError;

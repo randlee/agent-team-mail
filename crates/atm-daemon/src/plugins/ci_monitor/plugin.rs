@@ -8,7 +8,9 @@ use super::registry::{CiProviderFactory, CiProviderRegistry};
 use super::service::{fetch_run_details, list_completed_runs};
 #[cfg(unix)]
 use super::types::GhMonitorHealthFile;
-use super::types::{CiJob, CiRunConclusion, CiRunStatus};
+#[cfg(test)]
+use super::types::{CiFilter, CiRunStatus};
+use super::types::{CiJob, CiRunConclusion};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use agent_team_mail_core::context::{GitProvider as GitProviderType, RepoContext};
 use agent_team_mail_core::daemon_client::GhMonitorHealth;

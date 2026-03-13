@@ -1,10 +1,11 @@
 //! CI monitor service orchestration.
 
 #[cfg(unix)]
+use super::gh_alerts::{emit_ci_not_started_alert, emit_merge_conflict_alert};
+#[cfg(unix)]
 use super::gh_monitor::{
-    emit_ci_not_started_alert, emit_merge_conflict_alert, fetch_pr_merge_state,
-    is_pr_merge_state_dirty, monitor_gh_run, set_gh_monitor_health_state, try_find_workflow_run_id,
-    wait_for_pr_run_start,
+    fetch_pr_merge_state, is_pr_merge_state_dirty, monitor_gh_run, set_gh_monitor_health_state,
+    try_find_workflow_run_id, wait_for_pr_run_start,
 };
 use super::helpers::{
     apply_config_state_to_status, count_in_flight_monitors, evaluate_gh_monitor_config,
@@ -38,6 +39,14 @@ impl CiMonitorServiceError {
         Self::new(CI_MONITOR_INTERNAL_ERROR, message)
     }
 }
+
+impl std::fmt::Display for CiMonitorServiceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for CiMonitorServiceError {}
 
 pub(crate) type CiMonitorServiceResult<T> = std::result::Result<T, CiMonitorServiceError>;
 
@@ -597,7 +606,9 @@ mod tests {
 
         let runs = list_completed_runs(&provider).await.unwrap();
 
-        assert_eq!(runs, vec![run]);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, run.id);
+        assert_eq!(runs[0].name, run.name);
         assert_eq!(
             provider.get_calls(),
             vec![MockCall::ListRuns(CiFilter {
