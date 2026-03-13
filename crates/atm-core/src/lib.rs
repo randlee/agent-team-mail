@@ -24,6 +24,7 @@ pub mod pid;
 pub mod retention;
 pub mod schema;
 pub mod spawn;
+pub mod team_config_store;
 pub mod text;
 
 pub use schema::{

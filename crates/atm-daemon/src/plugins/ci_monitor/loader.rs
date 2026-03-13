@@ -285,6 +285,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_expand_tilde_with_atm_home() {
         // Safety: This test is isolated and sets/restores the env var
         // In production tests, ATM_HOME should be set at process level
