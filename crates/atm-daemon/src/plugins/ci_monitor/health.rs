@@ -79,7 +79,7 @@ pub(crate) fn read_gh_monitor_health(home: &Path, team: &str) -> Result<GhMonito
         .unwrap_or_else(|| default_gh_monitor_health(team)))
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 pub(crate) fn write_health_record(
     home: &Path,
     team: &str,
@@ -148,6 +148,12 @@ pub(crate) fn emit_gh_monitor_health_transition(
             .join(&target_team)
             .join("inboxes")
             .join(format!("{agent}.json"));
+        if let Some(parent) = inbox_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if !inbox_path.exists() {
+            let _ = std::fs::write(&inbox_path, "[]");
+        }
         let message = InboxMessage {
             from: from_agent.clone(),
             text: text.clone(),

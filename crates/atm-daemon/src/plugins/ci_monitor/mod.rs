@@ -29,4 +29,4 @@ pub use mock_provider::{
 pub use plugin::CiMonitorPlugin;
 pub use provider::{CiProvider, ErasedCiProvider};
 pub use registry::{CiFactoryFn, CiProviderFactory, CiProviderRegistry};
-pub use types::{CiFilter, CiJob, CiRun, CiRunConclusion, CiRunStatus, CiStep};
+pub use types::{CiFilter, CiJob, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep};

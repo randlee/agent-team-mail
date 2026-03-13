@@ -1,7 +1,6 @@
-//! GitHub monitor routing and notification helpers.
-
 use super::CiMonitorConfig;
 use super::helpers::normalize_repo_scope;
+use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{GhMonitorStatus, GhMonitorTargetKind};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::schema::InboxMessage;
@@ -34,11 +33,7 @@ pub(crate) fn emit_ci_monitor_message(
         if let Err(e) =
             agent_team_mail_core::io::inbox::inbox_append(&inbox_path, &message, team, agent)
         {
-            warn!(
-                team = %team,
-                agent = %agent,
-                "failed to emit ci monitor message: {e}"
-            );
+            warn!(team = %team, agent = %agent, "failed to emit ci monitor message: {e}");
         }
     }
 }
@@ -60,32 +55,14 @@ pub(crate) fn emit_ci_not_started_alert(
         status.target,
         status.message.clone().unwrap_or_default()
     );
-    let summary = format!("ci_not_started: {}", status.target);
-    for (agent, team) in targets {
-        let inbox_path = home
-            .join(".claude/teams")
-            .join(&team)
-            .join("inboxes")
-            .join(format!("{agent}.json"));
-        let message = InboxMessage {
-            from: from_agent.clone(),
-            text: text.clone(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            read: false,
-            summary: Some(summary.clone()),
-            message_id: Some(uuid::Uuid::new_v4().to_string()),
-            unknown_fields: std::collections::HashMap::new(),
-        };
-        if let Err(e) =
-            agent_team_mail_core::io::inbox::inbox_append(&inbox_path, &message, &team, &agent)
-        {
-            warn!(
-                team = %team,
-                agent = %agent,
-                "failed to emit ci_not_started alert: {e}"
-            );
-        }
-    }
+    emit_ci_monitor_message(
+        home,
+        &from_agent,
+        &targets,
+        &format!("ci_not_started: {}", status.target),
+        &text,
+        Some(uuid::Uuid::new_v4().to_string()),
+    );
 }
 
 #[cfg(unix)]
@@ -97,7 +74,7 @@ pub(crate) fn emit_merge_conflict_alert(
     run_conclusion: Option<&str>,
     config_cwd: Option<&str>,
 ) {
-    let expected_repo = pr_url.and_then(super::gh_monitor::extract_repo_slug_from_url);
+    let expected_repo = pr_url.and_then(super::polling::extract_repo_slug_from_url);
     let (from_agent, targets) =
         resolve_ci_alert_routing(home, &status.team, config_cwd, expected_repo.as_deref());
     let target_kind = match status.target_kind {
@@ -120,7 +97,6 @@ pub(crate) fn emit_merge_conflict_alert(
         text.push_str(&format!("\nreason: {message}"));
     }
 
-    let summary = format!("merge_conflict: {}", status.target);
     let mut extra_fields = serde_json::Map::new();
     extra_fields.insert(
         "classification".to_string(),
@@ -162,32 +138,14 @@ pub(crate) fn emit_merge_conflict_alert(
         extra_fields,
         ..Default::default()
     });
-
-    for (agent, team) in targets {
-        let inbox_path = home
-            .join(".claude/teams")
-            .join(&team)
-            .join("inboxes")
-            .join(format!("{agent}.json"));
-        let message = InboxMessage {
-            from: from_agent.clone(),
-            text: text.clone(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            read: false,
-            summary: Some(summary.clone()),
-            message_id: Some(uuid::Uuid::new_v4().to_string()),
-            unknown_fields: std::collections::HashMap::new(),
-        };
-        if let Err(e) =
-            agent_team_mail_core::io::inbox::inbox_append(&inbox_path, &message, &team, &agent)
-        {
-            warn!(
-                team = %team,
-                agent = %agent,
-                "failed to emit merge_conflict alert: {e}"
-            );
-        }
-    }
+    emit_ci_monitor_message(
+        home,
+        &from_agent,
+        &targets,
+        &format!("merge_conflict: {}", status.target),
+        &text,
+        Some(uuid::Uuid::new_v4().to_string()),
+    );
 }
 
 #[cfg(unix)]
@@ -202,8 +160,8 @@ pub(crate) fn resolve_ci_alert_routing(
         .filter(|cwd| !cwd.is_empty())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| home.to_path_buf());
-    let config = match agent_team_mail_core::config::resolve_config(
-        &agent_team_mail_core::config::ConfigOverrides {
+    let config = match resolve_config(
+        &ConfigOverrides {
             team: Some(team.to_string()),
             ..Default::default()
         },
@@ -219,8 +177,7 @@ pub(crate) fn resolve_ci_alert_routing(
         }
     };
 
-    let plugin_table = config.plugin_config("gh_monitor");
-    let Some(plugin_table) = plugin_table else {
+    let Some(plugin_table) = config.plugin_config("gh_monitor") else {
         return (
             "gh-monitor".to_string(),
             vec![("team-lead".to_string(), team.to_string())],
@@ -301,4 +258,46 @@ pub(crate) fn repo_scope_matches(configured: &str, expected: &str) -> bool {
         .split_once('/')
         .map(|(_, repo)| repo == configured)
         .unwrap_or(false)
+}
+
+#[cfg(unix)]
+pub(crate) fn emit_gh_monitor_health_transition(
+    home: &std::path::Path,
+    team: &str,
+    config_cwd: Option<&str>,
+    old_state: &str,
+    new_state: &str,
+    reason: &str,
+) {
+    if old_state == new_state {
+        return;
+    }
+
+    emit_event_best_effort(EventFields {
+        level: if new_state == "healthy" {
+            "info"
+        } else {
+            "warn"
+        },
+        source: "atm-daemon",
+        action: "gh_monitor_health_transition",
+        team: Some(team.to_string()),
+        result: Some(format!("{old_state}->{new_state}")),
+        error: Some(reason.to_string()),
+        ..Default::default()
+    });
+
+    let (from_agent, targets) = resolve_ci_alert_routing(home, team, config_cwd, None);
+    let text = format!(
+        "[gh_monitor] availability transition {} -> {}\nreason: {}",
+        old_state, new_state, reason
+    );
+    emit_ci_monitor_message(
+        home,
+        &from_agent,
+        &targets,
+        &format!("gh_monitor: {new_state}"),
+        &text,
+        Some(uuid::Uuid::new_v4().to_string()),
+    );
 }

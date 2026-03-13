@@ -2,9 +2,9 @@
 
 #[cfg(test)]
 use super::github_schema::GhStep;
-use super::github_schema::{GhJob, GhRun};
+use super::github_schema::{GhJob, GhPrLookupView, GhPrView, GhRun};
 use super::provider::CiProvider;
-use super::types::{CiFilter, CiJob, CiRun, CiRunConclusion, CiRunStatus, CiStep};
+use super::types::{CiFilter, CiJob, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep};
 use crate::plugin::PluginError;
 use std::process::Command;
 
@@ -103,6 +103,8 @@ impl GitHubActionsProvider {
             url: gh_run.url.clone(),
             created_at: gh_run.created_at.clone(),
             updated_at: gh_run.updated_at.clone(),
+            attempt: None,
+            pull_requests: None,
             jobs: if include_jobs {
                 gh_run
                     .jobs
@@ -123,6 +125,7 @@ impl GitHubActionsProvider {
             conclusion: Self::parse_conclusion(gh_job.conclusion.as_deref()),
             started_at: gh_job.started_at.clone(),
             completed_at: gh_job.completed_at.clone(),
+            url: None,
             steps: gh_job.steps.as_ref().map(|steps| {
                 steps
                     .iter()
@@ -245,6 +248,52 @@ impl CiProvider for GitHubActionsProvider {
         ];
 
         self.run_gh(&args).await
+    }
+
+    async fn get_pull_request(&self, pr_number: u64) -> Result<Option<CiPullRequest>, PluginError> {
+        let pr_number_arg = pr_number.to_string();
+        let repo_arg = format!("{}/{}", self.owner, self.repo);
+
+        let lookup_args = [
+            "pr",
+            "view",
+            &pr_number_arg,
+            "--repo",
+            &repo_arg,
+            "--json",
+            "headRefName,headRefOid,createdAt",
+        ];
+        let lookup_output = self.run_gh(&lookup_args).await?;
+        let lookup: GhPrLookupView =
+            serde_json::from_str(&lookup_output).map_err(|e| PluginError::Provider {
+                message: format!("Failed to parse gh JSON: {e}"),
+                source: Some(Box::new(e)),
+            })?;
+
+        let view_args = [
+            "pr",
+            "view",
+            &pr_number_arg,
+            "--repo",
+            &repo_arg,
+            "--json",
+            "mergeStateStatus,url",
+        ];
+        let view_output = self.run_gh(&view_args).await?;
+        let view: GhPrView =
+            serde_json::from_str(&view_output).map_err(|e| PluginError::Provider {
+                message: format!("Failed to parse gh JSON: {e}"),
+                source: Some(Box::new(e)),
+            })?;
+
+        Ok(Some(CiPullRequest {
+            number: pr_number,
+            url: view.url,
+            head_ref_name: lookup.head_ref_name,
+            head_ref_oid: lookup.head_ref_oid,
+            created_at: lookup.created_at,
+            merge_state_status: view.merge_state_status,
+        }))
     }
 
     fn provider_name(&self) -> &str {

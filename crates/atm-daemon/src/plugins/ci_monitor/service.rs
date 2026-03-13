@@ -526,8 +526,21 @@ pub(crate) fn health_request(
     health.config_source = config_state.config_source.clone();
     health.config_path = config_state.config_path.clone();
     if let Some(reason) = config_state.error.as_deref() {
-        health.availability_state = "disabled_config_error".to_string();
-        health.message = Some(reason.to_string());
+        health = set_gh_monitor_health_state(
+            home,
+            team,
+            GhMonitorHealthUpdate {
+                availability_state: Some("disabled_config_error"),
+                in_flight: Some(health.in_flight),
+                message: Some(reason.to_string()),
+                config_state: Some(&config_state),
+                config_cwd,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| {
+            CiMonitorServiceError::internal(format!("Failed to persist gh monitor health: {e}"))
+        })?;
     }
     Ok(health)
 }

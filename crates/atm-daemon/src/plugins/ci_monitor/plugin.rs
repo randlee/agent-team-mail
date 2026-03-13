@@ -4,6 +4,8 @@ use super::config::{CiMonitorConfig, DedupStrategy};
 use super::github::GitHubActionsProvider;
 #[cfg(unix)]
 use super::health;
+#[cfg(unix)]
+use super::helpers::evaluate_gh_monitor_config;
 use super::loader::CiProviderLoader;
 use super::provider::ErasedCiProvider;
 use super::registry::{CiProviderFactory, CiProviderRegistry};
@@ -13,9 +15,11 @@ use super::types::GhMonitorHealthFile;
 #[cfg(test)]
 use super::types::{CiFilter, CiRunStatus};
 use super::types::{CiJob, CiRunConclusion};
+#[cfg(unix)]
+use super::types::GhMonitorHealthUpdate;
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use agent_team_mail_core::context::{GitProvider as GitProviderType, RepoContext};
-use agent_team_mail_core::schema::{AgentMember, InboxMessage, TeamConfig};
+use agent_team_mail_core::schema::{AgentMember, InboxMessage};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -838,57 +842,6 @@ impl CiMonitorPlugin {
             .unwrap_or_else(|| ctx.config.core.default_team.clone())
     }
 
-    #[cfg(unix)]
-    fn write_health_record(
-        ctx: &PluginContext,
-        team: &str,
-        availability_state: &str,
-        message: &str,
-    ) {
-        let Some(home_dir) = ctx.system.claude_root.parent() else {
-            warn!("CI Monitor: failed to derive ATM home for health file");
-            return;
-        };
-        health::write_health_record(home_dir, team, availability_state, message);
-    }
-
-    fn notify_disabled_transition(&self, ctx: &PluginContext, team: &str, message: &str) {
-        let lead_agent =
-            std::fs::read_to_string(ctx.mail.teams_root().join(team).join("config.json"))
-                .ok()
-                .and_then(|raw| serde_json::from_str::<TeamConfig>(&raw).ok())
-                .and_then(|cfg| cfg.lead_agent_id.split('@').next().map(|s| s.to_string()))
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or_else(|| "team-lead".to_string());
-
-        let text = format!(
-            "[gh_monitor] availability transition healthy -> disabled_config_error\nreason: {message}"
-        );
-        let msg = InboxMessage {
-            from: if self.config.agent.is_empty() {
-                "ci-monitor".to_string()
-            } else {
-                self.config.agent.clone()
-            },
-            text,
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            read: false,
-            summary: Some("gh_monitor: disabled_config_error".to_string()),
-            message_id: Some(format!(
-                "gh-monitor-config-error-{}",
-                Utc::now().timestamp_millis()
-            )),
-            unknown_fields: std::collections::HashMap::new(),
-        };
-
-        if let Err(e) = ctx.mail.send(team, &lead_agent, &msg) {
-            warn!(
-                "CI Monitor: failed to send disabled_config_error transition alert to {}@{}: {}",
-                lead_agent, team, e
-            );
-        }
-    }
-
     fn project_disabled_config_error(
         &self,
         ctx: &PluginContext,
@@ -897,8 +850,24 @@ impl CiMonitorPlugin {
     ) {
         let team = Self::team_for_config_error(table, ctx);
         let message = format!("invalid gh_monitor config: {reason}");
-        Self::write_health_record(ctx, &team, "disabled_config_error", &message);
-        self.notify_disabled_transition(ctx, &team, &message);
+        let Some(home_dir) = ctx.system.claude_root.parent() else {
+            warn!("CI Monitor: failed to derive ATM home for health file");
+            return;
+        };
+        let config_state = evaluate_gh_monitor_config(home_dir, &team, None);
+        if let Err(e) = health::set_gh_monitor_health_state(
+            home_dir,
+            &team,
+            GhMonitorHealthUpdate {
+                availability_state: Some("disabled_config_error"),
+                in_flight: Some(0),
+                message: Some(message),
+                config_state: Some(&config_state),
+                ..Default::default()
+            },
+        ) {
+            warn!("CI Monitor: failed to persist disabled_config_error health state: {e}");
+        }
     }
 }
 
@@ -2013,6 +1982,7 @@ repo = "config-owner/config-repo"
         assert_eq!(member.cwd, temp_dir.path().to_string_lossy());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_init_without_git_or_config_repo_writes_disabled_init_health_record() {
         use crate::plugins::ci_monitor::MockCiProvider;

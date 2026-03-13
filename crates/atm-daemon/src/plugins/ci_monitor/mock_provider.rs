@@ -1,7 +1,7 @@
 //! Mock CI provider for testing
 
 use super::provider::CiProvider;
-use super::types::{CiFilter, CiJob, CiRun, CiRunConclusion, CiRunStatus, CiStep};
+use super::types::{CiFilter, CiJob, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep};
 use crate::plugin::PluginError;
 use std::sync::{Arc, Mutex};
 
@@ -14,6 +14,8 @@ pub struct MockCiProvider {
     pub jobs: Vec<CiJob>,
     /// If set, all methods return this error
     pub error: Option<String>,
+    /// Pull requests available for correlation lookups
+    pub pull_requests: Vec<CiPullRequest>,
     /// Track calls for verification
     pub call_log: Arc<Mutex<Vec<MockCall>>>,
 }
@@ -24,6 +26,7 @@ pub enum MockCall {
     ListRuns(CiFilter),
     GetRun(u64),
     GetJobLog(u64),
+    GetPullRequest(u64),
 }
 
 impl MockCiProvider {
@@ -33,6 +36,7 @@ impl MockCiProvider {
             runs: Vec::new(),
             jobs: Vec::new(),
             error: None,
+            pull_requests: Vec::new(),
             call_log: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -43,6 +47,7 @@ impl MockCiProvider {
             runs,
             jobs: Vec::new(),
             error: None,
+            pull_requests: Vec::new(),
             call_log: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -53,8 +58,15 @@ impl MockCiProvider {
             runs,
             jobs,
             error: None,
+            pull_requests: Vec::new(),
             call_log: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Create a mock provider with pull request metadata.
+    pub fn with_pull_requests(mut self, pull_requests: Vec<CiPullRequest>) -> Self {
+        self.pull_requests = pull_requests;
+        self
     }
 
     /// Set the error that all methods should return
@@ -166,6 +178,23 @@ impl CiProvider for MockCiProvider {
         Ok(format!("Mock log output for job {job_id}"))
     }
 
+    async fn get_pull_request(&self, pr_number: u64) -> Result<Option<CiPullRequest>, PluginError> {
+        self.log_call(MockCall::GetPullRequest(pr_number));
+
+        if let Some(err) = &self.error {
+            return Err(PluginError::Provider {
+                message: err.clone(),
+                source: None,
+            });
+        }
+
+        Ok(self
+            .pull_requests
+            .iter()
+            .find(|pr| pr.number == pr_number)
+            .cloned())
+    }
+
     fn provider_name(&self) -> &str {
         "MockCiProvider"
     }
@@ -189,6 +218,8 @@ pub fn create_test_run(
         url: format!("https://github.com/test/repo/actions/runs/{id}"),
         created_at: "2026-02-13T10:00:00Z".to_string(),
         updated_at: "2026-02-13T10:05:00Z".to_string(),
+        attempt: Some(1),
+        pull_requests: None,
         jobs: None,
     }
 }
@@ -207,6 +238,7 @@ pub fn create_test_job(
         conclusion,
         started_at: Some("2026-02-13T10:01:00Z".to_string()),
         completed_at: Some("2026-02-13T10:04:00Z".to_string()),
+        url: Some(format!("https://github.com/test/repo/actions/jobs/{id}")),
         steps: None,
     }
 }
@@ -236,6 +268,7 @@ mod tests {
         assert!(provider.runs.is_empty());
         assert!(provider.jobs.is_empty());
         assert!(provider.error.is_none());
+        assert!(provider.pull_requests.is_empty());
         assert!(provider.get_calls().is_empty());
     }
 
@@ -399,6 +432,22 @@ mod tests {
         let calls = provider.get_calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0], MockCall::GetJobLog(123));
+    }
+
+    #[tokio::test]
+    async fn test_mock_provider_get_pull_request() {
+        let provider = MockCiProvider::new().with_pull_requests(vec![CiPullRequest {
+            number: 42,
+            url: Some("https://github.com/test/repo/pull/42".to_string()),
+            head_ref_name: Some("feature/test".to_string()),
+            head_ref_oid: Some("sha42".to_string()),
+            created_at: Some("2026-02-13T10:00:00Z".to_string()),
+            merge_state_status: Some("clean".to_string()),
+        }]);
+
+        let pr = provider.get_pull_request(42).await.unwrap().unwrap();
+        assert_eq!(pr.number, 42);
+        assert_eq!(provider.get_calls(), vec![MockCall::GetPullRequest(42)]);
     }
 
     #[tokio::test]
