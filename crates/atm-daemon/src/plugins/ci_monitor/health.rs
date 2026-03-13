@@ -6,16 +6,12 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use agent_team_mail_core::daemon_client::GhMonitorHealth;
 #[cfg(unix)]
-use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
-#[cfg(unix)]
-use agent_team_mail_core::schema::InboxMessage;
-#[cfg(unix)]
 use anyhow::Result;
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 use tracing::warn;
 
 #[cfg(unix)]
-use super::gh_monitor::resolve_ci_alert_routing;
+use super::gh_alerts::emit_gh_monitor_health_transition;
 #[cfg(unix)]
 use super::types::{GhMonitorHealthFile, GhMonitorHealthUpdate};
 
@@ -79,7 +75,7 @@ pub(crate) fn read_gh_monitor_health(home: &Path, team: &str) -> Result<GhMonito
         .unwrap_or_else(|| default_gh_monitor_health(team)))
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 pub(crate) fn write_health_record(
     home: &Path,
     team: &str,
@@ -106,69 +102,6 @@ pub(crate) fn write_health_record(
             path.display(),
             e
         );
-    }
-}
-
-#[cfg(unix)]
-pub(crate) fn emit_gh_monitor_health_transition(
-    home: &Path,
-    team: &str,
-    config_cwd: Option<&str>,
-    old_state: &str,
-    new_state: &str,
-    reason: &str,
-) {
-    if old_state == new_state {
-        return;
-    }
-
-    let level = if new_state == "healthy" {
-        "info"
-    } else {
-        "warn"
-    };
-    emit_event_best_effort(EventFields {
-        level,
-        source: "atm-daemon",
-        action: "gh_monitor_health_transition",
-        team: Some(team.to_string()),
-        result: Some(format!("{old_state}->{new_state}")),
-        error: Some(reason.to_string()),
-        ..Default::default()
-    });
-
-    let (from_agent, targets) = resolve_ci_alert_routing(home, team, config_cwd, None);
-    let text = format!(
-        "[gh_monitor] availability transition {} -> {}\nreason: {}",
-        old_state, new_state, reason
-    );
-    for (agent, target_team) in targets {
-        let inbox_path = home
-            .join(".claude/teams")
-            .join(&target_team)
-            .join("inboxes")
-            .join(format!("{agent}.json"));
-        let message = InboxMessage {
-            from: from_agent.clone(),
-            text: text.clone(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            read: false,
-            summary: Some(format!("gh_monitor: {new_state}")),
-            message_id: Some(uuid::Uuid::new_v4().to_string()),
-            unknown_fields: std::collections::HashMap::new(),
-        };
-        if let Err(e) = agent_team_mail_core::io::inbox::inbox_append(
-            &inbox_path,
-            &message,
-            &target_team,
-            &agent,
-        ) {
-            warn!(
-                team = %target_team,
-                agent = %agent,
-                "failed to emit gh_monitor transition alert: {e}"
-            );
-        }
     }
 }
 

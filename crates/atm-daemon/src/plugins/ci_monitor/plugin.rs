@@ -1,17 +1,19 @@
 //! CI Monitor plugin implementation
 
+use super::GitHubActionsProvider;
 use super::config::{CiMonitorConfig, DedupStrategy};
-use super::github::GitHubActionsProvider;
-#[cfg(unix)]
-use super::health;
 use super::loader::CiProviderLoader;
 use super::provider::ErasedCiProvider;
 use super::registry::{CiProviderFactory, CiProviderRegistry};
-#[cfg(all(test, unix))]
-use super::types::GhMonitorHealthFile;
-use super::types::{CiFilter, CiJob, CiRunConclusion, CiRunStatus};
+use super::service::{fetch_run_details, list_completed_runs};
+#[cfg(test)]
+use super::types::{CiFilter, CiRunStatus};
+use super::types::{CiJob, CiRunConclusion};
+#[cfg(unix)]
+use super::types::{GhMonitorHealthFile, GhMonitorStateFile};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use agent_team_mail_core::context::{GitProvider as GitProviderType, RepoContext};
+use agent_team_mail_core::daemon_client::GhMonitorHealth;
 use agent_team_mail_core::schema::{AgentMember, InboxMessage, TeamConfig};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -33,20 +35,6 @@ struct RuntimeHistory {
     job_samples: HashMap<String, Vec<u64>>,
     processed_run_ids: Vec<u64>,
     drift_last_alert_epoch_secs: HashMap<String, i64>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
-struct GhMonitorStateRecord {
-    team: String,
-    state: String,
-    run_id: Option<u64>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
-struct GhMonitorStateFile {
-    records: Vec<GhMonitorStateRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -846,7 +834,66 @@ impl CiMonitorPlugin {
             warn!("CI Monitor: failed to derive ATM home for health file");
             return;
         };
-        health::write_health_record(home_dir, team, availability_state, message);
+        let path = agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(home_dir);
+        let mut file = match std::fs::read_to_string(&path) {
+            Ok(raw) => match serde_json::from_str::<GhMonitorHealthFile>(&raw) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    warn!(
+                        "CI Monitor: failed parsing health file {}: {}",
+                        path.display(),
+                        e
+                    );
+                    GhMonitorHealthFile::default()
+                }
+            },
+            Err(_) => GhMonitorHealthFile::default(),
+        };
+
+        let updated_record = GhMonitorHealth {
+            team: team.to_string(),
+            configured: false,
+            enabled: false,
+            config_source: None,
+            config_path: None,
+            lifecycle_state: "running".to_string(),
+            availability_state: availability_state.to_string(),
+            in_flight: 0,
+            updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            message: Some(message.to_string()),
+        };
+
+        if let Some(existing) = file.records.iter_mut().find(|record| record.team == team) {
+            *existing = updated_record;
+        } else {
+            file.records.push(updated_record);
+        }
+        file.records.sort_by(|a, b| a.team.cmp(&b.team));
+
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            warn!(
+                "CI Monitor: failed to create health directory {}: {}",
+                parent.display(),
+                e
+            );
+            return;
+        }
+        match serde_json::to_string_pretty(&file) {
+            Ok(serialized) => {
+                if let Err(e) = std::fs::write(&path, serialized) {
+                    warn!(
+                        "CI Monitor: failed writing health file {}: {}",
+                        path.display(),
+                        e
+                    );
+                }
+            }
+            Err(e) => {
+                warn!("CI Monitor: failed serializing health file: {}", e);
+            }
+        }
     }
 
     fn notify_disabled_transition(&self, ctx: &PluginContext, team: &str, message: &str) {
@@ -1131,16 +1178,9 @@ impl Plugin for CiMonitorPlugin {
                     // Evict old dedup cache entries
                     self.evict_old_dedup_entries();
 
-                    // Build filter from config (no branch filter - we'll filter client-side)
-                    let filter = CiFilter {
-                        status: Some(CiRunStatus::Completed),
-                        per_page: Some(20),
-                        ..Default::default()
-                    };
-
                     // Fetch all completed runs
                     let runs = match self.provider.as_ref() {
-                        Some(provider) => provider.list_runs(&filter).await,
+                        Some(provider) => list_completed_runs(provider.as_ref()).await,
                         None => {
                             warn!("CI Monitor: Provider disappeared during run");
                             break;
@@ -1168,7 +1208,7 @@ impl Plugin for CiMonitorPlugin {
 
                                 // Fetch full run details with jobs
                                 let full_run_result = match self.provider.as_ref() {
-                                    Some(provider) => provider.get_run(run.id).await,
+                                    Some(provider) => fetch_run_details(provider.as_ref(), run.id).await,
                                     None => {
                                         warn!("CI Monitor: Provider disappeared during run");
                                         break;
@@ -2216,11 +2256,28 @@ poll_interval_secs = 10
         .unwrap();
         let ctx = create_mock_context_with_config(teams_root.clone(), Some(table));
 
-        let state_path = CiMonitorPlugin::gh_monitor_state_path(&ctx);
-        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &state_path,
-            r#"{"records":[{"team":"dev-team","state":"failure","run_id":42}]}"#,
+        crate::plugins::ci_monitor::helpers::upsert_gh_monitor_status(
+            teams_root.as_path(),
+            agent_team_mail_core::daemon_client::GhMonitorStatus {
+                team: "dev-team".to_string(),
+                configured: true,
+                enabled: true,
+                config_source: Some("repo".to_string()),
+                config_path: Some(
+                    std::env::temp_dir()
+                        .join("test-repo")
+                        .join(".atm.toml")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                target_kind: agent_team_mail_core::daemon_client::GhMonitorTargetKind::Run,
+                target: "42".to_string(),
+                state: "failure".to_string(),
+                run_id: Some(42),
+                reference: None,
+                updated_at: "2026-03-12T00:00:00Z".to_string(),
+                message: None,
+            },
         )
         .unwrap();
 

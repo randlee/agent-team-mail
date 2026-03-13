@@ -3848,7 +3848,7 @@ mod tests {
     use super::*;
     use crate::daemon::dedup::DurableDedupeStore;
     use crate::daemon::session_registry::new_session_registry;
-    use crate::plugins::ci_monitor::test_support::EnvGuard;
+    use crate::plugins::ci_monitor::test_support::{EnvGuard, write_hook_auth_team_config};
     use crate::plugins::worker_adapter::AgentStateTracker;
     use agent_team_mail_core::control::{CONTROL_SCHEMA_VERSION, ControlAction, ControlRequest};
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
@@ -3923,46 +3923,6 @@ mod tests {
     struct HookAuthFixture {
         _temp: TempDir,
         _atm_home_guard: EnvGuard,
-    }
-
-    fn write_hook_auth_team_config(
-        home_dir: &std::path::Path,
-        team: &str,
-        lead: &str,
-        members: &[&str],
-    ) {
-        let team_dir = home_dir.join(".claude/teams").join(team);
-        std::fs::create_dir_all(&team_dir).unwrap();
-        let mut member_values = Vec::new();
-        for m in members {
-            member_values.push(serde_json::json!({
-                "agentId": format!("{m}@{team}"),
-                "name": m,
-                "agentType": "general-purpose",
-                "model": "unknown",
-                "joinedAt": 1739284800000u64,
-                "cwd": home_dir.to_string_lossy().to_string(),
-                "subscriptions": []
-            }));
-        }
-        let config = serde_json::json!({
-            "name": team,
-            "description": "test team",
-            "createdAt": 1739284800000u64,
-            "leadAgentId": format!("{lead}@{team}"),
-            "leadSessionId": "test-lead-session",
-            "members": member_values,
-        });
-        {
-            use std::io::Write;
-            let config_path = team_dir.join("config.json");
-            let config_bytes = serde_json::to_string_pretty(&config).unwrap();
-            let file = std::fs::File::create(&config_path).unwrap();
-            let mut writer = std::io::BufWriter::new(&file);
-            writer.write_all(config_bytes.as_bytes()).unwrap();
-            writer.flush().unwrap();
-            file.sync_all().unwrap();
-        }
     }
 
     fn write_session_file(

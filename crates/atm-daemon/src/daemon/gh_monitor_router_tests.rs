@@ -1,4 +1,5 @@
 use super::*;
+use crate::plugins::ci_monitor::gh_alerts::resolve_ci_alert_routing;
 use crate::plugins::ci_monitor::gh_monitor;
 #[cfg(unix)]
 use crate::plugins::ci_monitor::health::set_gh_monitor_health_state;
@@ -59,7 +60,7 @@ notify_target = "team-lead"
     )
     .unwrap();
 
-    let (from_agent, targets) = gh_monitor::resolve_ci_alert_routing(
+    let (from_agent, targets) = resolve_ci_alert_routing(
         temp.path(),
         "scmux-dev",
         Some(repo_dir.to_string_lossy().as_ref()),
@@ -71,7 +72,7 @@ notify_target = "team-lead"
         vec![("team-lead".to_string(), "scmux-dev".to_string())]
     );
 
-    let (_, wrong_repo_targets) = gh_monitor::resolve_ci_alert_routing(
+    let (_, wrong_repo_targets) = resolve_ci_alert_routing(
         temp.path(),
         "scmux-dev",
         Some(repo_dir.to_string_lossy().as_ref()),
@@ -82,7 +83,7 @@ notify_target = "team-lead"
         "repo mismatch must block alert routing"
     );
 
-    let (_, wrong_team_targets) = gh_monitor::resolve_ci_alert_routing(
+    let (_, wrong_team_targets) = resolve_ci_alert_routing(
         temp.path(),
         "atm-dev",
         Some(repo_dir.to_string_lossy().as_ref()),
@@ -853,6 +854,7 @@ async fn test_gh_monitor_health_reports_global_config_source() {
 
 #[tokio::test]
 #[cfg(unix)]
+#[serial]
 async fn test_gh_status_workflow_reference_disambiguates_parallel_runs() {
     let temp = TempDir::new().unwrap();
     let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
@@ -898,6 +900,7 @@ async fn test_gh_status_workflow_reference_disambiguates_parallel_runs() {
 
 #[tokio::test]
 #[cfg(unix)]
+#[serial]
 async fn test_gh_monitor_control_start_stop_restart_and_health() {
     let temp = TempDir::new().unwrap();
     let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
@@ -931,6 +934,7 @@ async fn test_gh_monitor_control_start_stop_restart_and_health() {
 
 #[tokio::test]
 #[cfg(unix)]
+#[serial]
 async fn test_gh_monitor_restart_reloads_updated_config_without_daemon_restart() {
     let temp = TempDir::new().unwrap();
     let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
@@ -994,6 +998,7 @@ async fn test_gh_monitor_restart_reloads_updated_config_without_daemon_restart()
 
 #[tokio::test]
 #[cfg(unix)]
+#[serial]
 async fn test_gh_monitor_command_rejected_when_lifecycle_stopped() {
     let temp = TempDir::new().unwrap();
     let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
