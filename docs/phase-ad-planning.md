@@ -11,7 +11,7 @@ blockers so `atm gh` workflows are usable without manual daemon surgery.
 ## Inputs
 
 - Team-lead dogfood findings (`DG-001`..`DG-011`)
-- Existing plugin requirements: `docs/plugins/ci-monitor/requirements.md`
+- Existing plugin requirements: `docs/ci-monitoring/requirements.md`
 - Core daemon contracts: `docs/requirements.md` (single-instance, socket path,
   team isolation)
 

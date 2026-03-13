@@ -189,7 +189,7 @@ Validation:
 
 - routing tests
 - notification payload tests
-- regression coverage for requirements in `docs/plugins/ci-monitor/requirements.md`
+- regression coverage for requirements in `docs/ci-monitoring/requirements.md`
 
 Exit criteria:
 

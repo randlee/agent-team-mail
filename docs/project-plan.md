@@ -1791,7 +1791,7 @@ daemon-safe lifecycle behavior, actionable `atm gh` command UX, and complete
 progress/failure observability.
 
 **Requirements references**:
-- `docs/plugins/ci-monitor/requirements.md`
+- `docs/ci-monitoring/requirements.md`
 - `docs/requirements.md` §4.11 and §5.8–§5.10
 
 **Integration branch**: `integrate/phase-AB` (planned)
@@ -1842,7 +1842,7 @@ progress/failure observability.
 1. `atm gh monitor pr <n>` reports `ci_not_started` when timeout expires with no run.
 2. Workflow and run monitor commands resolve and track expected run targets.
 3. `atm gh` and `atm gh status` (no target) provide actionable non-error plugin status output.
-4. Coverage maps to `GH-CI-TR-2` in `docs/plugins/ci-monitor/requirements.md`.
+4. Coverage maps to `GH-CI-TR-2` in `docs/ci-monitoring/requirements.md`.
 
 ### AB.3 — Progress + Final Reporting Payloads
 **Deliverables**
@@ -1854,7 +1854,7 @@ progress/failure observability.
 1. Progress is rate-limited under active monitoring.
 2. Terminal completion/failure message is immediate and complete.
 3. Failure notifications include required URLs and identifying metadata.
-4. Coverage maps to `GH-CI-TR-3` in `docs/plugins/ci-monitor/requirements.md`.
+4. Coverage maps to `GH-CI-TR-3` in `docs/ci-monitoring/requirements.md`.
 
 ### AB.4 — Availability State + Connectivity Recovery Signals
 **Deliverables**
@@ -1868,8 +1868,8 @@ progress/failure observability.
 2. Invalid configuration does not run polling and status is visible in
    `atm status` / `atm doctor`.
 3. Transient failures do not crash daemon.
-4. Coverage maps to `GH-CI-TR-1` in `docs/plugins/ci-monitor/requirements.md`.
-5. Coverage maps to `GH-CI-TR-4` in `docs/plugins/ci-monitor/requirements.md`.
+4. Coverage maps to `GH-CI-TR-1` in `docs/ci-monitoring/requirements.md`.
+5. Coverage maps to `GH-CI-TR-4` in `docs/ci-monitoring/requirements.md`.
 
 ### AB.5 — Runtime Drift Baselines (Optional Enhancement)
 **Deliverables**
@@ -1880,7 +1880,7 @@ progress/failure observability.
 **Acceptance Criteria**
 1. Drift alert can be reproduced in deterministic integration tests.
 2. Baseline calculations are stable across restarts.
-3. Coverage maps to `GH-CI-TR-5` in `docs/plugins/ci-monitor/requirements.md`.
+3. Coverage maps to `GH-CI-TR-5` in `docs/ci-monitoring/requirements.md`.
 
 ### AB.6 — PR Merge-Conflict + CI Gap Detection
 **Deliverables**
@@ -1890,7 +1890,7 @@ progress/failure observability.
 **Acceptance Criteria**
 1. Post-completion merge-conflict alert emitted when PR becomes DIRTY during a CI run.
 2. Pre-run merge-conflict alert emitted when PR is DIRTY before any run starts (distinct message from `ci_not_started`).
-3. Coverage maps to GH-CI-TR-2 and GH-CI-TR-4 in `docs/plugins/ci-monitor/requirements.md`.
+3. Coverage maps to GH-CI-TR-2 and GH-CI-TR-4 in `docs/ci-monitoring/requirements.md`.
 
 ### AB.7 — Architecture Review Findings Hardening
 **Deliverables**
