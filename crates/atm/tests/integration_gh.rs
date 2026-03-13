@@ -1,9 +1,9 @@
 //! Integration tests for `atm gh ...` daemon-routed commands.
 
 use assert_cmd::cargo;
+use predicates::prelude::PredicateBooleanExt;
 #[cfg(unix)]
 use serial_test::serial;
-use predicates::prelude::PredicateBooleanExt;
 use std::fs;
 #[cfg(unix)]
 use std::io::Write;
@@ -1373,20 +1373,16 @@ fn test_gh_monitor_report_json_includes_checks_reviews_and_merge_fields() {
     assert_eq!(json["pr"]["ci"]["state"].as_str(), Some("pending"));
     assert_eq!(json["pr"]["merge"]["mergeable"].as_str(), Some("unknown"));
     assert_eq!(json["pr"]["merge"]["status"].as_str(), Some("blocked"));
-    assert!(
-        json["pr"]["merge"]["blocking_reasons"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item.as_str() == Some("CI checks still pending"))
-    );
-    assert!(
-        json["pr"]["merge"]["advisory_reasons"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item.as_str() == Some("mergeability is UNKNOWN (transient)"))
-    );
+    assert!(json["pr"]["merge"]["blocking_reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item.as_str() == Some("CI checks still pending")));
+    assert!(json["pr"]["merge"]["advisory_reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item.as_str() == Some("mergeability is UNKNOWN (transient)")));
     assert!(json["pr"]["checks"].is_array());
     assert_eq!(json["pr"]["checks"].as_array().unwrap().len(), 2);
     assert!(json["pr"]["reviews"].is_array());
@@ -1482,19 +1478,15 @@ fn test_gh_monitor_report_json_no_reviews_and_skips_are_non_blocking() {
         json["pr"]["merge"]["status"].as_str(),
         Some("indeterminate")
     );
-    assert!(
-        json["pr"]["merge"]["blocking_reasons"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        json["pr"]["merge"]["advisory_reasons"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item.as_str() == Some("no explicit review decision"))
-    );
+    assert!(json["pr"]["merge"]["blocking_reasons"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(json["pr"]["merge"]["advisory_reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item.as_str() == Some("no explicit review decision")));
 }
 
 #[test]
