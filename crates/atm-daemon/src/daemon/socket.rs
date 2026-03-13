@@ -5941,7 +5941,7 @@ fn format_elapsed_as_iso8601(elapsed: std::time::Duration) -> String {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::daemon::dedup::DurableDedupeStore;
