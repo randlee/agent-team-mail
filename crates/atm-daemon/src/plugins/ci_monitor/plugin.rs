@@ -2234,6 +2234,7 @@ repo = "config-owner/config-repo"
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn test_init_rejects_non_plugin_member_with_same_name() {
         use crate::plugins::ci_monitor::MockCiProvider;
         use agent_team_mail_core::schema::{AgentMember, TeamConfig};
