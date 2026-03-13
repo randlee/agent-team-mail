@@ -1568,8 +1568,21 @@ fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
         if existing.agent_id == agent_id {
             // If --pane-id provided, update it on the existing member and return.
             if let Some(ref pane_id) = args.pane_id {
-                team_config.members[idx].tmux_pane_id = Some(pane_id.clone());
-                store.update(|_| Ok(Some(team_config.clone())))?;
+                let pane_id = pane_id.clone();
+                store.update(|mut current| {
+                    let member = current
+                        .members
+                        .iter_mut()
+                        .find(|m| m.name == args.agent)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Member '{}' disappeared while updating pane id.",
+                                args.agent
+                            )
+                        })?;
+                    member.tmux_pane_id = Some(pane_id);
+                    Ok(Some(current))
+                })?;
                 ensure_member_inbox_atomic(&team_dir, &args.team, &args.agent)?;
                 return Ok(AddMemberOutcome::UpdatedPaneId);
             } else {
@@ -1609,7 +1622,39 @@ fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
         if let Some(ref pane_id) = args.pane_id {
             m.tmux_pane_id = Some(pane_id.clone());
         }
-        store.update(|_| Ok(Some(team_config.clone())))?;
+        let updated_agent_id = m.agent_id.clone();
+        let updated_agent_type = m.agent_type.clone();
+        let updated_model = m.model.clone();
+        let updated_cwd = m.cwd.clone();
+        let updated_is_active = m.is_active;
+        let updated_last_active = m.last_active;
+        let updated_session_id = m.session_id.clone();
+        let updated_backend_type = m.external_backend_type.clone();
+        let updated_external_model = m.external_model.clone();
+        let updated_tmux_pane_id = m.tmux_pane_id.clone();
+        store.update(|mut current| {
+            let member = current
+                .members
+                .iter_mut()
+                .find(|member| member.name == args.agent)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Member '{}' disappeared while updating inactive member.",
+                        args.agent
+                    )
+                })?;
+            member.agent_id = updated_agent_id;
+            member.agent_type = updated_agent_type;
+            member.model = updated_model;
+            member.cwd = updated_cwd;
+            member.is_active = updated_is_active;
+            member.last_active = updated_last_active;
+            member.session_id = updated_session_id;
+            member.external_backend_type = updated_backend_type;
+            member.external_model = updated_external_model;
+            member.tmux_pane_id = updated_tmux_pane_id;
+            Ok(Some(current))
+        })?;
         ensure_member_inbox_atomic(&team_dir, &args.team, &args.agent)?;
         if let Some(ref session_id) = args.session_id {
             sync_member_session_hint_from_config(
@@ -1651,8 +1696,16 @@ fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
         unknown_fields: std::collections::HashMap::new(),
     };
 
-    team_config.members.push(member);
-    store.update(|_| Ok(Some(team_config.clone())))?;
+    store.update(|mut current| {
+        if !current
+            .members
+            .iter()
+            .any(|existing| existing.name == args.agent)
+        {
+            current.members.push(member);
+        }
+        Ok(Some(current))
+    })?;
     ensure_member_inbox_atomic(&team_dir, &args.team, &args.agent)?;
     if let Some(ref session_id) = args.session_id {
         sync_member_session_hint_from_config(&config_path, &args.team, &args.agent, session_id)?;
@@ -1698,7 +1751,13 @@ fn sync_member_session_hint_from_config(
     agent: &str,
     session_id: &str,
 ) -> Result<()> {
-    let cfg: TeamConfig = serde_json::from_str(&fs::read_to_string(config_path)?)?;
+    let team_dir = config_path.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "team config path '{}' has no parent directory",
+            config_path.display()
+        )
+    })?;
+    let cfg = TeamConfigStore::open(team_dir).read()?;
     let member = cfg.members.iter().find(|m| m.name == agent);
     sync_member_session_hint(team, agent, session_id, member)
 }
@@ -1834,7 +1893,28 @@ fn update_member(args: UpdateMemberArgs) -> Result<()> {
         return Ok(());
     }
 
-    store.update(|_| Ok(Some(team_config.clone())))?;
+    let updated_model = member.model.clone();
+    let updated_tmux_pane_id = member.tmux_pane_id.clone();
+    let updated_backend_type = member.external_backend_type.clone();
+    let updated_is_active = member.is_active;
+    let updated_last_active = member.last_active;
+    let updated_session_id = member.session_id.clone();
+    store.update(|mut current| {
+        let member = current
+            .members
+            .iter_mut()
+            .find(|member| member.name == args.agent)
+            .ok_or_else(|| {
+                anyhow::anyhow!("Member '{}' disappeared while updating member.", args.agent)
+            })?;
+        member.model = updated_model;
+        member.tmux_pane_id = updated_tmux_pane_id;
+        member.external_backend_type = updated_backend_type;
+        member.is_active = updated_is_active;
+        member.last_active = updated_last_active;
+        member.session_id = updated_session_id;
+        Ok(Some(current))
+    })?;
     if let Some(ref session_id) = session_id_to_sync {
         sync_member_session_hint_from_config(&config_path, &args.team, &args.agent, session_id)?;
     }
@@ -1859,7 +1939,7 @@ fn remove_member(args: RemoveMemberArgs) -> Result<()> {
     }
 
     let store = TeamConfigStore::open(&team_dir);
-    let mut team_config = store.read()?;
+    let team_config = store.read()?;
     let member = team_config
         .members
         .iter()
@@ -1945,8 +2025,10 @@ fn remove_member(args: RemoveMemberArgs) -> Result<()> {
         archived_to = archive_member_inbox(&home_dir, &args.team, &args.agent)?;
     }
 
-    team_config.members.retain(|m| m.name != args.agent);
-    store.update(|_| Ok(Some(team_config.clone())))?;
+    store.update(|mut current| {
+        current.members.retain(|member| member.name != args.agent);
+        Ok(Some(current))
+    })?;
     remove_member_mailbox_artifacts(&team_dir, &args.agent);
 
     emit_event_best_effort(EventFields {
@@ -2264,7 +2346,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
     }
 
     let store = TeamConfigStore::open(&team_dir);
-    let mut team_config = store.read()?;
+    let team_config = store.read()?;
 
     let mut removed_names: Vec<String> = Vec::new();
     let mut removed_orphan_mailboxes: Vec<String> = Vec::new();
@@ -2500,10 +2582,12 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
 
     // Remove dead members from config
     if !args.dry_run && !removed_names.is_empty() {
-        team_config
-            .members
-            .retain(|m| !removed_names.contains(&m.name));
-        store.update(|_| Ok(Some(team_config.clone())))?;
+        store.update(|mut current| {
+            current
+                .members
+                .retain(|member| !removed_names.contains(&member.name));
+            Ok(Some(current))
+        })?;
     }
 
     // Full-team cleanup mode: purge orphan mailbox artifacts that no longer
@@ -2984,7 +3068,7 @@ fn restore(args: RestoreArgs) -> Result<()> {
         serde_json::from_str(&fs::read_to_string(&backup_config_path)?)?;
 
     // Load current config (to preserve leadSessionId and existing members)
-    let current_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
+    let current_config = TeamConfigStore::open(&team_dir).read()?;
 
     let backup_inboxes_dir = backup_dir.join("inboxes");
     let team_inboxes_dir = team_dir.join("inboxes");

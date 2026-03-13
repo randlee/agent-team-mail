@@ -13,7 +13,7 @@
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::io::inbox::inbox_append;
-use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
+use agent_team_mail_core::schema::InboxMessage;
 use agent_team_mail_core::team_config_store::TeamConfigStore;
 use anyhow::Result;
 use chrono::Utc;
@@ -93,9 +93,15 @@ fn register_team_lead(
         );
     }
 
+    let store = TeamConfigStore::open(
+        config_path
+            .parent()
+            .expect("config_path must have a parent directory"),
+    );
+
     // Check liveness of existing session if not forced.
     if !force {
-        let existing: TeamConfig = serde_json::from_str(&std::fs::read_to_string(config_path)?)?;
+        let existing = store.read()?;
         if !existing.lead_session_id.is_empty() && existing.lead_session_id == session_id {
             println!(
                 "Already registered as team-lead for team '{}'. Session: {}",
@@ -134,11 +140,6 @@ fn register_team_lead(
         }
     }
 
-    let store = TeamConfigStore::open(
-        config_path
-            .parent()
-            .expect("config_path must have a parent directory"),
-    );
     store.update(|mut team_config| {
         team_config.lead_session_id = session_id.to_string();
         Ok(Some(team_config))
@@ -193,7 +194,12 @@ fn register_teammate(
     session_id: &str,
 ) -> Result<()> {
     // Verify member exists in team config.
-    let existing: TeamConfig = serde_json::from_str(&std::fs::read_to_string(config_path)?)?;
+    let store = TeamConfigStore::open(
+        config_path
+            .parent()
+            .expect("config_path must have a parent directory"),
+    );
+    let existing = store.read()?;
 
     if !existing.members.iter().any(|m| m.name == name) {
         anyhow::bail!(
@@ -215,11 +221,6 @@ fn register_teammate(
         );
     }
 
-    let store = TeamConfigStore::open(
-        config_path
-            .parent()
-            .expect("config_path must have a parent directory"),
-    );
     store.update(|mut team_config| {
         let member = team_config
             .members

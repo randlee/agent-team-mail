@@ -309,4 +309,47 @@ mod tests {
         assert_eq!(read_back.name, config.name);
         assert_eq!(read_back.members.len(), config.members.len());
     }
+
+    #[tokio::test]
+    async fn update_async_persists_changes() {
+        let temp = TempDir::new().unwrap();
+        let team_dir = temp.path().join("atm-dev");
+        let config_path = team_dir.join("config.json");
+        write_config(&config_path, &test_config("atm-dev", &["team-lead"]));
+
+        let store = TeamConfigStore::open(&team_dir);
+        let outcome = store
+            .update_async(|mut config| {
+                config.description = Some("updated async".to_string());
+                Ok(Some(config))
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, UpdateOutcome::Updated(_)));
+        let saved = store.read().unwrap();
+        assert_eq!(saved.description.as_deref(), Some("updated async"));
+    }
+
+    #[tokio::test]
+    async fn create_or_update_async_creates_missing_file() {
+        let temp = TempDir::new().unwrap();
+        let team_dir = temp.path().join("atm-dev");
+        let store = TeamConfigStore::open(&team_dir);
+
+        let outcome = store
+            .create_or_update_async(
+                || test_config("atm-dev", &["team-lead"]),
+                |mut config| {
+                    config.description = Some("created async".to_string());
+                    Ok(Some(config))
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, UpdateOutcome::Updated(_)));
+        let saved = store.read().unwrap();
+        assert_eq!(saved.description.as_deref(), Some("created async"));
+    }
 }

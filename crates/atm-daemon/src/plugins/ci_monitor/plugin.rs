@@ -1169,6 +1169,12 @@ impl Plugin for CiMonitorPlugin {
             return Ok(());
         }
 
+        #[cfg(not(unix))]
+        {
+            cancel.cancelled().await;
+            return Ok(());
+        }
+
         // Clone context for use in loop (Arc, so cheap)
         let ctx = self
             .ctx
@@ -1183,115 +1189,118 @@ impl Plugin for CiMonitorPlugin {
         let max_backoff_secs = MAX_ERROR_BACKOFF_SECS.max(base_interval_secs);
         let mut next_delay_secs: u64 = 0;
 
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    break;
-                }
-                _ = sleep(Duration::from_secs(next_delay_secs)) => {
-                    // Evict old dedup cache entries
-                    self.evict_old_dedup_entries();
+        #[cfg(unix)]
+        {
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        break;
+                    }
+                    _ = sleep(Duration::from_secs(next_delay_secs)) => {
+                        // Evict old dedup cache entries
+                        self.evict_old_dedup_entries();
 
-                    // Fetch all completed runs
-                    let runs = match self.provider.as_ref() {
-                        Some(provider) => list_completed_runs(provider.as_ref()).await,
-                        None => {
-                            warn!("CI Monitor: Provider disappeared during run");
-                            break;
-                        }
-                    };
-                    match runs {
-                        Ok(runs) => {
-                            next_delay_secs = base_interval_secs;
-                            // Process each run
-                            for run in runs {
-                                // Filter by branch using glob patterns (client-side)
-                                if !self.matches_branch(&run.head_branch) {
-                                    continue;
-                                }
-
-                                let should_notify_failure = run
-                                    .conclusion
-                                    .map(|c| self.config.notify_on.contains(&c))
-                                    .unwrap_or(false);
-                                let needs_full_run =
-                                    should_notify_failure || self.config.runtime_drift_enabled;
-                                if !needs_full_run {
-                                    continue;
-                                }
-
-                                // Fetch full run details with jobs
-                                let full_run_result = match self.provider.as_ref() {
-                                    Some(provider) => fetch_run_details(provider.as_ref(), run.id).await,
-                                    None => {
-                                        warn!("CI Monitor: Provider disappeared during run");
-                                        break;
-                                    }
-                                };
-                                let full_run = match full_run_result {
-                                    Ok(r) => r,
-                                    Err(e) => {
-                                        warn!("CI Monitor: Failed to fetch run details for #{}: {e}", run.id);
-                                        continue;
-                                    }
-                                };
-
-                                // Runtime drift alerts (optional enhancement): update persisted
-                                // baselines and notify on significant slowdowns.
-                                if let Some(drift_msg) =
-                                    self.update_runtime_history_and_build_alert(&full_run)
-                                {
-                                    if self.send_message_to_targets(&ctx, &drift_msg, run.id) {
-                                        debug!("CI Monitor: Runtime drift alert sent for run #{}", run.id);
-                                    }
-                                }
-
-                                if should_notify_failure {
-                                    // Generate dedup key
-                                    let key = self.dedup_key(&full_run);
-
-                                    // Skip if we've already seen this run+conclusion
-                                    if self.seen_runs.contains_key(&key) {
+                        // Fetch all completed runs
+                        let runs = match self.provider.as_ref() {
+                            Some(provider) => list_completed_runs(provider.as_ref()).await,
+                            None => {
+                                warn!("CI Monitor: Provider disappeared during run");
+                                break;
+                            }
+                        };
+                        match runs {
+                            Ok(runs) => {
+                                next_delay_secs = base_interval_secs;
+                                // Process each run
+                                for run in runs {
+                                    // Filter by branch using glob patterns (client-side)
+                                    if !self.matches_branch(&run.head_branch) {
                                         continue;
                                     }
 
-                                    // Command-path terminal notifications (atm gh monitor) are
-                                    // authoritative for that run_id. Avoid duplicate alerts
-                                    // from polling path when terminal state is already recorded.
-                                    if self.was_terminal_notified_by_command_path(&ctx, full_run.id)
+                                    let should_notify_failure = run
+                                        .conclusion
+                                        .map(|c| self.config.notify_on.contains(&c))
+                                        .unwrap_or(false);
+                                    let needs_full_run =
+                                        should_notify_failure || self.config.runtime_drift_enabled;
+                                    if !needs_full_run {
+                                        continue;
+                                    }
+
+                                    // Fetch full run details with jobs
+                                    let full_run_result = match self.provider.as_ref() {
+                                        Some(provider) => fetch_run_details(provider.as_ref(), run.id).await,
+                                        None => {
+                                            warn!("CI Monitor: Provider disappeared during run");
+                                            break;
+                                        }
+                                    };
+                                    let full_run = match full_run_result {
+                                        Ok(r) => r,
+                                        Err(e) => {
+                                            warn!("CI Monitor: Failed to fetch run details for #{}: {e}", run.id);
+                                            continue;
+                                        }
+                                    };
+
+                                    // Runtime drift alerts (optional enhancement): update persisted
+                                    // baselines and notify on significant slowdowns.
+                                    if let Some(drift_msg) =
+                                        self.update_runtime_history_and_build_alert(&full_run)
                                     {
-                                        debug!(
-                                            "CI Monitor: Skipping duplicate polling notification for run #{} (command-path terminal state present)",
-                                            full_run.id
-                                        );
-                                        self.seen_runs.insert(key, Utc::now());
-                                        continue;
+                                        if self.send_message_to_targets(&ctx, &drift_msg, run.id) {
+                                            debug!("CI Monitor: Runtime drift alert sent for run #{}", run.id);
+                                        }
                                     }
 
-                                    // Generate failure reports
-                                    if let Err(e) = self.generate_reports(&full_run) {
-                                        warn!("CI Monitor: Failed to generate reports for run #{}: {e}", run.id);
-                                    }
+                                    if should_notify_failure {
+                                        // Generate dedup key
+                                        let key = self.dedup_key(&full_run);
 
-                                    // Create notification message
-                                    let msg = self.run_to_message(&full_run);
-                                    if self.send_message_to_targets(&ctx, &msg, run.id) {
-                                        debug!("CI Monitor: Notified about run #{}", run.id);
-                                        self.seen_runs.insert(key, Utc::now());
+                                        // Skip if we've already seen this run+conclusion
+                                        if self.seen_runs.contains_key(&key) {
+                                            continue;
+                                        }
+
+                                        // Command-path terminal notifications (atm gh monitor) are
+                                        // authoritative for that run_id. Avoid duplicate alerts
+                                        // from polling path when terminal state is already recorded.
+                                        if self.was_terminal_notified_by_command_path(&ctx, full_run.id)
+                                        {
+                                            debug!(
+                                                "CI Monitor: Skipping duplicate polling notification for run #{} (command-path terminal state present)",
+                                                full_run.id
+                                            );
+                                            self.seen_runs.insert(key, Utc::now());
+                                            continue;
+                                        }
+
+                                        // Generate failure reports
+                                        if let Err(e) = self.generate_reports(&full_run) {
+                                            warn!("CI Monitor: Failed to generate reports for run #{}: {e}", run.id);
+                                        }
+
+                                        // Create notification message
+                                        let msg = self.run_to_message(&full_run);
+                                        if self.send_message_to_targets(&ctx, &msg, run.id) {
+                                            debug!("CI Monitor: Notified about run #{}", run.id);
+                                            self.seen_runs.insert(key, Utc::now());
+                                        }
                                     }
                                 }
                             }
-                        }
-                        Err(e) => {
-                            warn!("CI Monitor: Failed to fetch runs: {e}");
-                            // Continue polling after error using bounded exponential backoff.
-                            next_delay_secs = if next_delay_secs == 0 {
-                                base_interval_secs
-                            } else {
-                                next_delay_secs
-                                    .saturating_mul(2)
-                                    .min(max_backoff_secs)
-                            };
+                            Err(e) => {
+                                warn!("CI Monitor: Failed to fetch runs: {e}");
+                                // Continue polling after error using bounded exponential backoff.
+                                next_delay_secs = if next_delay_secs == 0 {
+                                    base_interval_secs
+                                } else {
+                                    next_delay_secs
+                                        .saturating_mul(2)
+                                        .min(max_backoff_secs)
+                                };
+                            }
                         }
                     }
                 }
