@@ -5,9 +5,10 @@ use super::github::GitHubActionsProvider;
 use super::loader::CiProviderLoader;
 use super::provider::ErasedCiProvider;
 use super::registry::{CiProviderFactory, CiProviderRegistry};
-use super::types::{CiFilter, CiJob, CiRunConclusion, CiRunStatus};
+use super::types::{CiFilter, CiJob, CiRunConclusion, CiRunStatus, GhMonitorHealthFile};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use agent_team_mail_core::context::{GitProvider as GitProviderType, RepoContext};
+use agent_team_mail_core::daemon_client::GhMonitorHealth;
 use agent_team_mail_core::schema::{AgentMember, InboxMessage, TeamConfig};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -29,23 +30,6 @@ struct RuntimeHistory {
     job_samples: HashMap<String, Vec<u64>>,
     processed_run_ids: Vec<u64>,
     drift_last_alert_epoch_secs: HashMap<String, i64>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
-struct GhMonitorHealthRecord {
-    team: String,
-    lifecycle_state: String,
-    availability_state: String,
-    in_flight: u64,
-    updated_at: String,
-    message: Option<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
-struct GhMonitorHealthFile {
-    records: Vec<GhMonitorHealthRecord>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
@@ -874,8 +858,12 @@ impl CiMonitorPlugin {
             Err(_) => GhMonitorHealthFile::default(),
         };
 
-        let updated_record = GhMonitorHealthRecord {
+        let updated_record = GhMonitorHealth {
             team: team.to_string(),
+            configured: false,
+            enabled: false,
+            config_source: None,
+            config_path: None,
             lifecycle_state: "running".to_string(),
             availability_state: availability_state.to_string(),
             in_flight: 0,

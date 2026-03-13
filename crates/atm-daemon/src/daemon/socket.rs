@@ -48,6 +48,12 @@ use crate::daemon::pid_backend_validation::{
 
 use crate::daemon::dedup::{DedupeKey, DurableDedupeStore};
 use crate::daemon::session_registry::{MarkDeadForSessionOutcome, SharedSessionRegistry};
+use crate::plugins::ci_monitor::helpers::{
+    apply_config_state_to_status, count_in_flight_monitors, evaluate_gh_monitor_config,
+    gh_monitor_key, load_gh_monitor_state_map, normalize_repo_scope, read_gh_monitor_health,
+    upsert_gh_monitor_health, upsert_gh_monitor_status,
+};
+use crate::plugins::ci_monitor::types::GhMonitorHealthUpdate;
 use crate::plugins::worker_adapter::AgentState;
 
 // ── Public API (cross-platform stubs) ────────────────────────────────────────
@@ -2012,90 +2018,6 @@ async fn handle_launch_command(request_str: &str, launch_tx: &LaunchSender) -> S
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-struct GhMonitorStateFile {
-    records: Vec<GhMonitorStatus>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-struct GhMonitorHealthFile {
-    records: Vec<GhMonitorHealth>,
-}
-
-#[cfg(unix)]
-fn default_gh_monitor_health(team: &str) -> GhMonitorHealth {
-    GhMonitorHealth {
-        team: team.to_string(),
-        configured: false,
-        enabled: false,
-        config_source: None,
-        config_path: None,
-        lifecycle_state: "running".to_string(),
-        availability_state: "healthy".to_string(),
-        in_flight: 0,
-        updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        message: None,
-    }
-}
-
-#[cfg(unix)]
-fn gh_monitor_health_path(home: &std::path::Path) -> PathBuf {
-    agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(home)
-}
-
-#[cfg(unix)]
-fn load_gh_monitor_health_map(
-    home: &std::path::Path,
-) -> Result<std::collections::HashMap<String, GhMonitorHealth>> {
-    let path = gh_monitor_health_path(home);
-    if !path.exists() {
-        return Ok(std::collections::HashMap::new());
-    }
-    let raw = std::fs::read_to_string(&path)?;
-    let file = serde_json::from_str::<GhMonitorHealthFile>(&raw)?;
-    let mut map = std::collections::HashMap::new();
-    for record in file.records {
-        map.insert(record.team.clone(), record);
-    }
-    Ok(map)
-}
-
-#[cfg(unix)]
-fn upsert_gh_monitor_health(home: &std::path::Path, health: GhMonitorHealth) -> Result<()> {
-    let mut map = load_gh_monitor_health_map(home)?;
-    map.insert(health.team.clone(), health);
-    let mut records: Vec<GhMonitorHealth> = map.into_values().collect();
-    records.sort_by(|a, b| a.team.cmp(&b.team));
-    let file = GhMonitorHealthFile { records };
-    let path = gh_monitor_health_path(home);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, serde_json::to_string_pretty(&file)?)?;
-    Ok(())
-}
-
-#[cfg(unix)]
-fn read_gh_monitor_health(home: &std::path::Path, team: &str) -> Result<GhMonitorHealth> {
-    let map = load_gh_monitor_health_map(home)?;
-    Ok(map
-        .get(team)
-        .cloned()
-        .unwrap_or_else(|| default_gh_monitor_health(team)))
-}
-
-#[cfg(unix)]
-fn count_in_flight_monitors(home: &std::path::Path, team: &str) -> u64 {
-    load_gh_monitor_state_map(home)
-        .ok()
-        .map(|map| {
-            map.values()
-                .filter(|status| status.team == team && status.state == "tracking")
-                .count() as u64
-        })
-        .unwrap_or(0)
-}
-
 #[cfg(unix)]
 fn emit_gh_monitor_health_transition(
     home: &std::path::Path,
@@ -2160,17 +2082,6 @@ fn emit_gh_monitor_health_transition(
 }
 
 #[cfg(unix)]
-#[derive(Debug, Clone, Default)]
-struct GhMonitorHealthUpdate<'a> {
-    lifecycle_state: Option<&'a str>,
-    availability_state: Option<&'a str>,
-    in_flight: Option<u64>,
-    message: Option<String>,
-    config_state: Option<&'a GhMonitorConfigState>,
-    config_cwd: Option<&'a str>,
-}
-
-#[cfg(unix)]
 fn set_gh_monitor_health_state(
     home: &std::path::Path,
     team: &str,
@@ -2214,109 +2125,6 @@ fn set_gh_monitor_health_state(
 
     upsert_gh_monitor_health(home, current.clone())?;
     Ok(current)
-}
-
-#[cfg(unix)]
-#[derive(Debug, Clone)]
-struct GhMonitorConfigState {
-    configured: bool,
-    enabled: bool,
-    config_source: Option<String>,
-    config_path: Option<String>,
-    configured_team: Option<String>,
-    owner_repo: Option<String>,
-    error: Option<String>,
-}
-
-#[cfg(unix)]
-fn evaluate_gh_monitor_config(
-    home: &std::path::Path,
-    team: &str,
-    config_cwd: Option<&str>,
-) -> GhMonitorConfigState {
-    let current_dir = config_cwd
-        .map(str::trim)
-        .filter(|cwd| !cwd.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| home.to_path_buf());
-    let location = agent_team_mail_core::config::resolve_plugin_config_location(
-        "gh_monitor",
-        &current_dir,
-        home,
-    );
-
-    let config = agent_team_mail_core::config::resolve_config(
-        &agent_team_mail_core::config::ConfigOverrides {
-            team: Some(team.to_string()),
-            ..Default::default()
-        },
-        &current_dir,
-        home,
-    );
-    let mut state = GhMonitorConfigState {
-        configured: false,
-        enabled: false,
-        config_source: location.as_ref().map(|loc| loc.source.clone()),
-        config_path: location
-            .as_ref()
-            .map(|loc| loc.path.to_string_lossy().to_string()),
-        configured_team: None,
-        owner_repo: None,
-        error: None,
-    };
-
-    let config = match config {
-        Ok(config) => config,
-        Err(e) => {
-            state.error = Some(e.to_string());
-            return state;
-        }
-    };
-
-    let Some(table) = config.plugin_config("gh_monitor") else {
-        state.error = Some("missing [plugins.gh_monitor] configuration".to_string());
-        return state;
-    };
-    state.configured = true;
-
-    let parsed = match crate::plugins::ci_monitor::CiMonitorConfig::from_toml(table) {
-        Ok(parsed) => parsed,
-        Err(e) => {
-            state.error = Some(e.to_string());
-            return state;
-        }
-    };
-    state.enabled = parsed.enabled;
-    state.configured_team = Some(parsed.team.clone());
-    state.owner_repo = normalize_repo_scope(parsed.owner.as_deref(), parsed.repo.as_deref());
-
-    if !parsed.enabled {
-        state.error = Some("gh_monitor plugin disabled in configuration".to_string());
-        return state;
-    }
-
-    if parsed
-        .repo
-        .as_deref()
-        .map(str::trim)
-        .unwrap_or("")
-        .is_empty()
-    {
-        state.error = Some(
-            "gh_monitor configuration missing required field: repo (run `atm gh init`)".to_string(),
-        );
-        return state;
-    }
-
-    state
-}
-
-#[cfg(unix)]
-fn apply_config_state_to_status(status: &mut GhMonitorStatus, config_state: &GhMonitorConfigState) {
-    status.configured = config_state.configured;
-    status.enabled = config_state.enabled;
-    status.config_source = config_state.config_source.clone();
-    status.config_path = config_state.config_path.clone();
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -3989,81 +3797,6 @@ fn derive_pr_url(
 }
 
 #[cfg(unix)]
-fn gh_monitor_state_path(home: &std::path::Path) -> PathBuf {
-    home.join(".atm/daemon/gh-monitor-state.json")
-}
-
-#[cfg(unix)]
-fn gh_monitor_key(
-    team: &str,
-    target_kind: GhMonitorTargetKind,
-    target: &str,
-    reference: Option<&str>,
-) -> String {
-    let kind = match target_kind {
-        GhMonitorTargetKind::Pr => "pr",
-        GhMonitorTargetKind::Workflow => "workflow",
-        GhMonitorTargetKind::Run => "run",
-    };
-    let reference = reference.unwrap_or_default();
-    format!(
-        "{}|{}|{}|{}",
-        team.trim(),
-        kind,
-        target.trim(),
-        reference.trim()
-    )
-}
-
-#[cfg(unix)]
-fn load_gh_monitor_state_map(
-    home: &std::path::Path,
-) -> Result<std::collections::HashMap<String, GhMonitorStatus>> {
-    let path = gh_monitor_state_path(home);
-    if !path.exists() {
-        return Ok(std::collections::HashMap::new());
-    }
-    let raw = std::fs::read_to_string(&path)?;
-    let state = serde_json::from_str::<GhMonitorStateFile>(&raw)?;
-    let mut map = std::collections::HashMap::new();
-    for record in state.records {
-        let key = gh_monitor_key(
-            &record.team,
-            record.target_kind,
-            &record.target,
-            record.reference.as_deref(),
-        );
-        map.insert(key, record);
-    }
-    Ok(map)
-}
-
-#[cfg(unix)]
-fn upsert_gh_monitor_status(home: &std::path::Path, status: GhMonitorStatus) -> Result<()> {
-    let mut map = load_gh_monitor_state_map(home)?;
-    let key = gh_monitor_key(
-        &status.team,
-        status.target_kind,
-        &status.target,
-        status.reference.as_deref(),
-    );
-    map.insert(key, status);
-    let mut records: Vec<GhMonitorStatus> = map.into_values().collect();
-    records.sort_by(|a, b| {
-        let ak = gh_monitor_key(&a.team, a.target_kind, &a.target, a.reference.as_deref());
-        let bk = gh_monitor_key(&b.team, b.target_kind, &b.target, b.reference.as_deref());
-        ak.cmp(&bk)
-    });
-    let state = GhMonitorStateFile { records };
-    let path = gh_monitor_state_path(home);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, serde_json::to_string_pretty(&state)?)?;
-    Ok(())
-}
-
-#[cfg(unix)]
 fn emit_ci_not_started_alert(
     home: &std::path::Path,
     status: &GhMonitorStatus,
@@ -4305,19 +4038,6 @@ fn resolve_ci_alert_routing(
             .collect()
     };
     (from_agent, targets)
-}
-
-#[cfg(unix)]
-fn normalize_repo_scope(owner: Option<&str>, repo: Option<&str>) -> Option<String> {
-    let repo = repo.map(str::trim).filter(|repo| !repo.is_empty())?;
-    if repo.contains('/') {
-        return Some(repo.to_lowercase());
-    }
-    owner
-        .map(str::trim)
-        .filter(|owner| !owner.is_empty())
-        .map(|owner| format!("{}/{}", owner.to_lowercase(), repo.to_lowercase()))
-        .or_else(|| Some(repo.to_lowercase()))
 }
 
 #[cfg(unix)]
@@ -6224,11 +5944,14 @@ mod tests {
     use super::*;
     use crate::daemon::dedup::DurableDedupeStore;
     use crate::daemon::session_registry::new_session_registry;
+    use crate::plugins::ci_monitor::test_support::{
+        EnvGuard, install_fake_gh_script, write_gh_monitor_config, write_invalid_gh_monitor_config,
+        write_repo_gh_monitor_config,
+    };
     use crate::plugins::worker_adapter::AgentStateTracker;
     use agent_team_mail_core::control::{CONTROL_SCHEMA_VERSION, ControlAction, ControlRequest};
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
     use serial_test::serial;
-    use std::path::Path;
     use std::time::Duration;
     use tempfile::TempDir;
 
@@ -6264,124 +5987,6 @@ mod tests {
             command: command.to_string(),
             payload,
         }
-    }
-
-    fn write_gh_monitor_config(home: &Path, team: &str) {
-        let cfg_dir = home.join(".config/atm");
-        std::fs::create_dir_all(&cfg_dir).unwrap();
-        let config = format!(
-            r#"[core]
-default_team = "{team}"
-identity = "daemon-test"
-
-[plugins.gh_monitor]
-enabled = true
-team = "{team}"
-agent = "gh-monitor"
-repo = "o/r"
-poll_interval_secs = 60
-"#
-        );
-        std::fs::write(cfg_dir.join("config.toml"), config).unwrap();
-    }
-
-    fn write_repo_gh_monitor_config(repo_dir: &Path, team: &str) {
-        std::fs::create_dir_all(repo_dir).unwrap();
-        let config = format!(
-            r#"[core]
-default_team = "{team}"
-identity = "daemon-test"
-
-[plugins.gh_monitor]
-enabled = true
-team = "{team}"
-agent = "gh-monitor"
-repo = "o/r"
-poll_interval_secs = 60
-"#
-        );
-        std::fs::write(repo_dir.join(".atm.toml"), config).unwrap();
-    }
-
-    fn write_invalid_gh_monitor_config(home: &Path, team: &str) {
-        let cfg_dir = home.join(".config/atm");
-        std::fs::create_dir_all(&cfg_dir).unwrap();
-        let config = format!(
-            r#"[core]
-default_team = "{team}"
-identity = "daemon-test"
-
-[plugins.gh_monitor]
-enabled = true
-team = "{team}"
-agent = "gh-monitor"
-poll_interval_secs = 1
-"#
-        );
-        std::fs::write(cfg_dir.join("config.toml"), config).unwrap();
-    }
-
-    struct EnvGuard {
-        key: &'static str,
-        previous: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let previous = std::env::var(key).ok();
-            // SAFETY: test-only env mutation, guarded by #[serial] on callers.
-            unsafe {
-                std::env::set_var(key, value);
-            }
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: test-only env mutation, guarded by #[serial] on callers.
-            unsafe {
-                match &self.previous {
-                    Some(v) => std::env::set_var(self.key, v),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    fn install_fake_gh_script(temp: &TempDir, script_body: &str) -> EnvGuard {
-        use std::os::unix::fs::PermissionsExt;
-
-        let script_path = temp.path().join("gh");
-        let body = script_body
-            .strip_prefix("#!/bin/sh\n")
-            .unwrap_or(script_body);
-        let wrapped = format!(
-            r#"#!/bin/sh
-if [ "$1" = "-R" ]; then
-  shift
-  if [ -n "$1" ]; then
-    shift
-  fi
-fi
-{body}
-"#
-        );
-        std::fs::write(&script_path, wrapped).expect("write fake gh script");
-        let mut perms = std::fs::metadata(&script_path)
-            .expect("stat fake gh script")
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&script_path, perms).expect("chmod fake gh script");
-
-        let previous_path = std::env::var("PATH").unwrap_or_default();
-        let composed = if previous_path.is_empty() {
-            temp.path().display().to_string()
-        } else {
-            format!("{}:{previous_path}", temp.path().display())
-        };
-        EnvGuard::set("PATH", &composed)
     }
 
     #[derive(Clone, Default)]
