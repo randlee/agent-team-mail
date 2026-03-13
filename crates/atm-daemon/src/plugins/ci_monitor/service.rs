@@ -1,8 +1,6 @@
 //! CI monitor service orchestration.
 
 #[cfg(unix)]
-use super::gh_alerts::{emit_ci_not_started_alert, emit_merge_conflict_alert};
-#[cfg(unix)]
 use super::gh_monitor::{
     fetch_pr_merge_state, is_pr_merge_state_dirty, monitor_gh_run, try_find_workflow_run_id,
     wait_for_pr_run_start,
@@ -14,7 +12,9 @@ use super::helpers::{
     gh_monitor_key, load_gh_monitor_state_map,
 };
 use super::provider::ErasedCiProvider;
-use super::types::{CiFilter, CiRun, CiRunStatus, GhMonitorHealthUpdate};
+#[cfg(unix)]
+use super::routing::{notify_ci_not_started, notify_merge_conflict};
+use super::types::{CiFilter, CiRun, CiRunStatus, GhMonitorConfigState, GhMonitorHealthUpdate};
 use agent_team_mail_core::daemon_client::{
     GhMonitorControlRequest, GhMonitorHealth, GhMonitorLifecycleAction, GhMonitorRequest,
     GhMonitorStatus, GhMonitorTargetKind, GhStatusRequest,
@@ -51,6 +51,61 @@ impl std::fmt::Display for CiMonitorServiceError {
 impl std::error::Error for CiMonitorServiceError {}
 
 pub(crate) type CiMonitorServiceResult<T> = std::result::Result<T, CiMonitorServiceError>;
+
+#[cfg(unix)]
+fn validate_monitor_request(
+    gh_request: &GhMonitorRequest,
+    config_state: &GhMonitorConfigState,
+) -> std::result::Result<(), (&'static str, String, Option<String>)> {
+    if let Some(reason) = config_state.error.clone() {
+        return Err((
+            "CONFIG_ERROR",
+            format!("gh_monitor unavailable: {reason}"),
+            Some(reason),
+        ));
+    }
+
+    if config_state
+        .configured_team
+        .as_deref()
+        .is_some_and(|configured_team| configured_team != gh_request.team)
+    {
+        let message = format!(
+            "gh_monitor team mismatch: configured '{}' but request was '{}'",
+            config_state.configured_team.as_deref().unwrap_or_default(),
+            gh_request.team
+        );
+        return Err(("CONFIG_ERROR", message.clone(), Some(message)));
+    }
+
+    if config_state
+        .owner_repo
+        .as_deref()
+        .unwrap_or_default()
+        .is_empty()
+    {
+        let message =
+            "gh_monitor unavailable: unable to resolve owner/repo for GitHub provider".to_string();
+        return Err(("CONFIG_ERROR", message.clone(), Some(message)));
+    }
+
+    if matches!(gh_request.target_kind, GhMonitorTargetKind::Workflow)
+        && gh_request
+            .reference
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_none()
+    {
+        return Err((
+            "MISSING_PARAMETER",
+            "Missing required payload field: 'reference' for workflow monitor".to_string(),
+            None,
+        ));
+    }
+
+    Ok(())
+}
 
 pub(crate) async fn list_completed_runs(
     provider: &dyn ErasedCiProvider,
@@ -110,61 +165,27 @@ pub(crate) async fn monitor_request(
     let config_state =
         evaluate_gh_monitor_config(home, &gh_request.team, gh_request.config_cwd.as_deref());
 
-    if let Some(reason) = config_state.error.clone() {
-        let _ = set_gh_monitor_health_state(
-            home,
-            &gh_request.team,
-            GhMonitorHealthUpdate {
-                availability_state: Some("disabled_config_error"),
-                in_flight: Some(0),
-                message: Some(reason.clone()),
-                config_state: Some(&config_state),
-                config_cwd: gh_request.config_cwd.as_deref(),
-                ..Default::default()
-            },
-        );
-        return Err(CiMonitorServiceError::new(
-            "CONFIG_ERROR",
-            format!("gh_monitor unavailable: {reason}"),
-        ));
-    }
-
-    if config_state
-        .configured_team
-        .as_deref()
-        .is_some_and(|configured_team| configured_team != gh_request.team)
+    if let Err((code, message, health_message)) =
+        validate_monitor_request(gh_request, &config_state)
     {
-        return Err(CiMonitorServiceError::new(
-            "CONFIG_ERROR",
-            format!(
-                "gh_monitor team mismatch: configured '{}' but request was '{}'",
-                config_state.configured_team.as_deref().unwrap_or_default(),
-                gh_request.team
-            ),
-        ));
+        if let Some(reason) = health_message {
+            let _ = set_gh_monitor_health_state(
+                home,
+                &gh_request.team,
+                GhMonitorHealthUpdate {
+                    availability_state: Some("disabled_config_error"),
+                    in_flight: Some(0),
+                    message: Some(reason),
+                    config_state: Some(&config_state),
+                    config_cwd: gh_request.config_cwd.as_deref(),
+                    ..Default::default()
+                },
+            );
+        }
+        return Err(CiMonitorServiceError::new(code, message));
     }
 
     let owner_repo = config_state.owner_repo.as_deref().unwrap_or_default();
-    if owner_repo.is_empty() {
-        return Err(CiMonitorServiceError::new(
-            "CONFIG_ERROR",
-            "gh_monitor unavailable: unable to resolve owner/repo for GitHub provider",
-        ));
-    }
-
-    if matches!(gh_request.target_kind, GhMonitorTargetKind::Workflow)
-        && gh_request
-            .reference
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .is_none()
-    {
-        return Err(CiMonitorServiceError::new(
-            "MISSING_PARAMETER",
-            "Missing required payload field: 'reference' for workflow monitor",
-        ));
-    }
 
     let now = chrono::Utc::now().to_rfc3339();
     let mut status = GhMonitorStatus {
@@ -221,7 +242,7 @@ pub(crate) async fn monitor_request(
                         status.message = Some(format!(
                             "PR #{pr_number} has mergeStateStatus={merge_state_status}; resolve conflicts before CI monitoring."
                         ));
-                        emit_merge_conflict_alert(
+                        notify_merge_conflict(
                             home,
                             &status,
                             pr_view.url.as_deref(),
@@ -288,7 +309,7 @@ pub(crate) async fn monitor_request(
     })?;
 
     if status.state == "ci_not_started" {
-        emit_ci_not_started_alert(home, &status, gh_request.config_cwd.as_deref());
+        notify_ci_not_started(home, &status, gh_request.config_cwd.as_deref());
     } else if let Some(run_id) = status.run_id {
         let home = home.to_path_buf();
         let status_seed = status.clone();

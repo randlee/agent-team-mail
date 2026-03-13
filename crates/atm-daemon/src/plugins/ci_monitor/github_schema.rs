@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Shared GitHub CLI response schemas used by the CI monitor subsystem.
 
 use serde::Deserialize;

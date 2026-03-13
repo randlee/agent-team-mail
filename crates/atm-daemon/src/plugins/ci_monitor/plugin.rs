@@ -1,16 +1,16 @@
 //! CI Monitor plugin implementation
 
-use super::GitHubActionsProvider;
 use super::config::{CiMonitorConfig, DedupStrategy};
+use super::github_provider::GitHubActionsProvider;
 use super::loader::CiProviderLoader;
 use super::provider::ErasedCiProvider;
 use super::registry::{CiProviderFactory, CiProviderRegistry};
 use super::service::{fetch_run_details, list_completed_runs};
+#[cfg(unix)]
+use super::types::GhMonitorHealthFile;
 #[cfg(test)]
 use super::types::{CiFilter, CiRunStatus};
 use super::types::{CiJob, CiRunConclusion};
-#[cfg(unix)]
-use super::types::{GhMonitorHealthFile, GhMonitorStateFile};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use agent_team_mail_core::context::{GitProvider as GitProviderType, RepoContext};
 use agent_team_mail_core::daemon_client::GhMonitorHealth;
@@ -35,6 +35,20 @@ struct RuntimeHistory {
     job_samples: HashMap<String, Vec<u64>>,
     processed_run_ids: Vec<u64>,
     drift_last_alert_epoch_secs: HashMap<String, i64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
+struct GhMonitorStateRecord {
+    team: String,
+    state: String,
+    run_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
+struct GhMonitorStateFile {
+    records: Vec<GhMonitorStateRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -2256,28 +2270,11 @@ poll_interval_secs = 10
         .unwrap();
         let ctx = create_mock_context_with_config(teams_root.clone(), Some(table));
 
-        crate::plugins::ci_monitor::helpers::upsert_gh_monitor_status(
-            teams_root.as_path(),
-            agent_team_mail_core::daemon_client::GhMonitorStatus {
-                team: "dev-team".to_string(),
-                configured: true,
-                enabled: true,
-                config_source: Some("repo".to_string()),
-                config_path: Some(
-                    std::env::temp_dir()
-                        .join("test-repo")
-                        .join(".atm.toml")
-                        .to_string_lossy()
-                        .into_owned(),
-                ),
-                target_kind: agent_team_mail_core::daemon_client::GhMonitorTargetKind::Run,
-                target: "42".to_string(),
-                state: "failure".to_string(),
-                run_id: Some(42),
-                reference: None,
-                updated_at: "2026-03-12T00:00:00Z".to_string(),
-                message: None,
-            },
+        let state_path = CiMonitorPlugin::gh_monitor_state_path(&ctx);
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &state_path,
+            r#"{"records":[{"team":"dev-team","state":"failure","run_id":42}]}"#,
         )
         .unwrap();
 

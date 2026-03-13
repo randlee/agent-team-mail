@@ -1839,6 +1839,9 @@ async fn handle_hook_event_command_with_dedup(
 }
 
 #[cfg(all(test, unix))]
+// Test-only socket shim kept at module scope because the socket test module
+// exercises the real handler shape directly without routing through a nested
+// helper module. The cfg gate keeps it out of production builds.
 async fn handle_hook_event_command(
     request_str: &str,
     state_store: &SharedStateStore,

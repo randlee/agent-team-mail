@@ -1,13 +1,22 @@
 //! GitHub-specific gh_monitor provider logic.
 
-use super::gh_alerts::{
-    emit_ci_monitor_message, emit_merge_conflict_alert, resolve_ci_alert_routing,
-};
+pub(crate) use super::alerts::emit_ci_monitor_message;
+// These schema re-exports keep the legacy gh_monitor tests/builders compiling
+// while AM.6 finishes moving the remaining provider helpers behind the routed surface.
 #[allow(unused_imports)]
 pub(crate) use super::github_schema::{
     GhPrLookupView, GhPrView, GhPullRequest, GhRunJob, GhRunListEntry, GhRunStep, GhRunView,
 };
 use super::helpers::upsert_gh_monitor_status;
+// These routing re-exports preserve the pre-split gh_monitor call surface for
+// downstream code until the final thin-socket cleanup removes the shim layer.
+#[allow(unused_imports)]
+pub(crate) use super::routing::{
+    notify_ci_not_started as emit_ci_not_started_alert,
+    notify_gh_monitor_health_transition as emit_gh_monitor_health_transition,
+    notify_merge_conflict as emit_merge_conflict_alert, repo_scope_matches,
+    resolve_ci_alert_routing,
+};
 use agent_team_mail_core::daemon_client::{GhMonitorRequest, GhMonitorStatus, GhMonitorTargetKind};
 use anyhow::Result;
 use tracing::warn;
