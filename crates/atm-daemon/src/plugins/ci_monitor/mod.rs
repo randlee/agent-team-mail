@@ -1,6 +1,8 @@
 //! CI Monitor plugin — provider abstraction for CI/CD platforms
 
 mod config;
+#[cfg(unix)]
+pub(crate) mod gh_monitor;
 mod github;
 pub(crate) mod helpers;
 mod loader;

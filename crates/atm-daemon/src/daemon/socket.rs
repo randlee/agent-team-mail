@@ -47,6 +47,8 @@ use crate::daemon::pid_backend_validation::{
 
 use crate::daemon::dedup::{DedupeKey, DurableDedupeStore};
 use crate::daemon::session_registry::{MarkDeadForSessionOutcome, SharedSessionRegistry};
+#[cfg(all(test, unix))]
+use crate::plugins::ci_monitor::gh_monitor;
 #[cfg(unix)]
 use crate::plugins::ci_monitor::service;
 use crate::plugins::worker_adapter::AgentState;
@@ -2034,7 +2036,9 @@ fn emit_gh_monitor_health_transition(
     new_state: &str,
     reason: &str,
 ) {
-    service::emit_gh_monitor_health_transition(home, team, config_cwd, old_state, new_state, reason)
+    gh_monitor::emit_gh_monitor_health_transition(
+        home, team, config_cwd, old_state, new_state, reason,
+    )
 }
 
 #[cfg(all(test, unix))]
@@ -2043,30 +2047,30 @@ fn set_gh_monitor_health_state(
     team: &str,
     update: GhMonitorHealthUpdate<'_>,
 ) -> Result<GhMonitorHealth> {
-    service::set_gh_monitor_health_state(home, team, update)
+    gh_monitor::set_gh_monitor_health_state(home, team, update)
 }
 
 #[cfg(all(test, unix))]
-type GhRunView = service::GhRunView;
+type GhRunView = gh_monitor::GhRunView;
 #[cfg(all(test, unix))]
-type GhRunJob = service::GhRunJob;
+type GhRunJob = gh_monitor::GhRunJob;
 #[cfg(all(test, unix))]
-type GhRunStep = service::GhRunStep;
-#[cfg(all(test, unix))]
-#[allow(dead_code)]
-type GhPullRequest = service::GhPullRequest;
+type GhRunStep = gh_monitor::GhRunStep;
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
-type GhPrLookupView = service::GhPrLookupView;
+type GhPullRequest = gh_monitor::GhPullRequest;
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
-type GhPrView = service::GhPrView;
+type GhPrLookupView = gh_monitor::GhPrLookupView;
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
-type GhRunListEntry = service::GhRunListEntry;
+type GhPrView = gh_monitor::GhPrView;
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
-type GhRunTerminalState = service::GhRunTerminalState;
+type GhRunListEntry = gh_monitor::GhRunListEntry;
+#[cfg(all(test, unix))]
+#[allow(dead_code)]
+type GhRunTerminalState = gh_monitor::GhRunTerminalState;
 
 #[cfg(unix)]
 async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) -> SocketResponse {
@@ -2348,31 +2352,31 @@ async fn wait_for_pr_run_start(
     pr_number: u64,
     timeout_secs: u64,
 ) -> Result<Option<u64>> {
-    service::wait_for_pr_run_start(owner_repo, pr_number, timeout_secs).await
+    gh_monitor::wait_for_pr_run_start(owner_repo, pr_number, timeout_secs).await
 }
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
 async fn try_find_pr_run_id(owner_repo: &str, pr_number: u64) -> Result<Option<u64>> {
-    service::try_find_pr_run_id(owner_repo, pr_number).await
+    gh_monitor::try_find_pr_run_id(owner_repo, pr_number).await
 }
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
 fn run_passes_pr_recency_gate(run_created_at: Option<&str>, pr_created_at: Option<&str>) -> bool {
-    service::run_passes_pr_recency_gate(run_created_at, pr_created_at)
+    gh_monitor::run_passes_pr_recency_gate(run_created_at, pr_created_at)
 }
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
 async fn fetch_pr_merge_state(owner_repo: &str, pr_number: u64) -> Result<Option<GhPrView>> {
-    service::fetch_pr_merge_state(owner_repo, pr_number).await
+    gh_monitor::fetch_pr_merge_state(owner_repo, pr_number).await
 }
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
 fn is_pr_merge_state_dirty(merge_state_status: &str) -> bool {
-    service::is_pr_merge_state_dirty(merge_state_status)
+    gh_monitor::is_pr_merge_state_dirty(merge_state_status)
 }
 
 #[cfg(all(test, unix))]
@@ -2382,18 +2386,18 @@ async fn try_find_workflow_run_id(
     workflow: &str,
     reference: &str,
 ) -> Result<Option<u64>> {
-    service::try_find_workflow_run_id(owner_repo, workflow, reference).await
+    gh_monitor::try_find_workflow_run_id(owner_repo, workflow, reference).await
 }
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
 async fn run_gh_command(args: &[&str]) -> Result<String> {
-    service::run_gh_command(args).await
+    gh_monitor::run_gh_command(args).await
 }
 
 #[cfg(all(test, unix))]
 async fn run_gh_command_for_repo(owner_repo: &str, args: &[&str]) -> Result<String> {
-    service::run_gh_command_for_repo(owner_repo, args).await
+    gh_monitor::run_gh_command_for_repo(owner_repo, args).await
 }
 
 #[cfg(all(test, unix))]
@@ -2404,13 +2408,13 @@ async fn monitor_gh_run(
     owner_repo: &str,
     run_id: u64,
 ) -> Result<()> {
-    service::monitor_gh_run(home, status_seed, gh_request, owner_repo, run_id).await
+    gh_monitor::monitor_gh_run(home, status_seed, gh_request, owner_repo, run_id).await
 }
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
 async fn fetch_run_view(owner_repo: &str, run_id: u64) -> Result<GhRunView> {
-    service::fetch_run_view(owner_repo, run_id).await
+    gh_monitor::fetch_run_view(owner_repo, run_id).await
 }
 
 #[cfg(all(test, unix))]
@@ -2418,54 +2422,54 @@ fn should_emit_progress(
     last_progress_emit: Option<std::time::Instant>,
     now: std::time::Instant,
 ) -> bool {
-    service::should_emit_progress(last_progress_emit, now)
+    gh_monitor::should_emit_progress(last_progress_emit, now)
 }
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
 fn is_job_completed(job: &GhRunJob) -> bool {
-    service::is_job_completed(job)
+    gh_monitor::is_job_completed(job)
 }
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
 fn count_completed_jobs(run: &GhRunView) -> usize {
-    service::count_completed_jobs(run)
+    gh_monitor::count_completed_jobs(run)
 }
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
 fn format_progress_message(run: &GhRunView, pending_completed: &[GhRunJob]) -> String {
-    service::format_progress_message(run, pending_completed)
+    gh_monitor::format_progress_message(run, pending_completed)
 }
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
 fn job_status_label(job: &GhRunJob) -> &'static str {
-    service::job_status_label(job)
+    gh_monitor::job_status_label(job)
 }
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
 fn classify_terminal_state(run: &GhRunView) -> Option<GhRunTerminalState> {
-    service::classify_terminal_state(run)
+    gh_monitor::classify_terminal_state(run)
 }
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
 fn terminal_state_label(state: GhRunTerminalState) -> &'static str {
-    service::terminal_state_label(state)
+    gh_monitor::terminal_state_label(state)
 }
 
 #[cfg(all(test, unix))]
 fn format_summary_table(run: &GhRunView) -> String {
-    service::format_summary_table(run)
+    gh_monitor::format_summary_table(run)
 }
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
 fn format_job_runtime(job: &GhRunJob) -> String {
-    service::format_job_runtime(job)
+    gh_monitor::format_job_runtime(job)
 }
 
 #[cfg(all(test, unix))]
@@ -2478,7 +2482,7 @@ fn emit_ci_monitor_message(
     text: &str,
     message_id: Option<String>,
 ) {
-    service::emit_ci_monitor_message(home, from_agent, targets, summary, text, message_id)
+    gh_monitor::emit_ci_monitor_message(home, from_agent, targets, summary, text, message_id)
 }
 
 #[cfg(all(test, unix))]
@@ -2489,42 +2493,43 @@ async fn build_failure_payload(
     owner_repo: &str,
     correlation_id: &str,
 ) -> String {
-    service::build_failure_payload(run, status_seed, gh_request, owner_repo, correlation_id).await
+    gh_monitor::build_failure_payload(run, status_seed, gh_request, owner_repo, correlation_id)
+        .await
 }
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
 async fn fetch_failed_log_excerpt(owner_repo: &str, job_id: u64) -> Result<String> {
-    service::fetch_failed_log_excerpt(owner_repo, job_id).await
+    gh_monitor::fetch_failed_log_excerpt(owner_repo, job_id).await
 }
 
 #[cfg(all(test, unix))]
 fn classify_failure(run: &GhRunView) -> &'static str {
-    service::classify_failure(run)
+    gh_monitor::classify_failure(run)
 }
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
 fn is_infra_failure(run: &GhRunView) -> bool {
-    service::is_infra_failure(run)
+    gh_monitor::is_infra_failure(run)
 }
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
 fn short_sha(sha: &str) -> String {
-    service::short_sha(sha)
+    gh_monitor::short_sha(sha)
 }
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
 fn derive_repo_base_from_run_url(run_url: &str) -> Option<String> {
-    service::derive_repo_base_from_run_url(run_url)
+    gh_monitor::derive_repo_base_from_run_url(run_url)
 }
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
 fn extract_repo_slug_from_url(url: &str) -> Option<String> {
-    service::extract_repo_slug_from_url(url)
+    gh_monitor::extract_repo_slug_from_url(url)
 }
 
 #[cfg(all(test, unix))]
@@ -2533,7 +2538,7 @@ fn derive_pr_url(
     status_seed: &GhMonitorStatus,
     gh_request: &GhMonitorRequest,
 ) -> Option<String> {
-    service::derive_pr_url(run, status_seed, gh_request)
+    gh_monitor::derive_pr_url(run, status_seed, gh_request)
 }
 
 #[cfg(all(test, unix))]
@@ -2543,7 +2548,7 @@ fn emit_ci_not_started_alert(
     status: &GhMonitorStatus,
     config_cwd: Option<&str>,
 ) {
-    service::emit_ci_not_started_alert(home, status, config_cwd)
+    gh_monitor::emit_ci_not_started_alert(home, status, config_cwd)
 }
 
 #[cfg(all(test, unix))]
@@ -2556,7 +2561,7 @@ fn emit_merge_conflict_alert(
     run_conclusion: Option<&str>,
     config_cwd: Option<&str>,
 ) {
-    service::emit_merge_conflict_alert(
+    gh_monitor::emit_merge_conflict_alert(
         home,
         status,
         pr_url,
@@ -2573,13 +2578,13 @@ fn resolve_ci_alert_routing(
     config_cwd: Option<&str>,
     expected_repo_slug: Option<&str>,
 ) -> (String, Vec<(String, String)>) {
-    service::resolve_ci_alert_routing(home, team, config_cwd, expected_repo_slug)
+    gh_monitor::resolve_ci_alert_routing(home, team, config_cwd, expected_repo_slug)
 }
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
 fn repo_scope_matches(configured: &str, expected: &str) -> bool {
-    service::repo_scope_matches(configured, expected)
+    gh_monitor::repo_scope_matches(configured, expected)
 }
 
 /// Handle the `"control"` command asynchronously.
