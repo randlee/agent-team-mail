@@ -10,8 +10,8 @@ use crate::daemon::{
 use crate::plugin::{Capability, FailedPluginInit, PluginContext, PluginRegistry};
 use crate::plugins::worker_adapter::AgentState;
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
-use agent_team_mail_core::io::{atomic::atomic_swap, lock::acquire_lock};
 use agent_team_mail_core::schema::TeamConfig;
+use agent_team_mail_core::team_config_store::TeamConfigStore;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -583,11 +583,8 @@ fn reconcile_team_member_activity_with_mode(
             continue;
         }
 
-        let content = match std::fs::read_to_string(&config_path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let mut config: TeamConfig = match serde_json::from_str(&content) {
+        let store = TeamConfigStore::open(&team_dir);
+        let config: TeamConfig = match store.read() {
             Ok(c) => c,
             Err(_) => continue,
         };
@@ -599,8 +596,9 @@ fn reconcile_team_member_activity_with_mode(
 
         let team_name = config.name.clone();
         let mut changed = false;
+        let mut alive_members = std::collections::HashSet::new();
         let mut terminal_non_lead_members: Vec<String> = Vec::new();
-        for member in &mut config.members {
+        for member in &config.members {
             desired_agent_names.insert(member.name.clone());
             let mut record = {
                 let reg = session_registry.lock().unwrap();
@@ -715,7 +713,7 @@ fn reconcile_team_member_activity_with_mode(
                 false
             };
             if alive {
-                member.last_active = Some(now_ms);
+                alive_members.insert(member.name.clone());
                 state_store.lock().unwrap().set_state_with_context(
                     &member.name,
                     AgentState::Active,
@@ -773,18 +771,6 @@ fn reconcile_team_member_activity_with_mode(
         }
 
         if !terminal_non_lead_members.is_empty() {
-            for name in &terminal_non_lead_members {
-                delete_member_inbox(&team_dir, name)?;
-                session_registry
-                    .lock()
-                    .unwrap()
-                    .remove_for_team(&team_name, name);
-                state_store.lock().unwrap().unregister_agent(name);
-                desired_agent_names.remove(name);
-            }
-            config
-                .members
-                .retain(|m| !terminal_non_lead_members.contains(&m.name));
             changed = true;
         }
 
@@ -853,7 +839,32 @@ fn reconcile_team_member_activity_with_mode(
         }
 
         if changed {
-            write_team_config_atomic(&config_path, &config)?;
+            let terminal_set: std::collections::HashSet<_> =
+                terminal_non_lead_members.iter().cloned().collect();
+            let alive_members = alive_members.clone();
+            let _ = store.update(|mut config| {
+                for member in &mut config.members {
+                    if alive_members.contains(&member.name) {
+                        member.last_active = Some(now_ms);
+                    }
+                }
+                if !terminal_set.is_empty() {
+                    config.members.retain(|m| !terminal_set.contains(&m.name));
+                }
+                Ok(Some(config))
+            })?;
+        }
+
+        if !terminal_non_lead_members.is_empty() {
+            for name in &terminal_non_lead_members {
+                delete_member_inbox(&team_dir, name)?;
+                session_registry
+                    .lock()
+                    .unwrap()
+                    .remove_for_team(&team_name, name);
+                state_store.lock().unwrap().unregister_agent(name);
+                desired_agent_names.remove(name);
+            }
         }
     }
 
@@ -890,18 +901,6 @@ fn delete_member_inbox(team_dir: &std::path::Path, agent_name: &str) -> Result<(
         return Ok(());
     }
     std::fs::remove_file(&inbox_path)?;
-    Ok(())
-}
-
-fn write_team_config_atomic(path: &std::path::Path, config: &TeamConfig) -> Result<()> {
-    let lock_path = path.with_extension("lock");
-    let _lock = acquire_lock(&lock_path, 5)
-        .map_err(|e| anyhow::anyhow!("failed to acquire config lock: {e}"))?;
-
-    let tmp = path.with_extension("tmp");
-    let serialized = serde_json::to_string_pretty(config)?;
-    std::fs::write(&tmp, serialized)?;
-    atomic_swap(path, &tmp)?;
     Ok(())
 }
 

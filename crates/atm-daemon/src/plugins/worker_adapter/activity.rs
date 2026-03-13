@@ -4,9 +4,7 @@
 //! `isActive` is hook-owned and must not be mutated here.
 
 use crate::plugin::PluginError;
-use agent_team_mail_core::io::{atomic::atomic_swap, lock::acquire_lock};
-use agent_team_mail_core::schema::TeamConfig;
-use std::fs;
+use agent_team_mail_core::team_config_store::TeamConfigStore;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
@@ -44,16 +42,35 @@ impl ActivityTracker {
         team_config_path: &Path,
         agent_name: &str,
     ) -> Result<(), PluginError> {
-        self.update_config_atomic_with_time(team_config_path, |config, now_ms| {
-            if let Some(member) = config.members.iter_mut().find(|m| m.name == agent_name) {
-                member.last_active = Some(now_ms);
-                debug!("Updated activity for agent {agent_name}: lastActive={now_ms}");
-                true
-            } else {
-                warn!("Agent {agent_name} not found in team config");
-                false
-            }
-        })
+        let team_dir = team_config_path
+            .parent()
+            .ok_or_else(|| PluginError::Runtime {
+                message: format!(
+                    "team config path {} has no parent directory",
+                    team_config_path.display()
+                ),
+                source: None,
+            })?;
+        TeamConfigStore::open(team_dir)
+            .update(|mut config| {
+                let now_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|e| anyhow::anyhow!("System time error: {e}"))?
+                    .as_millis() as u64;
+                if let Some(member) = config.members.iter_mut().find(|m| m.name == agent_name) {
+                    member.last_active = Some(now_ms);
+                    debug!("Updated activity for agent {agent_name}: lastActive={now_ms}");
+                    Ok(Some(config))
+                } else {
+                    warn!("Agent {agent_name} not found in team config");
+                    Ok(None)
+                }
+            })
+            .map(|_| ())
+            .map_err(|e| PluginError::Runtime {
+                message: format!("Failed to update team config: {e}"),
+                source: None,
+            })
     }
 
     /// `isActive` is hook-owned, so inbox activity does not clear activity state.
@@ -70,95 +87,6 @@ impl ActivityTracker {
         let _ = self.inactivity_timeout_ms;
         Ok(())
     }
-
-    /// Atomically update team config using lock/swap infrastructure
-    ///
-    /// # Arguments
-    ///
-    /// * `team_config_path` - Path to team config.json
-    /// * `update_fn` - Closure that modifies config, returns true if changes were made
-    ///
-    /// # Errors
-    ///
-    /// Returns `PluginError` for I/O errors, JSON errors, or lock timeout
-    fn update_config_atomic_with_time<F>(
-        &self,
-        team_config_path: &Path,
-        update_fn: F,
-    ) -> Result<(), PluginError>
-    where
-        F: FnOnce(&mut TeamConfig, u64) -> bool,
-    {
-        let lock_path = team_config_path.with_extension("lock");
-
-        // Step 1: Acquire lock with retry (5 attempts)
-        let _lock = acquire_lock(&lock_path, 5).map_err(|e| PluginError::Runtime {
-            message: format!("Failed to acquire lock for team config: {e}"),
-            source: None,
-        })?;
-
-        // Step 2: Read current config
-        let content = fs::read(team_config_path).map_err(|e| PluginError::Runtime {
-            message: format!("Failed to read team config: {e}"),
-            source: Some(Box::new(e)),
-        })?;
-
-        let mut config: TeamConfig =
-            serde_json::from_slice(&content).map_err(|e| PluginError::Runtime {
-                message: format!("Failed to parse team config JSON: {e}"),
-                source: Some(Box::new(e)),
-            })?;
-
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| PluginError::Runtime {
-                message: format!("System time error: {e}"),
-                source: Some(Box::new(e)),
-            })?
-            .as_millis() as u64;
-
-        // Step 3: Apply modification
-        if !update_fn(&mut config, now_ms) {
-            // No changes needed
-            return Ok(());
-        }
-
-        // Step 4: Write to temp file with fsync, then swap
-        let tmp_path = team_config_path.with_extension("tmp");
-        let new_content =
-            serde_json::to_string_pretty(&config).map_err(|e| PluginError::Runtime {
-                message: format!("Failed to serialize team config: {e}"),
-                source: Some(Box::new(e)),
-            })?;
-
-        // Write to temp file
-        let mut file = std::fs::File::create(&tmp_path).map_err(|e| PluginError::Runtime {
-            message: format!("Failed to create temp file: {e}"),
-            source: Some(Box::new(e)),
-        })?;
-
-        std::io::Write::write_all(&mut file, new_content.as_bytes()).map_err(|e| {
-            PluginError::Runtime {
-                message: format!("Failed to write temp file: {e}"),
-                source: Some(Box::new(e)),
-            }
-        })?;
-
-        file.sync_all().map_err(|e| PluginError::Runtime {
-            message: format!("Failed to sync temp file: {e}"),
-            source: Some(Box::new(e)),
-        })?;
-
-        drop(file);
-
-        // Atomic swap
-        atomic_swap(team_config_path, &tmp_path).map_err(|e| PluginError::Runtime {
-            message: format!("Failed to swap team config: {e}"),
-            source: None,
-        })?;
-
-        Ok(())
-    }
 }
 
 impl Default for ActivityTracker {
@@ -170,8 +98,9 @@ impl Default for ActivityTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_team_mail_core::schema::AgentMember;
+    use agent_team_mail_core::schema::{AgentMember, TeamConfig};
     use std::collections::HashMap;
+    use std::fs;
     use tempfile::TempDir;
 
     fn create_test_config(temp_dir: &TempDir) -> (TeamConfig, std::path::PathBuf) {

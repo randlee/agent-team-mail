@@ -27,7 +27,8 @@ use agent_team_mail_core::control::{
 use agent_team_mail_core::daemon_client::{CanonicalMemberState, LaunchConfig, LaunchResult};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::logging_event::LogEventV1;
-use agent_team_mail_core::schema::{AgentMember, TeamConfig};
+use agent_team_mail_core::schema::AgentMember;
+use agent_team_mail_core::team_config_store::TeamConfigStore;
 use agent_team_mail_core::text::DEFAULT_MAX_MESSAGE_BYTES;
 use anyhow::Result;
 use sc_observability::{
@@ -898,10 +899,16 @@ fn authorize_hook_event(
     let config_path = agent_team_mail_core::home::teams_root_dir_for(&home_dir)
         .join(team)
         .join("config.json");
-    let content = std::fs::read_to_string(&config_path)
-        .map_err(|_| format!("team config not found: {}", config_path.display()))?;
-    let config: TeamConfig =
-        serde_json::from_str(&content).map_err(|e| format!("invalid team config: {e}"))?;
+    let team_dir = config_path
+        .parent()
+        .ok_or_else(|| format!("team config path '{}' has no parent", config_path.display()))?;
+    let config = TeamConfigStore::open(team_dir).read().map_err(|e| {
+        if !config_path.exists() {
+            format!("team config not found: {}", config_path.display())
+        } else {
+            format!("invalid team config: {e}")
+        }
+    })?;
 
     // Support either canonical agent_id or bare name.
     let expected_agent_id = format!("{agent}@{team}");
@@ -3137,11 +3144,8 @@ fn load_team_members(
     home: &std::path::Path,
     team: &str,
 ) -> Option<Vec<agent_team_mail_core::schema::AgentMember>> {
-    let config_path = agent_team_mail_core::home::teams_root_dir_for(home)
-        .join(team)
-        .join("config.json");
-    let content = std::fs::read_to_string(config_path).ok()?;
-    let config: agent_team_mail_core::schema::TeamConfig = serde_json::from_str(&content).ok()?;
+    let team_dir = agent_team_mail_core::home::teams_root_dir_for(home).join(team);
+    let config = TeamConfigStore::open(&team_dir).read().ok()?;
     Some(config.members)
 }
 

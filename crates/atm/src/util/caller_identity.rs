@@ -1050,13 +1050,16 @@ mod tests {
     #[test]
     #[serial]
     fn implicit_claude_session_resolved_from_env_when_no_runtime_or_codex_thread_id() {
-        // No ATM_RUNTIME, no CODEX_THREAD_ID, no hook file — only CLAUDE_SESSION_ID set.
-        // The resolver must detect Claude runtime via the env var and return that session ID.
+        // Explicit Claude runtime with no hook file or CODEX_THREAD_ID should
+        // resolve directly from CLAUDE_SESSION_ID.
+        let temp = TempDir::new().unwrap();
         let hook_path = current_ppid_hook_path();
         let _ = std::fs::remove_file(&hook_path);
 
         unsafe {
-            std::env::remove_var("ATM_RUNTIME");
+            std::env::set_var("ATM_HOME", temp.path());
+            std::env::set_var("ATM_TEST_HOME", temp.path());
+            std::env::set_var("ATM_RUNTIME", "claude");
             std::env::remove_var("CODEX_THREAD_ID");
             std::env::remove_var("ATM_SESSION_ID");
             std::env::set_var("CLAUDE_SESSION_ID", "claude-implicit-session-abc");
@@ -1070,6 +1073,8 @@ mod tests {
         .expect("resolve");
 
         unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("ATM_RUNTIME");
             std::env::remove_var("CODEX_THREAD_ID");
             std::env::remove_var("ATM_SESSION_ID");

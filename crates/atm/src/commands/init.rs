@@ -22,6 +22,7 @@
 //! external script files are required post-install.
 
 use agent_team_mail_core::schema::{AgentMember, TeamConfig};
+use agent_team_mail_core::team_config_store::TeamConfigStore;
 use anyhow::{Context, Result};
 use clap::Args;
 use std::collections::HashMap;
@@ -806,7 +807,9 @@ fn ensure_team_config(home_dir: &Path, team: &str, cwd: &Path) -> Result<TeamSta
         unknown_fields: HashMap::new(),
     };
 
-    write_json_atomic(&config_path, &team_config)?;
+    TeamConfigStore::open(&team_dir)
+        .create_or_update(|| team_config.clone(), |config| Ok(Some(config)))
+        .with_context(|| format!("Failed to initialize {}", config_path.display()))?;
     Ok(TeamStatus::Created)
 }
 
@@ -828,13 +831,6 @@ fn write_text_atomic(path: &Path, content: &str) -> Result<()> {
         )
     })?;
     Ok(())
-}
-
-fn write_json_atomic(path: &Path, value: &impl serde::Serialize) -> Result<()> {
-    let mut serialized =
-        serde_json::to_string_pretty(value).context("Failed to serialize JSON value")?;
-    serialized.push('\n');
-    write_text_atomic(path, &serialized)
 }
 
 // ---------------------------------------------------------------------------

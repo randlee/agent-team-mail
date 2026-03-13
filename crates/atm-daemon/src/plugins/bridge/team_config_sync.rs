@@ -6,6 +6,7 @@
 
 use agent_team_mail_core::config::HostnameRegistry;
 use agent_team_mail_core::schema::TeamConfig;
+use agent_team_mail_core::team_config_store::TeamConfigStore;
 use anyhow::{Context, Result};
 use std::path::Path;
 use tokio::fs;
@@ -56,27 +57,26 @@ pub async fn sync_team_config(
     let hub_config: TeamConfig =
         serde_json::from_str(&hub_config_content).context("Failed to parse hub team config")?;
 
-    // Read local config
     let local_config_path = team_dir.join("config.json");
-    let local_config: TeamConfig = if local_config_path.exists() {
-        let content = fs::read_to_string(&local_config_path).await?;
-        serde_json::from_str(&content).context("Failed to parse local team config")?
+    let store = TeamConfigStore::open(team_dir);
+    if local_config_path.exists() {
+        let hub_config = hub_config.clone();
+        let registry = registry.clone();
+        let _ = store
+            .update_async(move |local_config| {
+                let merged = merge_team_config(&local_config, &hub_config, &registry);
+                Ok(Some(merged))
+            })
+            .await?;
     } else {
-        // No local config yet - use hub config as-is
-        fs::write(&local_config_path, &hub_config_content).await?;
+        let hub_config = hub_config.clone();
+        let _ = store
+            .create_or_update_async(move || hub_config.clone(), |config| Ok(Some(config)))
+            .await?;
         fs::remove_file(&temp_path).await?;
         info!("Initialized local team config from hub");
         return Ok(true);
-    };
-
-    // Merge configs: preserve local agent membership
-    let merged = merge_team_config(&local_config, &hub_config, registry);
-
-    // Write merged config atomically
-    let merged_json = serde_json::to_string_pretty(&merged)?;
-    let tmp_write_path = team_dir.join(".bridge-config-write-tmp");
-    fs::write(&tmp_write_path, &merged_json).await?;
-    fs::rename(&tmp_write_path, &local_config_path).await?;
+    }
 
     // Cleanup download temp file
     fs::remove_file(&temp_path).await?;

@@ -51,6 +51,7 @@ pub(crate) fn notify_merge_conflict(
 }
 
 #[cfg(unix)]
+#[allow(dead_code)]
 pub(crate) fn notify_gh_monitor_health_transition(
     home: &std::path::Path,
     team: &str,

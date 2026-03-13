@@ -33,14 +33,13 @@
 
 use super::agent_state::{AgentState, AgentStateTracker};
 use crate::daemon::session_registry::{MarkDeadForSessionOutcome, SharedSessionRegistry};
-use agent_team_mail_core::io::atomic::atomic_swap;
-use agent_team_mail_core::io::lock::acquire_lock;
 use agent_team_mail_core::schema::TeamConfig;
+use agent_team_mail_core::team_config_store::TeamConfigStore;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -706,32 +705,6 @@ fn classify_team_membership(
     }
 }
 
-/// Atomically write `team_config` to `config_path` using a lock file, a `.tmp`
-/// staging file, and the project's `atomic_swap` infrastructure.
-///
-/// This is the daemon-side equivalent of `write_team_config` in the CLI crate.
-/// Returns `Err` on any I/O failure so callers can log at the appropriate level.
-fn write_team_config_atomic(config_path: &Path, config: &TeamConfig) -> Result<(), anyhow::Error> {
-    let lock_path = config_path.with_extension("lock");
-    let _lock =
-        acquire_lock(&lock_path, 5).map_err(|e| anyhow::anyhow!("failed to acquire lock: {e}"))?;
-
-    let serialized = serde_json::to_string_pretty(config)
-        .map_err(|e| anyhow::anyhow!("serialisation failed: {e}"))?;
-
-    let tmp_path = config_path.with_extension("tmp");
-    let mut file = std::fs::File::create(&tmp_path)
-        .map_err(|e| anyhow::anyhow!("cannot create tmp file: {e}"))?;
-    file.write_all(serialized.as_bytes())
-        .and_then(|_| file.sync_all())
-        .map_err(|e| anyhow::anyhow!("write failed: {e}"))?;
-    drop(file);
-
-    atomic_swap(config_path, &tmp_path).map_err(|e| anyhow::anyhow!("atomic swap failed: {e}"))?;
-
-    Ok(())
-}
-
 /// Update `sessionId` in one team config under
 /// `{claude_root}/teams/{team}/config.json` for any member whose `name`
 /// matches `agent_name` (the bare agent name, without `@team` suffix) and
@@ -757,51 +730,34 @@ fn auto_update_member_session_id(
         return;
     }
 
-    let content = match std::fs::read_to_string(&config_path) {
-        Ok(c) => c,
-        Err(e) => {
-            debug!(
-                "auto_update_member_session_id: failed to read {}: {e}",
-                config_path.display()
-            );
-            return;
+    let store = TeamConfigStore::open(
+        config_path
+            .parent()
+            .expect("config_path must have a parent directory"),
+    );
+    if let Err(e) = store.update(|mut team_config| {
+        let mut changed = false;
+        for member in &mut team_config.members {
+            if member.name == agent_name
+                && member.external_backend_type.is_some()
+                && member.session_id.as_deref() != Some(new_session_id)
+            {
+                debug!(
+                    "auto_update_member_session_id: updating sessionId for '{}' in '{}'",
+                    agent_name,
+                    config_path.display()
+                );
+                member.session_id = Some(new_session_id.to_string());
+                changed = true;
+            }
         }
-    };
 
-    let mut team_config: TeamConfig = match serde_json::from_str(&content) {
-        Ok(tc) => tc,
-        Err(e) => {
-            debug!(
-                "auto_update_member_session_id: failed to parse {}: {e}",
-                config_path.display()
-            );
-            return;
+        if changed {
+            Ok(Some(team_config))
+        } else {
+            Ok(None)
         }
-    };
-
-    let mut changed = false;
-    for member in &mut team_config.members {
-        // Only update external agents (those with externalBackendType set).
-        if member.name == agent_name
-            && member.external_backend_type.is_some()
-            && member.session_id.as_deref() != Some(new_session_id)
-        {
-            debug!(
-                "auto_update_member_session_id: updating sessionId for '{}' in '{}'",
-                agent_name,
-                config_path.display()
-            );
-            member.session_id = Some(new_session_id.to_string());
-            changed = true;
-        }
-    }
-
-    if !changed {
-        return;
-    }
-
-    // Write updated config atomically via lock + tmp file + atomic swap.
-    if let Err(e) = write_team_config_atomic(&config_path, &team_config) {
+    }) {
         debug!("auto_update_member_session_id: atomic write failed: {e}");
     }
 }

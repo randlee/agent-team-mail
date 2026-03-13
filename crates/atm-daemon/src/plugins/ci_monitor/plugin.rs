@@ -1209,7 +1209,6 @@ impl Plugin for CiMonitorPlugin {
                     _ = sleep(Duration::from_secs(next_delay_secs)) => {
                         // Evict old dedup cache entries
                         self.evict_old_dedup_entries();
-
                         // Fetch all completed runs
                         let runs = match self.provider.as_ref() {
                             Some(provider) => list_completed_runs(provider.as_ref()).await,
