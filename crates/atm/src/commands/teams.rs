@@ -3243,6 +3243,8 @@ fn write_team_config(config_path: &Path, config: &TeamConfig) -> Result<()> {
             .parent()
             .expect("config_path must have a parent directory"),
     )
+    // Tests overwrite the full config snapshot intentionally; there is no
+    // partial merge semantics in this helper.
     .create_or_update(|| config.clone(), |_| Ok(Some(config.clone())))
     .map(|_| ())
 }
