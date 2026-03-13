@@ -1599,10 +1599,21 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
         ..Default::default()
     });
+    let stderr_capture = std::env::temp_dir().join(format!(
+        "atm-daemon-stderr-{}-{}.log",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    let stderr_file = std::fs::File::create(&stderr_capture)
+        .map_err(|e| anyhow::anyhow!("failed to prepare daemon stderr capture: {e}"))?;
+
     let mut child = match Command::new(&daemon_bin)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(stderr_file))
         .spawn()
     {
         Ok(child) => child,
@@ -1645,7 +1656,26 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
             return Ok(());
         }
         if let Some(status) = child.try_wait()? {
-            let error = format!("daemon process exited during startup with status {status}");
+            let stderr_tail = std::fs::read(&stderr_capture).ok().and_then(|buf| {
+                if buf.is_empty() {
+                    return None;
+                }
+                let trimmed = if buf.len() > 4096 {
+                    &buf[buf.len() - 4096..]
+                } else {
+                    &buf
+                };
+                let text = String::from_utf8_lossy(trimmed).trim().to_string();
+                if text.is_empty() { None } else { Some(text) }
+            });
+            let error = match stderr_tail {
+                Some(tail) => {
+                    format!(
+                        "daemon process exited during startup with status {status}; stderr_tail={tail}"
+                    )
+                }
+                None => format!("daemon process exited during startup with status {status}"),
+            };
             emit_event_best_effort(EventFields {
                 level: "error",
                 source: "atm",
@@ -1655,10 +1685,12 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
                 error: Some(error.clone()),
                 ..Default::default()
             });
+            let _ = std::fs::remove_file(&stderr_capture);
             anyhow::bail!("{error}");
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    let _ = std::fs::remove_file(&stderr_capture);
 
     let socket_path = daemon_socket_path()?;
     let pid_path = daemon_pid_path()?;
