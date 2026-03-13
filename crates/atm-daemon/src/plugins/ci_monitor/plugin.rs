@@ -834,6 +834,7 @@ impl CiMonitorPlugin {
             .unwrap_or_else(|| ctx.config.core.default_team.clone())
     }
 
+    #[cfg(unix)]
     fn write_health_record(
         ctx: &PluginContext,
         team: &str,
@@ -951,6 +952,7 @@ impl CiMonitorPlugin {
     ) {
         let team = Self::team_for_config_error(table, ctx);
         let message = format!("invalid gh_monitor config: {reason}");
+        #[cfg(unix)]
         Self::write_health_record(ctx, &team, "disabled_config_error", &message);
         self.notify_disabled_transition(ctx, &team, &message);
     }
@@ -2074,6 +2076,7 @@ repo = "config-owner/config-repo"
         assert_eq!(member.cwd, temp_dir.path().to_string_lossy());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_init_without_git_or_config_repo_writes_disabled_init_health_record() {
         use crate::plugins::ci_monitor::MockCiProvider;
