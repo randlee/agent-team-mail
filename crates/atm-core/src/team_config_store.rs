@@ -57,6 +57,7 @@ impl TeamConfigStore {
         self.apply_update_locked(current, f)
     }
 
+    /// Async wrapper for `update`. Runs the blocking I/O on a `spawn_blocking` thread. No async lock may be held across this await boundary.
     pub async fn update_async<F>(&self, f: F) -> Result<UpdateOutcome>
     where
         F: FnOnce(TeamConfig) -> Result<Option<TeamConfig>> + Send + 'static,
@@ -67,6 +68,7 @@ impl TeamConfigStore {
             .context("TeamConfigStore::update_async join failure")?
     }
 
+    /// Async wrapper for `create_or_update`. Runs the blocking I/O on a `spawn_blocking` thread. No async lock may be held across this await boundary.
     pub async fn create_or_update_async<F, D>(&self, default_fn: D, f: F) -> Result<UpdateOutcome>
     where
         D: FnOnce() -> TeamConfig + Send + 'static,
