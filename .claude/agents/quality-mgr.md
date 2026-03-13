@@ -2,7 +2,7 @@
 name: quality-mgr
 version: 1.0.0
 description: Coordinates QA across multiple sprints — runs rust-qa, atm-qa, and arch-qa background agents per sprint worktree, tracks findings, and reports to team-lead. Enforces hard PR quality gate.
-tools: Glob, Grep, LS, Read, Write, Edit, NotebookRead, WebFetch, TodoWrite, WebSearch, KillShell, BashOutput, Bash
+tools: Glob, Grep, LS, Read, Write, Edit, NotebookRead, WebFetch, TodoWrite, WebSearch, KillShell, BashOutput, Bash, Task
 model: sonnet
 color: cyan
 metadata:
