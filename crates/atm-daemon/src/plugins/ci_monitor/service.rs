@@ -6,7 +6,7 @@ use super::alerts::{
     emit_merge_conflict_alert as send_merge_conflict_alert,
 };
 use super::gh_cli::{
-    fetch_pull_request, fetch_run, is_pr_merge_state_dirty as pr_merge_state_dirty,
+    fetch_pull_request, is_pr_merge_state_dirty as pr_merge_state_dirty,
     try_find_pr_run_id as find_pr_run_id_with_provider,
     try_find_workflow_run_id as find_workflow_run_id_with_provider,
 };
@@ -18,8 +18,8 @@ use super::helpers::{
 use super::polling::monitor_run;
 use super::provider::ErasedCiProvider;
 #[cfg(test)]
-use super::types::{CiFilter, CiJob, CiPullRequest, CiRunStatus, CiStep};
-use super::types::{CiRun, GhMonitorConfigState, GhMonitorHealthUpdate};
+use super::types::{CiFilter, CiJob, CiRun, CiRunStatus, CiStep};
+use super::types::{GhMonitorConfigState, GhMonitorHealthUpdate};
 use agent_team_mail_core::daemon_client::{
     GhMonitorControlRequest, GhMonitorHealth, GhMonitorLifecycleAction, GhMonitorRequest,
     GhMonitorStatus, GhMonitorTargetKind, GhStatusRequest,
@@ -63,16 +63,6 @@ pub(crate) type GhRunView = CiRun;
 pub(crate) type GhRunJob = CiJob;
 #[cfg(all(test, unix))]
 pub(crate) type GhRunStep = CiStep;
-#[cfg(all(test, unix))]
-pub(crate) type GhPrView = CiPullRequest;
-#[cfg(all(test, unix))]
-pub(crate) type GhPullRequest = CiPullRequest;
-#[cfg(all(test, unix))]
-pub(crate) type GhPrLookupView = CiPullRequest;
-#[cfg(all(test, unix))]
-pub(crate) type GhRunListEntry = CiRun;
-#[cfg(all(test, unix))]
-pub(crate) type GhRunTerminalState = super::polling::GhRunTerminalState;
 
 #[derive(Clone)]
 pub(crate) struct CiMonitorService {
@@ -123,15 +113,6 @@ impl CiMonitorService {
             )),
             owner_repo.to_string(),
         ))
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) async fn fetch_run_view(&self, run_id: u64) -> CiMonitorServiceResult<CiRun> {
-        fetch_run(self.provider.as_ref(), run_id)
-            .await
-            .map_err(|e| {
-                CiMonitorServiceError::internal(format!("Failed to fetch run details: {e}"))
-            })
     }
 
     pub(crate) async fn try_find_pr_run_id(
@@ -815,18 +796,6 @@ pub(crate) fn set_gh_monitor_health_state(
 }
 
 #[cfg(all(test, unix))]
-pub(crate) async fn try_find_pr_run_id(
-    owner_repo: &str,
-    pr_number: u64,
-) -> anyhow::Result<Option<u64>> {
-    let service = build_github_service(owner_repo)?;
-    service
-        .try_find_pr_run_id(pr_number)
-        .await
-        .map_err(anyhow::Error::from)
-}
-
-#[cfg(all(test, unix))]
 pub(crate) async fn wait_for_pr_run_start(
     owner_repo: &str,
     pr_number: u64,
@@ -834,39 +803,6 @@ pub(crate) async fn wait_for_pr_run_start(
 ) -> anyhow::Result<Option<u64>> {
     let service = build_github_service(owner_repo)?;
     wait_for_pr_run_start_with_service(&service, pr_number, timeout_secs)
-        .await
-        .map_err(anyhow::Error::from)
-}
-
-#[cfg(all(test, unix))]
-pub(crate) async fn fetch_pr_merge_state(
-    owner_repo: &str,
-    pr_number: u64,
-) -> anyhow::Result<Option<GhPrView>> {
-    let service = build_github_service(owner_repo)?;
-    fetch_pull_request(service.provider.as_ref(), pr_number)
-        .await
-        .map_err(anyhow::Error::from)
-}
-
-#[cfg(all(test, unix))]
-pub(crate) async fn fetch_run_view(owner_repo: &str, run_id: u64) -> anyhow::Result<GhRunView> {
-    let service = build_github_service(owner_repo)?;
-    service
-        .fetch_run_view(run_id)
-        .await
-        .map_err(anyhow::Error::from)
-}
-
-#[cfg(all(test, unix))]
-pub(crate) async fn try_find_workflow_run_id(
-    owner_repo: &str,
-    workflow: &str,
-    reference: &str,
-) -> anyhow::Result<Option<u64>> {
-    let service = build_github_service(owner_repo)?;
-    service
-        .try_find_workflow_run_id(workflow, reference)
         .await
         .map_err(anyhow::Error::from)
 }
@@ -941,17 +877,6 @@ pub(crate) async fn build_failure_payload(
 }
 
 #[cfg(all(test, unix))]
-pub(crate) async fn fetch_failed_log_excerpt(
-    owner_repo: &str,
-    job_id: u64,
-) -> anyhow::Result<String> {
-    let service = build_github_service(owner_repo)?;
-    super::gh_cli::fetch_failed_log_excerpt(service.provider.as_ref(), job_id)
-        .await
-        .map_err(anyhow::Error::from)
-}
-
-#[cfg(all(test, unix))]
 fn build_github_service(owner_repo: &str) -> anyhow::Result<CiMonitorService> {
     let (owner, repo) = owner_repo
         .split_once('/')
@@ -966,19 +891,9 @@ fn build_github_service(owner_repo: &str) -> anyhow::Result<CiMonitorService> {
 }
 
 #[cfg(all(test, unix))]
-pub(crate) use super::alerts::{
-    emit_ci_monitor_message, emit_ci_not_started_alert, emit_gh_monitor_health_transition,
-    emit_merge_conflict_alert, repo_scope_matches, resolve_ci_alert_routing,
-};
+pub(crate) use super::alerts::resolve_ci_alert_routing;
 #[cfg(all(test, unix))]
-pub(crate) use super::gh_cli::{is_pr_merge_state_dirty, run_passes_pr_recency_gate};
-#[cfg(all(test, unix))]
-pub(crate) use super::polling::{
-    classify_failure, classify_terminal_state, count_completed_jobs, derive_pr_url,
-    derive_repo_base_from_run_url, extract_repo_slug_from_url, format_job_runtime,
-    format_progress_message, format_summary_table, is_infra_failure, is_job_completed,
-    job_status_label, short_sha, should_emit_progress, terminal_state_label,
-};
+pub(crate) use super::polling::{classify_failure, derive_pr_url, format_summary_table};
 
 #[cfg(all(test, unix))]
 mod tests {
