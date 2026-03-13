@@ -14,6 +14,7 @@ This primary requirements document registers secondary source-of-truth documents
 - Observability architecture: `docs/observability/architecture.md`
 - sc-composer requirements: `docs/sc-composer/requirements.md`
 - sc-composer architecture: `docs/sc-composer/architecture.md`
+- Phase AN CI-monitor extraction plan: `docs/phase-an-planning.md`
 
 All logging/OpenTelemetry requirements for ATM and companion tools are defined
 in the observability documents above. This file references that contract and
@@ -2850,6 +2851,22 @@ Required acceptance tests:
 - Compatibility aliases (for example hyphenated legacy names) are optional and
   must be explicitly documented if supported.
 
+### 5.10.1 CI Monitor Separation Contract
+
+- CI-monitor reusable core logic must remain separate from daemon transport and
+  plugin lifecycle glue.
+- Reusable CI-monitor modules must not expose ATM daemon adapter types as part
+  of their public interface, including:
+  - `PluginError`
+  - daemon-client request/response wire types
+  - socket/router transport types
+- `plugin.rs` and router/transport modules are daemon adapters. They may depend
+  on the CI-monitor core, but the core must not depend on them.
+- Production module surfaces must not re-export mocks, test builders, or
+  test-only helper types outside `#[cfg(test)]`.
+- Crate extraction is not complete until the CI-monitor core can build without
+  daemon transport/plugin bootstrap code in its public API.
+
 ### 5.11 sc-compose Logging Path Contract
 
 - `sc-compose` default log path must be:
@@ -2890,6 +2907,7 @@ All plugins are **provider-agnostic** where applicable. They read `ctx.system.re
 **Reference**:
 - `docs/plugins/ci-monitor/requirements.md`
 - `docs/ci-monitor-integration.md`
+- `docs/phase-an-planning.md`
 
 **Naming model**:
 - `ci_monitor` = shared monitor contract/interface
@@ -2904,6 +2922,13 @@ All plugins are **provider-agnostic** where applicable. They read `ctx.system.re
 - Post concise notification to designated agent's inbox
 - Deduplicate per-commit
 - Requires git repo context; if no repo is detected, the plugin should disable itself with a clear warning.
+
+**Separation requirements**:
+- Shared CI-monitor domain types must be provider-agnostic and daemon-agnostic.
+- Provider and registry/service layers must not expose daemon-only error or
+  transport types in their public API.
+- Socket routing and plugin lifecycle/bootstrap must remain daemon adapters,
+  even after CI-monitor core extraction.
 
 **Multi-repo + agent subscription model (planned)**:
 - Single daemon per machine; CI Monitor registers multiple repos from machine-level config.
