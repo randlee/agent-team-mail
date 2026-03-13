@@ -2,19 +2,27 @@
 
 use super::config::{CiMonitorConfig, DedupStrategy};
 use super::github_provider::GitHubActionsProvider;
+#[cfg(unix)]
+use super::health;
+#[cfg(unix)]
+use super::helpers::evaluate_gh_monitor_config;
 use super::loader::CiProviderLoader;
 use super::provider::ErasedCiProvider;
 use super::registry::{CiProviderFactory, CiProviderRegistry};
 use super::service::{fetch_run_details, list_completed_runs};
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 use super::types::GhMonitorHealthFile;
+#[cfg(unix)]
+use super::types::GhMonitorHealthUpdate;
+#[cfg(unix)]
+use super::types::GhMonitorStateFile;
 #[cfg(test)]
 use super::types::{CiFilter, CiRunStatus};
 use super::types::{CiJob, CiRunConclusion};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use agent_team_mail_core::context::{GitProvider as GitProviderType, RepoContext};
-use agent_team_mail_core::daemon_client::GhMonitorHealth;
-use agent_team_mail_core::schema::{AgentMember, InboxMessage, TeamConfig};
+use agent_team_mail_core::daemon_client::GhMonitorStatus;
+use agent_team_mail_core::schema::{AgentMember, InboxMessage};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -35,20 +43,6 @@ struct RuntimeHistory {
     job_samples: HashMap<String, Vec<u64>>,
     processed_run_ids: Vec<u64>,
     drift_last_alert_epoch_secs: HashMap<String, i64>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
-struct GhMonitorStateRecord {
-    team: String,
-    state: String,
-    run_id: Option<u64>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
-struct GhMonitorStateFile {
-    records: Vec<GhMonitorStateRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -801,14 +795,23 @@ impl CiMonitorPlugin {
         )
     }
 
+    #[cfg(unix)]
     fn was_terminal_notified_by_command_path(&self, ctx: &PluginContext, run_id: u64) -> bool {
         let path = Self::gh_monitor_state_path(ctx);
         let raw = match std::fs::read_to_string(&path) {
             Ok(raw) => raw,
             Err(_) => return false,
         };
-        let state_file = match serde_json::from_str::<GhMonitorStateFile>(&raw) {
-            Ok(parsed) => parsed,
+        if let Ok(state_file) = serde_json::from_str::<GhMonitorStateFile>(&raw) {
+            return state_file.records.iter().any(|record: &GhMonitorStatus| {
+                record.team == self.config.team
+                    && record.run_id == Some(run_id)
+                    && Self::is_terminal_monitor_state(&record.state)
+            });
+        }
+
+        let legacy = match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(value) => value,
             Err(e) => {
                 warn!(
                     "CI Monitor: Failed to parse gh monitor state {}: {}",
@@ -818,13 +821,28 @@ impl CiMonitorPlugin {
                 return false;
             }
         };
-        state_file.records.iter().any(|record| {
-            record.team == self.config.team
-                && record.run_id == Some(run_id)
-                && Self::is_terminal_monitor_state(&record.state)
-        })
+        legacy
+            .get("records")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|record| {
+                record.get("team").and_then(serde_json::Value::as_str)
+                    == Some(self.config.team.as_str())
+                    && record.get("run_id").and_then(serde_json::Value::as_u64) == Some(run_id)
+                    && record
+                        .get("state")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(Self::is_terminal_monitor_state)
+            })
     }
 
+    #[cfg(not(unix))]
+    fn was_terminal_notified_by_command_path(&self, _ctx: &PluginContext, _run_id: u64) -> bool {
+        false
+    }
+
+    #[cfg(unix)]
     fn team_for_config_error(
         table: Option<&agent_team_mail_core::toml::Table>,
         ctx: &PluginContext,
@@ -838,115 +856,6 @@ impl CiMonitorPlugin {
     }
 
     #[cfg(unix)]
-    fn write_health_record(
-        ctx: &PluginContext,
-        team: &str,
-        availability_state: &str,
-        message: &str,
-    ) {
-        let Some(home_dir) = ctx.system.claude_root.parent() else {
-            warn!("CI Monitor: failed to derive ATM home for health file");
-            return;
-        };
-        let path = agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(home_dir);
-        let mut file = match std::fs::read_to_string(&path) {
-            Ok(raw) => match serde_json::from_str::<GhMonitorHealthFile>(&raw) {
-                Ok(parsed) => parsed,
-                Err(e) => {
-                    warn!(
-                        "CI Monitor: failed parsing health file {}: {}",
-                        path.display(),
-                        e
-                    );
-                    GhMonitorHealthFile::default()
-                }
-            },
-            Err(_) => GhMonitorHealthFile::default(),
-        };
-
-        let updated_record = GhMonitorHealth {
-            team: team.to_string(),
-            configured: false,
-            enabled: false,
-            config_source: None,
-            config_path: None,
-            lifecycle_state: "running".to_string(),
-            availability_state: availability_state.to_string(),
-            in_flight: 0,
-            updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            message: Some(message.to_string()),
-        };
-
-        if let Some(existing) = file.records.iter_mut().find(|record| record.team == team) {
-            *existing = updated_record;
-        } else {
-            file.records.push(updated_record);
-        }
-        file.records.sort_by(|a, b| a.team.cmp(&b.team));
-
-        if let Some(parent) = path.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            warn!(
-                "CI Monitor: failed to create health directory {}: {}",
-                parent.display(),
-                e
-            );
-            return;
-        }
-        match serde_json::to_string_pretty(&file) {
-            Ok(serialized) => {
-                if let Err(e) = std::fs::write(&path, serialized) {
-                    warn!(
-                        "CI Monitor: failed writing health file {}: {}",
-                        path.display(),
-                        e
-                    );
-                }
-            }
-            Err(e) => {
-                warn!("CI Monitor: failed serializing health file: {}", e);
-            }
-        }
-    }
-
-    fn notify_disabled_transition(&self, ctx: &PluginContext, team: &str, message: &str) {
-        let lead_agent =
-            std::fs::read_to_string(ctx.mail.teams_root().join(team).join("config.json"))
-                .ok()
-                .and_then(|raw| serde_json::from_str::<TeamConfig>(&raw).ok())
-                .and_then(|cfg| cfg.lead_agent_id.split('@').next().map(|s| s.to_string()))
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or_else(|| "team-lead".to_string());
-
-        let text = format!(
-            "[gh_monitor] availability transition healthy -> disabled_config_error\nreason: {message}"
-        );
-        let msg = InboxMessage {
-            from: if self.config.agent.is_empty() {
-                "ci-monitor".to_string()
-            } else {
-                self.config.agent.clone()
-            },
-            text,
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            read: false,
-            summary: Some("gh_monitor: disabled_config_error".to_string()),
-            message_id: Some(format!(
-                "gh-monitor-config-error-{}",
-                Utc::now().timestamp_millis()
-            )),
-            unknown_fields: std::collections::HashMap::new(),
-        };
-
-        if let Err(e) = ctx.mail.send(team, &lead_agent, &msg) {
-            warn!(
-                "CI Monitor: failed to send disabled_config_error transition alert to {}@{}: {}",
-                lead_agent, team, e
-            );
-        }
-    }
-
     fn project_disabled_config_error(
         &self,
         ctx: &PluginContext,
@@ -955,8 +864,24 @@ impl CiMonitorPlugin {
     ) {
         let team = Self::team_for_config_error(table, ctx);
         let message = format!("invalid gh_monitor config: {reason}");
-        Self::write_health_record(ctx, &team, "disabled_config_error", &message);
-        self.notify_disabled_transition(ctx, &team, &message);
+        let Some(home_dir) = ctx.system.claude_root.parent() else {
+            warn!("CI Monitor: failed to derive ATM home for health file");
+            return;
+        };
+        let config_state = evaluate_gh_monitor_config(home_dir, &team, None);
+        if let Err(e) = health::set_gh_monitor_health_state(
+            home_dir,
+            &team,
+            GhMonitorHealthUpdate {
+                availability_state: Some("disabled_config_error"),
+                in_flight: Some(0),
+                message: Some(message),
+                config_state: Some(&config_state),
+                ..Default::default()
+            },
+        ) {
+            warn!("CI Monitor: failed to persist disabled_config_error health state: {e}");
+        }
     }
 }
 
@@ -987,6 +912,7 @@ impl Plugin for CiMonitorPlugin {
             match CiMonitorConfig::from_toml(table) {
                 Ok(config) => config,
                 Err(e) => {
+                    #[cfg(unix)]
                     self.project_disabled_config_error(ctx, config_table, &e.to_string());
                     return Err(e);
                 }
@@ -1007,6 +933,7 @@ impl Plugin for CiMonitorPlugin {
         let repo = match self.resolve_repo_context(ctx) {
             Ok(repo) => repo,
             Err(err) => {
+                #[cfg(unix)]
                 self.project_disabled_config_error(ctx, config_table, &err.to_string());
                 return Err(err);
             }
@@ -2071,12 +1998,16 @@ repo = "config-owner/config-repo"
         assert_eq!(member.cwd, temp_dir.path().to_string_lossy());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_init_without_git_or_config_repo_writes_disabled_init_health_record() {
         use crate::plugins::ci_monitor::MockCiProvider;
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
+        let inbox_dir = temp_dir.path().join(".claude/teams/dev-team/inboxes");
+        std::fs::create_dir_all(&inbox_dir).unwrap();
+        std::fs::write(inbox_dir.join("team-lead.json"), "[]").unwrap();
         let teams_root = temp_dir.path().to_path_buf();
         let table: toml::Table = toml::from_str("team = \"dev-team\"").unwrap();
         let ctx = create_mock_context_with_repo_config(teams_root.clone(), Some(table), false);
@@ -2107,6 +2038,21 @@ repo = "config-owner/config-repo"
                 .message
                 .as_deref()
                 .is_some_and(|message| message.contains("No repository information available"))
+        );
+
+        let inbox_raw =
+            std::fs::read_to_string(inbox_dir.join("team-lead.json")).expect("team-lead inbox");
+        let inbox: Vec<agent_team_mail_core::schema::InboxMessage> =
+            serde_json::from_str(&inbox_raw).expect("team-lead inbox json");
+        assert!(
+            inbox.iter().any(|message| {
+                message
+                    .summary
+                    .as_deref()
+                    .is_some_and(|summary| summary.contains("gh_monitor: disabled_config_error"))
+                    && message.text.contains("No repository information available")
+            }),
+            "expected disabled_config_error alert in team-lead inbox"
         );
     }
 
@@ -2200,6 +2146,7 @@ notify_target = "team-lead"
         assert!(result.is_ok());
     }
 
+    #[cfg(all(test, unix))]
     #[tokio::test]
     async fn test_polling_notification_suppressed_when_command_path_already_terminal() {
         use crate::plugins::ci_monitor::{
@@ -2208,7 +2155,39 @@ notify_target = "team-lead"
         use agent_team_mail_core::schema::{AgentMember, TeamConfig};
         use tempfile::TempDir;
 
+        struct EnvRestoreGuard {
+            key: &'static str,
+            original: Option<String>,
+        }
+
+        impl Drop for EnvRestoreGuard {
+            fn drop(&mut self) {
+                match self.original.take() {
+                    Some(value) => unsafe { std::env::set_var(self.key, value) },
+                    None => unsafe { std::env::remove_var(self.key) },
+                }
+            }
+        }
+
+        struct CurrentDirGuard(std::path::PathBuf);
+
+        impl Drop for CurrentDirGuard {
+            fn drop(&mut self) {
+                std::env::set_current_dir(&self.0).expect("restore current directory");
+            }
+        }
+
         let temp_dir = TempDir::new().unwrap();
+        let _atm_config_guard = EnvRestoreGuard {
+            key: "ATM_CONFIG",
+            original: std::env::var("ATM_CONFIG").ok(),
+        };
+        let _cwd_guard = CurrentDirGuard(std::env::current_dir().unwrap());
+        unsafe {
+            std::env::remove_var("ATM_CONFIG");
+        }
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+
         let teams_root = temp_dir.path().join("teams");
         let team_dir = teams_root.join("dev-team");
         let inboxes_dir = team_dir.join("inboxes");

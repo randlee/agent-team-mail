@@ -1,26 +1,18 @@
 //! GitHub-specific gh_monitor provider logic.
 
-pub(crate) use super::alerts::emit_ci_monitor_message;
-// These schema re-exports keep the legacy gh_monitor tests/builders compiling
-// while AM.6 finishes moving the remaining provider helpers behind the routed surface.
+#[allow(unused_imports)]
+pub(crate) use super::gh_alerts::{
+    emit_ci_monitor_message, emit_ci_not_started_alert, emit_merge_conflict_alert,
+    repo_scope_matches, resolve_ci_alert_routing,
+};
 #[allow(unused_imports)]
 pub(crate) use super::github_schema::{
     GhPrLookupView, GhPrView, GhPullRequest, GhRunJob, GhRunListEntry, GhRunStep, GhRunView,
 };
-use super::helpers::{read_gh_monitor_health, upsert_gh_monitor_health, upsert_gh_monitor_status};
-// These routing re-exports preserve the pre-split gh_monitor call surface for
-// downstream code until the final thin-socket cleanup removes the shim layer.
 #[allow(unused_imports)]
-pub(crate) use super::routing::{
-    notify_ci_not_started as emit_ci_not_started_alert,
-    notify_gh_monitor_health_transition as emit_gh_monitor_health_transition,
-    notify_merge_conflict as emit_merge_conflict_alert, repo_scope_matches,
-    resolve_ci_alert_routing,
-};
-use super::types::GhMonitorHealthUpdate;
-use agent_team_mail_core::daemon_client::{
-    GhMonitorHealth, GhMonitorRequest, GhMonitorStatus, GhMonitorTargetKind,
-};
+pub(crate) use super::health::emit_gh_monitor_health_transition;
+use super::helpers::upsert_gh_monitor_status;
+use agent_team_mail_core::daemon_client::{GhMonitorRequest, GhMonitorStatus, GhMonitorTargetKind};
 use anyhow::Result;
 use tracing::warn;
 
@@ -774,50 +766,4 @@ pub(crate) fn derive_pr_url(
         return Some(format!("{}/pull/{}", repo_base, status_seed.target.trim()));
     }
     None
-}
-
-#[cfg(unix)]
-pub(crate) fn set_gh_monitor_health_state(
-    home: &std::path::Path,
-    team: &str,
-    update: GhMonitorHealthUpdate<'_>,
-) -> Result<GhMonitorHealth> {
-    let mut current = read_gh_monitor_health(home, team)?;
-    let old_availability = current.availability_state.clone();
-
-    if let Some(lifecycle_state) = update.lifecycle_state {
-        current.lifecycle_state = lifecycle_state.to_string();
-    }
-    if let Some(availability_state) = update.availability_state {
-        current.availability_state = availability_state.to_string();
-    }
-    if let Some(in_flight) = update.in_flight {
-        current.in_flight = in_flight;
-    }
-    if let Some(config_state) = update.config_state {
-        current.configured = config_state.configured;
-        current.enabled = config_state.enabled;
-        current.config_source = config_state.config_source.clone();
-        current.config_path = config_state.config_path.clone();
-    }
-    current.updated_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    current.message = update.message;
-
-    if old_availability != current.availability_state {
-        let reason = current
-            .message
-            .clone()
-            .unwrap_or_else(|| "availability changed".to_string());
-        emit_gh_monitor_health_transition(
-            home,
-            team,
-            update.config_cwd,
-            &old_availability,
-            &current.availability_state,
-            &reason,
-        );
-    }
-
-    upsert_gh_monitor_health(home, current.clone())?;
-    Ok(current)
 }
