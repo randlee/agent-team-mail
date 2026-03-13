@@ -14,11 +14,13 @@ use super::service::{fetch_run_details, list_completed_runs};
 use super::types::GhMonitorHealthFile;
 #[cfg(unix)]
 use super::types::GhMonitorHealthUpdate;
+use super::types::GhMonitorStateFile;
 #[cfg(test)]
 use super::types::{CiFilter, CiRunStatus};
 use super::types::{CiJob, CiRunConclusion};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use agent_team_mail_core::context::{GitProvider as GitProviderType, RepoContext};
+use agent_team_mail_core::daemon_client::GhMonitorStatus;
 use agent_team_mail_core::schema::{AgentMember, InboxMessage};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -40,20 +42,6 @@ struct RuntimeHistory {
     job_samples: HashMap<String, Vec<u64>>,
     processed_run_ids: Vec<u64>,
     drift_last_alert_epoch_secs: HashMap<String, i64>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
-struct GhMonitorStateRecord {
-    team: String,
-    state: String,
-    run_id: Option<u64>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
-struct GhMonitorStateFile {
-    records: Vec<GhMonitorStateRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -812,8 +800,16 @@ impl CiMonitorPlugin {
             Ok(raw) => raw,
             Err(_) => return false,
         };
-        let state_file = match serde_json::from_str::<GhMonitorStateFile>(&raw) {
-            Ok(parsed) => parsed,
+        if let Ok(state_file) = serde_json::from_str::<GhMonitorStateFile>(&raw) {
+            return state_file.records.iter().any(|record: &GhMonitorStatus| {
+                record.team == self.config.team
+                    && record.run_id == Some(run_id)
+                    && Self::is_terminal_monitor_state(&record.state)
+            });
+        }
+
+        let legacy = match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(value) => value,
             Err(e) => {
                 warn!(
                     "CI Monitor: Failed to parse gh monitor state {}: {}",
@@ -823,11 +819,20 @@ impl CiMonitorPlugin {
                 return false;
             }
         };
-        state_file.records.iter().any(|record| {
-            record.team == self.config.team
-                && record.run_id == Some(run_id)
-                && Self::is_terminal_monitor_state(&record.state)
-        })
+        legacy
+            .get("records")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|record| {
+                record.get("team").and_then(serde_json::Value::as_str)
+                    == Some(self.config.team.as_str())
+                    && record.get("run_id").and_then(serde_json::Value::as_u64) == Some(run_id)
+                    && record
+                        .get("state")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(Self::is_terminal_monitor_state)
+            })
     }
 
     #[cfg(unix)]
@@ -2142,7 +2147,39 @@ notify_target = "team-lead"
         use agent_team_mail_core::schema::{AgentMember, TeamConfig};
         use tempfile::TempDir;
 
+        struct EnvRestoreGuard {
+            key: &'static str,
+            original: Option<String>,
+        }
+
+        impl Drop for EnvRestoreGuard {
+            fn drop(&mut self) {
+                match self.original.take() {
+                    Some(value) => unsafe { std::env::set_var(self.key, value) },
+                    None => unsafe { std::env::remove_var(self.key) },
+                }
+            }
+        }
+
+        struct CurrentDirGuard(std::path::PathBuf);
+
+        impl Drop for CurrentDirGuard {
+            fn drop(&mut self) {
+                std::env::set_current_dir(&self.0).expect("restore current directory");
+            }
+        }
+
         let temp_dir = TempDir::new().unwrap();
+        let _atm_config_guard = EnvRestoreGuard {
+            key: "ATM_CONFIG",
+            original: std::env::var("ATM_CONFIG").ok(),
+        };
+        let _cwd_guard = CurrentDirGuard(std::env::current_dir().unwrap());
+        unsafe {
+            std::env::remove_var("ATM_CONFIG");
+        }
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+
         let teams_root = temp_dir.path().join("teams");
         let team_dir = teams_root.join("dev-team");
         let inboxes_dir = team_dir.join("inboxes");

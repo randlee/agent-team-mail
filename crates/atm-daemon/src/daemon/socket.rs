@@ -2021,21 +2021,6 @@ async fn handle_launch_command(request_str: &str, launch_tx: &LaunchSender) -> S
 }
 
 #[cfg(all(test, unix))]
-#[allow(dead_code)]
-fn emit_gh_monitor_health_transition(
-    home: &std::path::Path,
-    team: &str,
-    config_cwd: Option<&str>,
-    old_state: &str,
-    new_state: &str,
-    reason: &str,
-) {
-    crate::plugins::ci_monitor::health::emit_gh_monitor_health_transition(
-        home, team, config_cwd, old_state, new_state, reason,
-    )
-}
-
-#[cfg(all(test, unix))]
 fn set_gh_monitor_health_state(
     home: &std::path::Path,
     team: &str,
