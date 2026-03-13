@@ -90,6 +90,12 @@ pub struct CiMonitorPlugin {
     runtime_history: RuntimeHistory,
     /// Persisted runtime history path (initialized in init when enabled).
     runtime_history_path: Option<PathBuf>,
+    /// Test-only: when set, `list_members` inside the DuplicateMember adoption arm
+    /// returns this error message as a `PluginError::Init` instead of calling the
+    /// real roster service.  Allows regression coverage of the `map_err` path without
+    /// filesystem timing tricks.
+    #[cfg(test)]
+    list_members_error: Option<String>,
 }
 
 impl CiMonitorPlugin {
@@ -104,6 +110,8 @@ impl CiMonitorPlugin {
             seen_runs: HashMap::new(),
             runtime_history: RuntimeHistory::default(),
             runtime_history_path: None,
+            #[cfg(test)]
+            list_members_error: None,
         }
     }
 
@@ -128,6 +136,17 @@ impl CiMonitorPlugin {
     #[cfg(test)]
     fn with_runtime_history(mut self, runtime_history: RuntimeHistory) -> Self {
         self.runtime_history = runtime_history;
+        self
+    }
+
+    /// Inject a simulated `list_members` error for the `DuplicateMember` adoption path.
+    ///
+    /// When set, the `init()` roster-verify step returns `PluginError::Init` with the
+    /// supplied message instead of calling the real `RosterService::list_members`.
+    /// This provides a deterministic test seam without filesystem timing tricks.
+    #[cfg(test)]
+    fn with_list_members_error(mut self, msg: impl Into<String>) -> Self {
+        self.list_members_error = Some(msg.into());
         self
     }
 
@@ -1102,6 +1121,15 @@ impl Plugin for CiMonitorPlugin {
                 // same name must not be silently hijacked — cleanup_plugin only purges
                 // rows with agent_type "plugin:gh_monitor", so a mismatched row would
                 // escape cleanup and the plugin would be bound to the wrong entry.
+                #[cfg(test)]
+                if let Some(ref err_msg) = self.list_members_error {
+                    return Err(PluginError::Init {
+                        message: format!(
+                            "Failed to verify existing roster entry for '{name}' in team '{team}': {err_msg}"
+                        ),
+                        source: None,
+                    });
+                }
                 let existing = ctx
                     .roster
                     .list_members(team, Some("gh_monitor"))
@@ -2606,6 +2634,91 @@ notify_target = ["lead", "qa-bot@qa-team"]
 
         // Verify multi-recipient note is included
         assert!(msg.text.contains("Notified: lead@dev-team, qa-bot@qa-team"));
+    }
+
+    /// Regression test: when `add_member` returns `DuplicateMember` and the
+    /// subsequent `list_members` call fails, `init()` must propagate the error
+    /// as `PluginError::Init` with a message containing
+    /// "Failed to verify existing roster entry".
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_init_propagates_list_members_error_on_duplicate() {
+        use crate::plugins::ci_monitor::MockCiProvider;
+        use agent_team_mail_core::schema::{AgentMember, TeamConfig};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let team_name = "dev-team";
+        let team_dir = teams_root.join(team_name);
+        let inboxes_dir = team_dir.join("inboxes");
+        std::fs::create_dir_all(&inboxes_dir).unwrap();
+
+        // Create ci-monitor inbox (required for synthetic member registration).
+        std::fs::write(inboxes_dir.join("ci-monitor.json"), "[]").unwrap();
+
+        // Pre-seed config.json with the synthetic member already present so that
+        // `add_member` detects a duplicate (DuplicateMember) without writing.
+        let synthetic_member = AgentMember {
+            agent_id: format!("ci-monitor@{team_name}"),
+            name: "ci-monitor".to_string(),
+            agent_type: "plugin:gh_monitor".to_string(),
+            model: "synthetic".to_string(),
+            prompt: None,
+            color: None,
+            plan_mode_required: None,
+            joined_at: 1_234_567_890,
+            tmux_pane_id: None,
+            cwd: ".".to_string(),
+            subscriptions: Vec::new(),
+            backend_type: None,
+            is_active: Some(true),
+            last_active: None,
+            session_id: None,
+            external_backend_type: None,
+            external_model: None,
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        let team_config = TeamConfig {
+            name: team_name.to_string(),
+            description: None,
+            created_at: 1_234_567_890,
+            lead_agent_id: format!("lead@{team_name}"),
+            lead_session_id: "session-test".to_string(),
+            members: vec![synthetic_member],
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        std::fs::write(
+            team_dir.join("config.json"),
+            serde_json::to_string(&team_config).unwrap(),
+        )
+        .unwrap();
+
+        // Build a plugin config that points at the pre-seeded team.
+        let toml_str = format!(
+            r#"
+team = "{team_name}"
+agent = "ci-monitor"
+"#
+        );
+        let table: toml::Table = toml::from_str(&toml_str).unwrap();
+        let ctx = create_mock_context_with_repo_config(teams_root.clone(), Some(table), true);
+
+        // Inject the test seam: list_members will return this error message
+        // instead of reading config.json, simulating an I/O failure between
+        // add_member detecting DuplicateMember and the follow-up roster verify.
+        let mut plugin = CiMonitorPlugin::new()
+            .with_provider(Box::new(MockCiProvider::new()))
+            .with_list_members_error("simulated read failure");
+
+        let result = plugin.init(&ctx).await;
+
+        assert!(result.is_err(), "init() must fail when list_members errors");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Failed to verify existing roster entry"),
+            "error message must contain 'Failed to verify existing roster entry', got: {err_msg}"
+        );
     }
 
     #[test]
