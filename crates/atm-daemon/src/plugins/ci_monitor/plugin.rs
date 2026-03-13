@@ -1,13 +1,16 @@
 //! CI Monitor plugin implementation
 
+use super::GitHubActionsProvider;
 use super::config::{CiMonitorConfig, DedupStrategy};
-use super::github::GitHubActionsProvider;
 use super::loader::CiProviderLoader;
 use super::provider::ErasedCiProvider;
 use super::registry::{CiProviderFactory, CiProviderRegistry};
+use super::service::{fetch_run_details, list_completed_runs};
+#[cfg(test)]
+use super::types::{CiFilter, CiRunStatus};
+use super::types::{CiJob, CiRunConclusion};
 #[cfg(unix)]
-use super::types::GhMonitorHealthFile;
-use super::types::{CiFilter, CiJob, CiRunConclusion, CiRunStatus};
+use super::types::{GhMonitorHealthFile, GhMonitorStateFile};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use agent_team_mail_core::context::{GitProvider as GitProviderType, RepoContext};
 use agent_team_mail_core::daemon_client::GhMonitorHealth;
@@ -32,20 +35,6 @@ struct RuntimeHistory {
     job_samples: HashMap<String, Vec<u64>>,
     processed_run_ids: Vec<u64>,
     drift_last_alert_epoch_secs: HashMap<String, i64>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
-struct PluginMonitorStateRecord {
-    team: String,
-    state: String,
-    run_id: Option<u64>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
-struct PluginMonitorStateFile {
-    records: Vec<PluginMonitorStateRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -804,7 +793,7 @@ impl CiMonitorPlugin {
             Ok(raw) => raw,
             Err(_) => return false,
         };
-        let state_file = match serde_json::from_str::<PluginMonitorStateFile>(&raw) {
+        let state_file = match serde_json::from_str::<GhMonitorStateFile>(&raw) {
             Ok(parsed) => parsed,
             Err(e) => {
                 warn!(
@@ -952,7 +941,6 @@ impl CiMonitorPlugin {
     ) {
         let team = Self::team_for_config_error(table, ctx);
         let message = format!("invalid gh_monitor config: {reason}");
-        #[cfg(unix)]
         Self::write_health_record(ctx, &team, "disabled_config_error", &message);
         self.notify_disabled_transition(ctx, &team, &message);
     }
@@ -1190,16 +1178,9 @@ impl Plugin for CiMonitorPlugin {
                     // Evict old dedup cache entries
                     self.evict_old_dedup_entries();
 
-                    // Build filter from config (no branch filter - we'll filter client-side)
-                    let filter = CiFilter {
-                        status: Some(CiRunStatus::Completed),
-                        per_page: Some(20),
-                        ..Default::default()
-                    };
-
                     // Fetch all completed runs
                     let runs = match self.provider.as_ref() {
-                        Some(provider) => provider.list_runs(&filter).await,
+                        Some(provider) => list_completed_runs(provider.as_ref()).await,
                         None => {
                             warn!("CI Monitor: Provider disappeared during run");
                             break;
@@ -1227,7 +1208,7 @@ impl Plugin for CiMonitorPlugin {
 
                                 // Fetch full run details with jobs
                                 let full_run_result = match self.provider.as_ref() {
-                                    Some(provider) => provider.get_run(run.id).await,
+                                    Some(provider) => fetch_run_details(provider.as_ref(), run.id).await,
                                     None => {
                                         warn!("CI Monitor: Provider disappeared during run");
                                         break;
@@ -2076,7 +2057,6 @@ repo = "config-owner/config-repo"
         assert_eq!(member.cwd, temp_dir.path().to_string_lossy());
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn test_init_without_git_or_config_repo_writes_disabled_init_health_record() {
         use crate::plugins::ci_monitor::MockCiProvider;
@@ -2276,11 +2256,28 @@ poll_interval_secs = 10
         .unwrap();
         let ctx = create_mock_context_with_config(teams_root.clone(), Some(table));
 
-        let state_path = CiMonitorPlugin::gh_monitor_state_path(&ctx);
-        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &state_path,
-            r#"{"records":[{"team":"dev-team","state":"failure","run_id":42}]}"#,
+        crate::plugins::ci_monitor::helpers::upsert_gh_monitor_status(
+            teams_root.as_path(),
+            agent_team_mail_core::daemon_client::GhMonitorStatus {
+                team: "dev-team".to_string(),
+                configured: true,
+                enabled: true,
+                config_source: Some("repo".to_string()),
+                config_path: Some(
+                    std::env::temp_dir()
+                        .join("test-repo")
+                        .join(".atm.toml")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                target_kind: agent_team_mail_core::daemon_client::GhMonitorTargetKind::Run,
+                target: "42".to_string(),
+                state: "failure".to_string(),
+                run_id: Some(42),
+                reference: None,
+                updated_at: "2026-03-12T00:00:00Z".to_string(),
+                message: None,
+            },
         )
         .unwrap();
 
