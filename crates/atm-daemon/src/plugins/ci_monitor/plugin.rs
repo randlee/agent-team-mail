@@ -5,9 +5,12 @@ use super::github::GitHubActionsProvider;
 use super::loader::CiProviderLoader;
 use super::provider::ErasedCiProvider;
 use super::registry::{CiProviderFactory, CiProviderRegistry};
+#[cfg(unix)]
+use super::types::GhMonitorHealthFile;
 use super::types::{CiFilter, CiJob, CiRunConclusion, CiRunStatus};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use agent_team_mail_core::context::{GitProvider as GitProviderType, RepoContext};
+use agent_team_mail_core::daemon_client::GhMonitorHealth;
 use agent_team_mail_core::schema::{AgentMember, InboxMessage, TeamConfig};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -33,24 +36,7 @@ struct RuntimeHistory {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 #[serde(default)]
-struct GhMonitorHealthRecord {
-    team: String,
-    lifecycle_state: String,
-    availability_state: String,
-    in_flight: u64,
-    updated_at: String,
-    message: Option<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
-struct GhMonitorHealthFile {
-    records: Vec<GhMonitorHealthRecord>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
-struct GhMonitorStateRecord {
+struct PluginMonitorStateRecord {
     team: String,
     state: String,
     run_id: Option<u64>,
@@ -58,8 +44,8 @@ struct GhMonitorStateRecord {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 #[serde(default)]
-struct GhMonitorStateFile {
-    records: Vec<GhMonitorStateRecord>,
+struct PluginMonitorStateFile {
+    records: Vec<PluginMonitorStateRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -818,7 +804,7 @@ impl CiMonitorPlugin {
             Ok(raw) => raw,
             Err(_) => return false,
         };
-        let state_file = match serde_json::from_str::<GhMonitorStateFile>(&raw) {
+        let state_file = match serde_json::from_str::<PluginMonitorStateFile>(&raw) {
             Ok(parsed) => parsed,
             Err(e) => {
                 warn!(
@@ -848,6 +834,7 @@ impl CiMonitorPlugin {
             .unwrap_or_else(|| ctx.config.core.default_team.clone())
     }
 
+    #[cfg(unix)]
     fn write_health_record(
         ctx: &PluginContext,
         team: &str,
@@ -874,8 +861,12 @@ impl CiMonitorPlugin {
             Err(_) => GhMonitorHealthFile::default(),
         };
 
-        let updated_record = GhMonitorHealthRecord {
+        let updated_record = GhMonitorHealth {
             team: team.to_string(),
+            configured: false,
+            enabled: false,
+            config_source: None,
+            config_path: None,
             lifecycle_state: "running".to_string(),
             availability_state: availability_state.to_string(),
             in_flight: 0,
@@ -961,6 +952,7 @@ impl CiMonitorPlugin {
     ) {
         let team = Self::team_for_config_error(table, ctx);
         let message = format!("invalid gh_monitor config: {reason}");
+        #[cfg(unix)]
         Self::write_health_record(ctx, &team, "disabled_config_error", &message);
         self.notify_disabled_transition(ctx, &team, &message);
     }
@@ -2084,6 +2076,7 @@ repo = "config-owner/config-repo"
         assert_eq!(member.cwd, temp_dir.path().to_string_lossy());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_init_without_git_or_config_repo_writes_disabled_init_health_record() {
         use crate::plugins::ci_monitor::MockCiProvider;
