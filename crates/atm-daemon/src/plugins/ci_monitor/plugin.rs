@@ -2267,6 +2267,7 @@ repo = "config-owner/config-repo"
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     #[serial_test::serial]
     async fn test_init_rejects_non_plugin_member_with_same_name() {
@@ -2388,6 +2389,7 @@ repo = "config-owner/config-repo"
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_init_without_git_or_config_repo_writes_disabled_init_health_record() {
         use crate::plugins::ci_monitor::MockCiProvider;
