@@ -6,7 +6,7 @@ This plan defines deterministic coverage for Phase AD contracts:
 - Python-only product runtime script policy (`docs/requirements.md` §4.9.3a)
 - Runtime detection + auto-install contract (`docs/requirements.md` §4.9.5)
 - GH init and disabled guidance requirements (`docs/requirements.md` §4.11)
-- GH monitor dogfood regressions (`docs/plugins/ci-monitor/requirements.md` GH-CI-FR-19..24, GH-CI-TR-7)
+- GH monitor dogfood regressions (`docs/ci-monitoring/requirements.md` GH-CI-FR-19..24, GH-CI-TR-7)
 
 ## Sprint Mapping
 
