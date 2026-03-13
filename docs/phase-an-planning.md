@@ -88,11 +88,31 @@ Move `MockCiProvider`, `MockCall`, `create_test_*`, and similar helpers behind
 `#[cfg(test)]` or into test-only modules.
 
 Deliverables:
-- `mod.rs` exports only production interfaces/types
-- test helpers are no longer visible from production builds
+- inventory and fence the current test-only symbols before extraction work:
+  - `MockCall` (`crates/atm-daemon/src/plugins/ci_monitor/mock_provider.rs`)
+    -> test-only support module / extracted crate test-support
+  - `MockCiProvider` (`crates/atm-daemon/src/plugins/ci_monitor/mock_provider.rs`)
+    -> test-only support module / extracted crate test-support
+  - `create_test_job`
+    (`crates/atm-daemon/src/plugins/ci_monitor/mock_provider.rs`)
+    -> test-only support module / extracted crate test-support
+  - `create_test_run`
+    (`crates/atm-daemon/src/plugins/ci_monitor/mock_provider.rs`)
+    -> test-only support module / extracted crate test-support
+  - `create_test_step`
+    (`crates/atm-daemon/src/plugins/ci_monitor/mock_provider.rs`)
+    -> test-only support module / extracted crate test-support
+- `mod.rs` export inventory identifies which symbols stay production-facing and
+  which become test-only
+- the `SystemTime::now().duration_since(UNIX_EPOCH).unwrap()` path in
+  `plugin.rs` is identified for replacement with a fallible/descriptive
+  alternative before extraction work proceeds
 
 Acceptance:
-- production `mod.rs` no longer re-exports test-only types
+- AN.0b is inventory and fencing only; no production symbol moves land in this
+  sprint
+- production `mod.rs` no longer re-exports `MockCall`, `MockCiProvider`,
+  `create_test_job`, `create_test_run`, or `create_test_step`
 - tests compile without relying on production-surface leakage
 
 ## Sprint Sizing
@@ -134,9 +154,12 @@ Deliverables:
 - explicit CI-domain errors replace `PluginError` leakage in reusable modules
 
 Acceptance:
-- `types.rs` and adjacent public type surfaces compile without importing
-  `crate::plugin::PluginError`
+- `types.rs`, `provider.rs`, and `registry.rs` are all in scope for the sprint
+  and no longer expose `crate::plugin::PluginError` in their public API
 - provider/registry/service APIs use CI-domain types only
+- no `PluginError` + `CiError` coexistence lands in the same ci-monitor-core
+  compilation unit; this sprint removes `PluginError` from all reusable
+  ci-monitor public APIs instead of introducing a dual-error transition period
 - no behavior changes in existing CI-monitor tests
 
 ### AN.2 — Service Split
@@ -196,6 +219,8 @@ Acceptance:
 - production builds do not expose `MockCiProvider`, `MockCall`, or
   `create_test_*`
 - module surface is small enough to serve as a future crate `lib.rs`
+- unlike AN.0b, AN.4 owns the actual production public-API stabilization and
+  final export narrowing needed for extraction readiness
 - AN.4 begins only after AN.3 lands; these sprints are intentionally serial
   because both reshape the CI-monitor module surface
 
@@ -236,34 +261,47 @@ Acceptance:
 - extracted crate does not depend on daemon plugin bootstrap/socket code
 - daemon adapter builds cleanly against the extracted core
 - tests are split cleanly between crate-core tests and daemon-adapter tests
+- extracted crate `Cargo.toml` has zero path or version dependencies on
+  `atm-daemon`
+- extracted crate builds with `atm-daemon` absent from the workspace
+- no daemon wire types leak into the extracted crate through dev-dependencies,
+  test helpers, or transitive public dependencies
 
-### AN.7 — Multi-repo `atm gh` Command Contract
+### AN.7 — Multi-repo `atm gh`
 
-Define the daemon-side multi-repo command contract for `atm gh` without pushing
-repo selection or cwd discovery into the extracted CI-monitor core.
+**Issue**: `#730`
+**Branch**: `feature/pAN-s7-multi-repo-gh`
+**PR target**: `integrate/phase-AN`
+**Depends on**: AN.6 (extracted `ci-monitor-core`)
+
+Title: cwd inference, `--repo` flag, caller routing, `--cc` flag
 
 Scope:
-- define how `atm gh` resolves repo/root context in single-repo and multi-repo
-  daemon mode
-- keep repo discovery, config lookup, and cwd/default resolution in the daemon
-  adapter layer
+- add repo-selection and routing semantics to daemon-backed `atm gh` commands
+- keep repo discovery, config lookup, cwd inference, and caller routing in the
+  daemon adapter layer
 - require reusable CI-monitor core APIs to receive explicit resolved repo
-  context rather than discovering repo ownership themselves
-- align planning and requirements docs on ambiguous-repo behavior
+  context and recipients rather than discovering them internally
 
 Deliverables:
-- explicit multi-repo `atm gh` command contract
-- documented daemon-adapter repo-selection boundary
-- no reusable CI-monitor core module performs cwd/home/repo autodiscovery
+- cwd inference: if no `--repo` flag is given, infer repo from the cwd git
+  remote; error if cwd is not a git repo and no `--repo` is provided
+- `--repo` flag: accepts `owner/repo` or full GitHub URL and overrides cwd
+  inference on all `atm gh` subcommands
+- caller routing: CI monitor notifications always route to the calling agent
+  identity; never to a hardcoded team member
+- `--cc` flag: optional repeatable ATM recipients for copied monitor
+  notifications
 
 Acceptance:
-- commands that require repo context either resolve it deterministically or
-  fail with an actionable ambiguous-repo error
-- `atm gh` status surfaces report whether repo context came from an explicit
-  selector, current repo, or single configured default
-- extracted CI-monitor core accepts resolved repo context as input and does not
-  own repo/root discovery logic
-- requirements and planning docs agree on multi-repo `atm gh` behavior
+- GH-MULTI-FR-01: cwd inference resolves repo from git remote without
+  `--repo`
+- GH-MULTI-FR-02: `--repo` accepts `owner/repo` or full GitHub URL and
+  overrides cwd inference
+- GH-MULTI-FR-03: monitor notifications route to caller identity by default
+- GH-MULTI-FR-04: `--cc` delivers copies to named ATM recipients
+- unit tests cover each FR
+- `cargo clippy -- -D warnings` stays clean
 
 ## Dependency Ordering
 
@@ -273,6 +311,8 @@ Acceptance:
   types.
 - AN.2 must land before AN.3 because traits should be introduced on top of the
   service boundary, not before it exists.
+- AN.4 must land before AN.5 because the transport adapter split should
+  operate on an already-narrowed production surface.
 - AN.3 must land before AN.5 because the transport adapter can only be thin if
   service dependencies are already injectable.
 - AN.4 is serial after AN.3; they must not run in parallel.

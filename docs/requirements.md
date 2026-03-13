@@ -2551,22 +2551,7 @@ One-shot PR query commands (no daemon required):
 - `atm gh pr report <pr-number> [--json] [--template <path>]` returns detailed per-PR check report.
 - `atm gh pr init-report [--output <path>]` writes a starter report template for customization.
 
-Multi-repo command contract:
-- `atm gh` command behavior must remain correct when one daemon hosts multiple
-  repos/roots.
-- Commands that require repo context must either:
-  - use an explicit repo selector, or
-  - resolve a single deterministic repo from current context/config, or
-  - fail with an actionable ambiguous-repo error that tells the operator how to
-    disambiguate.
-- `atm gh` and `atm gh status` must report how repo context was chosen:
-  explicit selector, current repo, or single configured default.
-- `atm gh init` must update the selected repo-scoped CI-monitor config only; it
-  must not silently mutate sibling repo configs in multi-repo mode.
-- Reusable CI-monitor core code must not discover repo/root context from cwd,
-  home-directory scans, or daemon-global config. Repo selection is a daemon
-  adapter responsibility, and resolved repo context must be passed into the
-  core explicitly.
+Multi-repo `atm gh` support requirements are defined in §5.12.
 
 Operator status UX contract:
 - `atm gh` must not fail argument parsing and must always return a concise status
@@ -2897,6 +2882,34 @@ Required acceptance tests:
   - if log parent is `.../logs`, spool is sibling `.../log-spool`,
   - otherwise spool is `<log_parent>/log-spool`.
 - Path derivation behavior must be deterministic and covered by integration tests.
+
+### 5.12 Multi-Repo `atm gh` Support
+
+Reference issue: `#730`
+
+- **GH-MULTI-FR-01 — cwd inference**:
+  when no `--repo` flag is provided, `atm gh` commands that require repo
+  context must resolve the repo from the current working directory's git
+  remote. If cwd is not a git repo and no explicit repo is provided, the
+  command must fail with actionable guidance.
+
+- **GH-MULTI-FR-02 — `--repo` override**:
+  `--repo` must accept either `owner/repo` or a full GitHub URL and override
+  cwd inference on all `atm gh` subcommands that operate on a repo target.
+
+- **GH-MULTI-FR-03 — caller routing**:
+  CI monitor notifications initiated from `atm gh` commands must route to the
+  calling ATM agent identity by default, not to a hard-coded team member or
+  static monitor recipient.
+
+- **GH-MULTI-FR-04 — `--cc` copies**:
+  `--cc <member>` must deliver a copy of each monitor notification to the named
+  ATM recipient. The flag must be repeatable so one command can notify multiple
+  additional recipients.
+
+- Repo selection, cwd inference, and caller routing remain daemon-adapter
+  responsibilities. Reusable CI-monitor core code must receive resolved repo
+  context and recipients explicitly rather than discovering them internally.
 
 ---
 
