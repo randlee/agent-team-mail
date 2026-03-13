@@ -2,9 +2,9 @@
 
 mod config;
 #[cfg(unix)]
-pub(crate) mod gh_cli;
-#[cfg(unix)]
 pub(crate) mod gh_alerts;
+#[cfg(unix)]
+pub(crate) mod gh_cli;
 #[cfg(unix)]
 pub(crate) mod gh_monitor;
 mod github_provider;
