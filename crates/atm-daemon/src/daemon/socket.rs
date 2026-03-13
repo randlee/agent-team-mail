@@ -24,10 +24,7 @@
 use agent_team_mail_core::control::{
     CONTROL_SCHEMA_VERSION, ContentRef, ControlAck, ControlAction, ControlRequest, ControlResult,
 };
-use agent_team_mail_core::daemon_client::{
-    CanonicalMemberState, GhMonitorControlRequest, GhMonitorRequest, GhStatusRequest, LaunchConfig,
-    LaunchResult,
-};
+use agent_team_mail_core::daemon_client::{CanonicalMemberState, LaunchConfig, LaunchResult};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::logging_event::LogEventV1;
 use agent_team_mail_core::schema::{AgentMember, TeamConfig};
@@ -46,11 +43,10 @@ use crate::daemon::pid_backend_validation::{
 };
 
 use crate::daemon::dedup::{DedupeKey, DurableDedupeStore};
+use crate::daemon::gh_monitor_router;
 use crate::daemon::session_registry::{MarkDeadForSessionOutcome, SharedSessionRegistry};
-#[cfg(unix)]
-use crate::plugins::ci_monitor::service;
 #[cfg(all(test, unix))]
-use crate::plugins::ci_monitor::{gh_alerts, gh_monitor};
+use crate::plugins::ci_monitor::gh_monitor;
 use crate::plugins::worker_adapter::AgentState;
 
 #[cfg(test)]
@@ -60,7 +56,9 @@ use crate::plugins::ci_monitor::helpers::{
 #[cfg(test)]
 use crate::plugins::ci_monitor::types::GhMonitorHealthUpdate;
 #[cfg(test)]
-use agent_team_mail_core::daemon_client::{GhMonitorHealth, GhMonitorStatus, GhMonitorTargetKind};
+use agent_team_mail_core::daemon_client::{
+    GhMonitorHealth, GhMonitorRequest, GhMonitorStatus, GhMonitorTargetKind,
+};
 #[cfg(test)]
 use agent_team_mail_core::schema::InboxMessage;
 
@@ -472,14 +470,10 @@ async fn handle_connection(
     // use async channel communication with the WorkerAdapterPlugin.
     let response = if is_launch_command(request_str) {
         handle_launch_command(request_str, &launch_tx).await
-    } else if is_gh_monitor_command(request_str) {
-        handle_gh_monitor_command(request_str, &home).await
-    } else if is_gh_monitor_control_command(request_str) {
-        handle_gh_monitor_control_command(request_str, &home).await
-    } else if is_gh_monitor_health_command(request_str) {
-        handle_gh_monitor_health_command(request_str, &home).await
-    } else if is_gh_status_command(request_str) {
-        handle_gh_status_command(request_str, &home).await
+    } else if let Some(response) =
+        gh_monitor_router::maybe_route_async_command(request_str, &home).await
+    {
+        response
     } else if is_control_command(request_str) {
         handle_control_command(
             request_str,
@@ -555,30 +549,30 @@ fn is_control_command(request_str: &str) -> bool {
 
 /// Quickly determine if a raw JSON line is a `"gh-monitor"` command.
 #[cfg(unix)]
+#[cfg_attr(not(test), allow(dead_code))]
 fn is_gh_monitor_command(request_str: &str) -> bool {
-    request_str.contains(r#""command":"gh-monitor""#)
-        || request_str.contains(r#""command": "gh-monitor""#)
+    gh_monitor_router::is_gh_monitor_command(request_str)
 }
 
 /// Quickly determine if a raw JSON line is a `"gh-status"` command.
 #[cfg(unix)]
+#[cfg_attr(not(test), allow(dead_code))]
 fn is_gh_status_command(request_str: &str) -> bool {
-    request_str.contains(r#""command":"gh-status""#)
-        || request_str.contains(r#""command": "gh-status""#)
+    gh_monitor_router::is_gh_status_command(request_str)
 }
 
 /// Quickly determine if a raw JSON line is a `"gh-monitor-control"` command.
 #[cfg(unix)]
+#[cfg_attr(not(test), allow(dead_code))]
 fn is_gh_monitor_control_command(request_str: &str) -> bool {
-    request_str.contains(r#""command":"gh-monitor-control""#)
-        || request_str.contains(r#""command": "gh-monitor-control""#)
+    gh_monitor_router::is_gh_monitor_control_command(request_str)
 }
 
 /// Quickly determine if a raw JSON line is a `"gh-monitor-health"` command.
 #[cfg(unix)]
+#[cfg_attr(not(test), allow(dead_code))]
 fn is_gh_monitor_health_command(request_str: &str) -> bool {
-    request_str.contains(r#""command":"gh-monitor-health""#)
-        || request_str.contains(r#""command": "gh-monitor-health""#)
+    gh_monitor_router::is_gh_monitor_health_command(request_str)
 }
 
 /// Quickly determine if a raw JSON line is a `"hook-event"` command.
@@ -2036,7 +2030,7 @@ fn emit_gh_monitor_health_transition(
     new_state: &str,
     reason: &str,
 ) {
-    gh_alerts::emit_gh_monitor_health_transition(
+    gh_monitor::emit_gh_monitor_health_transition(
         home, team, config_cwd, old_state, new_state, reason,
     )
 }
@@ -2073,277 +2067,63 @@ type GhRunListEntry = gh_monitor::GhRunListEntry;
 type GhRunTerminalState = gh_monitor::GhRunTerminalState;
 
 #[cfg(unix)]
+#[cfg_attr(not(test), allow(dead_code))]
 async fn handle_gh_monitor_command(request_str: &str, home: &std::path::Path) -> SocketResponse {
-    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
-
-    let request: SocketRequest = match serde_json::from_str(request_str) {
-        Ok(r) => r,
-        Err(e) => {
-            return make_error_response(
-                "unknown",
-                "INVALID_REQUEST",
-                &format!("Failed to parse gh-monitor request: {e}"),
-            );
-        }
-    };
-
-    if request.version != PROTOCOL_VERSION {
-        return make_error_response(
-            &request.request_id,
-            SOCKET_ERROR_VERSION_MISMATCH,
-            &format!(
-                "Unsupported protocol version {}; server supports {}",
-                request.version, PROTOCOL_VERSION
-            ),
-        );
-    }
-
-    let gh_request: GhMonitorRequest = match serde_json::from_value(request.payload.clone()) {
-        Ok(payload) => payload,
-        Err(e) => {
-            return make_error_response(
-                &request.request_id,
-                SOCKET_ERROR_INVALID_PAYLOAD,
-                &format!("Failed to parse gh-monitor payload: {e}"),
-            );
-        }
-    };
-
-    match service::monitor_request(home, &gh_request).await {
-        Ok(status) => make_ok_response(
-            &request.request_id,
-            serde_json::to_value(status).unwrap_or_default(),
-        ),
-        Err(err) => make_error_response(&request.request_id, err.code, &err.message),
-    }
+    gh_monitor_router::handle_gh_monitor_command(request_str, home).await
 }
 
 #[cfg(unix)]
+#[cfg_attr(not(test), allow(dead_code))]
 async fn handle_gh_monitor_control_command(
     request_str: &str,
     home: &std::path::Path,
 ) -> SocketResponse {
-    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
-
-    let request: SocketRequest = match serde_json::from_str(request_str) {
-        Ok(r) => r,
-        Err(e) => {
-            return make_error_response(
-                "unknown",
-                "INVALID_REQUEST",
-                &format!("Failed to parse gh-monitor-control request: {e}"),
-            );
-        }
-    };
-    if request.version != PROTOCOL_VERSION {
-        return make_error_response(
-            &request.request_id,
-            SOCKET_ERROR_VERSION_MISMATCH,
-            &format!(
-                "Unsupported protocol version {}; server supports {}",
-                request.version, PROTOCOL_VERSION
-            ),
-        );
-    }
-
-    let control: GhMonitorControlRequest = match serde_json::from_value(request.payload.clone()) {
-        Ok(payload) => payload,
-        Err(e) => {
-            return make_error_response(
-                &request.request_id,
-                SOCKET_ERROR_INVALID_PAYLOAD,
-                &format!("Failed to parse gh-monitor-control payload: {e}"),
-            );
-        }
-    };
-    match service::control_request(home, &control).await {
-        Ok(health) => make_ok_response(
-            &request.request_id,
-            serde_json::to_value(health).unwrap_or_default(),
-        ),
-        Err(err) => make_error_response(&request.request_id, err.code, &err.message),
-    }
+    gh_monitor_router::handle_gh_monitor_control_command(request_str, home).await
 }
 
 #[cfg(unix)]
+#[cfg_attr(not(test), allow(dead_code))]
 async fn handle_gh_monitor_health_command(
     request_str: &str,
     home: &std::path::Path,
 ) -> SocketResponse {
-    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
-
-    let request: SocketRequest = match serde_json::from_str(request_str) {
-        Ok(r) => r,
-        Err(e) => {
-            return make_error_response(
-                "unknown",
-                "INVALID_REQUEST",
-                &format!("Failed to parse gh-monitor-health request: {e}"),
-            );
-        }
-    };
-    if request.version != PROTOCOL_VERSION {
-        return make_error_response(
-            &request.request_id,
-            SOCKET_ERROR_VERSION_MISMATCH,
-            &format!(
-                "Unsupported protocol version {}; server supports {}",
-                request.version, PROTOCOL_VERSION
-            ),
-        );
-    }
-
-    let team = request
-        .payload
-        .get("team")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    let config_cwd = request
-        .payload
-        .get("config_cwd")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    if team.is_empty() {
-        return make_error_response(
-            &request.request_id,
-            "MISSING_PARAMETER",
-            "Missing required payload field: 'team'",
-        );
-    }
-
-    match service::health_request(home, &team, config_cwd.as_deref()) {
-        Ok(health) => make_ok_response(
-            &request.request_id,
-            serde_json::to_value(health).unwrap_or_default(),
-        ),
-        Err(err) => make_error_response(&request.request_id, err.code, &err.message),
-    }
+    gh_monitor_router::handle_gh_monitor_health_command(request_str, home).await
 }
 
 #[cfg(not(unix))]
+#[cfg_attr(not(test), allow(dead_code))]
 async fn handle_gh_monitor_command(request_str: &str, _home: &std::path::Path) -> SocketResponse {
-    let request_id = serde_json::from_str::<serde_json::Value>(request_str)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("request_id")
-                .and_then(|request_id| request_id.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-    make_error_response(
-        &request_id,
-        "UNSUPPORTED_PLATFORM",
-        "gh-monitor commands require Unix daemon transport",
-    )
+    gh_monitor_router::handle_gh_monitor_command(request_str, _home).await
 }
 
 #[cfg(not(unix))]
+#[cfg_attr(not(test), allow(dead_code))]
 async fn handle_gh_monitor_control_command(
     request_str: &str,
     _home: &std::path::Path,
 ) -> SocketResponse {
-    let request_id = serde_json::from_str::<serde_json::Value>(request_str)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("request_id")
-                .and_then(|request_id| request_id.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-    make_error_response(
-        &request_id,
-        "UNSUPPORTED_PLATFORM",
-        "gh-monitor-control commands require Unix daemon transport",
-    )
+    gh_monitor_router::handle_gh_monitor_control_command(request_str, _home).await
 }
 
 #[cfg(not(unix))]
+#[cfg_attr(not(test), allow(dead_code))]
 async fn handle_gh_monitor_health_command(
     request_str: &str,
     _home: &std::path::Path,
 ) -> SocketResponse {
-    let request_id = serde_json::from_str::<serde_json::Value>(request_str)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("request_id")
-                .and_then(|request_id| request_id.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-    make_error_response(
-        &request_id,
-        "UNSUPPORTED_PLATFORM",
-        "gh-monitor-health commands require Unix daemon transport",
-    )
+    gh_monitor_router::handle_gh_monitor_health_command(request_str, _home).await
 }
 
 #[cfg(unix)]
+#[cfg_attr(not(test), allow(dead_code))]
 async fn handle_gh_status_command(request_str: &str, home: &std::path::Path) -> SocketResponse {
-    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
-
-    let request: SocketRequest = match serde_json::from_str(request_str) {
-        Ok(r) => r,
-        Err(e) => {
-            return make_error_response(
-                "unknown",
-                "INVALID_REQUEST",
-                &format!("Failed to parse gh-status request: {e}"),
-            );
-        }
-    };
-
-    if request.version != PROTOCOL_VERSION {
-        return make_error_response(
-            &request.request_id,
-            SOCKET_ERROR_VERSION_MISMATCH,
-            &format!(
-                "Unsupported protocol version {}; server supports {}",
-                request.version, PROTOCOL_VERSION
-            ),
-        );
-    }
-
-    let gh_request: GhStatusRequest = match serde_json::from_value(request.payload.clone()) {
-        Ok(payload) => payload,
-        Err(e) => {
-            return make_error_response(
-                &request.request_id,
-                SOCKET_ERROR_INVALID_PAYLOAD,
-                &format!("Failed to parse gh-status payload: {e}"),
-            );
-        }
-    };
-
-    match service::status_request(home, &gh_request) {
-        Ok(status) => make_ok_response(
-            &request.request_id,
-            serde_json::to_value(status).unwrap_or_default(),
-        ),
-        Err(err) => make_error_response(&request.request_id, err.code, &err.message),
-    }
+    gh_monitor_router::handle_gh_status_command(request_str, home).await
 }
 
 #[cfg(not(unix))]
+#[cfg_attr(not(test), allow(dead_code))]
 async fn handle_gh_status_command(request_str: &str, _home: &std::path::Path) -> SocketResponse {
-    let request_id = serde_json::from_str::<serde_json::Value>(request_str)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("request_id")
-                .and_then(|request_id| request_id.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-    make_error_response(
-        &request_id,
-        "UNSUPPORTED_PLATFORM",
-        "gh-status commands require Unix daemon transport",
-    )
+    gh_monitor_router::handle_gh_status_command(request_str, _home).await
 }
 
 #[cfg(all(test, unix))]
@@ -2482,7 +2262,7 @@ fn emit_ci_monitor_message(
     text: &str,
     message_id: Option<String>,
 ) {
-    gh_alerts::emit_ci_monitor_message(home, from_agent, targets, summary, text, message_id)
+    gh_monitor::emit_ci_monitor_message(home, from_agent, targets, summary, text, message_id)
 }
 
 #[cfg(all(test, unix))]
@@ -2548,7 +2328,7 @@ fn emit_ci_not_started_alert(
     status: &GhMonitorStatus,
     config_cwd: Option<&str>,
 ) {
-    gh_alerts::emit_ci_not_started_alert(home, status, config_cwd)
+    gh_monitor::emit_ci_not_started_alert(home, status, config_cwd)
 }
 
 #[cfg(all(test, unix))]
@@ -2561,7 +2341,7 @@ fn emit_merge_conflict_alert(
     run_conclusion: Option<&str>,
     config_cwd: Option<&str>,
 ) {
-    gh_alerts::emit_merge_conflict_alert(
+    gh_monitor::emit_merge_conflict_alert(
         home,
         status,
         pr_url,
@@ -2578,13 +2358,13 @@ fn resolve_ci_alert_routing(
     config_cwd: Option<&str>,
     expected_repo_slug: Option<&str>,
 ) -> (String, Vec<(String, String)>) {
-    gh_alerts::resolve_ci_alert_routing(home, team, config_cwd, expected_repo_slug)
+    gh_monitor::resolve_ci_alert_routing(home, team, config_cwd, expected_repo_slug)
 }
 
 #[cfg(all(test, unix))]
 #[allow(dead_code)]
 fn repo_scope_matches(configured: &str, expected: &str) -> bool {
-    gh_alerts::repo_scope_matches(configured, expected)
+    gh_monitor::repo_scope_matches(configured, expected)
 }
 
 /// Handle the `"control"` command asynchronously.
@@ -3140,30 +2920,13 @@ fn parse_and_dispatch(
             SOCKET_ERROR_INTERNAL_ERROR,
             "stream-event command should have been handled by the async path",
         ),
-        // "gh-monitor" is handled asynchronously before parse_and_dispatch is called.
-        "gh-monitor" => make_error_response(
-            &request.request_id,
-            SOCKET_ERROR_INTERNAL_ERROR,
-            "gh-monitor command should have been handled by the async path",
-        ),
-        // "gh-status" is handled asynchronously before parse_and_dispatch is called.
-        "gh-status" => make_error_response(
-            &request.request_id,
-            SOCKET_ERROR_INTERNAL_ERROR,
-            "gh-status command should have been handled by the async path",
-        ),
-        // "gh-monitor-control" is handled asynchronously before parse_and_dispatch is called.
-        "gh-monitor-control" => make_error_response(
-            &request.request_id,
-            SOCKET_ERROR_INTERNAL_ERROR,
-            "gh-monitor-control command should have been handled by the async path",
-        ),
-        // "gh-monitor-health" is handled asynchronously before parse_and_dispatch is called.
-        "gh-monitor-health" => make_error_response(
-            &request.request_id,
-            SOCKET_ERROR_INTERNAL_ERROR,
-            "gh-monitor-health command should have been handled by the async path",
-        ),
+        // gh-monitor family commands are handled asynchronously before
+        // parse_and_dispatch is called. If one reaches this sync path, return a
+        // clear internal error from the router boundary.
+        "gh-monitor" | "gh-status" | "gh-monitor-control" | "gh-monitor-health" => {
+            gh_monitor_router::async_dispatch_error(&request.request_id, request.command.as_str())
+                .expect("gh-monitor async-dispatch error should exist for known commands")
+        }
         other => make_error_response(
             &request.request_id,
             "UNKNOWN_COMMAND",
