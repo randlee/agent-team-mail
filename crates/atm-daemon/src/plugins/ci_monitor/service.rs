@@ -17,12 +17,14 @@ use anyhow::Result;
 use sc_observability::SOCKET_ERROR_INTERNAL_ERROR;
 use tracing::warn;
 
+#[cfg(unix)]
 #[derive(Debug, Clone)]
 pub(crate) struct CiMonitorServiceError {
     pub(crate) code: &'static str,
     pub(crate) message: String,
 }
 
+#[cfg(unix)]
 impl CiMonitorServiceError {
     fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
@@ -36,6 +38,7 @@ impl CiMonitorServiceError {
     }
 }
 
+#[cfg(unix)]
 pub(crate) type CiMonitorServiceResult<T> = std::result::Result<T, CiMonitorServiceError>;
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1788,4 +1791,167 @@ pub(crate) fn set_gh_monitor_health_state(
 
     upsert_gh_monitor_health(home, current.clone())?;
     Ok(current)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::plugins::ci_monitor::test_support::{
+        EnvGuard, install_fake_gh_script, write_gh_monitor_config,
+    };
+    use serial_test::serial;
+    use tempfile::TempDir;
+
+    fn run_monitor_status(team: &str, target: &str, run_id: u64) -> GhMonitorStatus {
+        GhMonitorStatus {
+            team: team.to_string(),
+            configured: true,
+            enabled: true,
+            config_source: None,
+            config_path: None,
+            target_kind: GhMonitorTargetKind::Run,
+            target: target.to_string(),
+            state: "monitoring".to_string(),
+            run_id: Some(run_id),
+            reference: None,
+            updated_at: "2026-03-13T00:00:00Z".to_string(),
+            message: Some("seeded".to_string()),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_status_request_returns_seeded_run_monitor_status() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_gh_monitor_config(temp.path(), "atm-dev");
+        upsert_gh_monitor_status(temp.path(), run_monitor_status("atm-dev", "456", 456)).unwrap();
+
+        let req = GhStatusRequest {
+            team: "atm-dev".to_string(),
+            target_kind: GhMonitorTargetKind::Run,
+            target: "456".to_string(),
+            reference: None,
+            config_cwd: None,
+        };
+
+        let status = status_request(temp.path(), &req).expect("status request should succeed");
+        assert_eq!(status.target_kind, GhMonitorTargetKind::Run);
+        assert_eq!(status.target, "456");
+        assert_eq!(status.run_id, Some(456));
+        assert_eq!(status.state, "monitoring");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_monitor_request_pr_start_and_control_stop() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_gh_monitor_config(temp.path(), "atm-dev");
+        let _path_guard = install_fake_gh_script(
+            &temp,
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$4" = "--json" ] && [ "$5" = "mergeStateStatus,url" ]; then
+  echo '{"mergeStateStatus":"clean","url":"https://github.com/o/r/pull/123"}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$4" = "--json" ] && [ "$5" = "headRefName,headRefOid,createdAt" ]; then
+  echo '{"headRefName":"feature/test","headRefOid":"abc12345","createdAt":"2026-03-13T00:00:00Z"}'
+  exit 0
+fi
+if [ "$1" = "run" ] && [ "$2" = "list" ]; then
+  echo '[{"databaseId":123456,"headSha":"abc12345","createdAt":"2026-03-13T00:00:05Z"}]'
+  exit 0
+fi
+if [ "$1" = "run" ] && [ "$2" = "view" ]; then
+  echo '{"databaseId":123456,"name":"ci","status":"completed","conclusion":"success","headBranch":"feature/test","headSha":"abc12345","url":"https://github.com/o/r/actions/runs/123456","jobs":[],"attempt":1,"pullRequests":[{"url":"https://github.com/o/r/pull/123"}]}'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+
+        let monitor = monitor_request(
+            temp.path(),
+            &GhMonitorRequest {
+                team: "atm-dev".to_string(),
+                target_kind: GhMonitorTargetKind::Pr,
+                target: "123".to_string(),
+                reference: None,
+                start_timeout_secs: Some(30),
+                config_cwd: None,
+            },
+        )
+        .await
+        .expect("pr monitor request should succeed");
+        assert_eq!(monitor.target_kind, GhMonitorTargetKind::Pr);
+        assert_eq!(monitor.run_id, Some(123456));
+
+        let stop = control_request(
+            temp.path(),
+            &GhMonitorControlRequest {
+                team: "atm-dev".to_string(),
+                action: GhMonitorLifecycleAction::Stop,
+                drain_timeout_secs: Some(1),
+                config_cwd: None,
+            },
+        )
+        .await
+        .expect("control stop should succeed");
+        assert_eq!(stop.lifecycle_state, "stopped");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_monitor_request_workflow_start_and_control_stop() {
+        let temp = TempDir::new().unwrap();
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        write_gh_monitor_config(temp.path(), "atm-dev");
+        let _path_guard = install_fake_gh_script(
+            &temp,
+            r#"#!/bin/sh
+if [ "$1" = "run" ] && [ "$2" = "list" ] && [ "$3" = "--workflow" ]; then
+  echo '[{"databaseId":987654,"headBranch":"develop","headSha":"abcd1234"}]'
+  exit 0
+fi
+if [ "$1" = "run" ] && [ "$2" = "view" ]; then
+  echo '{"databaseId":987654,"name":"ci","status":"completed","conclusion":"success","headBranch":"develop","headSha":"abcd1234","url":"https://github.com/o/r/actions/runs/987654","jobs":[],"attempt":1,"pullRequests":[]}'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+
+        let monitor = monitor_request(
+            temp.path(),
+            &GhMonitorRequest {
+                team: "atm-dev".to_string(),
+                target_kind: GhMonitorTargetKind::Workflow,
+                target: "ci".to_string(),
+                reference: Some("develop".to_string()),
+                start_timeout_secs: Some(30),
+                config_cwd: None,
+            },
+        )
+        .await
+        .expect("workflow monitor request should succeed");
+        assert_eq!(monitor.target_kind, GhMonitorTargetKind::Workflow);
+        assert_eq!(monitor.run_id, Some(987654));
+        assert_eq!(monitor.reference.as_deref(), Some("develop"));
+
+        let stop = control_request(
+            temp.path(),
+            &GhMonitorControlRequest {
+                team: "atm-dev".to_string(),
+                action: GhMonitorLifecycleAction::Stop,
+                drain_timeout_secs: Some(1),
+                config_cwd: None,
+            },
+        )
+        .await
+        .expect("control stop should succeed");
+        assert_eq!(stop.lifecycle_state, "stopped");
+    }
 }

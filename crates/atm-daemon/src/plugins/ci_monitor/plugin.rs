@@ -5,7 +5,9 @@ use super::github::GitHubActionsProvider;
 use super::loader::CiProviderLoader;
 use super::provider::ErasedCiProvider;
 use super::registry::{CiProviderFactory, CiProviderRegistry};
-use super::types::{CiFilter, CiJob, CiRunConclusion, CiRunStatus, GhMonitorHealthFile};
+#[cfg(unix)]
+use super::types::GhMonitorHealthFile;
+use super::types::{CiFilter, CiJob, CiRunConclusion, CiRunStatus};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use agent_team_mail_core::context::{GitProvider as GitProviderType, RepoContext};
 use agent_team_mail_core::daemon_client::GhMonitorHealth;
@@ -34,7 +36,7 @@ struct RuntimeHistory {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 #[serde(default)]
-struct GhMonitorStateRecord {
+struct PluginMonitorStateRecord {
     team: String,
     state: String,
     run_id: Option<u64>,
@@ -42,8 +44,8 @@ struct GhMonitorStateRecord {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 #[serde(default)]
-struct GhMonitorStateFile {
-    records: Vec<GhMonitorStateRecord>,
+struct PluginMonitorStateFile {
+    records: Vec<PluginMonitorStateRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -802,7 +804,7 @@ impl CiMonitorPlugin {
             Ok(raw) => raw,
             Err(_) => return false,
         };
-        let state_file = match serde_json::from_str::<GhMonitorStateFile>(&raw) {
+        let state_file = match serde_json::from_str::<PluginMonitorStateFile>(&raw) {
             Ok(parsed) => parsed,
             Err(e) => {
                 warn!(
@@ -832,6 +834,7 @@ impl CiMonitorPlugin {
             .unwrap_or_else(|| ctx.config.core.default_team.clone())
     }
 
+    #[cfg(unix)]
     fn write_health_record(
         ctx: &PluginContext,
         team: &str,
@@ -949,6 +952,7 @@ impl CiMonitorPlugin {
     ) {
         let team = Self::team_for_config_error(table, ctx);
         let message = format!("invalid gh_monitor config: {reason}");
+        #[cfg(unix)]
         Self::write_health_record(ctx, &team, "disabled_config_error", &message);
         self.notify_disabled_transition(ctx, &team, &message);
     }
@@ -2072,6 +2076,7 @@ repo = "config-owner/config-repo"
         assert_eq!(member.cwd, temp_dir.path().to_string_lossy());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_init_without_git_or_config_repo_writes_disabled_init_health_record() {
         use crate::plugins::ci_monitor::MockCiProvider;

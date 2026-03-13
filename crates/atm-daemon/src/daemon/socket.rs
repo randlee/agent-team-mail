@@ -51,15 +51,15 @@ use crate::daemon::session_registry::{MarkDeadForSessionOutcome, SharedSessionRe
 use crate::plugins::ci_monitor::service;
 use crate::plugins::worker_adapter::AgentState;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use crate::plugins::ci_monitor::helpers::{
     gh_monitor_key, load_gh_monitor_state_map, upsert_gh_monitor_status,
 };
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use crate::plugins::ci_monitor::types::GhMonitorHealthUpdate;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use agent_team_mail_core::daemon_client::{GhMonitorHealth, GhMonitorStatus, GhMonitorTargetKind};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use agent_team_mail_core::schema::InboxMessage;
 
 // ── Public API (cross-platform stubs) ────────────────────────────────────────
@@ -4465,7 +4465,7 @@ fn format_elapsed_as_iso8601(elapsed: std::time::Duration) -> String {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::daemon::dedup::DurableDedupeStore;
