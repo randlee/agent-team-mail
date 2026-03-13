@@ -5977,25 +5977,27 @@ exit 1
     #[cfg(unix)]
     fn test_format_summary_table_contains_required_columns() {
         let run = GhRunView {
-            database_id: 42,
+            id: 42,
             name: "ci".to_string(),
-            status: "completed".to_string(),
-            conclusion: Some("success".to_string()),
+            status: crate::plugins::ci_monitor::CiRunStatus::Completed,
+            conclusion: Some(crate::plugins::ci_monitor::CiRunConclusion::Success),
             head_branch: "develop".to_string(),
             head_sha: "abcdef1234567890".to_string(),
             url: "https://github.com/o/r/actions/runs/42".to_string(),
-            jobs: vec![GhRunJob {
-                database_id: 1,
+            created_at: "2026-03-06T00:00:00Z".to_string(),
+            updated_at: "2026-03-06T00:00:10Z".to_string(),
+            jobs: Some(vec![GhRunJob {
+                id: 1,
                 name: "clippy".to_string(),
-                status: "completed".to_string(),
-                conclusion: Some("success".to_string()),
+                status: crate::plugins::ci_monitor::CiRunStatus::Completed,
+                conclusion: Some(crate::plugins::ci_monitor::CiRunConclusion::Success),
                 started_at: Some("2026-03-06T00:00:00Z".to_string()),
                 completed_at: Some("2026-03-06T00:00:10Z".to_string()),
-                steps: Vec::new(),
                 url: Some("https://github.com/o/r/actions/runs/42/job/1".to_string()),
-            }],
+                steps: Some(Vec::new()),
+            }]),
             attempt: Some(1),
-            pull_requests: Vec::new(),
+            pull_requests: Some(Vec::new()),
         };
 
         let table = format_summary_table(&run);
@@ -6007,16 +6009,18 @@ exit 1
     #[cfg(unix)]
     fn test_derive_pr_url_prefers_pr_target_fallback() {
         let run = GhRunView {
-            database_id: 42,
+            id: 42,
             name: "ci".to_string(),
-            status: "completed".to_string(),
-            conclusion: Some("failure".to_string()),
+            status: crate::plugins::ci_monitor::CiRunStatus::Completed,
+            conclusion: Some(crate::plugins::ci_monitor::CiRunConclusion::Failure),
             head_branch: "feature/x".to_string(),
             head_sha: "abcdef1234567890".to_string(),
             url: "https://github.com/o/r/actions/runs/42".to_string(),
-            jobs: Vec::new(),
+            created_at: "2026-03-06T00:00:00Z".to_string(),
+            updated_at: "2026-03-06T00:00:10Z".to_string(),
+            jobs: Some(Vec::new()),
             attempt: Some(1),
-            pull_requests: Vec::new(),
+            pull_requests: Some(Vec::new()),
         };
         let status_seed = GhMonitorStatus {
             team: "atm-dev".to_string(),
@@ -6130,16 +6134,18 @@ exit 1
     #[cfg(unix)]
     async fn test_build_failure_payload_contains_required_fields() {
         let run = GhRunView {
-            database_id: 42,
+            id: 42,
             name: "ci".to_string(),
-            status: "completed".to_string(),
-            conclusion: Some("failure".to_string()),
+            status: crate::plugins::ci_monitor::CiRunStatus::Completed,
+            conclusion: Some(crate::plugins::ci_monitor::CiRunConclusion::Failure),
             head_branch: "feature/x".to_string(),
             head_sha: "abcdef1234567890".to_string(),
             url: "https://github.com/o/r/actions/runs/42".to_string(),
-            jobs: Vec::new(),
+            created_at: "2026-03-06T00:00:00Z".to_string(),
+            updated_at: "2026-03-06T00:00:10Z".to_string(),
+            jobs: Some(Vec::new()),
             attempt: Some(2),
-            pull_requests: Vec::new(),
+            pull_requests: Some(Vec::new()),
         };
         let status_seed = GhMonitorStatus {
             team: "atm-dev".to_string(),
@@ -6192,29 +6198,32 @@ exit 1
     #[cfg(unix)]
     fn test_classify_failure_infra_when_runner_failure_detected() {
         let run = GhRunView {
-            database_id: 88,
+            id: 88,
             name: "ci".to_string(),
-            status: "completed".to_string(),
-            conclusion: Some("failure".to_string()),
+            status: crate::plugins::ci_monitor::CiRunStatus::Completed,
+            conclusion: Some(crate::plugins::ci_monitor::CiRunConclusion::Failure),
             head_branch: "main".to_string(),
             head_sha: "abcdef1234567890".to_string(),
             url: "https://github.com/o/r/actions/runs/88".to_string(),
-            jobs: vec![GhRunJob {
-                database_id: 101,
+            created_at: "2026-03-06T00:00:00Z".to_string(),
+            updated_at: "2026-03-06T00:00:10Z".to_string(),
+            jobs: Some(vec![GhRunJob {
+                id: 101,
                 name: "Runner provisioning failed".to_string(),
-                status: "completed".to_string(),
-                conclusion: Some("failure".to_string()),
+                status: crate::plugins::ci_monitor::CiRunStatus::Completed,
+                conclusion: Some(crate::plugins::ci_monitor::CiRunConclusion::Failure),
                 started_at: None,
                 completed_at: None,
-                steps: vec![GhRunStep {
+                steps: Some(vec![GhRunStep {
                     name: "Set up runner".to_string(),
-                    status: Some("completed".to_string()),
-                    conclusion: Some("failure".to_string()),
-                }],
+                    status: crate::plugins::ci_monitor::CiRunStatus::Completed,
+                    conclusion: Some(crate::plugins::ci_monitor::CiRunConclusion::Failure),
+                    number: 1,
+                }]),
                 url: None,
-            }],
+            }]),
             attempt: Some(1),
-            pull_requests: Vec::new(),
+            pull_requests: Some(Vec::new()),
         };
 
         assert_eq!(classify_failure(&run), "infra");

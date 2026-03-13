@@ -1,11 +1,17 @@
 //! CI Monitor plugin — provider abstraction for CI/CD platforms
 
+#[cfg(unix)]
+mod alerts;
 mod config;
+#[cfg(unix)]
+mod gh_cli;
 mod github;
 pub(crate) mod helpers;
 mod loader;
 mod mock_provider;
 mod plugin;
+#[cfg(unix)]
+mod polling;
 mod provider;
 mod registry;
 #[cfg(unix)]

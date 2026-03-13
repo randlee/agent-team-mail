@@ -26,6 +26,10 @@ pub struct CiRun {
     pub created_at: String,
     /// Last update timestamp (ISO 8601)
     pub updated_at: String,
+    /// Run attempt number when provided by the CI system
+    pub attempt: Option<u64>,
+    /// Pull requests associated with this run
+    pub pull_requests: Option<Vec<CiPullRequest>>,
     /// Jobs in this run (optional, included when fetching run details)
     pub jobs: Option<Vec<CiJob>>,
 }
@@ -45,6 +49,8 @@ pub struct CiJob {
     pub started_at: Option<String>,
     /// Job completion timestamp (ISO 8601)
     pub completed_at: Option<String>,
+    /// Web URL to the job, when available
+    pub url: Option<String>,
     /// Steps in this job (optional)
     pub steps: Option<Vec<CiStep>>,
 }
@@ -60,6 +66,23 @@ pub struct CiStep {
     pub conclusion: Option<CiRunConclusion>,
     /// Step number in the job
     pub number: u64,
+}
+
+/// Pull request metadata used by CI monitor orchestration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CiPullRequest {
+    /// Pull request number
+    pub number: u64,
+    /// Pull request URL
+    pub url: Option<String>,
+    /// Source branch for the PR
+    pub head_ref_name: Option<String>,
+    /// Source commit for the PR
+    pub head_ref_oid: Option<String>,
+    /// Creation timestamp (ISO 8601)
+    pub created_at: Option<String>,
+    /// Merge-state status from the provider
+    pub merge_state_status: Option<String>,
 }
 
 /// CI run/job status
@@ -170,6 +193,8 @@ mod tests {
             url: "https://github.com/owner/repo/actions/runs/123456789".to_string(),
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:05:00Z".to_string(),
+            attempt: Some(1),
+            pull_requests: None,
             jobs: None,
         };
 
@@ -191,6 +216,7 @@ mod tests {
             conclusion: Some(CiRunConclusion::Success),
             started_at: Some("2026-01-01T00:01:00Z".to_string()),
             completed_at: Some("2026-01-01T00:04:00Z".to_string()),
+            url: Some("https://github.com/owner/repo/actions/jobs/987654321".to_string()),
             steps: None,
         };
 
@@ -266,5 +292,23 @@ mod tests {
         assert_eq!(filter.conclusion, Some(CiRunConclusion::Success));
         assert_eq!(filter.per_page, Some(50));
         assert_eq!(filter.page, Some(1));
+    }
+
+    #[test]
+    fn test_ci_pull_request_serialization() {
+        let pr = CiPullRequest {
+            number: 123,
+            url: Some("https://github.com/owner/repo/pull/123".to_string()),
+            head_ref_name: Some("feature/test".to_string()),
+            head_ref_oid: Some("abc123".to_string()),
+            created_at: Some("2026-01-01T00:00:00Z".to_string()),
+            merge_state_status: Some("clean".to_string()),
+        };
+
+        let json = serde_json::to_string(&pr).unwrap();
+        let deserialized: CiPullRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.number, 123);
+        assert_eq!(deserialized.merge_state_status.as_deref(), Some("clean"));
     }
 }
