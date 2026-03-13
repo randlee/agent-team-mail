@@ -1120,12 +1120,14 @@ impl Plugin for CiMonitorPlugin {
                     // soft-cleanup still fires correctly without tracker presence.
                     debug!(agent = %name, "gh_monitor: synthetic member already registered, adopting existing roster entry");
                 } else {
+                    let msg = format!(
+                        "Cannot register synthetic member '{name}': a non-plugin roster \
+                         entry with that name already exists in team '{team}'. \
+                         Remove the conflicting member to allow gh_monitor to initialize."
+                    );
+                    self.project_disabled_config_error(ctx, config_table, &msg);
                     return Err(PluginError::Init {
-                        message: format!(
-                            "Cannot register synthetic member '{name}': a non-plugin roster \
-                             entry with that name already exists in team '{team}'. \
-                             Remove the conflicting member to allow gh_monitor to initialize."
-                        ),
+                        message: msg,
                         source: None,
                     });
                 }
@@ -2228,6 +2230,126 @@ repo = "config-owner/config-repo"
             ci_members.len(),
             1,
             "ci-monitor should appear exactly once in roster"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_init_rejects_non_plugin_member_with_same_name() {
+        use crate::plugins::ci_monitor::MockCiProvider;
+        use agent_team_mail_core::schema::{AgentMember, TeamConfig};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let team_dir = teams_root.join("dev-team");
+        let inboxes_dir = team_dir.join("inboxes");
+        std::fs::create_dir_all(&inboxes_dir).unwrap();
+        std::fs::write(inboxes_dir.join("ci-monitor.json"), "[]").unwrap();
+
+        // Pre-populate config.json with a non-plugin member named "ci-monitor".
+        // This simulates a human or other non-plugin roster entry that should NOT
+        // be silently hijacked by gh_monitor.
+        let conflicting_member = AgentMember {
+            agent_id: "ci-monitor@dev-team".to_string(),
+            name: "ci-monitor".to_string(),
+            agent_type: "general-purpose".to_string(), // NOT plugin:gh_monitor
+            model: String::new(),
+            prompt: None,
+            color: None,
+            plan_mode_required: None,
+            joined_at: 1234567890,
+            tmux_pane_id: None,
+            cwd: ".".to_string(),
+            subscriptions: Vec::new(),
+            backend_type: None,
+            is_active: None,
+            last_active: None,
+            session_id: None,
+            external_backend_type: None,
+            external_model: None,
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        let team_config = TeamConfig {
+            name: "dev-team".to_string(),
+            description: None,
+            created_at: 1234567890,
+            lead_agent_id: "lead@dev-team".to_string(),
+            lead_session_id: "session-123".to_string(),
+            members: vec![conflicting_member],
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        std::fs::write(
+            team_dir.join("config.json"),
+            serde_json::to_string(&team_config).unwrap(),
+        )
+        .unwrap();
+
+        let toml_str = r#"
+team = "dev-team"
+repo = "config-owner/config-repo"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let ctx = create_mock_context_with_repo_config(teams_root.clone(), Some(table), false);
+        let mut plugin = CiMonitorPlugin::new().with_provider(Box::new(MockCiProvider::new()));
+
+        let atm_config_path = temp_dir.path().join(".atm.toml");
+        std::fs::write(&atm_config_path, toml_str).unwrap();
+
+        struct EnvRestoreGuard {
+            key: &'static str,
+            original: Option<String>,
+        }
+        impl Drop for EnvRestoreGuard {
+            fn drop(&mut self) {
+                match self.original.take() {
+                    Some(value) => unsafe { std::env::set_var(self.key, value) },
+                    None => unsafe { std::env::remove_var(self.key) },
+                }
+            }
+        }
+        struct CurrentDirGuard(std::path::PathBuf);
+        impl Drop for CurrentDirGuard {
+            fn drop(&mut self) {
+                std::env::set_current_dir(&self.0).expect("restore current directory");
+            }
+        }
+
+        let _atm_config_guard = EnvRestoreGuard {
+            key: "ATM_CONFIG",
+            original: std::env::var("ATM_CONFIG").ok(),
+        };
+        let _cwd_guard = CurrentDirGuard(std::env::current_dir().unwrap());
+        unsafe { std::env::set_var("ATM_CONFIG", &atm_config_path) };
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+
+        // Init must fail because "ci-monitor" is a non-plugin member.
+        let err = plugin
+            .init(&ctx)
+            .await
+            .expect_err("init should fail when ci-monitor name is taken by a non-plugin member");
+        assert!(
+            err.to_string().contains("non-plugin roster entry"),
+            "error should mention non-plugin roster entry conflict: {err}"
+        );
+
+        // Health record must be written as disabled_config_error.
+        let health_path =
+            agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(temp_dir.path());
+        let raw = std::fs::read_to_string(&health_path).expect("health record should be written");
+        let health: GhMonitorHealthFile = serde_json::from_str(&raw).expect("health json");
+        let record = health
+            .records
+            .iter()
+            .find(|r| r.team == "dev-team")
+            .expect("dev-team health record");
+        assert_eq!(
+            record.availability_state, "disabled_config_error",
+            "non-plugin conflict should write disabled_config_error health record"
+        );
+        let msg = record.message.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("non-plugin roster entry"),
+            "health record message should describe the conflict: {msg}"
         );
     }
 
