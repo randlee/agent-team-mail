@@ -7,7 +7,7 @@ mod config;
 pub(crate) mod gh_cli;
 #[cfg(unix)]
 pub(crate) mod gh_monitor;
-mod github;
+mod github_provider;
 mod github_schema;
 pub(crate) mod helpers;
 mod loader;
@@ -25,7 +25,7 @@ pub(crate) mod test_support;
 pub(crate) mod types;
 
 pub use config::{CiMonitorConfig, DedupStrategy, NotifyTarget};
-pub use github::GitHubActionsProvider;
+pub use github_provider::GitHubActionsProvider;
 pub use loader::CiProviderLoader;
 pub use mock_provider::{
     MockCall, MockCiProvider, create_test_job, create_test_run, create_test_step,

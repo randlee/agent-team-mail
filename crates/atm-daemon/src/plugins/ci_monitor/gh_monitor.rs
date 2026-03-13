@@ -1,11 +1,15 @@
 //! GitHub-specific gh_monitor provider logic.
 
 pub(crate) use super::alerts::emit_ci_monitor_message;
+// These schema re-exports keep the legacy gh_monitor tests/builders compiling
+// while AM.6 finishes moving the remaining provider helpers behind the routed surface.
 #[allow(unused_imports)]
 pub(crate) use super::github_schema::{
     GhPrLookupView, GhPrView, GhPullRequest, GhRunJob, GhRunListEntry, GhRunStep, GhRunView,
 };
 use super::helpers::{read_gh_monitor_health, upsert_gh_monitor_health, upsert_gh_monitor_status};
+// These routing re-exports preserve the pre-split gh_monitor call surface for
+// downstream code until the final thin-socket cleanup removes the shim layer.
 #[allow(unused_imports)]
 pub(crate) use super::routing::{
     notify_ci_not_started as emit_ci_not_started_alert,

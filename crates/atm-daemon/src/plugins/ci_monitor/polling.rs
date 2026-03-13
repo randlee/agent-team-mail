@@ -1,3 +1,7 @@
+//! Staged polling helpers extracted during AM.4.
+//!
+//! These helpers remain module-local until AM.6 finishes thinning the remaining
+//! socket/plugin call sites onto the routed CI-monitor surface.
 #![allow(dead_code)]
 
 use super::alerts::{emit_ci_monitor_message, emit_merge_conflict_alert, resolve_ci_alert_routing};
