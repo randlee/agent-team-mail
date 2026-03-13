@@ -176,6 +176,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AI | GH Monitor Dashboard + Detailed PR Reporting | `atm gh pr list`, `atm gh pr report`, `--template` rendering, `init-report`; CI rollup neutral/skipped fix | IN-PROGRESS |
 | AJ | Session-ID SSoT Normalization | Canonical `session_id` naming, shared caller resolver, runtime session resolution closure, doctor/session consistency | PLANNED |
 | AK | Mandatory OTel Rollout | Non-optional OTel across in-scope tools with canonical correlation and health/reporting contracts | PLANNED |
+| AM | CI Monitor Refactor | Extract CI monitoring from `socket.rs` into subsystem/service/provider/routing/health boundaries on `integrate/phase-AM` | IN-PROGRESS |
 
 ---
 
@@ -1564,6 +1565,26 @@ local structured logging always-on and fail-open.
 | AK.3 | Producer integration (`atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `scmux`, `schook`, `sc-compose`, `sc-composer`) | OTel rollout | PLANNED |
 | AK.4 | Doctor/status observability health + runbook finalization | health/reporting | PLANNED |
 | AK.5 | End-to-end QA, release gates, and cross-platform validation | release confidence | PLANNED |
+
+---
+
+## 17.21 Phase AM: CI Monitor Refactor
+
+**Goal**: Extract CI monitoring out of `socket.rs` into a dedicated subsystem
+with stable service, provider, routing, health, and test-support boundaries.
+**Integration branch**: `integrate/phase-AM`
+
+**Planning doc**: `docs/phase-am-planning.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Branch | Status |
+|---|---|---|---|
+| AM.1 | Extract CI domain types and shared helpers | `feature/pAM-s1-extract-ci-types` | IN-PROGRESS |
+| AM.2 | Introduce `service.rs` orchestration boundary | `feature/pAM-s2-ci-monitor-service` | IN-PROGRESS |
+| AM.3 | Split provider-neutral logic from GitHub adapter | `feature/pAM-s3-provider-split` | IN-PROGRESS |
+| AM.4 | Extract routing and notification policy | `feature/pAM-s4-routing-split` | IN-PROGRESS |
+| AM.5 | Extract health and availability state handling | `feature/pAM-s5-health-state` | IN-PROGRESS |
+| AM.6 | Thin `socket.rs` and reorganize CI monitor tests | `feature/pAM-s6-thin-socket` | PLANNED |
 
 ---
 
