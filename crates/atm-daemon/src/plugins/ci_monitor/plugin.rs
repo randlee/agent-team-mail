@@ -2263,7 +2263,13 @@ poll_interval_secs = 10
                 configured: true,
                 enabled: true,
                 config_source: Some("repo".to_string()),
-                config_path: Some("/tmp/.atm.toml".to_string()),
+                config_path: Some(
+                    std::env::temp_dir()
+                        .join("test-repo")
+                        .join(".atm.toml")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
                 target_kind: agent_team_mail_core::daemon_client::GhMonitorTargetKind::Run,
                 target: "42".to_string(),
                 state: "failure".to_string(),
