@@ -1102,12 +1102,17 @@ impl Plugin for CiMonitorPlugin {
                 // same name must not be silently hijacked — cleanup_plugin only purges
                 // rows with agent_type "plugin:gh_monitor", so a mismatched row would
                 // escape cleanup and the plugin would be bound to the wrong entry.
-                let is_valid_synthetic = ctx
+                let existing = ctx
                     .roster
                     .list_members(team, Some("gh_monitor"))
-                    .unwrap_or_default()
-                    .iter()
-                    .any(|m| &m.name == name);
+                    .map_err(|e| PluginError::Init {
+                        message: format!(
+                            "Failed to verify existing roster entry for '{name}' in team '{team}': {e}"
+                        ),
+                        source: None,
+                    })?;
+
+                let is_valid_synthetic = existing.iter().any(|m| &m.name == name);
 
                 if is_valid_synthetic {
                     // Note: MembershipTracker has no entry for this triple;
