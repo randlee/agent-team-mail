@@ -130,7 +130,6 @@ pub(crate) fn run_passes_pr_recency_gate(
     run_ts >= pr_ts
 }
 
-#[cfg(unix)]
 pub(crate) fn is_pr_merge_state_dirty(merge_state_status: &str) -> bool {
     merge_state_status.trim().eq_ignore_ascii_case("dirty")
 }
