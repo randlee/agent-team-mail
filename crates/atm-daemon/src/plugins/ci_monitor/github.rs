@@ -1,9 +1,11 @@
 //! GitHub Actions provider using the `gh` CLI
 
+#[cfg(test)]
+use super::github_schema::GhStep;
+use super::github_schema::{GhJob, GhRun};
 use super::provider::CiProvider;
 use super::types::{CiFilter, CiJob, CiRun, CiRunConclusion, CiRunStatus, CiStep};
 use crate::plugin::PluginError;
-use serde::Deserialize;
 use std::process::Command;
 
 /// GitHub Actions provider that uses the `gh` CLI
@@ -248,45 +250,6 @@ impl CiProvider for GitHubActionsProvider {
     fn provider_name(&self) -> &str {
         "GitHub Actions"
     }
-}
-
-/// GitHub run JSON schema (from `gh run list --json`)
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GhRun {
-    database_id: u64,
-    name: String,
-    status: String,
-    conclusion: Option<String>,
-    head_branch: String,
-    head_sha: String,
-    url: String,
-    created_at: String,
-    updated_at: String,
-    jobs: Option<Vec<GhJob>>,
-}
-
-/// GitHub job JSON schema
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GhJob {
-    database_id: u64,
-    name: String,
-    status: String,
-    conclusion: Option<String>,
-    started_at: Option<String>,
-    completed_at: Option<String>,
-    steps: Option<Vec<GhStep>>,
-}
-
-/// GitHub step JSON schema
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GhStep {
-    name: String,
-    status: String,
-    conclusion: Option<String>,
-    number: u64,
 }
 
 #[cfg(test)]

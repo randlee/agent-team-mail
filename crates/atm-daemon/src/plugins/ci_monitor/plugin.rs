@@ -7,9 +7,12 @@ use super::health;
 use super::loader::CiProviderLoader;
 use super::provider::ErasedCiProvider;
 use super::registry::{CiProviderFactory, CiProviderRegistry};
+use super::service::{fetch_run_details, list_completed_runs};
 #[cfg(all(test, unix))]
 use super::types::GhMonitorHealthFile;
-use super::types::{CiFilter, CiJob, CiRunConclusion, CiRunStatus};
+#[cfg(test)]
+use super::types::{CiFilter, CiRunStatus};
+use super::types::{CiJob, CiRunConclusion};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use agent_team_mail_core::context::{GitProvider as GitProviderType, RepoContext};
 use agent_team_mail_core::schema::{AgentMember, InboxMessage, TeamConfig};
@@ -1131,16 +1134,9 @@ impl Plugin for CiMonitorPlugin {
                     // Evict old dedup cache entries
                     self.evict_old_dedup_entries();
 
-                    // Build filter from config (no branch filter - we'll filter client-side)
-                    let filter = CiFilter {
-                        status: Some(CiRunStatus::Completed),
-                        per_page: Some(20),
-                        ..Default::default()
-                    };
-
                     // Fetch all completed runs
                     let runs = match self.provider.as_ref() {
-                        Some(provider) => provider.list_runs(&filter).await,
+                        Some(provider) => list_completed_runs(provider.as_ref()).await,
                         None => {
                             warn!("CI Monitor: Provider disappeared during run");
                             break;
@@ -1168,7 +1164,7 @@ impl Plugin for CiMonitorPlugin {
 
                                 // Fetch full run details with jobs
                                 let full_run_result = match self.provider.as_ref() {
-                                    Some(provider) => provider.get_run(run.id).await,
+                                    Some(provider) => fetch_run_details(provider.as_ref(), run.id).await,
                                     None => {
                                         warn!("CI Monitor: Provider disappeared during run");
                                         break;
