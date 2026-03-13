@@ -1049,16 +1049,13 @@ mod tests {
 
     #[test]
     #[serial]
-    fn implicit_claude_session_resolved_from_env_when_no_runtime_or_codex_thread_id() {
-        // Explicit Claude runtime with no hook file or CODEX_THREAD_ID should
-        // resolve directly from CLAUDE_SESSION_ID.
-        let temp = TempDir::new().unwrap();
+    fn claude_session_resolved_from_env_when_runtime_is_claude_and_no_hook() {
+        // Force Claude runtime explicitly so the assertion stays deterministic even when the
+        // test harness itself is running under a Codex parent process.
         let hook_path = current_ppid_hook_path();
         let _ = std::fs::remove_file(&hook_path);
 
         unsafe {
-            std::env::set_var("ATM_HOME", temp.path());
-            std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::set_var("ATM_RUNTIME", "claude");
             std::env::remove_var("CODEX_THREAD_ID");
             std::env::remove_var("ATM_SESSION_ID");

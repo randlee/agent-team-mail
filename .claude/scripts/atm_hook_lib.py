@@ -57,7 +57,10 @@ def _send_unix(dd: Path, msg: bytes) -> None:
             s.settimeout(1.0)
             s.connect(str(sock_path))
             s.sendall(msg)
-            s.recv(4096)  # Drain response
+            try:
+                s.recv(4096)  # Drain response — optional; daemon ack is fire-and-forget
+            except (TimeoutError, ConnectionResetError, OSError):
+                pass  # Send succeeded; recv failure is not an error
     except Exception as exc:
         sys.stderr.write(f"[atm-hook] unix socket send failed: {exc}\n")
 
@@ -78,7 +81,10 @@ def _send_tcp(dd: Path, msg: bytes) -> None:
             s.settimeout(1.0)
             s.connect(("127.0.0.1", port))
             s.sendall(msg)
-            s.recv(4096)  # Drain response
+            try:
+                s.recv(4096)  # Drain response — optional; daemon ack is fire-and-forget
+            except (TimeoutError, ConnectionResetError, OSError):
+                pass  # Send succeeded; recv failure is not an error
     except Exception as exc:
         sys.stderr.write(f"[atm-hook] tcp socket send failed: {exc}\n")
 
