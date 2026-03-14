@@ -82,6 +82,9 @@ Acceptance:
 - No blocking/high-priority test depends solely on a raw sleep for correctness
 - Long-running loop tests have explicit upper bounds and timeout-aware failure
   messages
+- Upper bounds are enforced with an affirmative assertion, e.g.
+  `assert!(elapsed < Duration::from_secs(N), "test exceeded expected duration")`,
+  not only with a timeout wrapper
 - Watcher/config reconciliation tests prefer deterministic direct calls over
   repeated polling where possible
 - CI output makes the currently running risky integration test identifiable
@@ -102,6 +105,10 @@ Scope:
 - Replace hardcoded `/tmp` fixture paths with `std::env::temp_dir()`
 - audit monitor/integration tests for missing `#[serial]` where shared runtime
   state still leaks through test helpers
+- `#[serial]` is reserved for tests that still touch shared process-wide
+  resources after RAII cleanup is applied; RAII isolates per-test lifecycle via
+  `Drop`, but it cannot prevent concurrent access to the same Tokio runtime,
+  daemon socket, or shared runtime directory
 - perform a final identify-only sweep for unbounded waits, leaked subprocesses,
   and poor attribution in the touched suites
 
