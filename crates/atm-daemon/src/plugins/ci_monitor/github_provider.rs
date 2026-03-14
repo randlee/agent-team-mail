@@ -1,8 +1,9 @@
 //! GitHub Actions provider using the `gh` CLI
 
 use super::provider::CiProvider;
-use super::types::{CiFilter, CiJob, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep};
-use crate::plugin::PluginError;
+use super::types::{
+    CiFilter, CiJob, CiProviderError, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep,
+};
 use serde::Deserialize;
 use std::process::Command;
 
@@ -20,45 +21,35 @@ impl GitHubActionsProvider {
     }
 
     /// Execute a `gh` command and return stdout
-    async fn run_gh(&self, args: &[&str]) -> Result<String, PluginError> {
+    async fn run_gh(&self, args: &[&str]) -> Result<String, CiProviderError> {
         // Run gh command in a blocking task
         let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         tokio::task::spawn_blocking(move || {
             let output = Command::new("gh").args(&args_owned).output().map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    PluginError::Provider {
-                        message: "gh CLI not found. Install from https://cli.github.com/"
-                            .to_string(),
-                        source: Some(Box::new(e)),
-                    }
+                    CiProviderError::provider(
+                        "gh CLI not found. Install from https://cli.github.com/",
+                    )
                 } else {
-                    PluginError::Provider {
-                        message: format!("Failed to execute gh: {e}"),
-                        source: Some(Box::new(e)),
-                    }
+                    CiProviderError::provider(format!("Failed to execute gh: {e}"))
                 }
             })?;
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(PluginError::Provider {
-                    message: format!("gh command failed: {stderr}"),
-                    source: None,
-                });
+                return Err(CiProviderError::provider(format!(
+                    "gh command failed: {stderr}"
+                )));
             }
 
-            let stdout = String::from_utf8(output.stdout).map_err(|e| PluginError::Provider {
-                message: format!("Invalid UTF-8 in gh output: {e}"),
-                source: Some(Box::new(e)),
+            let stdout = String::from_utf8(output.stdout).map_err(|e| {
+                CiProviderError::provider(format!("Invalid UTF-8 in gh output: {e}"))
             })?;
 
             Ok(stdout)
         })
         .await
-        .map_err(|e| PluginError::Runtime {
-            message: format!("Task join error: {e}"),
-            source: Some(Box::new(e)),
-        })?
+        .map_err(|e| CiProviderError::runtime(format!("Task join error: {e}")))?
     }
 
     fn repo_scope(&self) -> String {
@@ -155,7 +146,7 @@ impl GitHubActionsProvider {
 }
 
 impl CiProvider for GitHubActionsProvider {
-    async fn list_runs(&self, filter: &CiFilter) -> Result<Vec<CiRun>, PluginError> {
+    async fn list_runs(&self, filter: &CiFilter) -> Result<Vec<CiRun>, CiProviderError> {
         let mut args = vec![
             "-R".to_string(),
             self.repo_scope(),
@@ -202,11 +193,8 @@ impl CiProvider for GitHubActionsProvider {
         let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let output = self.run_gh(&args_refs).await?;
 
-        let gh_runs: Vec<GhRun> =
-            serde_json::from_str(&output).map_err(|e| PluginError::Provider {
-                message: format!("Failed to parse gh JSON: {e}"),
-                source: Some(Box::new(e)),
-            })?;
+        let gh_runs: Vec<GhRun> = serde_json::from_str(&output)
+            .map_err(|e| CiProviderError::provider(format!("Failed to parse gh JSON: {e}")))?;
 
         let mut runs: Vec<CiRun> = gh_runs.iter().map(|gh| self.parse_run(gh, false)).collect();
 
@@ -223,7 +211,7 @@ impl CiProvider for GitHubActionsProvider {
         Ok(runs)
     }
 
-    async fn get_run(&self, run_id: u64) -> Result<CiRun, PluginError> {
+    async fn get_run(&self, run_id: u64) -> Result<CiRun, CiProviderError> {
         let run_id_arg = run_id.to_string();
         let args = [
             "-R",
@@ -237,15 +225,13 @@ impl CiProvider for GitHubActionsProvider {
 
         let output = self.run_gh(&args).await?;
 
-        let gh_run: GhRun = serde_json::from_str(&output).map_err(|e| PluginError::Provider {
-            message: format!("Failed to parse gh JSON: {e}"),
-            source: Some(Box::new(e)),
-        })?;
+        let gh_run: GhRun = serde_json::from_str(&output)
+            .map_err(|e| CiProviderError::provider(format!("Failed to parse gh JSON: {e}")))?;
 
         Ok(self.parse_run(&gh_run, true))
     }
 
-    async fn get_job_log(&self, job_id: u64) -> Result<String, PluginError> {
+    async fn get_job_log(&self, job_id: u64) -> Result<String, CiProviderError> {
         let job_id_arg = job_id.to_string();
         let args = [
             "-R",
@@ -260,7 +246,10 @@ impl CiProvider for GitHubActionsProvider {
         self.run_gh(&args).await
     }
 
-    async fn get_pull_request(&self, pr_number: u64) -> Result<Option<CiPullRequest>, PluginError> {
+    async fn get_pull_request(
+        &self,
+        pr_number: u64,
+    ) -> Result<Option<CiPullRequest>, CiProviderError> {
         let pr_number_arg = pr_number.to_string();
         let repo_scope = self.repo_scope();
         let base_args = [
@@ -283,11 +272,8 @@ impl CiProvider for GitHubActionsProvider {
                 "mergeStateStatus,url",
             ])
             .await?;
-        let pr: GhPullRequestView =
-            serde_json::from_str(&output).map_err(|e| PluginError::Provider {
-                message: format!("Failed to parse gh JSON: {e}"),
-                source: Some(Box::new(e)),
-            })?;
+        let pr: GhPullRequestView = serde_json::from_str(&output)
+            .map_err(|e| CiProviderError::provider(format!("Failed to parse gh JSON: {e}")))?;
         let mut ci_pr = CiPullRequest {
             number: pr.number.unwrap_or(pr_number),
             url: pr.url,
@@ -320,11 +306,8 @@ impl CiProvider for GitHubActionsProvider {
                     "headRefName,headRefOid,createdAt",
                 ])
                 .await?;
-            let detail: GhPullRequestView =
-                serde_json::from_str(&detail_output).map_err(|e| PluginError::Provider {
-                    message: format!("Failed to parse gh JSON: {e}"),
-                    source: Some(Box::new(e)),
-                })?;
+            let detail: GhPullRequestView = serde_json::from_str(&detail_output)
+                .map_err(|e| CiProviderError::provider(format!("Failed to parse gh JSON: {e}")))?;
             ci_pr.number = detail.number.unwrap_or(ci_pr.number);
             ci_pr.head_ref_name = detail.head_ref_name;
             ci_pr.head_ref_oid = detail.head_ref_oid;

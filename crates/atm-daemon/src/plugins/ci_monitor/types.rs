@@ -1,9 +1,49 @@
 //! Shared types for the CI Monitor plugin provider abstraction
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 #[cfg(unix)]
 use agent_team_mail_core::daemon_client::{GhMonitorHealth, GhMonitorStatus};
+
+/// Domain-level provider error for CI monitor provider and registry boundaries.
+#[derive(Debug)]
+pub enum CiProviderError {
+    /// Provider-specific failure such as a CLI/API/config issue.
+    Provider { message: String },
+    /// Runtime failure such as a task join or local execution issue.
+    Runtime { message: String },
+}
+
+impl CiProviderError {
+    pub fn provider(message: impl Into<String>) -> Self {
+        Self::Provider {
+            message: message.into(),
+        }
+    }
+
+    pub fn runtime(message: impl Into<String>) -> Self {
+        Self::Runtime {
+            message: message.into(),
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Provider { message } | Self::Runtime { message } => message,
+        }
+    }
+}
+
+impl fmt::Display for CiProviderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Provider { message } | Self::Runtime { message } => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for CiProviderError {}
 
 /// A CI workflow/pipeline run
 #[derive(Debug, Clone, Serialize, Deserialize)]

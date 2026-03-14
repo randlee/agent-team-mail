@@ -33,7 +33,9 @@ pub use loader::CiProviderLoader;
 pub use plugin::CiMonitorPlugin;
 pub use provider::{CiProvider, ErasedCiProvider};
 pub use registry::{CiFactoryFn, CiProviderFactory, CiProviderRegistry};
-pub use types::{CiFilter, CiJob, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep};
+pub use types::{
+    CiFilter, CiJob, CiProviderError, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep,
+};
 
 // Production surface: config, provider, registry, plugin, and CI domain types only.
 // Test-only symbols live under `mock_support` so tests do not rely on the root production API.

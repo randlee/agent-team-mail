@@ -1,8 +1,9 @@
 //! Mock CI provider for testing
 
 use super::provider::CiProvider;
-use super::types::{CiFilter, CiJob, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep};
-use crate::plugin::PluginError;
+use super::types::{
+    CiFilter, CiJob, CiProviderError, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep,
+};
 use std::sync::{Arc, Mutex};
 
 /// Mock CI provider for testing. Returns canned data.
@@ -98,14 +99,11 @@ impl Default for MockCiProvider {
 }
 
 impl CiProvider for MockCiProvider {
-    async fn list_runs(&self, filter: &CiFilter) -> Result<Vec<CiRun>, PluginError> {
+    async fn list_runs(&self, filter: &CiFilter) -> Result<Vec<CiRun>, CiProviderError> {
         self.log_call(MockCall::ListRuns(filter.clone()));
 
         if let Some(err) = &self.error {
-            return Err(PluginError::Provider {
-                message: err.clone(),
-                source: None,
-            });
+            return Err(CiProviderError::provider(err.clone()));
         }
 
         // Apply filters to runs
@@ -137,14 +135,11 @@ impl CiProvider for MockCiProvider {
         Ok(filtered)
     }
 
-    async fn get_run(&self, run_id: u64) -> Result<CiRun, PluginError> {
+    async fn get_run(&self, run_id: u64) -> Result<CiRun, CiProviderError> {
         self.log_call(MockCall::GetRun(run_id));
 
         if let Some(err) = &self.error {
-            return Err(PluginError::Provider {
-                message: err.clone(),
-                source: None,
-            });
+            return Err(CiProviderError::provider(err.clone()));
         }
 
         let mut run = self
@@ -152,10 +147,7 @@ impl CiProvider for MockCiProvider {
             .iter()
             .find(|run| run.id == run_id)
             .cloned()
-            .ok_or_else(|| PluginError::Provider {
-                message: format!("Run #{run_id} not found"),
-                source: None,
-            })?;
+            .ok_or_else(|| CiProviderError::provider(format!("Run #{run_id} not found")))?;
 
         // Add jobs to the run if available
         if !self.jobs.is_empty() {
@@ -165,27 +157,24 @@ impl CiProvider for MockCiProvider {
         Ok(run)
     }
 
-    async fn get_job_log(&self, job_id: u64) -> Result<String, PluginError> {
+    async fn get_job_log(&self, job_id: u64) -> Result<String, CiProviderError> {
         self.log_call(MockCall::GetJobLog(job_id));
 
         if let Some(err) = &self.error {
-            return Err(PluginError::Provider {
-                message: err.clone(),
-                source: None,
-            });
+            return Err(CiProviderError::provider(err.clone()));
         }
 
         Ok(format!("Mock log output for job {job_id}"))
     }
 
-    async fn get_pull_request(&self, pr_number: u64) -> Result<Option<CiPullRequest>, PluginError> {
+    async fn get_pull_request(
+        &self,
+        pr_number: u64,
+    ) -> Result<Option<CiPullRequest>, CiProviderError> {
         self.log_call(MockCall::GetPullRequest(pr_number));
 
         if let Some(err) = &self.error {
-            return Err(PluginError::Provider {
-                message: err.clone(),
-                source: None,
-            });
+            return Err(CiProviderError::provider(err.clone()));
         }
 
         Ok(self
