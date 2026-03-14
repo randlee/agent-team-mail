@@ -1645,14 +1645,14 @@ operator-controllable.
 |---|---|---|---|
 | AO.1 | Shared runtime admission guard (`release`/`dev` only, hard-stop invalid shared launches) | `feature/pAO-s1-runtime-admission` | PLANNED |
 | AO.2 | Explicit isolated runtime creation + 10-minute TTL cleanup policy | `feature/pAO-s2-isolated-runtime` | PLANNED |
-| AO.3 | Shared repo-state cache, team budgets (`100/hour`), doctor audit call, freshness/status surfaces | `feature/pAO-s3-gh-budget-cache` | PLANNED |
-| AO.4 | Single `(team, repo)` lease ownership + hidden human-authorized cross-team stop/disable path | `feature/pAO-s4-operator-control` | PLANNED |
+| AO.3 | Shared repo-state cache, team budgets (`100/hour`), attributed `run_gh()` path, merge-conflict checks, and config/init parity | `feature/pAO-s3-gh-budget-cache` | PLANNED |
+| AO.4 | Single `(team, repo)` lease ownership + hidden human-authorized cross-team stop/disable path with operator-facing owner metadata | `feature/pAO-s4-operator-control` | PLANNED |
 
 ### Exit Criteria
 1. Shared `release` and `dev` runtimes reject invalid owners and duplicate daemon starts.
 2. Isolated runtimes are explicit, short-lived, and do not enable live GH polling by default.
-3. GitHub calls are budgeted per team, counted locally, and surfaced with freshness metadata in `atm gh status` and `atm doctor`.
-4. One active `gh_monitor` owner exists per `(team, repo)`, and operators can stop a runaway monitor with auditable cross-team controls.
+3. GitHub calls are budgeted per team, counted locally, and surfaced with freshness metadata in `atm gh status` and `atm doctor`; pre-run/post-completion merge-conflict checks plus config/init parity remain on the attributed `run_gh()` path.
+4. One active `gh_monitor` owner exists per `(team, repo)`, operator-facing status shows the active owner metadata, and operators can stop a runaway monitor with auditable cross-team controls.
 
 **Dependency graph**: AO.1 → AO.2 → AO.3 → AO.4
 

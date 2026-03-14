@@ -25,6 +25,8 @@ Rules:
 
 Acceptance:
 - Requirements covered: `GH-CI-FR-35`, `GH-CI-FR-36`
+- shared runtime lease acquisition uses `acquire_lock` + re-read + fsync +
+  `atomic_swap` discipline (`GH-CI-FR-35`)
 - repo/worktree binaries cannot start against shared `release` or `dev`
 - second daemon for shared `release` or `dev` fails loudly
 - daemon status records runtime owner metadata sufficient to explain refusal
@@ -98,11 +100,19 @@ Rules:
   - `rate_limit_critical`
 
 Acceptance:
-- Requirements covered: `GH-CI-FR-22`, `GH-CI-FR-23`, `GH-CI-FR-24`, `GH-CI-FR-25`, `GH-CI-FR-26`, `GH-CI-FR-27`, `GH-CI-FR-28`, `GH-CI-FR-39`
+- Requirements covered: `GH-CI-FR-22`, `GH-CI-FR-23`, `GH-CI-FR-24`, `GH-CI-FR-25`, `GH-CI-FR-26`, `GH-CI-FR-27`, `GH-CI-FR-28`, `GH-CI-FR-39`, `GH-CI-FR-41`, `GH-CI-FR-42`, `GH-CI-FR-43`, `GH-CI-FR-44`, `GH-CI-FR-45`
 - `atm gh status` shows freshness metadata (`updated_at`) for GH-derived data
 - `atm doctor` shows cached GH call counts and one live rate-limit audit sample
 - operators can identify which runtime owns active polling
 - operators can identify call volume by team, repo, and branch/ref when known
+- pre-run and post-completion DIRTY merge-conflict checks stay on the attributed
+  polling path and surface canonical merge-conflict alerts (`GH-CI-FR-41`,
+  `GH-CI-FR-42`)
+- CLI/daemon config discovery parity and `atm gh init` config file selection are
+  preserved under the AO.3 attributed `gh` path (`GH-CI-FR-43`,
+  `GH-CI-FR-44`)
+- legacy direct `gh` helper paths are eliminated or rerouted through the
+  attributed provider `run_gh()` path (`GH-CI-FR-45`)
 
 ## AO.4 Operator Shutdown and Lease Control
 
@@ -124,5 +134,8 @@ Rules:
 Acceptance:
 - Requirements covered: `GH-CI-FR-20`, `GH-CI-FR-21`, `GH-CI-FR-29`
 - duplicate `(team, repo)` monitor ownership fails loudly
+- operator-facing status shows `runtime_kind`, `PID`, `binary_path`,
+  `ATM_HOME`, `team`, `repo`, and `poll_interval` for the active `(team, repo)`
+  polling owner (`GH-CI-FR-21`)
 - hidden operator stop path exists for emergency shutdown
 - affected team lead receives notification identifying actor and reason

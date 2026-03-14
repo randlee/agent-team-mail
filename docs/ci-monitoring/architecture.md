@@ -223,6 +223,16 @@ should attach local accounting metadata for:
 - remaining, `limit`, and `reset_at` for rate-limit emissions
 - `budget_used`, `budget_limit`, and `budget_window` for rate-limit emissions
 
+This is also an explicit subsystem constraint: all `gh` CLI invocations for
+`gh_monitor` behavior must flow through the attributed provider path. Direct
+`Command::new("gh")` helpers outside the `CiProvider` implementation are not
+allowed to satisfy monitor behavior because they bypass budgeting, attribution,
+freshness gating, and `in_flight` accounting.
+
+Phase AO must eliminate or reroute existing bypass helpers such as
+`run_gh_command` and `run_gh_command_for_repo` onto the attributed provider
+path before the guardrail phase is considered complete.
+
 The local accounting counter and attribution store should live in the
 future `agent-team-mail-ci-monitor` crate, created in AO.1 as a new workspace
 member, so the reusable CI-monitor core owns the counting contract instead of

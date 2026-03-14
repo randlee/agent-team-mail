@@ -499,3 +499,18 @@ After a monitored PR run reaches terminal state:
   - else existing global config (`~/.config/atm/config.toml`) when present
   - else local `.atm.toml` in current directory
 - Command must create parent directories as needed.
+
+### GH-CI-FR-45 Attributed `gh` invocation path
+
+All `gh` CLI invocations inside the `gh_monitor` subsystem must go through the
+attributed `run_gh()` path in the GitHub provider implementation.
+
+Direct `Command::new("gh")` calls outside the `CiProvider` trait
+implementation are prohibited for `gh_monitor` behavior because they bypass:
+- team budgeting
+- repo-state freshness gating
+- attribution/log emission
+- `in_flight` accounting
+
+Existing bypass helpers must be eliminated or rerouted through the attributed
+provider path during Phase AO.
