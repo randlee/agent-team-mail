@@ -217,7 +217,7 @@ should attach local accounting metadata for:
 - runtime_kind
 - binary_path
 - poll_interval_secs when emitted from the shared poller
-- action/arguments
+- action (gh subcommand and arguments)
 - duration_ms
 - success
 - remaining, `limit`, and `reset_at` for rate-limit emissions
