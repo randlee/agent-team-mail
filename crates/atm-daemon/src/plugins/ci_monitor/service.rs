@@ -1,4 +1,9 @@
-//! CI monitor service orchestration.
+//! Transport-free CI monitor service orchestration.
+//!
+//! This module forms the core CI monitor boundary. It must not depend on daemon
+//! socket/router request or response types; daemon transport adapters are responsible
+//! for translating wire payloads into these CI monitor request/status types before
+//! calling into the service layer.
 
 #[cfg(unix)]
 use super::gh_monitor::{
