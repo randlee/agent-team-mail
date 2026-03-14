@@ -1487,6 +1487,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_create_provider_from_registry_prefers_git_repo_over_config_repo() {
         let registry = RecordingRegistry::new();
         let git_provider = GitProviderType::GitHub {
@@ -1510,6 +1511,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_create_provider_from_registry_falls_back_to_config_repo_when_git_missing() {
         let registry = RecordingRegistry::new();
 
