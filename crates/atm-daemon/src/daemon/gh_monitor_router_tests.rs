@@ -1053,6 +1053,43 @@ async fn test_gh_monitor_control_cross_team_requires_user_authorized() {
 #[tokio::test]
 #[cfg(unix)]
 #[serial]
+async fn test_gh_monitor_control_cross_team_stop_and_restart_notify_team_lead() {
+    let temp = TempDir::new().unwrap();
+    let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+    write_gh_monitor_config(temp.path(), "ops-team");
+    write_hook_auth_team_config(temp.path(), "ops-team", "team-lead", &["team-lead"]);
+    std::fs::create_dir_all(temp.path().join(".claude/teams/ops-team/inboxes")).unwrap();
+
+    let stop_req = r#"{"version":1,"request_id":"r-gh-stop-cross-team-notify","command":"gh-monitor-control","payload":{"team":"ops-team","action":"stop","actor":"team-lead","actor_team":"atm-dev","user_authorized":true,"operator_reason":"manual rollback","drain_timeout_secs":1}}"#;
+    let stop_resp = handle_gh_monitor_control_command(stop_req, temp.path()).await;
+    assert_eq!(stop_resp.status, "ok");
+
+    let restart_req = r#"{"version":1,"request_id":"r-gh-restart-cross-team-notify","command":"gh-monitor-control","payload":{"team":"ops-team","action":"restart","actor":"team-lead","actor_team":"atm-dev","user_authorized":true,"operator_reason":"resume service","drain_timeout_secs":1}}"#;
+    let restart_resp = handle_gh_monitor_control_command(restart_req, temp.path()).await;
+    assert_eq!(restart_resp.status, "ok");
+
+    let inbox = read_team_inbox_messages(temp.path(), "ops-team", "team-lead");
+    assert!(
+        inbox.iter().any(|msg| {
+            msg.text
+                .contains("your gh monitor was stopped by team-lead@atm-dev")
+                && msg.text.contains("manual rollback")
+        }),
+        "cross-team stop should notify affected team lead with actor and reason"
+    );
+    assert!(
+        inbox.iter().any(|msg| {
+            msg.text
+                .contains("your gh monitor was restarted by team-lead@atm-dev")
+                && msg.text.contains("resume service")
+        }),
+        "cross-team restart should notify affected team lead with actor and reason"
+    );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+#[serial]
 async fn test_gh_monitor_health_includes_owner_metadata_fields() {
     let temp = TempDir::new().unwrap();
     let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
