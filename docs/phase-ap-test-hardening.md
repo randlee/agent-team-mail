@@ -3,6 +3,11 @@
 Goal: eliminate hang-prone, flaky, and operationally unsafe test patterns
 without changing product behavior.
 
+Prerequisites:
+- Phase AN merged to `develop`.
+- Phase AO may proceed in parallel, but AP.1 should start before new
+  daemon-heavy test coverage expands.
+
 Status review:
 - The original report was generated against the AN.4 worktree, but a current
   spot-check on `develop`-equivalent code shows the core findings still exist.
