@@ -1658,6 +1658,38 @@ operator-controllable.
 
 ---
 
+## 17.24 Phase AP: Test Stability and Harness Hardening
+
+**Goal**: eliminate hang-prone, flaky, and operationally unsafe test patterns
+that can block CI without clearly identifying the failing test or resource.
+
+**Prerequisites**: Phase AN merged to `develop`; Phase AO may proceed in
+parallel, but AP.1 should start before new daemon-heavy test coverage expands.
+**Integration branch**: `integrate/phase-AP`
+
+**Planning doc**: `docs/phase-ap-test-hardening.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Branch | Status |
+|---|---|---|---|
+| AP.1 | Environment/process safety: scoped `ATM_HOME`, subprocess RAII, autostart diagnostics | `feature/pAP-s1-process-safety` | PLANNED |
+| AP.2 | Deterministic timing: replace wall-clock sleeps, bound loop/watcher waits, improve test attribution | `feature/pAP-s2-deterministic-timing` | PLANNED |
+| AP.3 | Pathing/serialization cleanup and final audit | `feature/pAP-s3-test-hygiene-audit` | PLANNED |
+
+### Exit Criteria
+1. Blocking/high-priority tests no longer rely on raw wall-clock sleeps as their
+   sole synchronization mechanism.
+2. Test helpers and integration tests do not leak daemon/subprocess children on
+   panic.
+3. Shared mutable environment state (`ATM_HOME`, shared runtime paths) is scoped
+   safely or serialized explicitly.
+4. Cross-platform fixtures avoid hardcoded `/tmp`, and risky integration suites
+   fail with bounded, attributable diagnostics instead of hanging silently.
+
+**Dependency graph**: AP.1 → AP.2 → AP.3
+
+---
+
 ## 17.11 Phase Z: Daemon SSoT + Observability Hardening
 
 **Goal**: Close daemon single-source-of-truth gaps for member/session state and make
