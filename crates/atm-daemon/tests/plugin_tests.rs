@@ -133,6 +133,17 @@ fn create_test_message(from: &str, text: &str) -> InboxMessage {
     }
 }
 
+async fn wait_until(timeout_ms: u64, mut pred: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    while std::time::Instant::now() < deadline {
+        if pred() {
+            return true;
+        }
+        tokio::task::yield_now().await;
+    }
+    pred()
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -391,8 +402,10 @@ async fn test_plugin_run_respects_cancellation() {
     // Spawn run task
     let run_handle = tokio::spawn(async move { plugin.run(cancel_clone).await });
 
-    // Give it a moment to start
-    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    assert!(
+        wait_until(1_000, || !run_handle.is_finished()).await,
+        "run task should remain pending until cancellation"
+    );
 
     // Cancel and verify it completes
     cancel.cancel();
