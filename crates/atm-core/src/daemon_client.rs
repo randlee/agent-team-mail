@@ -706,7 +706,11 @@ pub fn write_daemon_lock_metadata(
     let current = read_daemon_lock_metadata(home);
     if let Some(current) = current {
         let current_pid = current.pid as i32;
-        if current.pid != std::process::id() && pid_alive(current_pid) {
+        #[cfg(unix)]
+        let is_alive = current.pid != std::process::id() && pid_alive(current_pid);
+        #[cfg(not(unix))]
+        let is_alive = current.pid != std::process::id();
+        if is_alive {
             anyhow::bail!(
                 "shared {} runtime already owned by live pid {}; refusing metadata overwrite for pid {}",
                 current.owner.runtime_kind.as_str(),
