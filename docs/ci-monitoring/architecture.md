@@ -101,6 +101,13 @@ The CI-monitoring subsystem should separate:
 - routing/notification shaping
 - health and status persistence
 
+State ownership note:
+- `GhMonitorStateFile` and `GhMonitorStateRecord` are defined exclusively in
+  `crates/atm-daemon/src/plugins/ci_monitor/types.rs` as the canonical daemon
+  state-file types.
+- `plugin.rs` and all other consumers must import those definitions from
+  `types.rs` and must not re-define local copies.
+
 The subsystem should move toward:
 
 - core CI service logic in one place

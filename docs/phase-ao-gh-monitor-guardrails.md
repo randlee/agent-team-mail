@@ -15,6 +15,11 @@ Deletion policy for this phase:
   workflow.
 - AO acceptance favors one canonical path per concern, not coexistence of old
   and new paths.
+- The named deletion targets are the legacy `run_gh_command` /
+  `run_gh_command_for_repo` helper paths and equivalent duplicate runtime or
+  state helpers. All other named paths inside the `CiProvider` trait
+  implementation are normative and must not be deleted. When in doubt, consult
+  the AO.5 must-not-delete list before removing a path.
 
 ## AO.1 Shared Runtime Admission Guard
 
@@ -167,6 +172,14 @@ Rules:
   AO.1-AO.4 should be reviewed for removal once the canonical AO path is live.
 - Contracts should be narrowed to the surviving canonical runtime, polling,
   state, and operator-control surfaces.
+- The following contract surfaces must survive AO.5 intact:
+  - `CiProvider` trait boundary in
+    `crates/atm-daemon/src/plugins/ci_monitor/provider.rs`
+  - attributed `run_gh()` path in `GitHubActionsProvider`
+  - shared `(team, repo)` poller contract (`GH-CI-FR-10a`,
+    `GH-CI-FR-10b`, `GH-CI-FR-10c`)
+  - `GhMonitorHealthRecord` schema fields (`GH-CI-FR-21`, `GH-CI-FR-26`)
+  - any test that is the sole coverage for a GH-CI-FR normative requirement
 
 Acceptance:
 - superseded GH helper paths, state representations, and transitional runtime

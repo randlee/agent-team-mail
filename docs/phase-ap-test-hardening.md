@@ -21,6 +21,10 @@ Deletion policy for this phase:
   action is consolidation or deletion.
 - When AP introduces a canonical timeout/cleanup helper, older parallel helpers
   should be removed.
+- A test that is the sole or primary coverage for a normative requirement in
+  `docs/requirements.md` or `docs/ci-monitoring/requirements.md` must be
+  stabilized rather than deleted. Deletion is permitted only when an equivalent
+  canonical test retains equivalent coverage.
 
 ## AP.1 Environment and Process Safety
 
@@ -83,8 +87,8 @@ Acceptance:
 - Long-running loop tests have explicit upper bounds and timeout-aware failure
   messages
 - Upper bounds are enforced with an affirmative assertion, e.g.
-  `assert!(elapsed < Duration::from_secs(N), "test exceeded expected duration")`,
-  not only with a timeout wrapper
+  `assert!(elapsed < Duration::from_secs(N), "test exceeded {}s: elapsed={:?}",
+  N, elapsed)`, not only with a timeout wrapper
 - Watcher/config reconciliation tests prefer deterministic direct calls over
   repeated polling where possible
 - CI output makes the currently running risky integration test identifiable
@@ -109,6 +113,9 @@ Scope:
   resources after RAII cleanup is applied; RAII isolates per-test lifecycle via
   `Drop`, but it cannot prevent concurrent access to the same Tokio runtime,
   daemon socket, or shared runtime directory
+- Use RAII where the resource can be scoped per-test. Use `#[serial]` where the
+  resource is inherently process-global and concurrent test threads would still
+  race even after Drop-based cleanup.
 - perform a final identify-only sweep for unbounded waits, leaked subprocesses,
   and poor attribution in the touched suites
 
