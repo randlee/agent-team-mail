@@ -872,10 +872,13 @@ fn reap_expired_isolated_runtime_roots_with_base(base_root: &Path) -> anyhow::Re
         }
 
         let pid_path = daemon_runtime_dir_for(&home).join("atm-daemon.pid");
-        let alive = std::fs::read_to_string(&pid_path)
+        let runtime_pid = std::fs::read_to_string(&pid_path)
             .ok()
-            .and_then(|raw| raw.trim().parse::<i32>().ok())
-            .is_some_and(pid_alive);
+            .and_then(|raw| raw.trim().parse::<i32>().ok());
+        #[cfg(unix)]
+        let alive = runtime_pid.is_some_and(pid_alive);
+        #[cfg(not(unix))]
+        let alive = false;
         if alive {
             continue;
         }
