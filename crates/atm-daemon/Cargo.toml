@@ -26,7 +26,7 @@ path = "tests/ci_monitor_integration.rs"
 required-features = ["test-support"]
 
 [dependencies]
-agent-team-mail-ci-monitor = { workspace = true, features = ["test-support"] }
+agent-team-mail-ci-monitor.workspace = true
 agent-team-mail-core.workspace = true
 sc-observability.workspace = true
 thiserror.workspace = true
@@ -63,6 +63,7 @@ ssh-tests = ["ssh"]
 test-support = []
 
 [dev-dependencies]
+agent-team-mail-ci-monitor = { workspace = true, features = ["test-support"] }
 tempfile = "3.13"
 tokio = { version = "1", features = ["full", "test-util"] }
 chrono = "0.4"
