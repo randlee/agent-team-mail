@@ -40,23 +40,6 @@ pub(crate) struct GhAlertTargets<'a> {
 
 #[cfg(unix)]
 #[derive(Debug, Clone, Default)]
-pub(crate) struct OwnedGhAlertTargets {
-    pub(crate) caller_agent: Option<String>,
-    pub(crate) cc: Vec<String>,
-}
-
-#[cfg(unix)]
-impl OwnedGhAlertTargets {
-    pub(crate) fn borrowed(&self) -> GhAlertTargets<'_> {
-        GhAlertTargets {
-            caller_agent: self.caller_agent.as_deref(),
-            cc: &self.cc,
-        }
-    }
-}
-
-#[cfg(unix)]
-#[derive(Debug, Clone, Default)]
 pub(crate) struct GhMonitorHealthUpdate<'a> {
     pub(crate) lifecycle_state: Option<&'a str>,
     pub(crate) availability_state: Option<&'a str>,

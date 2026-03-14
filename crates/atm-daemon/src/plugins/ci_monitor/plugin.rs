@@ -855,7 +855,7 @@ impl CiMonitorPlugin {
             config_path: None,
             lifecycle_state: "running".to_string(),
             availability_state: availability_state.to_string(),
-            in_flight: 0,
+            in_flight: super::helpers::count_in_flight_monitors(home_dir, team),
             updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             message: Some(message.to_string()),
             repo_state_updated_at: None,
@@ -1497,6 +1497,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_create_provider_from_registry_prefers_git_repo_over_config_repo() {
+        let temp = tempfile::tempdir().unwrap();
         let registry = RecordingRegistry::new();
         let git_provider = GitProviderType::GitHub {
             owner: "git-owner".to_string(),
@@ -1504,7 +1505,7 @@ mod tests {
         };
 
         let provider = create_provider_from_registry(
-            std::path::Path::new("/tmp/atm-home"),
+            temp.path(),
             "atm-dev",
             &registry,
             "github",
@@ -1523,10 +1524,11 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_create_provider_from_registry_falls_back_to_config_repo_when_git_missing() {
+        let temp = tempfile::tempdir().unwrap();
         let registry = RecordingRegistry::new();
 
         let provider = create_provider_from_registry(
-            std::path::Path::new("/tmp/atm-home"),
+            temp.path(),
             "atm-dev",
             &registry,
             "github",

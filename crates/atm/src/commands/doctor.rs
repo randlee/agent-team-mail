@@ -5,7 +5,6 @@ use clap::Args;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
@@ -14,7 +13,10 @@ use agent_team_mail_core::daemon_client::{
     query_list_agents_for_team, query_session_for_team, query_team_member_states,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
-use agent_team_mail_core::gh_monitor_observability::read_gh_repo_state;
+use agent_team_mail_core::gh_monitor_observability::{
+    GhCliObserverContext, RateLimitUpdate, read_gh_repo_state, run_attributed_gh_command,
+    update_gh_repo_state_rate_limit,
+};
 use agent_team_mail_core::log_reader::{LogFilter, LogReader};
 use agent_team_mail_core::schema::TeamConfig;
 use chrono::{DateTime, Duration, Utc};
@@ -405,16 +407,45 @@ fn build_gh_rate_limit_audit(home_dir: &Path, team: &str) -> Result<Option<GhRat
         return Ok(None);
     }
 
-    let output = Command::new("gh").args(["api", "rate_limit"]).output()?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "gh api rate_limit failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+    let repo_scope = &team_records[0].repo;
+    if !repo_scope.contains('/') {
+        anyhow::bail!("invalid owner/repo scope in gh repo-state: {repo_scope}");
     }
+    let observer_ctx = GhCliObserverContext {
+        home: home_dir.to_path_buf(),
+        team: team.to_string(),
+        repo: repo_scope.to_string(),
+        runtime: "atm".to_string(),
+    };
+    let output = run_attributed_gh_command(
+        &observer_ctx,
+        "gh_api_rate_limit",
+        &["api", "rate_limit"],
+        None,
+        None,
+    )
+    .context("gh api rate_limit failed via attributed provider path")?;
 
-    let live: GhRateLimitResponse = serde_json::from_slice(&output.stdout)
-        .context("failed to parse gh api rate_limit response")?;
+    let live: GhRateLimitResponse =
+        serde_json::from_str(&output).context("failed to parse gh api rate_limit response")?;
+    let live_reset_at = live
+        .resources
+        .core
+        .reset
+        .and_then(|epoch| DateTime::<Utc>::from_timestamp(epoch, 0))
+        .map(|ts| ts.to_rfc3339());
+    let _ = update_gh_repo_state_rate_limit(
+        home_dir,
+        team,
+        repo_scope,
+        RateLimitUpdate {
+            runtime: "atm".to_string(),
+            remaining: live.resources.core.remaining,
+            limit: live.resources.core.limit,
+            reset_at: live_reset_at.clone(),
+            source: "atm_doctor",
+        },
+    );
     let cached_used_in_window: u64 = team_records
         .iter()
         .map(|record| record.budget_used_in_window)
@@ -428,13 +459,6 @@ fn build_gh_rate_limit_audit(home_dir: &Path, team: &str) -> Result<Option<GhRat
         .core
         .limit
         .saturating_sub(live.resources.core.remaining);
-    let live_reset_at = live
-        .resources
-        .core
-        .reset
-        .and_then(|epoch| DateTime::<Utc>::from_timestamp(epoch, 0))
-        .map(|ts| ts.to_rfc3339());
-
     Ok(Some(GhRateLimitAudit {
         live_remaining: live.resources.core.remaining,
         live_limit: live.resources.core.limit,

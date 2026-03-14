@@ -10,9 +10,14 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::event_log::{EventFields, emit_event_best_effort};
+use crate::io::inbox::inbox_append;
+use crate::schema::InboxMessage;
+use crate::team_config_store::TeamConfigStore;
 
 const GH_BUDGET_LIMIT_PER_HOUR: u64 = 100;
 const GH_WARNING_THRESHOLD: u64 = 50;
@@ -65,6 +70,52 @@ pub fn build_gh_cli_observer(ctx: GhCliObserverContext) -> Arc<dyn GhCliObserver
     Arc::new(SharedGhCliObserver::new(ctx))
 }
 
+pub fn run_attributed_gh_command(
+    ctx: &GhCliObserverContext,
+    action: &str,
+    args: &[&str],
+    branch: Option<&str>,
+    reference: Option<&str>,
+) -> Result<String> {
+    let observer = SharedGhCliObserver::new(ctx.clone());
+    let metadata = GhCliCallMetadata {
+        repo_scope: ctx.repo.clone(),
+        action: action.to_string(),
+        args: args.iter().map(|value| (*value).to_string()).collect(),
+        branch: branch.map(str::to_string),
+        reference: reference.map(str::to_string),
+    };
+    observer
+        .before_gh_call(&metadata)
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+
+    let started = Instant::now();
+    let output = Command::new("gh")
+        .args(args)
+        .output()
+        .map_err(|err| anyhow::anyhow!("failed to execute gh: {err}"))?;
+    let duration_ms = started.elapsed().as_millis() as u64;
+
+    let result = if output.status.success() {
+        String::from_utf8(output.stdout)
+            .map_err(|err| anyhow::anyhow!("invalid UTF-8 in gh output: {err}"))
+    } else {
+        Err(anyhow::anyhow!(
+            "gh command failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    };
+
+    observer.after_gh_call(&GhCliCallOutcome {
+        metadata,
+        duration_ms,
+        success: result.is_ok(),
+        error: result.as_ref().err().map(|err| err.to_string()),
+    });
+
+    result
+}
+
 pub fn gh_repo_state_path_for(home: &Path) -> PathBuf {
     ci_repo_state_path_for(home)
 }
@@ -104,26 +155,32 @@ pub fn update_gh_repo_state_rate_limit(
     home: &Path,
     team: &str,
     repo: &str,
-    runtime: &str,
-    remaining: u64,
-    limit: u64,
-    reset_at: Option<String>,
-    source: &str,
+    update: RateLimitUpdate<'_>,
 ) -> Result<GhRepoStateRecord> {
-    mutate_record(home, team, repo, runtime, |record, now| {
+    mutate_record(home, team, repo, &update.runtime, |record, now| {
         record.rate_limit = Some(GhRateLimitSnapshot {
-            remaining,
-            limit,
+            remaining: update.remaining,
+            limit: update.limit,
             updated_at: now.to_rfc3339(),
-            reset_at,
-            source: source.to_string(),
+            reset_at: update.reset_at.clone(),
+            source: update.source.to_string(),
         });
         record.updated_at = now.to_rfc3339();
         record.cache_expires_at = (now + Duration::seconds(GH_REPO_STATE_TTL_SECS)).to_rfc3339();
     })
 }
 
+#[derive(Debug, Clone)]
+pub struct RateLimitUpdate<'a> {
+    pub runtime: String,
+    pub remaining: u64,
+    pub limit: u64,
+    pub reset_at: Option<String>,
+    pub source: &'a str,
+}
+
 fn record_call_outcome(ctx: &GhCliObserverContext, outcome: &GhCliCallOutcome) -> Result<()> {
+    let mut warning_crossed = false;
     let record = mutate_record(
         &ctx.home,
         &ctx.team,
@@ -150,6 +207,12 @@ fn record_call_outcome(ctx: &GhCliObserverContext, outcome: &GhCliCallOutcome) -
             record.last_refresh_at = Some(now.to_rfc3339());
             record.cache_expires_at =
                 (now + Duration::seconds(GH_REPO_STATE_TTL_SECS)).to_rfc3339();
+            if record.budget_used_in_window >= record.budget_warning_threshold
+                && record.warning_emitted_at.is_none()
+            {
+                record.warning_emitted_at = Some(now.to_rfc3339());
+                warning_crossed = true;
+            }
         },
     )?;
 
@@ -163,9 +226,7 @@ fn record_call_outcome(ctx: &GhCliObserverContext, outcome: &GhCliCallOutcome) -
             &record,
             outcome.error.as_deref(),
         );
-    } else if record.budget_used_in_window >= record.budget_warning_threshold
-        && record.warning_emitted_at.is_some()
-    {
+    } else if warning_crossed {
         emit_rate_limit_event(
             "rate_limit_warning",
             ctx,
@@ -173,6 +234,7 @@ fn record_call_outcome(ctx: &GhCliObserverContext, outcome: &GhCliCallOutcome) -
             &record,
             outcome.error.as_deref(),
         );
+        emit_budget_warning_message(ctx, &record, &outcome.metadata);
     }
 
     Ok(())
@@ -186,19 +248,37 @@ fn emit_call_event(
     let mut extra = serde_json::Map::new();
     extra.insert("repo".to_string(), json!(ctx.repo));
     extra.insert(
-        "used_calls".to_string(),
+        "budget_used".to_string(),
         json!(record.budget_used_in_window),
     );
     extra.insert(
-        "budget_limit_per_hour".to_string(),
+        "budget_limit".to_string(),
         json!(record.budget_limit_per_hour),
     );
     extra.insert("duration_ms".to_string(), json!(outcome.duration_ms));
+    extra.insert("success".to_string(), json!(outcome.success));
+    extra.insert("runtime_kind".to_string(), json!(ctx.runtime));
+    extra.insert(
+        "poll_interval_secs".to_string(),
+        json!(current_poll_interval_secs(record)),
+    );
+    extra.insert(
+        "gh_subcommand".to_string(),
+        json!(format_gh_subcommand(&outcome.metadata)),
+    );
+    extra.insert(
+        "action_subcommand".to_string(),
+        json!(format_gh_subcommand(&outcome.metadata)),
+    );
+    if let Some(owner) = record.owner.as_ref() {
+        extra.insert("binary_path".to_string(), json!(owner.executable_path));
+        extra.insert("pid".to_string(), json!(owner.pid));
+    }
     if let Some(branch) = outcome.metadata.branch.as_deref() {
         extra.insert("branch".to_string(), json!(branch));
     }
     if let Some(reference) = outcome.metadata.reference.as_deref() {
-        extra.insert("reference".to_string(), json!(reference));
+        extra.insert("target_ref".to_string(), json!(reference));
     }
     emit_event_best_effort(EventFields {
         level: if outcome.success { "info" } else { "warn" },
@@ -230,21 +310,66 @@ fn emit_rate_limit_event(
     error: Option<&str>,
 ) {
     let mut extra = serde_json::Map::new();
+    let fallback_reset_at = parse_rfc3339(&record.budget_window_started_at)
+        .map(|started| (started + Duration::hours(1)).to_rfc3339());
+    let remaining = record
+        .rate_limit
+        .as_ref()
+        .map(|rate_limit| rate_limit.remaining)
+        .unwrap_or_else(|| {
+            record
+                .budget_limit_per_hour
+                .saturating_sub(record.budget_used_in_window)
+        });
+    let limit = record
+        .rate_limit
+        .as_ref()
+        .map(|rate_limit| rate_limit.limit)
+        .unwrap_or(record.budget_limit_per_hour);
+    let reset_at = record
+        .rate_limit
+        .as_ref()
+        .and_then(|rate_limit| rate_limit.reset_at.clone())
+        .or(fallback_reset_at);
     extra.insert("repo".to_string(), json!(ctx.repo));
     extra.insert(
-        "used_calls".to_string(),
+        "budget_used".to_string(),
         json!(record.budget_used_in_window),
     );
     extra.insert(
-        "budget_limit_per_hour".to_string(),
+        "budget_limit".to_string(),
         json!(record.budget_limit_per_hour),
     );
+    extra.insert(
+        "budget_window".to_string(),
+        json!(record.budget_window_started_at),
+    );
+    extra.insert("runtime_kind".to_string(), json!(ctx.runtime));
+    extra.insert(
+        "poll_interval_secs".to_string(),
+        json!(current_poll_interval_secs(record)),
+    );
+    extra.insert(
+        "gh_subcommand".to_string(),
+        json!(format_gh_subcommand(metadata)),
+    );
+    extra.insert(
+        "action_subcommand".to_string(),
+        json!(format_gh_subcommand(metadata)),
+    );
+    if let Some(owner) = record.owner.as_ref() {
+        extra.insert("binary_path".to_string(), json!(owner.executable_path));
+        extra.insert("pid".to_string(), json!(owner.pid));
+    }
     if let Some(branch) = metadata.branch.as_deref() {
         extra.insert("branch".to_string(), json!(branch));
     }
     if let Some(reference) = metadata.reference.as_deref() {
-        extra.insert("reference".to_string(), json!(reference));
+        extra.insert("target_ref".to_string(), json!(reference));
     }
+    extra.insert("remaining".to_string(), json!(remaining));
+    extra.insert("limit".to_string(), json!(limit));
+    extra.insert("reset_at".to_string(), json!(reset_at));
     emit_event_best_effort(EventFields {
         level: if action == "rate_limit_critical" {
             "warn"
@@ -412,12 +537,61 @@ fn maybe_reset_budget_window(record: &mut GhRepoStateRecord, now: DateTime<Utc>)
     } else if record.budget_used_in_window < record.budget_limit_per_hour {
         record.blocked = false;
     }
+}
 
-    if record.budget_used_in_window + 1 >= record.budget_warning_threshold
-        && record.warning_emitted_at.is_none()
-    {
-        record.warning_emitted_at = Some(now.to_rfc3339());
+fn current_poll_interval_secs(record: &GhRepoStateRecord) -> u64 {
+    if record.in_flight > 0 {
+        record.active_poll_interval_secs
+    } else {
+        record.idle_poll_interval_secs
     }
+}
+
+fn format_gh_subcommand(metadata: &GhCliCallMetadata) -> String {
+    metadata
+        .args
+        .iter()
+        .filter(|arg| !arg.starts_with('-') && !arg.contains('/'))
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn emit_budget_warning_message(
+    ctx: &GhCliObserverContext,
+    record: &GhRepoStateRecord,
+    metadata: &GhCliCallMetadata,
+) {
+    let team_dir = ctx.home.join(".claude/teams").join(&ctx.team);
+    let lead_agent = TeamConfigStore::open(&team_dir)
+        .read()
+        .ok()
+        .and_then(|config| config.lead_agent_id.split('@').next().map(str::to_string))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "team-lead".to_string());
+    let inbox_path = team_dir.join("inboxes").join(format!("{lead_agent}.json"));
+    let message = InboxMessage {
+        from: "gh_monitor".to_string(),
+        text: format!(
+            "GitHub monitor budget warning for {} on {}: {}/{} calls used in current window while running `{}`.",
+            ctx.team,
+            ctx.repo,
+            record.budget_used_in_window,
+            record.budget_limit_per_hour,
+            format_gh_subcommand(metadata)
+        ),
+        timestamp: Utc::now().to_rfc3339(),
+        read: false,
+        summary: Some(format!("gh_monitor budget warning: {}", ctx.repo)),
+        message_id: Some(format!(
+            "gh-budget-warning-{}-{}",
+            ctx.team,
+            ctx.repo.replace('/', "-")
+        )),
+        unknown_fields: Default::default(),
+    };
+    let _ = inbox_append(&inbox_path, &message, &ctx.team, &lead_agent);
 }
 
 fn bump_branch_ref_count(
