@@ -7,7 +7,7 @@ pub(crate) use super::gh_alerts::emit_ci_monitor_message;
 pub(crate) use super::github_schema::{
     GhPrLookupView, GhPrView, GhPullRequest, GhRunJob, GhRunListEntry, GhRunStep, GhRunView,
 };
-use super::helpers::upsert_gh_monitor_status;
+use super::helpers::upsert_gh_monitor_status_for_repo;
 // These routing re-exports preserve the pre-split gh_monitor call surface for
 // downstream code until the final thin-socket cleanup removes the shim layer.
 #[allow(unused_imports)]
@@ -17,7 +17,7 @@ pub(crate) use super::routing::{
     notify_merge_conflict as emit_merge_conflict_alert, repo_scope_matches,
     resolve_ci_alert_routing,
 };
-use super::types::{CiMonitorRequest, CiMonitorStatus, CiMonitorTargetKind};
+use super::types::{CiMonitorRequest, CiMonitorStatus, CiMonitorTargetKind, GhAlertTargets};
 use anyhow::Result;
 use tracing::warn;
 
@@ -257,6 +257,8 @@ pub(crate) async fn monitor_gh_run(
     gh_request: &CiMonitorRequest,
     owner_repo: &str,
     run_id: u64,
+    repo_scope: Option<&str>,
+    alert_targets: GhAlertTargets<'_>,
 ) -> Result<()> {
     let mut seen_completed: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut pending_completed: Vec<GhRunJob> = Vec::new();
@@ -270,7 +272,8 @@ pub(crate) async fn monitor_gh_run(
             home,
             &status_seed.team,
             gh_request.config_cwd.as_deref(),
-            expected_repo.as_deref(),
+            expected_repo.as_deref().or(repo_scope),
+            alert_targets,
         );
         let completed_jobs: Vec<GhRunJob> = run
             .jobs
@@ -321,7 +324,7 @@ pub(crate) async fn monitor_gh_run(
                 count_completed_jobs(&run),
                 run.jobs.len()
             ));
-            upsert_gh_monitor_status(home, state)?;
+            upsert_gh_monitor_status_for_repo(home, state, repo_scope)?;
 
             let sleep_secs = if first_poll { 5 } else { 15 };
             first_poll = false;
@@ -379,7 +382,7 @@ pub(crate) async fn monitor_gh_run(
             count_completed_jobs(&run),
             run.jobs.len()
         ));
-        upsert_gh_monitor_status(home, state)?;
+        upsert_gh_monitor_status_for_repo(home, state, repo_scope)?;
 
         if matches!(gh_request.target_kind, CiMonitorTargetKind::Pr)
             && let Ok(pr_number) = status_seed.target.trim().parse::<u64>()
@@ -396,6 +399,7 @@ pub(crate) async fn monitor_gh_run(
                             merge_state_status,
                             run.conclusion.as_deref(),
                             gh_request.config_cwd.as_deref(),
+                            alert_targets,
                         );
                     }
                 }

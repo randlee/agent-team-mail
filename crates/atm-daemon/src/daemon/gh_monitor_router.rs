@@ -29,6 +29,13 @@ struct ParsedWireRequest<T> {
 }
 
 #[cfg(unix)]
+struct ParsedHealthRequest {
+    team: String,
+    config_cwd: Option<String>,
+    repo: Option<String>,
+}
+
+#[cfg(unix)]
 fn target_kind_from_wire(
     kind: agent_team_mail_core::daemon_client::GhMonitorTargetKind,
 ) -> CiMonitorTargetKind {
@@ -72,15 +79,30 @@ fn lifecycle_action_from_wire(
 }
 
 #[cfg(unix)]
-fn monitor_request_from_wire(request: GhMonitorRequest) -> CiMonitorRequest {
-    CiMonitorRequest {
-        team: request.team,
-        target_kind: target_kind_from_wire(request.target_kind),
-        target: request.target,
-        reference: request.reference,
-        start_timeout_secs: request.start_timeout_secs,
-        config_cwd: request.config_cwd,
-    }
+fn monitor_request_from_wire(
+    request: GhMonitorRequest,
+) -> (
+    CiMonitorRequest,
+    Option<String>,
+    Option<String>,
+    Vec<String>,
+) {
+    let repo = request.repo;
+    let caller_agent = request.caller_agent;
+    let cc = request.cc;
+    (
+        CiMonitorRequest {
+            team: request.team,
+            target_kind: target_kind_from_wire(request.target_kind),
+            target: request.target,
+            reference: request.reference,
+            start_timeout_secs: request.start_timeout_secs,
+            config_cwd: request.config_cwd,
+        },
+        repo,
+        caller_agent,
+        cc,
+    )
 }
 
 #[cfg(unix)]
@@ -135,7 +157,7 @@ where
 #[allow(clippy::result_large_err)]
 fn parse_health_request(
     request_str: &str,
-) -> Result<ParsedWireRequest<(String, Option<String>)>, SocketResponse> {
+) -> Result<ParsedWireRequest<ParsedHealthRequest>, SocketResponse> {
     let request: SocketRequest = match serde_json::from_str(request_str) {
         Ok(r) => r,
         Err(e) => {
@@ -169,6 +191,11 @@ fn parse_health_request(
         .get("config_cwd")
         .and_then(|v| v.as_str())
         .map(str::to_string);
+    let repo = request
+        .payload
+        .get("repo")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     if team.is_empty() {
         return Err(make_error_response(
             &request.request_id,
@@ -179,19 +206,27 @@ fn parse_health_request(
 
     Ok(ParsedWireRequest {
         request_id: request.request_id,
-        payload: (team, config_cwd),
+        payload: ParsedHealthRequest {
+            team,
+            config_cwd,
+            repo,
+        },
     })
 }
 
 #[cfg(unix)]
-fn status_request_from_wire(request: GhStatusRequest) -> CiMonitorStatusRequest {
-    CiMonitorStatusRequest {
-        team: request.team,
-        target_kind: target_kind_from_wire(request.target_kind),
-        target: request.target,
-        reference: request.reference,
-        config_cwd: request.config_cwd,
-    }
+fn status_request_from_wire(request: GhStatusRequest) -> (CiMonitorStatusRequest, Option<String>) {
+    let repo = request.repo;
+    (
+        CiMonitorStatusRequest {
+            team: request.team,
+            target_kind: target_kind_from_wire(request.target_kind),
+            target: request.target,
+            reference: request.reference,
+            config_cwd: request.config_cwd,
+        },
+        repo,
+    )
 }
 
 #[cfg(unix)]
@@ -315,8 +350,17 @@ pub(crate) async fn handle_gh_monitor_command(
         Ok(parsed) => parsed,
         Err(response) => return response,
     };
+    let (gh_request, repo, caller_agent, cc) = monitor_request_from_wire(gh_request);
 
-    match service::monitor_request(home, &monitor_request_from_wire(gh_request)).await {
+    match service::monitor_request(
+        home,
+        &gh_request,
+        repo.as_deref(),
+        caller_agent.as_deref(),
+        &cc,
+    )
+    .await
+    {
         Ok(status) => make_ok_response(
             &request_id,
             serde_json::to_value(status_to_wire(status)).unwrap_or_default(),
@@ -353,7 +397,12 @@ pub(crate) async fn handle_gh_monitor_health_command(
 ) -> SocketResponse {
     let ParsedWireRequest {
         request_id,
-        payload: (team, config_cwd),
+        payload:
+            ParsedHealthRequest {
+                team,
+                config_cwd,
+                repo: _repo,
+            },
     } = match parse_health_request(request_str) {
         Ok(parsed) => parsed,
         Err(response) => return response,
@@ -380,8 +429,9 @@ pub(crate) async fn handle_gh_status_command(
         Ok(parsed) => parsed,
         Err(response) => return response,
     };
+    let (gh_request, repo) = status_request_from_wire(gh_request);
 
-    match service::status_request(home, &status_request_from_wire(gh_request)) {
+    match service::status_request(home, &gh_request, repo.as_deref()) {
         Ok(status) => make_ok_response(
             &request_id,
             serde_json::to_value(status_to_wire(status)).unwrap_or_default(),

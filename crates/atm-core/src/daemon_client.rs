@@ -869,11 +869,17 @@ pub struct GhMonitorRequest {
     pub target_kind: GhMonitorTargetKind,
     pub target: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_timeout_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cc: Vec<String>,
 }
 
 /// Request payload for daemon-routed `gh-status` command.
@@ -882,6 +888,8 @@ pub struct GhStatusRequest {
     pub team: String,
     pub target_kind: GhMonitorTargetKind,
     pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -902,6 +910,8 @@ pub enum GhMonitorLifecycleAction {
 pub struct GhMonitorControlRequest {
     pub team: String,
     pub action: GhMonitorLifecycleAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drain_timeout_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

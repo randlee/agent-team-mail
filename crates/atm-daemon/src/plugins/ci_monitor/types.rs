@@ -11,15 +11,48 @@ pub use agent_team_mail_ci_monitor::{
 use serde::{Deserialize, Serialize};
 
 #[cfg(unix)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct GhMonitorStateRecord {
+    #[serde(flatten)]
+    pub(crate) status: CiMonitorStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) repo_scope: Option<String>,
+}
+
+#[cfg(unix)]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct GhMonitorStateFile {
-    pub(crate) records: Vec<CiMonitorStatus>,
+    pub(crate) records: Vec<GhMonitorStateRecord>,
 }
 
 #[cfg(unix)]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct GhMonitorHealthFile {
     pub(crate) records: Vec<CiMonitorHealth>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct GhAlertTargets<'a> {
+    pub(crate) caller_agent: Option<&'a str>,
+    pub(crate) cc: &'a [String],
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Default)]
+pub(crate) struct OwnedGhAlertTargets {
+    pub(crate) caller_agent: Option<String>,
+    pub(crate) cc: Vec<String>,
+}
+
+#[cfg(unix)]
+impl OwnedGhAlertTargets {
+    pub(crate) fn borrowed(&self) -> GhAlertTargets<'_> {
+        GhAlertTargets {
+            caller_agent: self.caller_agent.as_deref(),
+            cc: &self.cc,
+        }
+    }
 }
 
 #[cfg(unix)]
