@@ -10,12 +10,15 @@ use super::gh_monitor::{
     fetch_pr_merge_state, is_pr_merge_state_dirty, monitor_gh_run, try_find_workflow_run_id,
     wait_for_pr_run_start,
 };
+use super::github_provider::GitHubActionsProvider;
 #[cfg(unix)]
 use super::health::set_gh_monitor_health_state;
 use super::helpers::{
     apply_config_state_to_status, count_in_flight_monitors, evaluate_gh_monitor_config,
     gh_monitor_key, load_gh_monitor_state_map,
 };
+use super::provider::ErasedCiProvider;
+use super::registry::CiProviderRegistryPort;
 #[cfg(unix)]
 use super::routing::{notify_ci_not_started, notify_merge_conflict};
 use super::types::{
@@ -23,11 +26,68 @@ use super::types::{
     CiMonitorStatus, CiMonitorStatusRequest, CiMonitorTargetKind, GhMonitorConfigState,
     GhMonitorHealthUpdate,
 };
+use agent_team_mail_core::context::GitProvider as GitProviderType;
 use tracing::warn;
 
 pub(crate) use agent_team_mail_ci_monitor::service::{
     CiMonitorServiceError, CiMonitorServiceResult, fetch_run_details, list_completed_runs,
 };
+
+pub(crate) fn create_provider_from_registry(
+    registry: &dyn CiProviderRegistryPort,
+    provider_name: &str,
+    configured_owner: Option<&str>,
+    configured_repo: Option<&str>,
+    git_provider: Option<&GitProviderType>,
+    config_table: Option<&toml::Table>,
+) -> CiMonitorServiceResult<Box<dyn ErasedCiProvider>> {
+    let (owner, repo) = if let Some(git_provider) = git_provider {
+        match git_provider {
+            GitProviderType::GitHub { owner, repo } => (owner.clone(), repo.clone()),
+            GitProviderType::AzureDevOps { org, project, repo } => {
+                return Err(CiMonitorServiceError::new(
+                    "PROVIDER_ERROR",
+                    format!(
+                        "Azure DevOps not yet supported (org: {org}, project: {project}, repo: {repo})"
+                    ),
+                ));
+            }
+            GitProviderType::GitLab { namespace, repo } => {
+                return Err(CiMonitorServiceError::new(
+                    "PROVIDER_ERROR",
+                    format!("GitLab not yet supported (namespace: {namespace}, repo: {repo})"),
+                ));
+            }
+            GitProviderType::Bitbucket { workspace, repo } => {
+                return Err(CiMonitorServiceError::new(
+                    "PROVIDER_ERROR",
+                    format!("Bitbucket not yet supported (workspace: {workspace}, repo: {repo})"),
+                ));
+            }
+            GitProviderType::Unknown { host } => {
+                return Err(CiMonitorServiceError::new(
+                    "PROVIDER_ERROR",
+                    format!("No CI provider for unknown git host: {host}"),
+                ));
+            }
+        }
+    } else if let (Some(owner), Some(repo)) = (configured_owner, configured_repo) {
+        (owner.to_string(), repo.to_string())
+    } else {
+        return Err(CiMonitorServiceError::new(
+            "PROVIDER_ERROR",
+            "No repository information available",
+        ));
+    };
+
+    if provider_name == "github" {
+        return Ok(Box::new(GitHubActionsProvider::new(owner, repo)));
+    }
+
+    registry
+        .create_provider(provider_name, config_table)
+        .map_err(|e| CiMonitorServiceError::new("PROVIDER_ERROR", e.to_string()))
+}
 
 #[cfg(unix)]
 fn validate_monitor_request(
