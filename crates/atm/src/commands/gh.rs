@@ -708,6 +708,19 @@ pub fn execute(args: GhArgs) -> Result<()> {
                         restart.reason.as_deref(),
                         restart.user_authorized,
                     );
+                    if restart.user_authorized && actor_team != team {
+                        notify_team_lead_of_monitor_control(
+                            &home_dir,
+                            &actor,
+                            &actor_team,
+                            team,
+                            "restarted",
+                            restart
+                                .reason
+                                .as_deref()
+                                .unwrap_or("operator-authorized cross-team restart"),
+                        )?;
+                    }
                     GhOutput::MonitorHealth(health)
                 }
                 MonitorTarget::Status(_status) => unreachable!("handled above"),
@@ -2257,6 +2270,26 @@ fn audit_monitor_control_action(
     reason: Option<&str>,
     user_authorized: bool,
 ) {
+    emit_event_best_effort(build_monitor_control_audit_fields(
+        action,
+        actor,
+        actor_team,
+        target_team,
+        repo,
+        reason,
+        user_authorized,
+    ));
+}
+
+fn build_monitor_control_audit_fields(
+    action: &str,
+    actor: &str,
+    actor_team: &str,
+    target_team: &str,
+    repo: Option<&str>,
+    reason: Option<&str>,
+    user_authorized: bool,
+) -> EventFields {
     let mut extra = serde_json::Map::new();
     extra.insert("actor".to_string(), serde_json::json!(actor));
     extra.insert("actor_team".to_string(), serde_json::json!(actor_team));
@@ -2271,7 +2304,7 @@ fn audit_monitor_control_action(
     if let Some(reason) = reason.filter(|value| !value.trim().is_empty()) {
         extra.insert("reason".to_string(), serde_json::json!(reason.trim()));
     }
-    emit_event_best_effort(EventFields {
+    EventFields {
         level: "info",
         source: "atm",
         action: "gh_monitor_control",
@@ -2282,7 +2315,7 @@ fn audit_monitor_control_action(
         agent_name: Some(actor.to_string()),
         extra_fields: extra,
         ..Default::default()
-    });
+    }
 }
 
 fn notify_team_lead_of_monitor_control(
@@ -2686,5 +2719,39 @@ mod tests {
 
         let rendered = render_pr_report_template(&template_path, &report).expect("render template");
         assert_eq!(rendered, "team=atm-dev pr=42 schema=1.0.0");
+    }
+
+    #[test]
+    fn build_monitor_control_audit_fields_captures_authorized_cross_team_stop() {
+        let fields = build_monitor_control_audit_fields(
+            "stop",
+            "team-lead",
+            "atm-dev",
+            "ops-team",
+            Some("owner/repo"),
+            Some("runaway polling"),
+            true,
+        );
+
+        assert_eq!(fields.action, "gh_monitor_control");
+        assert_eq!(fields.team.as_deref(), Some("ops-team"));
+        assert_eq!(fields.target.as_deref(), Some("owner/repo"));
+        assert_eq!(fields.runtime.as_deref(), Some("atm-dev"));
+        assert_eq!(fields.result.as_deref(), Some("stop"));
+        assert_eq!(fields.agent_name.as_deref(), Some("team-lead"));
+        assert_eq!(
+            fields
+                .extra_fields
+                .get("user_authorized")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            fields
+                .extra_fields
+                .get("target_team")
+                .and_then(|value| value.as_str()),
+            Some("ops-team")
+        );
     }
 }
