@@ -178,7 +178,6 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AO | GH Monitor Guardrails + Runtime Admission | Prevent accidental shared-runtime pollers, add isolated-runtime TTL policy, and make GH usage attributable/self-limiting with cached repo-state and operator controls | PLANNED |
 | AJ | Session-ID SSoT Normalization | Canonical `session_id` naming, shared caller resolver, runtime session resolution closure, doctor/session consistency | PLANNED |
 | AK | Mandatory OTel Rollout | Non-optional OTel across in-scope tools with canonical correlation and health/reporting contracts | PLANNED |
-| AM | CI Monitor Refactor | Extract CI monitoring from `socket.rs` into subsystem/service/provider/routing/health boundaries on `integrate/phase-AM` | IN-PROGRESS |
 
 ---
 
@@ -1605,6 +1604,9 @@ GitHub-specific adapter logic, routing, and health handling live under
 explicit and short-lived, and make GitHub usage attributable, budgeted, and
 operator-controllable.
 
+**Prerequisites**: Phase AN merged to `develop`.
+**Integration branch**: `integrate/phase-AO`
+
 **Planning doc**: `docs/phase-ao-gh-monitor-guardrails.md`
 **Requirements authority**:
 - `docs/ci-monitoring/requirements.md`
@@ -1623,6 +1625,8 @@ operator-controllable.
 2. Isolated runtimes are explicit, short-lived, and do not enable live GH polling by default.
 3. GitHub calls are budgeted per team, counted locally, and surfaced with freshness metadata in `atm gh status` and `atm doctor`.
 4. One active `gh_monitor` owner exists per `(team, repo)`, and operators can stop a runaway monitor with auditable cross-team controls.
+
+**Dependency graph**: AO.1 → AO.2 → AO.3 → AO.4
 
 ---
 

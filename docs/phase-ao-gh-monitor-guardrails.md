@@ -11,6 +11,8 @@ make GitHub query sources visible and stoppable.
 
 Goal: prevent accidental extra daemons from joining shared runtimes.
 
+Integration branch: `integrate/phase-AO`
+
 Rules:
 - ATM supports exactly two shared runtimes: `release` and `dev`.
 - Both shared runtimes must use release-built binaries.
@@ -30,6 +32,8 @@ Acceptance:
 
 Goal: make testing/smoke/debug runs explicit, short-lived, and harmless.
 
+Integration branch: `integrate/phase-AO`
+
 Rules:
 - Anything that is not the approved shared `release` or `dev` runtime is
   classified as `isolated`.
@@ -39,6 +43,8 @@ Rules:
 - Expired isolated runtimes are cleanup-eligible immediately.
 - Isolated runtimes must not use shared GitHub polling/account access by
   default.
+- `GhMonitorHealthRecord.in_flight` must be wired to the real in-flight request
+  count instead of remaining hardcoded to `0`.
 
 Acceptance:
 - ATM can create an isolated runtime root with runtime metadata
@@ -52,6 +58,8 @@ Acceptance:
 
 Goal: make GitHub query sources attributable without spending extra API budget
 in `doctor`.
+
+Integration branch: `integrate/phase-AO`
 
 Rules:
 - Each team gets a fixed GitHub budget of `100 calls/hour`.
@@ -81,6 +89,11 @@ Rules:
   repo-state rather than issuing normal live GH queries on demand.
 - `atm doctor` makes exactly one live rate-limit audit call and compares that
   result to ATM's internal count/estimate.
+- `sc-observability` events for this sprint must include planned
+  `event_type` values:
+  - `gh_api_call`
+  - `rate_limit_warning`
+  - `rate_limit_critical`
 
 Acceptance:
 - `atm gh status` shows freshness metadata (`updated_at`) for GH-derived data
@@ -92,6 +105,8 @@ Acceptance:
 
 Goal: make runaway polling stoppable without granting ordinary teams cross-team
 authority.
+
+Integration branch: `integrate/phase-AO`
 
 Rules:
 - Only one active `gh_monitor` lease may exist per `(team, repo)`.

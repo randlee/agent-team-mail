@@ -231,7 +231,7 @@ CI monitor requires repo context:
 
 Plugin init/runtime failure must never crash daemon or block unrelated plugins.
 
-### GH-CI-FR-16 Shared runtime admission
+### GH-CI-FR-35 Shared runtime admission
 
 ATM supports exactly two shared runtimes for live GitHub polling:
 - `release`
@@ -244,7 +244,7 @@ A normal shared-runtime launch must hard-stop unless all of these are true:
 
 Repo/worktree/ad hoc binaries must not start as shared runtime owners.
 
-### GH-CI-FR-17 Isolated runtime classification
+### GH-CI-FR-36 Isolated runtime classification
 
 Any runtime that is not the approved shared `release` or `dev` runtime is
 classified as `isolated`.
@@ -255,7 +255,7 @@ Isolated runtimes must:
 - be created explicitly through ATM tooling, not by accidental inheritance
 - be marked as isolated in runtime metadata
 
-### GH-CI-FR-18 Isolated runtime TTL
+### GH-CI-FR-37 Isolated runtime TTL
 
 Isolated runtimes are short-lived leases, not long-lived shared environments.
 
@@ -266,7 +266,7 @@ Requirements:
 - expired + dead isolated runtimes should be automatically reaped or loudly
   surfaced for cleanup
 
-### GH-CI-FR-19 Isolated GitHub policy
+### GH-CI-FR-38 Isolated GitHub policy
 
 Isolated runtimes must not use shared GitHub polling/account access by default.
 
@@ -301,6 +301,10 @@ source, including at minimum:
 ### GH-CI-FR-22 Team budget
 
 Each team must have a fixed local GitHub call budget.
+
+The upstream GitHub token ceiling is shared across all callers using the same
+token. ATM must therefore treat the token-level budget as a global shared
+resource, not as a per-daemon or per-repo allowance.
 
 Initial default:
 - `100 calls/hour` per team

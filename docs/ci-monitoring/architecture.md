@@ -186,6 +186,16 @@ Operator-facing status must identify:
 
 This allows operators to stop the correct source without guessing.
 
+Lease acquisition and renewal for `(team, repo)` monitor ownership must use the
+same class of write discipline as TeamConfigStore updates:
+- lock
+- re-read
+- fsync
+- atomic_swap
+
+The lease holder must prove ownership against the latest on-disk state before
+publishing itself as the active poller.
+
 ---
 
 ## 6. GitHub API Observability
@@ -204,6 +214,10 @@ should attach local accounting metadata for:
 - daemon/runtime owner
 - duration
 - success/failure
+
+The local accounting counter and attribution store should live in the
+`agent-team-mail-ci-monitor` crate so the reusable CI-monitor core owns the
+counting contract instead of daemon-only adapters.
 
 The steady-state polling path should use the repo-wide PR list surface as the
 shared source of truth for monitor subscriptions. Teammate requests attach to
@@ -237,6 +251,10 @@ The shared repo-state cache should have:
 - eviction of stale entries after TTL
 - demand-triggered refresh only when cache age exceeds `1 minute` and the
   shared gate permits the call
+
+The cached `rate_limit` snapshot represents the shared upstream token budget
+used by every caller authenticating with that token, not just one daemon or one
+repo poller.
 
 All GitHub-monitor-related queries, including workflow/run-specific lookups,
 must pass through the same team/repo budget and authorization gate even when
