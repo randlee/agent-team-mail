@@ -4,8 +4,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
-use agent_team_mail_core::daemon_client::GhMonitorHealth;
-#[cfg(unix)]
 use anyhow::Result;
 #[cfg(all(test, unix))]
 use tracing::warn;
@@ -13,11 +11,11 @@ use tracing::warn;
 #[cfg(unix)]
 use super::routing::notify_gh_monitor_health_transition as emit_gh_monitor_health_transition;
 #[cfg(unix)]
-use super::types::{GhMonitorHealthFile, GhMonitorHealthUpdate};
+use super::types::{CiMonitorHealth, GhMonitorHealthFile, GhMonitorHealthUpdate};
 
 #[cfg(unix)]
-pub(crate) fn default_gh_monitor_health(team: &str) -> GhMonitorHealth {
-    GhMonitorHealth {
+pub(crate) fn default_gh_monitor_health(team: &str) -> CiMonitorHealth {
+    CiMonitorHealth {
         team: team.to_string(),
         configured: false,
         enabled: false,
@@ -37,7 +35,7 @@ fn gh_monitor_health_path(home: &Path) -> PathBuf {
 }
 
 #[cfg(unix)]
-pub(crate) fn load_gh_monitor_health_map(home: &Path) -> Result<HashMap<String, GhMonitorHealth>> {
+pub(crate) fn load_gh_monitor_health_map(home: &Path) -> Result<HashMap<String, CiMonitorHealth>> {
     let path = gh_monitor_health_path(home);
     if !path.exists() {
         return Ok(HashMap::new());
@@ -52,10 +50,10 @@ pub(crate) fn load_gh_monitor_health_map(home: &Path) -> Result<HashMap<String, 
 }
 
 #[cfg(unix)]
-pub(crate) fn upsert_gh_monitor_health(home: &Path, health: GhMonitorHealth) -> Result<()> {
+pub(crate) fn upsert_gh_monitor_health(home: &Path, health: CiMonitorHealth) -> Result<()> {
     let mut map = load_gh_monitor_health_map(home)?;
     map.insert(health.team.clone(), health);
-    let mut records: Vec<GhMonitorHealth> = map.into_values().collect();
+    let mut records: Vec<CiMonitorHealth> = map.into_values().collect();
     records.sort_by(|a, b| a.team.cmp(&b.team));
     let file = GhMonitorHealthFile { records };
     let path = gh_monitor_health_path(home);
@@ -67,7 +65,7 @@ pub(crate) fn upsert_gh_monitor_health(home: &Path, health: GhMonitorHealth) -> 
 }
 
 #[cfg(unix)]
-pub(crate) fn read_gh_monitor_health(home: &Path, team: &str) -> Result<GhMonitorHealth> {
+pub(crate) fn read_gh_monitor_health(home: &Path, team: &str) -> Result<CiMonitorHealth> {
     let map = load_gh_monitor_health_map(home)?;
     Ok(map
         .get(team)
@@ -82,7 +80,7 @@ pub(crate) fn write_health_record(
     availability_state: &str,
     message: &str,
 ) {
-    let updated_record = GhMonitorHealth {
+    let updated_record = CiMonitorHealth {
         team: team.to_string(),
         configured: false,
         enabled: false,
@@ -110,7 +108,7 @@ pub(crate) fn set_gh_monitor_health_state(
     home: &Path,
     team: &str,
     update: GhMonitorHealthUpdate<'_>,
-) -> Result<GhMonitorHealth> {
+) -> Result<CiMonitorHealth> {
     let mut current = read_gh_monitor_health(home, team)?;
     let old_availability = current.availability_state.clone();
 

@@ -4,12 +4,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
-use agent_team_mail_core::daemon_client::{GhMonitorStatus, GhMonitorTargetKind};
-#[cfg(unix)]
 use anyhow::Result;
 
 #[cfg(unix)]
-use super::types::{GhMonitorConfigState, GhMonitorStateFile};
+use super::types::{
+    CiMonitorStatus, CiMonitorTargetKind, GhMonitorConfigState, GhMonitorStateFile,
+};
 
 #[cfg(unix)]
 pub(crate) fn count_in_flight_monitors(home: &Path, team: &str) -> u64 {
@@ -108,7 +108,7 @@ pub(crate) fn evaluate_gh_monitor_config(
 
 #[cfg(unix)]
 pub(crate) fn apply_config_state_to_status(
-    status: &mut GhMonitorStatus,
+    status: &mut CiMonitorStatus,
     config_state: &GhMonitorConfigState,
 ) {
     status.configured = config_state.configured;
@@ -138,14 +138,14 @@ fn gh_monitor_state_path(home: &Path) -> PathBuf {
 #[cfg(unix)]
 pub(crate) fn gh_monitor_key(
     team: &str,
-    target_kind: GhMonitorTargetKind,
+    target_kind: CiMonitorTargetKind,
     target: &str,
     reference: Option<&str>,
 ) -> String {
     let kind = match target_kind {
-        GhMonitorTargetKind::Pr => "pr",
-        GhMonitorTargetKind::Workflow => "workflow",
-        GhMonitorTargetKind::Run => "run",
+        CiMonitorTargetKind::Pr => "pr",
+        CiMonitorTargetKind::Workflow => "workflow",
+        CiMonitorTargetKind::Run => "run",
     };
     let reference = reference.unwrap_or_default();
     format!(
@@ -158,7 +158,7 @@ pub(crate) fn gh_monitor_key(
 }
 
 #[cfg(unix)]
-pub(crate) fn load_gh_monitor_state_map(home: &Path) -> Result<HashMap<String, GhMonitorStatus>> {
+pub(crate) fn load_gh_monitor_state_map(home: &Path) -> Result<HashMap<String, CiMonitorStatus>> {
     let path = gh_monitor_state_path(home);
     if !path.exists() {
         return Ok(HashMap::new());
@@ -179,7 +179,7 @@ pub(crate) fn load_gh_monitor_state_map(home: &Path) -> Result<HashMap<String, G
 }
 
 #[cfg(unix)]
-pub(crate) fn upsert_gh_monitor_status(home: &Path, status: GhMonitorStatus) -> Result<()> {
+pub(crate) fn upsert_gh_monitor_status(home: &Path, status: CiMonitorStatus) -> Result<()> {
     let mut map = load_gh_monitor_state_map(home)?;
     let key = gh_monitor_key(
         &status.team,
@@ -188,7 +188,7 @@ pub(crate) fn upsert_gh_monitor_status(home: &Path, status: GhMonitorStatus) -> 
         status.reference.as_deref(),
     );
     map.insert(key, status);
-    let mut records: Vec<GhMonitorStatus> = map.into_values().collect();
+    let mut records: Vec<CiMonitorStatus> = map.into_values().collect();
     records.sort_by(|a, b| {
         let ak = gh_monitor_key(&a.team, a.target_kind, &a.target, a.reference.as_deref());
         let bk = gh_monitor_key(&b.team, b.target_kind, &b.target, b.reference.as_deref());

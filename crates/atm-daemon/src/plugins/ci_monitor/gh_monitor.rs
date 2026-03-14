@@ -17,7 +17,7 @@ pub(crate) use super::routing::{
     notify_merge_conflict as emit_merge_conflict_alert, repo_scope_matches,
     resolve_ci_alert_routing,
 };
-use agent_team_mail_core::daemon_client::{GhMonitorRequest, GhMonitorStatus, GhMonitorTargetKind};
+use super::types::{CiMonitorRequest, CiMonitorStatus, CiMonitorTargetKind};
 use anyhow::Result;
 use tracing::warn;
 
@@ -253,8 +253,8 @@ pub(crate) async fn run_gh_command_for_repo(owner_repo: &str, args: &[&str]) -> 
 #[cfg(unix)]
 pub(crate) async fn monitor_gh_run(
     home: &std::path::Path,
-    status_seed: &GhMonitorStatus,
-    gh_request: &GhMonitorRequest,
+    status_seed: &CiMonitorStatus,
+    gh_request: &CiMonitorRequest,
     owner_repo: &str,
     run_id: u64,
 ) -> Result<()> {
@@ -381,7 +381,7 @@ pub(crate) async fn monitor_gh_run(
         ));
         upsert_gh_monitor_status(home, state)?;
 
-        if matches!(gh_request.target_kind, GhMonitorTargetKind::Pr)
+        if matches!(gh_request.target_kind, CiMonitorTargetKind::Pr)
             && let Ok(pr_number) = status_seed.target.trim().parse::<u64>()
         {
             match fetch_pr_merge_state(owner_repo, pr_number).await {
@@ -569,8 +569,8 @@ pub(crate) fn format_job_runtime(job: &GhRunJob) -> String {
 #[cfg(unix)]
 pub(crate) async fn build_failure_payload(
     run: &GhRunView,
-    status_seed: &GhMonitorStatus,
-    gh_request: &GhMonitorRequest,
+    status_seed: &CiMonitorStatus,
+    gh_request: &CiMonitorRequest,
     owner_repo: &str,
     correlation_id: &str,
 ) -> String {
@@ -759,13 +759,13 @@ pub(crate) fn extract_repo_slug_from_url(url: &str) -> Option<String> {
 #[cfg(unix)]
 pub(crate) fn derive_pr_url(
     run: &GhRunView,
-    status_seed: &GhMonitorStatus,
-    gh_request: &GhMonitorRequest,
+    status_seed: &CiMonitorStatus,
+    gh_request: &CiMonitorRequest,
 ) -> Option<String> {
     if let Some(url) = run.pull_requests.iter().find_map(|pr| pr.url.clone()) {
         return Some(url);
     }
-    if matches!(gh_request.target_kind, GhMonitorTargetKind::Pr)
+    if matches!(gh_request.target_kind, CiMonitorTargetKind::Pr)
         && let Some(repo_base) = derive_repo_base_from_run_url(&run.url)
     {
         return Some(format!("{}/pull/{}", repo_base, status_seed.target.trim()));

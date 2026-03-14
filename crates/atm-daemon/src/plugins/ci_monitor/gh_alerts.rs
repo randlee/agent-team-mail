@@ -2,7 +2,7 @@
 
 use super::CiMonitorConfig;
 use super::helpers::normalize_repo_scope;
-use agent_team_mail_core::daemon_client::{GhMonitorStatus, GhMonitorTargetKind};
+use super::types::{CiMonitorStatus, CiMonitorTargetKind};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::schema::InboxMessage;
 use tracing::warn;
@@ -46,16 +46,16 @@ pub(crate) fn emit_ci_monitor_message(
 #[cfg(unix)]
 pub(crate) fn emit_ci_not_started_alert(
     home: &std::path::Path,
-    status: &GhMonitorStatus,
+    status: &CiMonitorStatus,
     config_cwd: Option<&str>,
 ) {
     let (from_agent, targets) = resolve_ci_alert_routing(home, &status.team, config_cwd, None);
     let text = format!(
         "[ci_not_started] {} target '{}' did not produce a run in the start window.\n{}",
         match status.target_kind {
-            GhMonitorTargetKind::Pr => "PR monitor",
-            GhMonitorTargetKind::Workflow => "workflow monitor",
-            GhMonitorTargetKind::Run => "run monitor",
+            CiMonitorTargetKind::Pr => "PR monitor",
+            CiMonitorTargetKind::Workflow => "workflow monitor",
+            CiMonitorTargetKind::Run => "run monitor",
         },
         status.target,
         status.message.clone().unwrap_or_default()
@@ -91,7 +91,7 @@ pub(crate) fn emit_ci_not_started_alert(
 #[cfg(unix)]
 pub(crate) fn emit_merge_conflict_alert(
     home: &std::path::Path,
-    status: &GhMonitorStatus,
+    status: &CiMonitorStatus,
     pr_url: Option<&str>,
     merge_state_status: &str,
     run_conclusion: Option<&str>,
@@ -101,9 +101,9 @@ pub(crate) fn emit_merge_conflict_alert(
     let (from_agent, targets) =
         resolve_ci_alert_routing(home, &status.team, config_cwd, expected_repo.as_deref());
     let target_kind = match status.target_kind {
-        GhMonitorTargetKind::Pr => "pr",
-        GhMonitorTargetKind::Workflow => "workflow",
-        GhMonitorTargetKind::Run => "run",
+        CiMonitorTargetKind::Pr => "pr",
+        CiMonitorTargetKind::Workflow => "workflow",
+        CiMonitorTargetKind::Run => "run",
     };
     let mut text = format!(
         "[merge_conflict] Merge conflict detected for monitored target.\nclassification: merge_conflict\nstatus: merge_conflict\ntarget_kind: {target_kind}\ntarget: {}\npr_url: {}\nmerge_state_status: {}",
@@ -306,7 +306,7 @@ pub(crate) fn repo_scope_matches(configured: &str, expected: &str) -> bool {
 #[cfg(all(test, unix))]
 mod tests {
     use super::{emit_merge_conflict_alert, resolve_ci_alert_routing};
-    use agent_team_mail_core::daemon_client::{GhMonitorStatus, GhMonitorTargetKind};
+    use crate::plugins::ci_monitor::types::{CiMonitorStatus, CiMonitorTargetKind};
     use agent_team_mail_core::schema::InboxMessage;
     use tempfile::TempDir;
 
@@ -372,13 +372,13 @@ notify_target = "team-lead"
         )
         .unwrap();
 
-        let status = GhMonitorStatus {
+        let status = CiMonitorStatus {
             team: "atm-dev".to_string(),
             configured: true,
             enabled: true,
             config_source: Some("repo".to_string()),
             config_path: Some(repo_dir.join(".atm.toml").to_string_lossy().to_string()),
-            target_kind: GhMonitorTargetKind::Pr,
+            target_kind: CiMonitorTargetKind::Pr,
             target: "123".to_string(),
             state: "merge_conflict".to_string(),
             run_id: Some(99),

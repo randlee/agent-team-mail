@@ -39,10 +39,9 @@
 //!
 //! The daemon will automatically discover and load this provider.
 
-use agent_team_mail_daemon::plugin::PluginError;
-use agent_team_mail_daemon::plugins::ci_monitor::{
-    CiFilter, CiJob, CiProvider, CiProviderFactory, CiPullRequest, CiRun, CiRunConclusion,
-    CiRunStatus, CiStep, ErasedCiProvider,
+use agent_team_mail_ci_monitor::{
+    CiFilter, CiJob, CiProvider, CiProviderError, CiProviderFactory, CiPullRequest, CiRun,
+    CiRunConclusion, CiRunStatus, CiStep, ErasedCiProvider,
 };
 use std::sync::Arc;
 
@@ -116,7 +115,7 @@ impl AzurePipelinesProvider {
 }
 
 impl CiProvider for AzurePipelinesProvider {
-    async fn list_runs(&self, _filter: &CiFilter) -> Result<Vec<CiRun>, PluginError> {
+    async fn list_runs(&self, _filter: &CiFilter) -> Result<Vec<CiRun>, CiProviderError> {
         // STUB: In a real implementation, this would call:
         // az pipelines runs list --organization <org> --project <project> --output json
         //
@@ -127,7 +126,7 @@ impl CiProvider for AzurePipelinesProvider {
         ])
     }
 
-    async fn get_run(&self, run_id: u64) -> Result<CiRun, PluginError> {
+    async fn get_run(&self, run_id: u64) -> Result<CiRun, CiProviderError> {
         // STUB: In a real implementation, this would call:
         // az pipelines runs show --id <run_id> --organization <org> --project <project> --output json
         //
@@ -137,7 +136,7 @@ impl CiProvider for AzurePipelinesProvider {
         Ok(run)
     }
 
-    async fn get_job_log(&self, job_id: u64) -> Result<String, PluginError> {
+    async fn get_job_log(&self, job_id: u64) -> Result<String, CiProviderError> {
         // STUB: In a real implementation, this would call:
         // az pipelines runs artifact download --artifact-name logs --run-id <run_id> ...
         //
@@ -150,7 +149,10 @@ impl CiProvider for AzurePipelinesProvider {
         ))
     }
 
-    async fn get_pull_request(&self, pr_number: u64) -> Result<Option<CiPullRequest>, PluginError> {
+    async fn get_pull_request(
+        &self,
+        pr_number: u64,
+    ) -> Result<Option<CiPullRequest>, CiProviderError> {
         Ok(Some(CiPullRequest {
             number: pr_number,
             url: Some(format!(
