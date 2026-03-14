@@ -20,12 +20,16 @@ use daemon_process_guard::DaemonProcessGuard;
 /// Uses `ATM_HOME` which is checked first by `get_home_dir()`, avoiding
 /// platform-specific differences in how `dirs::home_dir()` resolves.
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
+    set_home_env_path(cmd, temp_dir.path());
+}
+
+fn set_home_env_path(cmd: &mut assert_cmd::Command, home: &std::path::Path) {
     // Use a subdirectory as CWD to avoid:
     // 1. .atm.toml config leak from the repo root
-    // 2. auto-identity CWD matching against team member CWD (temp_dir root)
-    let workdir = temp_dir.path().join("workdir");
+    // 2. auto-identity CWD matching against team member CWD (ATM_HOME root)
+    let workdir = home.join("workdir");
     std::fs::create_dir_all(&workdir).ok();
-    cmd.env("ATM_HOME", temp_dir.path())
+    cmd.env("ATM_HOME", home)
         // Prevent opportunistic daemon autostart from changing expected
         // offline/online label behavior in deterministic integration tests.
         .env("ATM_DAEMON_AUTOSTART", "0")
@@ -34,6 +38,36 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
         .env_remove("ATM_CONFIG")
         .env_remove("CLAUDE_SESSION_ID")
         .current_dir(&workdir);
+}
+
+#[cfg(unix)]
+struct RuntimeDaemonCleanupGuard {
+    home: PathBuf,
+}
+
+#[cfg(unix)]
+impl RuntimeDaemonCleanupGuard {
+    fn new(temp_dir: &TempDir) -> Self {
+        daemon_test_registry::sweep_stale_test_daemons();
+        Self {
+            home: temp_dir.path().to_path_buf(),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RuntimeDaemonCleanupGuard {
+    fn drop(&mut self) {
+        let pid_path = self.home.join(".atm/daemon/atm-daemon.pid");
+        if let Ok(raw) = fs::read_to_string(pid_path)
+            && let Ok(pid) = raw.trim().parse::<u32>()
+            && pid > 1
+            && pid_alive(pid as i32)
+        {
+            cleanup_pid(pid);
+        }
+        daemon_test_registry::sweep_stale_test_daemons();
+    }
 }
 
 /// Create a test team structure with multiple agents
@@ -351,6 +385,8 @@ fn test_concurrent_cli_and_direct_write_no_loss() {
 
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
+    #[cfg(unix)]
+    let _daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
 
     let inbox_path = temp_dir
         .path()
@@ -376,7 +412,7 @@ fn test_concurrent_cli_and_direct_write_no_loss() {
     let handle1 = std::thread::spawn(move || {
         barrier1.wait();
         let mut cmd = cargo::cargo_bin_cmd!("atm");
-        cmd.env("ATM_HOME", &temp_path1);
+        set_home_env_path(&mut cmd, &temp_path1);
         cmd.env("ATM_TEAM", "test-team");
         cmd.env("ATM_IDENTITY", "cli-sender");
         cmd.arg("send").arg("agent-a").arg("CLI message");
@@ -388,7 +424,7 @@ fn test_concurrent_cli_and_direct_write_no_loss() {
     let handle2 = std::thread::spawn(move || {
         barrier2.wait();
         let mut cmd = cargo::cargo_bin_cmd!("atm");
-        cmd.env("ATM_HOME", &temp_path);
+        set_home_env_path(&mut cmd, &temp_path);
         cmd.env("ATM_TEAM", "test-team");
         cmd.env("ATM_IDENTITY", "claude-code");
         cmd.arg("send").arg("agent-a").arg("Claude Code message");
@@ -863,6 +899,7 @@ fn test_permission_denied_inboxes_dir() {
 
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
+    let _daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
 
     let inboxes_dir = temp_dir.path().join(".claude/teams/test-team/inboxes");
 
@@ -900,6 +937,8 @@ fn test_no_duplicate_message_ids_under_concurrent_sends() {
 
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
+    #[cfg(unix)]
+    let _daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
 
     let num_threads = 4;
     let barrier = Arc::new(Barrier::new(num_threads));
@@ -911,7 +950,7 @@ fn test_no_duplicate_message_ids_under_concurrent_sends() {
         let handle = std::thread::spawn(move || {
             barrier.wait();
             let mut cmd = cargo::cargo_bin_cmd!("atm");
-            cmd.env("ATM_HOME", &temp_path);
+            set_home_env_path(&mut cmd, &temp_path);
             cmd.env("ATM_TEAM", "test-team");
             cmd.env("ATM_IDENTITY", format!("thread-{thread_id}"));
             cmd.arg("send")
