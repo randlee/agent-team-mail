@@ -1025,55 +1025,59 @@ impl Plugin for CiMonitorPlugin {
             self.runtime_history_path = None;
         }
 
-        // Determine ATM config root from canonical home resolution.
-        let atm_home = match agent_team_mail_core::home::get_home_dir() {
-            Ok(home_dir) => home_dir.join(".config/atm"),
-            Err(e) => {
-                let err = PluginError::Init {
-                    message: format!("Could not determine home directory: {e}"),
-                    source: None,
-                };
-                self.project_disabled_config_error(ctx, config_table, &err.to_string());
-                return Err(err);
-            }
-        };
-
-        if self.registry.is_none() {
-            self.registry = Some(self.build_registry(&atm_home));
-        }
-        let registry = self
-            .registry
-            .as_ref()
-            .expect("registry must be initialized before provider creation");
-        debug!(
-            "Provider registry initialized with {} providers: {:?}",
-            registry.provider_count(),
-            registry.list_provider_names()
-        );
-
-        // Create provider if not already injected (for testing)
-        if self.provider.is_none() {
-            // Create the CI provider from the registry
-            // Pass provider_config for external providers
-            let provider_config = self.config.provider_config.as_ref();
-            let provider = match create_provider_from_registry(
-                registry.as_ref(),
-                &self.config.provider,
-                self.config.owner.as_deref(),
-                self.config.repo.as_deref(),
-                repo.provider.as_ref(),
-                provider_config,
-            ) {
-                Ok(provider) => provider,
-                Err(err) => {
-                    self.project_disabled_config_error(ctx, config_table, &err.to_string());
-                    return Err(PluginError::Provider {
-                        message: err.to_string(),
+        // Determine ATM config root and create provider from registry.
+        // Provider creation depends on unix-only registry infrastructure.
+        #[cfg(unix)]
+        {
+            let atm_home = match agent_team_mail_core::home::get_home_dir() {
+                Ok(home_dir) => home_dir.join(".config/atm"),
+                Err(e) => {
+                    let err = PluginError::Init {
+                        message: format!("Could not determine home directory: {e}"),
                         source: None,
-                    });
+                    };
+                    self.project_disabled_config_error(ctx, config_table, &err.to_string());
+                    return Err(err);
                 }
             };
-            self.provider = Some(provider);
+
+            if self.registry.is_none() {
+                self.registry = Some(self.build_registry(&atm_home));
+            }
+            let registry = self
+                .registry
+                .as_ref()
+                .expect("registry must be initialized before provider creation");
+            debug!(
+                "Provider registry initialized with {} providers: {:?}",
+                registry.provider_count(),
+                registry.list_provider_names()
+            );
+
+            // Create provider if not already injected (for testing)
+            if self.provider.is_none() {
+                // Create the CI provider from the registry
+                // Pass provider_config for external providers
+                let provider_config = self.config.provider_config.as_ref();
+                let provider = match create_provider_from_registry(
+                    registry.as_ref(),
+                    &self.config.provider,
+                    self.config.owner.as_deref(),
+                    self.config.repo.as_deref(),
+                    repo.provider.as_ref(),
+                    provider_config,
+                ) {
+                    Ok(provider) => provider,
+                    Err(err) => {
+                        self.project_disabled_config_error(ctx, config_table, &err.to_string());
+                        return Err(PluginError::Provider {
+                            message: err.to_string(),
+                            source: None,
+                        });
+                    }
+                };
+                self.provider = Some(provider);
+            }
         }
 
         // Register synthetic member
