@@ -15,9 +15,12 @@ pub use github_provider::GitHubActionsProvider;
 pub use provider::{CiProvider, ErasedCiProvider};
 pub use registry::{CiFactoryFn, CiProviderFactory, CiProviderRegistry};
 pub use types::{
-    CiFilter, CiJob, CiMonitorControlRequest, CiMonitorHealth, CiMonitorLifecycleAction,
-    CiMonitorRequest, CiMonitorStatus, CiMonitorStatusRequest, CiMonitorTargetKind,
-    CiProviderError, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep,
+    CiFilter, CiJob, CiProviderError, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep,
+};
+#[cfg(unix)]
+pub use types::{
+    CiMonitorControlRequest, CiMonitorHealth, CiMonitorLifecycleAction, CiMonitorRequest,
+    CiMonitorStatus, CiMonitorStatusRequest, CiMonitorTargetKind,
 };
 
 #[cfg(any(test, feature = "test-support"))]

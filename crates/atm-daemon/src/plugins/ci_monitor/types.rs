@@ -1,7 +1,11 @@
 pub use agent_team_mail_ci_monitor::{
-    CiFilter, CiJob, CiMonitorControlRequest, CiMonitorHealth, CiMonitorLifecycleAction,
-    CiMonitorRequest, CiMonitorStatus, CiMonitorStatusRequest, CiMonitorTargetKind,
-    CiProviderError, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep,
+    CiFilter, CiJob, CiProviderError, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep,
+};
+
+#[cfg(unix)]
+pub use agent_team_mail_ci_monitor::{
+    CiMonitorControlRequest, CiMonitorHealth, CiMonitorLifecycleAction, CiMonitorRequest,
+    CiMonitorStatus, CiMonitorStatusRequest, CiMonitorTargetKind,
 };
 
 use serde::{Deserialize, Serialize};
