@@ -1,10 +1,10 @@
 //! Daemon management commands
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
+use agent_team_mail_core::daemon_client::RuntimeOwnerMetadata;
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
 use anyhow::{Context, Result};
-use agent_team_mail_core::daemon_client::RuntimeOwnerMetadata;
 use chrono::Utc;
 use clap::{Args, Subcommand};
 use std::collections::HashMap;

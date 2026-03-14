@@ -3,8 +3,8 @@
 //! Writes daemon status to `${ATM_HOME}/.atm/daemon/status.json` for CLI consumption.
 //! Status includes daemon PID, uptime, plugin states, and last update timestamp.
 
-use anyhow::{Context, Result};
 use agent_team_mail_core::daemon_client::RuntimeOwnerMetadata;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

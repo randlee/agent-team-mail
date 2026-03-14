@@ -574,8 +574,7 @@ fn looks_like_repo_or_worktree_binary(path: &Path) -> bool {
 }
 
 fn is_approved_release_binary(path: &Path, input: &RuntimePolicyInput) -> bool {
-    let in_bin_dir =
-        path.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("bin"));
+    let in_bin_dir = path.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("bin"));
     in_bin_dir
         && path.file_name() == Some(std::ffi::OsStr::new("atm-daemon"))
         && !path.starts_with(default_dev_runtime_root_for(&input.os_home))
@@ -609,7 +608,9 @@ fn evaluate_runtime_owner_metadata(input: &RuntimePolicyInput) -> RuntimeOwnerMe
     }
 }
 
-fn validate_runtime_admission_input(input: &RuntimePolicyInput) -> anyhow::Result<RuntimeOwnerMetadata> {
+fn validate_runtime_admission_input(
+    input: &RuntimePolicyInput,
+) -> anyhow::Result<RuntimeOwnerMetadata> {
     let owner = evaluate_runtime_owner_metadata(input);
 
     if matches!(owner.runtime_kind, RuntimeKind::Isolated) {
@@ -644,7 +645,10 @@ fn validate_runtime_admission_input(input: &RuntimePolicyInput) -> anyhow::Resul
     Ok(owner)
 }
 
-pub fn validate_runtime_admission(home: &Path, daemon_bin: &Path) -> anyhow::Result<RuntimeOwnerMetadata> {
+pub fn validate_runtime_admission(
+    home: &Path,
+    daemon_bin: &Path,
+) -> anyhow::Result<RuntimeOwnerMetadata> {
     let os_home = crate::home::get_os_home_dir()?;
     let input = RuntimePolicyInput {
         home_scope: home.to_path_buf(),
@@ -699,7 +703,18 @@ pub fn write_daemon_lock_metadata(
     }
 
     let _guard = acquire_lock(&metadata_lock_path, 10)?;
-    let _current = read_daemon_lock_metadata(home);
+    let current = read_daemon_lock_metadata(home);
+    if let Some(current) = current {
+        let current_pid = current.pid as i32;
+        if current.pid != std::process::id() && pid_alive(current_pid) {
+            anyhow::bail!(
+                "shared {} runtime already owned by live pid {}; refusing metadata overwrite for pid {}",
+                current.owner.runtime_kind.as_str(),
+                current.pid,
+                std::process::id()
+            );
+        }
+    }
 
     let metadata = DaemonLockMetadata {
         pid: std::process::id(),
@@ -2944,6 +2959,54 @@ sleep 2
 
     #[cfg(unix)]
     #[test]
+    #[serial]
+    fn test_write_daemon_lock_metadata_rejects_conflicting_live_pid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let owner = RuntimeOwnerMetadata {
+            runtime_kind: RuntimeKind::Dev,
+            build_profile: BuildProfile::Release,
+            executable_path: default_dev_runtime_root_for(&home.join("os-home"))
+                .join("current")
+                .join("bin")
+                .join("atm-daemon")
+                .to_string_lossy()
+                .into_owned(),
+            home_scope: default_dev_runtime_home_for(&home.join("os-home"))
+                .to_string_lossy()
+                .into_owned(),
+        };
+
+        let child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn guard process");
+        let child_pid = child.id();
+        let metadata = DaemonLockMetadata {
+            pid: child_pid,
+            owner: owner.clone(),
+            version: "existing".to_string(),
+            written_at: chrono::Utc::now().to_rfc3339(),
+        };
+        let metadata_path = daemon_lock_metadata_path_for(home);
+        std::fs::create_dir_all(metadata_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &metadata_path,
+            serde_json::to_vec_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
+
+        let err = write_daemon_lock_metadata(home, "next", &owner)
+            .expect_err("live conflicting pid must block overwrite");
+        assert!(err.to_string().contains("already owned by live pid"));
+
+        let mut child = child;
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn test_validate_runtime_admission_accepts_shared_dev_install() {
         let root = tempfile::tempdir().unwrap();
         let os_home = root.path().join("home");
@@ -2984,6 +3047,25 @@ sleep 2
 
     #[cfg(unix)]
     #[test]
+    fn test_validate_runtime_admission_rejects_repo_binary_for_shared_release_runtime() {
+        let root = tempfile::tempdir().unwrap();
+        let os_home = root.path().join("home");
+        let repo = root.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let input = RuntimePolicyInput {
+            home_scope: os_home.clone(),
+            daemon_bin: repo.join("target").join("release").join("atm-daemon"),
+            os_home,
+            temp_root: root.path().join("tmp"),
+            build_profile: BuildProfile::Release,
+        };
+
+        let err = validate_runtime_admission_input(&input).expect_err("repo binary must be denied");
+        assert!(err.to_string().contains("approved installed daemon binary"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn test_validate_runtime_admission_rejects_debug_build_for_shared_release_runtime() {
         let root = tempfile::tempdir().unwrap();
         let os_home = root.path().join("home");
@@ -2995,8 +3077,7 @@ sleep 2
             build_profile: BuildProfile::Debug,
         };
 
-        let err =
-            validate_runtime_admission_input(&input).expect_err("debug build must be denied");
+        let err = validate_runtime_admission_input(&input).expect_err("debug build must be denied");
         assert!(err.to_string().contains("requires a release build"));
     }
 
