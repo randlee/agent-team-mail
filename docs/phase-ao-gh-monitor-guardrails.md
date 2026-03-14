@@ -24,6 +24,7 @@ Rules:
   - no other daemon already owns that shared runtime
 
 Acceptance:
+- Requirements covered: `GH-CI-FR-35`, `GH-CI-FR-36`
 - repo/worktree binaries cannot start against shared `release` or `dev`
 - second daemon for shared `release` or `dev` fails loudly
 - daemon status records runtime owner metadata sufficient to explain refusal
@@ -47,6 +48,7 @@ Rules:
   count instead of remaining hardcoded to `0`.
 
 Acceptance:
+- Requirements covered: `GH-CI-FR-37`, `GH-CI-FR-38`
 - ATM can create an isolated runtime root with runtime metadata
 - runtime metadata includes `created_at` and `expires_at`
 - expired + dead isolated runtimes are automatically reaped or flagged for
@@ -90,12 +92,13 @@ Rules:
 - `atm doctor` makes exactly one live rate-limit audit call and compares that
   result to ATM's internal count/estimate.
 - `sc-observability` events for this sprint must include planned
-  `event_type` values:
+  `action` values:
   - `gh_api_call`
   - `rate_limit_warning`
   - `rate_limit_critical`
 
 Acceptance:
+- Requirements covered: `GH-CI-FR-22`, `GH-CI-FR-23`, `GH-CI-FR-24`, `GH-CI-FR-25`, `GH-CI-FR-26`, `GH-CI-FR-27`, `GH-CI-FR-28`, `GH-CI-FR-39`
 - `atm gh status` shows freshness metadata (`updated_at`) for GH-derived data
 - `atm doctor` shows cached GH call counts and one live rate-limit audit sample
 - operators can identify which runtime owns active polling
@@ -119,6 +122,7 @@ Rules:
 - All operator shutdown actions must be auditable.
 
 Acceptance:
+- Requirements covered: `GH-CI-FR-20`, `GH-CI-FR-21`, `GH-CI-FR-29`
 - duplicate `(team, repo)` monitor ownership fails loudly
 - hidden operator stop path exists for emergency shutdown
 - affected team lead receives notification identifying actor and reason

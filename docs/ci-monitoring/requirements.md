@@ -221,6 +221,8 @@ Progress updates must include:
 
 ## 8. Repo and Daemon Boundary Rules
 
+### 8.1 Base daemon boundary
+
 ### GH-CI-FR-14 Repo context requirement
 
 CI monitor requires repo context:
@@ -231,50 +233,7 @@ CI monitor requires repo context:
 
 Plugin init/runtime failure must never crash daemon or block unrelated plugins.
 
-### GH-CI-FR-35 Shared runtime admission
-
-ATM supports exactly two shared runtimes for live GitHub polling:
-- `release`
-- `dev`
-
-A normal shared-runtime launch must hard-stop unless all of these are true:
-- release-built binary
-- approved installed location for the target shared runtime
-- no other daemon already owns that shared runtime
-
-Repo/worktree/ad hoc binaries must not start as shared runtime owners.
-
-### GH-CI-FR-36 Isolated runtime classification
-
-Any runtime that is not the approved shared `release` or `dev` runtime is
-classified as `isolated`.
-
-Isolated runtimes must:
-- use their own `ATM_HOME`
-- use their own lock/socket/status paths
-- be created explicitly through ATM tooling, not by accidental inheritance
-- be marked as isolated in runtime metadata
-
-### GH-CI-FR-37 Isolated runtime TTL
-
-Isolated runtimes are short-lived leases, not long-lived shared environments.
-
-Requirements:
-- default TTL is `10 minutes`
-- runtime metadata must record `created_at` and `expires_at`
-- expired isolated runtimes must be cleanup-eligible immediately
-- expired + dead isolated runtimes should be automatically reaped or loudly
-  surfaced for cleanup
-
-### GH-CI-FR-38 Isolated GitHub policy
-
-Isolated runtimes must not use shared GitHub polling/account access by default.
-
-Specifically:
-- `gh_monitor` must start disabled in isolated runtimes unless explicitly
-  allowed
-- isolated runtimes must not silently inherit live polling authority from the
-  shared `release` or `dev` runtime
+### 8.2 Runtime guardrails and operator controls
 
 ### GH-CI-FR-20 Single polling owner
 
@@ -364,6 +323,7 @@ cached monitor state, not by issuing live GitHub API calls on demand.
 Required cached fields:
 - API calls made in the current local accounting window
 - counts by repo and branch/ref when known
+- `in_flight` call count
 - current poll interval
 - cached rate-limit snapshot (`remaining`, `limit`, `reset_at`) when available
 - active lease/runtime owner
@@ -397,6 +357,79 @@ Cross-team stop/disable control must be:
 
 If one team disables another team's monitor, the affected team's lead must be
 notified with actor identity and reason.
+
+### 8.3 AO guardrails additions
+
+### GH-CI-FR-35 Shared runtime admission
+
+ATM supports exactly two shared runtimes for live GitHub polling:
+- `release`
+- `dev`
+
+A normal shared-runtime launch must hard-stop unless all of these are true:
+- release-built binary
+- approved installed location for the target shared runtime
+- no other daemon already owns that shared runtime
+
+Repo/worktree/ad hoc binaries must not start as shared runtime owners.
+
+Shared runtime admission and `(team, repo)` lease acquisition must use
+`acquire_lock` plus re-read plus fsync plus `atomic_swap` write discipline to
+prevent split-ownership races.
+
+### GH-CI-FR-36 Isolated runtime classification
+
+Any runtime that is not the approved shared `release` or `dev` runtime is
+classified as `isolated`.
+
+Isolated runtimes must:
+- use their own `ATM_HOME`
+- use their own lock/socket/status paths
+- be created explicitly through ATM tooling, not by accidental inheritance
+- be marked as isolated in runtime metadata
+
+### GH-CI-FR-37 Isolated runtime TTL
+
+Isolated runtimes are short-lived leases, not long-lived shared environments.
+
+Requirements:
+- default TTL is `10 minutes`
+- runtime metadata must record `created_at` and `expires_at`
+- expired isolated runtimes must be cleanup-eligible immediately
+- expired + dead isolated runtimes should be automatically reaped or loudly
+  surfaced for cleanup
+
+### GH-CI-FR-38 Isolated GitHub policy
+
+Isolated runtimes must not use shared GitHub polling/account access by default.
+
+Specifically:
+- `gh_monitor` must start disabled in isolated runtimes unless explicitly
+  allowed
+- isolated runtimes must not silently inherit live polling authority from the
+  shared `release` or `dev` runtime
+
+### GH-CI-FR-39 Observability action contract
+
+GitHub monitor observability must emit `LogEventV1` records using the canonical
+stable identifier field `action`, not a separate `event_type` field.
+
+AO.3 reserves these `action` strings:
+- `gh_api_call`
+- `rate_limit_warning`
+- `rate_limit_critical`
+
+Required payload fields:
+- `team`
+- `repo`
+- `branch` or `target_ref` when known
+- `runtime_kind`
+- `binary_path`
+- `poll_interval_secs` when emitted from the shared poller
+- `duration_ms` for `gh_api_call`
+- `success` for `gh_api_call`
+- `remaining`, `limit`, and `reset_at` for rate-limit actions
+- `budget_used`, `budget_limit`, and `budget_window` for rate-limit actions
 
 ---
 

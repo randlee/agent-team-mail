@@ -1598,7 +1598,35 @@ GitHub-specific adapter logic, routing, and health handling live under
 
 ---
 
-## 17.22 Phase AO: GH Monitor Guardrails + Runtime Admission
+## 17.22 Phase AN: CI Monitor Extraction Readiness
+
+**Goal**: Prepare CI monitor code for clean extraction by tightening daemon/core
+boundaries, narrowing the production module surface, moving reusable logic into
+the extracted crate boundary, and landing the multi-repo `atm gh` contract.
+
+**Integration branch**: `integrate/phase-AN`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Branch | Status |
+|---|---|---|---|
+| AN.1 | CI core boundary cleanup | `feature/pAN-s1-ci-core-boundary` | COMPLETE |
+| AN.2 | Service split from daemon wire types | `feature/pAN-s2-service-split` | COMPLETE |
+| AN.3 | Trait injection for provider/registry seams | `feature/pAN-s3-trait-injection` | COMPLETE |
+| AN.4 | Narrow production `mod.rs` surface | `feature/pAN-s4-mod-narrowing` | IN-PROGRESS |
+| AN.5 | Transport adapter boundary in `gh_monitor_router` | `feature/pAN-s5-plugin-init-split` | IN-PROGRESS |
+| AN.6 | Extract `agent-team-mail-ci-monitor` crate | `feature/pAN-s6-crate-extraction` | IN-PROGRESS |
+| AN.7 | Multi-repo `atm gh` routing and repo inference | `feature/pAN-s7-multi-repo-gh` | IN-PROGRESS |
+| AN.8 | Phase AO guardrail planning and requirements closure | `feature/pAN-s8-gh-monitor-guardrails` | IN-PROGRESS |
+
+### Exit Criteria
+1. Reusable CI monitor logic is isolated behind crate-friendly boundaries.
+2. Daemon-only transport and lifecycle adapters remain in `atm-daemon`.
+3. The extracted `agent-team-mail-ci-monitor` crate owns the shared CI-monitor
+   core surface.
+4. Multi-repo `atm gh` routing is stable and Phase AO planning is ready to
+   begin.
+
+## 17.23 Phase AO: GH Monitor Guardrails + Runtime Admission
 
 **Goal**: Prevent accidental shared-runtime pollers, make isolated test runtimes
 explicit and short-lived, and make GitHub usage attributable, budgeted, and

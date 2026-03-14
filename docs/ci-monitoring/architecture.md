@@ -187,7 +187,7 @@ Operator-facing status must identify:
 This allows operators to stop the correct source without guessing.
 
 Lease acquisition and renewal for `(team, repo)` monitor ownership must use the
-same class of write discipline as TeamConfigStore updates:
+same write discipline as the existing ATM atomic file helpers:
 - lock
 - re-read
 - fsync
@@ -195,6 +195,10 @@ same class of write discipline as TeamConfigStore updates:
 
 The lease holder must prove ownership against the latest on-disk state before
 publishing itself as the active poller.
+
+Concrete mechanism references:
+- `acquire_lock`: `crates/atm-core/src/io/lock.rs`
+- `atomic_swap`: `crates/atm-core/src/io/atomic.rs`
 
 ---
 
@@ -216,12 +220,18 @@ should attach local accounting metadata for:
 - success/failure
 
 The local accounting counter and attribution store should live in the
-`agent-team-mail-ci-monitor` crate so the reusable CI-monitor core owns the
-counting contract instead of daemon-only adapters.
+future `agent-team-mail-ci-monitor` crate, created in AO.1 as a new workspace
+member, so the reusable CI-monitor core owns the counting contract instead of
+daemon-only adapters.
 
 The steady-state polling path should use the repo-wide PR list surface as the
 shared source of truth for monitor subscriptions. Teammate requests attach to
 that shared poller instead of creating parallel GitHub query loops.
+
+`run_gh()` is also the canonical `LogEventV1` emission point for:
+- `action = "gh_api_call"` on every GitHub CLI/API invocation
+- `action = "rate_limit_warning"` when cached token budget crosses the warning threshold
+- `action = "rate_limit_critical"` when cached token budget crosses the critical threshold
 
 ### 6.2 Local counters and cached rate-limit state
 
@@ -259,6 +269,10 @@ repo poller.
 All GitHub-monitor-related queries, including workflow/run-specific lookups,
 must pass through the same team/repo budget and authorization gate even when
 their underlying GitHub query differs from the repo-wide PR list poll.
+
+The cached state should be written as a JSON file under `ATM_RUNTIME_DIR`, using
+the same file-based IPC pattern as the existing health-record surface. `atm doctor`
+reads that JSON file directly; no new socket protocol is introduced for AO.3.
 
 ### 6.3 Status surfaces
 
