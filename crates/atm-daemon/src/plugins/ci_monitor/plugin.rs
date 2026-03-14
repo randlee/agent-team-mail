@@ -30,6 +30,13 @@ const RUNTIME_HISTORY_FILE_NAME: &str = "runtime-history.json";
 const RUNTIME_PROCESSED_RUN_LIMIT: usize = 500;
 const MAX_ERROR_BACKOFF_SECS: u64 = 40;
 
+fn ci_provider_error_to_plugin_error(err: super::types::CiProviderError) -> PluginError {
+    PluginError::Provider {
+        message: err.to_string(),
+        source: None,
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 #[serde(default)]
 struct RuntimeHistory {
@@ -183,11 +190,9 @@ impl CiMonitorPlugin {
             description: "GitHub Actions provider (built-in)".to_string(),
             create: Arc::new(|_config| {
                 // GitHub provider requires owner/repo from git context
-                Err(PluginError::Provider {
-                    message: "GitHub Actions provider requires owner/repo from git context"
-                        .to_string(),
-                    source: None,
-                })
+                Err(super::types::CiProviderError::provider(
+                    "GitHub Actions provider requires owner/repo from git context",
+                ))
             }),
         });
 
@@ -283,7 +288,9 @@ impl CiMonitorPlugin {
             Ok(Box::new(GitHubActionsProvider::new(owner, repo)))
         } else {
             // Try to create from registry (for external providers)
-            registry.create_provider(&self.config.provider, config_table)
+            registry
+                .create_provider(&self.config.provider, config_table)
+                .map_err(ci_provider_error_to_plugin_error)
         }
     }
 

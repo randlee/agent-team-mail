@@ -1,13 +1,15 @@
 //! Provider registry for runtime registration of CI providers
 
 use super::provider::ErasedCiProvider;
-use crate::plugin::PluginError;
+use super::types::CiProviderError;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 /// A factory function that creates a CI provider instance
 pub type CiFactoryFn = Arc<
-    dyn Fn(Option<&toml::Table>) -> Result<Box<dyn ErasedCiProvider>, PluginError> + Send + Sync,
+    dyn Fn(Option<&toml::Table>) -> Result<Box<dyn ErasedCiProvider>, CiProviderError>
+        + Send
+        + Sync,
 >;
 
 /// A factory that can create a CI provider instance
@@ -64,19 +66,15 @@ impl CiProviderRegistry {
     ///
     /// # Errors
     ///
-    /// Returns `PluginError::Provider` if the provider is not registered or creation fails.
+    /// Returns `CiProviderError::Provider` if the provider is not registered or creation fails.
     pub fn create_provider(
         &self,
         name: &str,
         config: Option<&toml::Table>,
-    ) -> Result<Box<dyn ErasedCiProvider>, PluginError> {
-        let factory = self
-            .factories
-            .get(name)
-            .ok_or_else(|| PluginError::Provider {
-                message: format!("CI provider '{name}' not registered"),
-                source: None,
-            })?;
+    ) -> Result<Box<dyn ErasedCiProvider>, CiProviderError> {
+        let factory = self.factories.get(name).ok_or_else(|| {
+            CiProviderError::provider(format!("CI provider '{name}' not registered"))
+        })?;
 
         (factory.create)(config)
     }
