@@ -14,6 +14,7 @@ use agent_team_mail_daemon::plugin::{
 };
 use agent_team_mail_daemon::roster::RosterService;
 use serial_test::serial;
+use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -232,41 +233,52 @@ fn write_team_config(teams_root: &std::path::Path, team: &str, members: serde_js
     .unwrap();
 }
 
-async fn wait_until(timeout_ms: u64, mut pred: impl FnMut() -> bool) -> bool {
-    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+async fn wait_until_elapsed(
+    timeout_ms: u64,
+    mut pred: impl FnMut() -> bool,
+) -> Option<std::time::Duration> {
+    let start = std::time::Instant::now();
+    let deadline = start + Duration::from_millis(timeout_ms);
     while std::time::Instant::now() < deadline {
         if pred() {
-            return true;
+            return Some(start.elapsed());
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    pred()
+    pred().then(|| start.elapsed())
 }
 
-async fn wait_for_task_running<T>(task: &tokio::task::JoinHandle<T>, timeout_ms: u64) -> bool {
-    wait_until(timeout_ms, || !task.is_finished()).await
+async fn wait_for_task_running_elapsed<T>(
+    task: &tokio::task::JoinHandle<T>,
+    timeout_ms: u64,
+) -> Option<std::time::Duration> {
+    wait_until_elapsed(timeout_ms, || !task.is_finished()).await
 }
 
-async fn wait_for_recorded_event(
+async fn wait_for_recorded_event_elapsed(
     events: &Arc<Mutex<Vec<String>>>,
     expected: &str,
     timeout_ms: u64,
-) -> bool {
-    wait_until(timeout_ms, || {
+) -> Option<std::time::Duration> {
+    wait_until_elapsed(timeout_ms, || {
         events.lock().unwrap().iter().any(|event| event == expected)
     })
     .await
 }
 
-fn wait_for_child_running(child: &mut std::process::Child, timeout_ms: u64) -> bool {
-    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+fn wait_for_child_running_elapsed(
+    child: &mut Child,
+    timeout_ms: u64,
+) -> Option<std::time::Duration> {
+    let start = std::time::Instant::now();
+    let deadline = start + Duration::from_millis(timeout_ms);
     while std::time::Instant::now() < deadline {
         if child
             .try_wait()
             .expect("failed to poll child process")
             .is_none()
         {
-            return true;
+            return Some(start.elapsed());
         }
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -274,24 +286,39 @@ fn wait_for_child_running(child: &mut std::process::Child, timeout_ms: u64) -> b
         .try_wait()
         .expect("failed to poll child process at timeout")
         .is_none()
+        .then(|| start.elapsed())
 }
 
-fn wait_for_child_exit(child: &mut std::process::Child, timeout_ms: u64) -> bool {
-    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
-    while std::time::Instant::now() < deadline {
-        if child
-            .try_wait()
-            .expect("failed to poll child process for exit")
-            .is_some()
-        {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(25));
+struct ChildProcessGuard {
+    child: Option<Child>,
+}
+
+impl ChildProcessGuard {
+    fn new(child: Child) -> Self {
+        Self { child: Some(child) }
     }
-    child
-        .try_wait()
-        .expect("failed to poll child process at exit timeout")
-        .is_some()
+
+    fn child_mut(&mut self) -> &mut Child {
+        self.child
+            .as_mut()
+            .expect("child process should still exist")
+    }
+
+    fn wait_for_exit(mut self) {
+        if let Some(mut child) = self.child.take() {
+            child.kill().expect("failed to kill child daemon");
+            let _status = child.wait().expect("failed to wait for child daemon exit");
+        }
+    }
+}
+
+impl Drop for ChildProcessGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 /// Create a test status writer
@@ -353,8 +380,11 @@ async fn test_daemon_starts_and_loads_mock_plugin() {
         .await
     });
 
+    let observed_run = wait_for_recorded_event_elapsed(&events, "test-plugin:run", 1_000)
+        .await
+        .expect("daemon should reach plugin run state before cancellation");
     assert!(
-        wait_for_recorded_event(&events, "test-plugin:run", 1_000).await,
+        observed_run <= Duration::from_secs(1),
         "daemon should reach plugin run state before cancellation"
     );
 
@@ -420,12 +450,18 @@ async fn test_signal_triggers_graceful_shutdown() {
         .await
     });
 
+    let plugin1_running = wait_for_recorded_event_elapsed(&events, "plugin1:run", 1_000)
+        .await
+        .expect("plugin1 should reach run state before cancellation");
     assert!(
-        wait_for_recorded_event(&events, "plugin1:run", 1_000).await,
+        plugin1_running <= Duration::from_secs(1),
         "plugin1 should reach run state before cancellation"
     );
+    let plugin2_running = wait_for_recorded_event_elapsed(&events, "plugin2:run", 1_000)
+        .await
+        .expect("plugin2 should reach run state before cancellation");
     assert!(
-        wait_for_recorded_event(&events, "plugin2:run", 1_000).await,
+        plugin2_running <= Duration::from_secs(1),
         "plugin2 should reach run state before cancellation"
     );
 
@@ -475,8 +511,11 @@ async fn test_plugin_lifecycle_order() {
         .await
     });
 
+    let plugin_running = wait_for_recorded_event_elapsed(&events, "plugin:run", 1_000)
+        .await
+        .expect("plugin should reach run state before cancellation");
     assert!(
-        wait_for_recorded_event(&events, "plugin:run", 1_000).await,
+        plugin_running <= Duration::from_secs(1),
         "plugin should reach run state before cancellation"
     );
     cancel.cancel();
@@ -528,8 +567,11 @@ async fn test_spool_drain_runs_on_interval() {
         .await
     });
 
+    let daemon_running = wait_for_task_running_elapsed(&daemon_task, 1_000)
+        .await
+        .expect("daemon task should remain running long enough to service background loops");
     assert!(
-        wait_for_task_running(&daemon_task, 1_000).await,
+        daemon_running <= Duration::from_secs(1),
         "daemon task should remain running long enough to service background loops"
     );
 
@@ -603,16 +645,17 @@ async fn test_startup_reconcile_seeds_roster_without_interval_delay() {
         .await
     });
 
-    let seeded = wait_until(1000, || {
+    let seeded = wait_until_elapsed(1000, || {
         state_store_probe
             .lock()
             .unwrap()
             .get_state("worker")
             .is_some()
     })
-    .await;
+    .await
+    .expect("startup reconcile should seed worker state promptly (<1s)");
     assert!(
-        seeded,
+        seeded <= Duration::from_secs(1),
         "startup reconcile should seed worker state promptly (<1s)"
     );
 
@@ -690,16 +733,17 @@ async fn test_config_watch_event_updates_and_removes_members() {
         .await
     });
 
-    let initial_seeded = wait_until(1500, || {
+    let initial_seeded = wait_until_elapsed(1500, || {
         state_store_probe
             .lock()
             .unwrap()
             .get_state("worker-a")
             .is_some()
     })
-    .await;
+    .await
+    .expect("worker-a should be tracked after daemon startup");
     assert!(
-        initial_seeded,
+        initial_seeded <= Duration::from_millis(1500),
         "worker-a should be tracked after daemon startup"
     );
 
@@ -731,29 +775,31 @@ async fn test_config_watch_event_updates_and_removes_members() {
         ]),
     );
 
-    let added = wait_until(8000, || {
+    let added = wait_until_elapsed(8000, || {
         state_store_probe
             .lock()
             .unwrap()
             .get_state("worker-b")
             .is_some()
     })
-    .await;
+    .await
+    .expect("worker-b should be added via live config watcher reconcile");
     assert!(
-        added,
+        added <= Duration::from_secs(8),
         "worker-b should be added via live config watcher reconcile"
     );
 
-    let removed = wait_until(8000, || {
+    let removed = wait_until_elapsed(8000, || {
         state_store_probe
             .lock()
             .unwrap()
             .get_state("worker-a")
             .is_none()
     })
-    .await;
+    .await
+    .expect("worker-a should be removed from tracked state after config update");
     assert!(
-        removed,
+        removed <= Duration::from_secs(8),
         "worker-a should be removed from tracked state after config update"
     );
 
@@ -800,8 +846,11 @@ async fn test_graceful_shutdown_with_timeout() {
         .await
     });
 
+    let run_observed = wait_for_recorded_event_elapsed(&events, "slow-shutdown:run", 1_000)
+        .await
+        .expect("slow-shutdown plugin should enter run before cancellation");
     assert!(
-        wait_for_recorded_event(&events, "slow-shutdown:run", 1_000).await,
+        run_observed <= Duration::from_secs(1),
         "slow-shutdown plugin should enter run before cancellation"
     );
     cancel.cancel();
@@ -861,8 +910,11 @@ async fn test_empty_registry_runs_successfully() {
         .await
     });
 
+    let daemon_running = wait_for_task_running_elapsed(&daemon_task, 1_000)
+        .await
+        .expect("daemon task should remain live before cancellation");
     assert!(
-        wait_for_task_running(&daemon_task, 1_000).await,
+        daemon_running <= Duration::from_secs(1),
         "daemon task should remain live before cancellation"
     );
     cancel.cancel();
@@ -907,16 +959,25 @@ async fn test_multiple_plugins_run_concurrently() {
         .await
     });
 
+    let plugin1_running = wait_for_recorded_event_elapsed(&events, "plugin1:run", 1_000)
+        .await
+        .expect("plugin1 should reach run state before cancellation");
     assert!(
-        wait_for_recorded_event(&events, "plugin1:run", 1_000).await,
+        plugin1_running <= Duration::from_secs(1),
         "plugin1 should reach run state before cancellation"
     );
+    let plugin2_running = wait_for_recorded_event_elapsed(&events, "plugin2:run", 1_000)
+        .await
+        .expect("plugin2 should reach run state before cancellation");
     assert!(
-        wait_for_recorded_event(&events, "plugin2:run", 1_000).await,
+        plugin2_running <= Duration::from_secs(1),
         "plugin2 should reach run state before cancellation"
     );
+    let plugin3_running = wait_for_recorded_event_elapsed(&events, "plugin3:run", 1_000)
+        .await
+        .expect("plugin3 should reach run state before cancellation");
     assert!(
-        wait_for_recorded_event(&events, "plugin3:run", 1_000).await,
+        plugin3_running <= Duration::from_secs(1),
         "plugin3 should reach run state before cancellation"
     );
     cancel.cancel();
@@ -971,14 +1032,15 @@ async fn test_plugin_run_failure_isolated_from_sibling_plugins() {
         .await
     });
 
-    let sibling_running = wait_until(1_000, || {
+    let sibling_running = wait_until_elapsed(1_000, || {
         let recorded_events = events.lock().unwrap();
         recorded_events.contains(&"gh-monitor:run_failed".to_string())
             && recorded_events.contains(&"worker-adapter:run".to_string())
     })
-    .await;
+    .await
+    .expect("expected failing and sibling plugin states before cancellation");
     assert!(
-        sibling_running,
+        sibling_running <= Duration::from_secs(1),
         "expected failing and sibling plugin states before cancellation"
     );
 
@@ -1014,13 +1076,18 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
     let temp_dir = TempDir::new().unwrap();
     let bin = env!("CARGO_BIN_EXE_atm-daemon");
 
-    let mut first = std::process::Command::new(bin)
+    let first = std::process::Command::new(bin)
         .env("ATM_HOME", temp_dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .expect("failed to spawn first daemon");
+    let mut first = ChildProcessGuard::new(first);
 
+    let daemon_running = wait_for_child_running_elapsed(first.child_mut(), 1_000)
+        .expect("first daemon should still be running");
     assert!(
-        wait_for_child_running(&mut first, 1_000),
+        daemon_running <= Duration::from_secs(1),
         "first daemon should still be running"
     );
 
@@ -1039,9 +1106,5 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
         "second daemon error should indicate lock contention, got: {stderr}"
     );
 
-    let _ = first.kill();
-    assert!(
-        wait_for_child_exit(&mut first, 1_000),
-        "first daemon should exit promptly after kill"
-    );
+    first.wait_for_exit();
 }
