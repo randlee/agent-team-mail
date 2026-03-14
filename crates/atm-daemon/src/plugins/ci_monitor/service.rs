@@ -31,6 +31,10 @@ use agent_team_mail_core::gh_monitor_observability::{
     GhCliObserverContext, build_gh_cli_observer, read_gh_repo_state_record,
     update_gh_repo_state_in_flight,
 };
+use agent_team_mail_core::home::teams_root_dir_for;
+use agent_team_mail_core::io::inbox::inbox_append;
+use agent_team_mail_core::schema::InboxMessage;
+use agent_team_mail_core::team_config_store::TeamConfigStore;
 #[cfg(unix)]
 use std::collections::HashMap;
 #[cfg(unix)]
@@ -42,6 +46,52 @@ use tracing::warn;
 pub(crate) use agent_team_mail_ci_monitor::service::{
     CiMonitorServiceError, CiMonitorServiceResult, fetch_run_details, list_completed_runs,
 };
+
+#[cfg(unix)]
+fn notify_team_lead_of_monitor_control(
+    home: &std::path::Path,
+    actor: &str,
+    actor_team: &str,
+    target_team: &str,
+    action_word: &str,
+    reason: &str,
+) -> anyhow::Result<()> {
+    let teams_root = teams_root_dir_for(home);
+    let team_dir = teams_root.join(target_team);
+    let lead_agent = TeamConfigStore::open(&team_dir)
+        .read()
+        .ok()
+        .and_then(|cfg| {
+            cfg.lead_agent_id
+                .split('@')
+                .next()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "team-lead".to_string());
+    let inbox_path = team_dir.join("inboxes").join(format!("{lead_agent}.json"));
+    let now = chrono::Utc::now().to_rfc3339();
+    let message = InboxMessage {
+        from: actor.to_string(),
+        text: format!(
+            "your gh monitor was {action_word} by {actor}@{actor_team} for {}",
+            reason.trim()
+        ),
+        timestamp: now.clone(),
+        read: false,
+        summary: Some(format!("gh monitor {action_word} by {actor}@{actor_team}")),
+        message_id: Some(format!(
+            "gh-monitor-{}-{}-{}",
+            action_word,
+            target_team,
+            chrono::Utc::now().timestamp_millis()
+        )),
+        unknown_fields: std::collections::HashMap::new(),
+    };
+    let _ = inbox_append(&inbox_path, &message, target_team, &lead_agent)?;
+    Ok(())
+}
 
 #[cfg(unix)]
 fn shared_pollers() -> &'static Mutex<HashMap<String, JoinHandle<()>>> {
@@ -743,7 +793,7 @@ pub(crate) async fn control_request(
                     in_flight
                 )
             };
-            set_gh_monitor_health_state(
+            let health = set_gh_monitor_health_state(
                 home,
                 &control.team,
                 GhMonitorHealthUpdate {
@@ -757,7 +807,26 @@ pub(crate) async fn control_request(
             )
             .map_err(|e| {
                 CiMonitorServiceError::internal(format!("failed to stop monitor lifecycle: {e}"))
-            })?
+            })?;
+            if cross_team {
+                notify_team_lead_of_monitor_control(
+                    home,
+                    control.actor.as_deref().unwrap_or("team-lead"),
+                    caller_team,
+                    &control.team,
+                    "stopped",
+                    control
+                        .operator_reason
+                        .as_deref()
+                        .unwrap_or("operator-authorized cross-team stop"),
+                )
+                .map_err(|e| {
+                    CiMonitorServiceError::internal(format!(
+                        "failed to notify team lead about cross-team stop: {e}"
+                    ))
+                })?;
+            }
+            health
         }
         CiMonitorLifecycleAction::Restart => {
             let drain_timeout_secs = control.drain_timeout_secs.unwrap_or(30);
@@ -807,7 +876,7 @@ pub(crate) async fn control_request(
                 ));
             }
 
-            set_gh_monitor_health_state(
+            let health = set_gh_monitor_health_state(
                 home,
                 &control.team,
                 GhMonitorHealthUpdate {
@@ -828,7 +897,26 @@ pub(crate) async fn control_request(
             )
             .map_err(|e| {
                 CiMonitorServiceError::internal(format!("failed to restart monitor lifecycle: {e}"))
-            })?
+            })?;
+            if cross_team {
+                notify_team_lead_of_monitor_control(
+                    home,
+                    control.actor.as_deref().unwrap_or("team-lead"),
+                    caller_team,
+                    &control.team,
+                    "restarted",
+                    control
+                        .operator_reason
+                        .as_deref()
+                        .unwrap_or("operator-authorized cross-team restart"),
+                )
+                .map_err(|e| {
+                    CiMonitorServiceError::internal(format!(
+                        "failed to notify team lead about cross-team restart: {e}"
+                    ))
+                })?;
+            }
+            health
         }
     };
 
