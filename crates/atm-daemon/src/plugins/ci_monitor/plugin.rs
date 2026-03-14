@@ -1,12 +1,11 @@
 //! CI Monitor plugin implementation
 
 use super::config::{CiMonitorConfig, DedupStrategy};
-use super::github_provider::GitHubActionsProvider;
 use super::loader::CiProviderLoader;
 use super::provider::ErasedCiProvider;
 use super::registry::{CiProviderFactory, CiProviderRegistry};
 #[cfg(unix)]
-use super::service::{fetch_run_details, list_completed_runs};
+use super::service::{create_provider_from_registry, fetch_run_details, list_completed_runs};
 #[cfg(test)]
 use super::types::{CiFilter, CiRunStatus};
 use super::types::{CiJob, CiRunConclusion};
@@ -14,7 +13,7 @@ use super::types::{CiJob, CiRunConclusion};
 use super::types::{CiMonitorHealth, GhMonitorHealthFile};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use crate::roster::RosterError;
-use agent_team_mail_core::context::{GitProvider as GitProviderType, RepoContext};
+use agent_team_mail_core::context::RepoContext;
 use agent_team_mail_core::schema::{AgentMember, InboxMessage, TeamConfig};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -28,13 +27,6 @@ use tracing::{debug, warn};
 const RUNTIME_HISTORY_FILE_NAME: &str = "runtime-history.json";
 const RUNTIME_PROCESSED_RUN_LIMIT: usize = 500;
 const MAX_ERROR_BACKOFF_SECS: u64 = 40;
-
-fn ci_provider_error_to_plugin_error(err: super::types::CiProviderError) -> PluginError {
-    PluginError::Provider {
-        message: err.to_string(),
-        source: None,
-    }
-}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 #[serde(default)]
@@ -223,74 +215,6 @@ impl CiMonitorPlugin {
         self.loader = Some(loader);
 
         registry
-    }
-
-    /// Select and create a provider from the registry
-    fn create_provider_from_registry(
-        &self,
-        registry: &CiProviderRegistry,
-        git_provider: Option<&GitProviderType>,
-        config_table: Option<&toml::Table>,
-    ) -> Result<Box<dyn ErasedCiProvider>, PluginError> {
-        // Prefer git auto-detection when available; only fall back to explicit
-        // plugin config owner/repo when repository context is unavailable.
-        let (owner, repo) = if let Some(git_provider) = git_provider {
-            match git_provider {
-                GitProviderType::GitHub { owner, repo } => (owner.clone(), repo.clone()),
-                GitProviderType::AzureDevOps { org, project, repo } => {
-                    return Err(PluginError::Provider {
-                        message: format!(
-                            "Azure DevOps not yet supported (org: {org}, project: {project}, repo: {repo})"
-                        ),
-                        source: None,
-                    });
-                }
-                GitProviderType::GitLab { namespace, repo } => {
-                    return Err(PluginError::Provider {
-                        message: format!(
-                            "GitLab not yet supported (namespace: {namespace}, repo: {repo})"
-                        ),
-                        source: None,
-                    });
-                }
-                GitProviderType::Bitbucket { workspace, repo } => {
-                    return Err(PluginError::Provider {
-                        message: format!(
-                            "Bitbucket not yet supported (workspace: {workspace}, repo: {repo})"
-                        ),
-                        source: None,
-                    });
-                }
-                GitProviderType::Unknown { host } => {
-                    return Err(PluginError::Provider {
-                        message: format!("No CI provider for unknown git host: {host}"),
-                        source: None,
-                    });
-                }
-            }
-        } else if let (Some(owner), Some(repo)) = (&self.config.owner, &self.config.repo) {
-            debug!(
-                "gh_monitor falling back to config-provided repo {}/{} because git auto-detection was unavailable",
-                owner, repo
-            );
-            (owner.clone(), repo.clone())
-        } else {
-            return Err(PluginError::Provider {
-                message: "No repository information available".to_string(),
-                source: None,
-            });
-        };
-
-        // For now, only GitHub is supported built-in
-        if self.config.provider == "github" {
-            debug!("Creating GitHub Actions provider for {}/{}", owner, repo);
-            Ok(Box::new(GitHubActionsProvider::new(owner, repo)))
-        } else {
-            // Try to create from registry (for external providers)
-            registry
-                .create_provider(&self.config.provider, config_table)
-                .map_err(ci_provider_error_to_plugin_error)
-        }
     }
 
     /// Generate a deduplication key for a run based on configured strategy
@@ -1121,15 +1045,21 @@ impl Plugin for CiMonitorPlugin {
             // Create the CI provider from the registry
             // Pass provider_config for external providers
             let provider_config = self.config.provider_config.as_ref();
-            let provider = match self.create_provider_from_registry(
+            let provider = match create_provider_from_registry(
                 &registry,
+                &self.config.provider,
+                self.config.owner.as_deref(),
+                self.config.repo.as_deref(),
                 repo.provider.as_ref(),
                 provider_config,
             ) {
                 Ok(provider) => provider,
                 Err(err) => {
                     self.project_disabled_config_error(ctx, config_table, &err.to_string());
-                    return Err(err);
+                    return Err(PluginError::Provider {
+                        message: err.to_string(),
+                        source: None,
+                    });
                 }
             };
             self.provider = Some(provider);
@@ -1480,6 +1410,7 @@ impl Plugin for CiMonitorPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_team_mail_core::context::GitProvider as GitProviderType;
 
     #[test]
     fn test_plugin_metadata() {
@@ -1509,21 +1440,21 @@ mod tests {
 
     #[test]
     fn test_create_provider_from_registry_prefers_git_repo_over_config_repo() {
-        let config = CiMonitorConfig {
-            owner: Some("config-owner".to_string()),
-            repo: Some("config-repo".to_string()),
-            ..Default::default()
-        };
-        let plugin = CiMonitorPlugin::new().with_config(config);
         let registry = CiProviderRegistry::new();
         let git_provider = GitProviderType::GitHub {
             owner: "git-owner".to_string(),
             repo: "git-repo".to_string(),
         };
 
-        let provider = plugin
-            .create_provider_from_registry(&registry, Some(&git_provider), None)
-            .expect("provider");
+        let provider = create_provider_from_registry(
+            &registry,
+            "github",
+            Some("config-owner"),
+            Some("config-repo"),
+            Some(&git_provider),
+            None,
+        )
+        .expect("provider");
         let debug = format!("{provider:?}");
         assert!(debug.contains("git-owner"));
         assert!(debug.contains("git-repo"));
@@ -1532,17 +1463,17 @@ mod tests {
 
     #[test]
     fn test_create_provider_from_registry_falls_back_to_config_repo_when_git_missing() {
-        let config = CiMonitorConfig {
-            owner: Some("config-owner".to_string()),
-            repo: Some("config-repo".to_string()),
-            ..Default::default()
-        };
-        let plugin = CiMonitorPlugin::new().with_config(config);
         let registry = CiProviderRegistry::new();
 
-        let provider = plugin
-            .create_provider_from_registry(&registry, None, None)
-            .expect("provider");
+        let provider = create_provider_from_registry(
+            &registry,
+            "github",
+            Some("config-owner"),
+            Some("config-repo"),
+            None,
+            None,
+        )
+        .expect("provider");
         let debug = format!("{provider:?}");
         assert!(debug.contains("config-owner"));
         assert!(debug.contains("config-repo"));
@@ -2491,7 +2422,7 @@ repo = "config-owner/config-repo"
     #[cfg(unix)]
     #[tokio::test]
     async fn test_init_joined_at_failure_writes_disabled_init_health_record() {
-        use crate::plugins::ci_monitor::MockCiProvider;
+        use crate::plugins::ci_monitor::mock_support::MockCiProvider;
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
