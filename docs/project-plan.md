@@ -1651,7 +1651,7 @@ operator-controllable.
 ### Exit Criteria
 1. Shared `release` and `dev` runtimes reject invalid owners and duplicate daemon starts.
 2. Isolated runtimes are explicit, short-lived, and do not enable live GH polling by default.
-3. GitHub calls are budgeted per team, counted locally, and surfaced with freshness metadata in `atm gh status` and `atm doctor`; one shared `(team, repo)` poller uses the repo-wide PR list view as its primary poll surface, polling at most once per 5 minutes when idle and once per 1 minute when active; pre-run/post-completion merge-conflict checks plus config/init parity remain on the attributed `run_gh()` path.
+3. GitHub calls are budgeted per team, counted locally, and surfaced with freshness metadata in `atm gh status` and `atm doctor`; one shared `(team, repo)` poller uses the repo-wide PR list view as its primary poll surface, polling at most once per 5 minutes when idle and once per 1 minute when active (`GH-CI-FR-10a`, `GH-CI-FR-10b`, `GH-CI-FR-10c`); pre-run/post-completion merge-conflict checks plus config/init parity remain on the attributed `run_gh()` path.
 4. One active `gh_monitor` owner exists per `(team, repo)`, operator-facing status shows the active owner metadata, and operators can stop a runaway monitor with auditable cross-team controls.
 
 **Dependency graph**: AO.1 → AO.2 → AO.3 → AO.4

@@ -10,7 +10,7 @@ use super::service::{create_provider_from_registry, fetch_run_details, list_comp
 use super::types::{CiFilter, CiRunStatus};
 use super::types::{CiJob, CiRunConclusion};
 #[cfg(unix)]
-use super::types::{CiMonitorHealth, GhMonitorHealthFile};
+use super::types::{CiMonitorHealth, GhMonitorHealthFile, GhMonitorStateFile};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use crate::roster::RosterError;
 use agent_team_mail_core::context::RepoContext;
@@ -35,20 +35,6 @@ struct RuntimeHistory {
     job_samples: HashMap<String, Vec<u64>>,
     processed_run_ids: Vec<u64>,
     drift_last_alert_epoch_secs: HashMap<String, i64>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
-struct GhMonitorStateRecord {
-    team: String,
-    state: String,
-    run_id: Option<u64>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
-struct GhMonitorStateFile {
-    records: Vec<GhMonitorStateRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -809,9 +795,9 @@ impl CiMonitorPlugin {
             }
         };
         state_file.records.iter().any(|record| {
-            record.team == self.config.team
-                && record.run_id == Some(run_id)
-                && Self::is_terminal_monitor_state(&record.state)
+            record.status.team == self.config.team
+                && record.status.run_id == Some(run_id)
+                && Self::is_terminal_monitor_state(&record.status.state)
         })
     }
 
@@ -2786,7 +2772,7 @@ poll_interval_secs = 10
         std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         std::fs::write(
             &state_path,
-            r#"{"records":[{"team":"dev-team","state":"failure","run_id":42}]}"#,
+            r#"{"records":[{"team":"dev-team","configured":true,"enabled":true,"target_kind":"Workflow","target":"CI","state":"failure","run_id":42,"updated_at":"2026-03-14T00:00:00Z"}]}"#,
         )
         .unwrap();
 

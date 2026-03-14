@@ -426,6 +426,8 @@ Required payload fields:
 - `runtime_kind`
 - `binary_path`
 - `poll_interval_secs` when emitted from the shared poller
+- `action` containing the `gh` subcommand and arguments (for example `run list`
+  or `pr view`)
 - `duration_ms` for `gh_api_call`
 - `success` for `gh_api_call`
 - `remaining`, `limit`, and `reset_at` for rate-limit actions
