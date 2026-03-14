@@ -729,6 +729,9 @@ fn test_gh_command_surface_compiles_on_windows() {
 fn test_gh_monitor_lifecycle_status_roundtrip_json() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    std::fs::create_dir_all(&workdir).unwrap();
+    init_git_repo_with_origin(&workdir, "https://github.com/acme/agent-team-mail.git");
     let mut daemon = start_fake_gh_daemon(temp_dir.path());
 
     let mut start = cargo::cargo_bin_cmd!("atm");

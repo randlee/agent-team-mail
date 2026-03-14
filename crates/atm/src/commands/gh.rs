@@ -543,11 +543,10 @@ pub fn execute(args: GhArgs) -> Result<()> {
                     let request = GhMonitorControlRequest {
                         team: team.to_string(),
                         action: GhMonitorLifecycleAction::Start,
-                        repo: args
-                            .repo
-                            .as_deref()
-                            .map(resolve_repo_override)
-                            .transpose()?,
+                        repo: Some(resolve_daemon_repo_scope(
+                            args.repo.as_deref(),
+                            &current_dir,
+                        )?),
                         drain_timeout_secs: None,
                         config_cwd: Some(current_dir.to_string_lossy().to_string()),
                     };
@@ -559,11 +558,10 @@ pub fn execute(args: GhArgs) -> Result<()> {
                     let request = GhMonitorControlRequest {
                         team: team.to_string(),
                         action: GhMonitorLifecycleAction::Stop,
-                        repo: args
-                            .repo
-                            .as_deref()
-                            .map(resolve_repo_override)
-                            .transpose()?,
+                        repo: Some(resolve_daemon_repo_scope(
+                            args.repo.as_deref(),
+                            &current_dir,
+                        )?),
                         drain_timeout_secs: Some(stop.drain_timeout_secs),
                         config_cwd: Some(current_dir.to_string_lossy().to_string()),
                     };
@@ -575,11 +573,10 @@ pub fn execute(args: GhArgs) -> Result<()> {
                     let request = GhMonitorControlRequest {
                         team: team.to_string(),
                         action: GhMonitorLifecycleAction::Restart,
-                        repo: args
-                            .repo
-                            .as_deref()
-                            .map(resolve_repo_override)
-                            .transpose()?,
+                        repo: Some(resolve_daemon_repo_scope(
+                            args.repo.as_deref(),
+                            &current_dir,
+                        )?),
                         drain_timeout_secs: Some(restart.drain_timeout_secs),
                         config_cwd: Some(current_dir.to_string_lossy().to_string()),
                     };
