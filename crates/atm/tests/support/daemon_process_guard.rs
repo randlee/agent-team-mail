@@ -11,7 +11,7 @@ use super::daemon_test_registry;
 ///
 /// Tracks a spawned atm-daemon PID and guarantees teardown via kill+wait.
 pub struct DaemonProcessGuard {
-    child: Child,
+    child: Option<Child>,
     pid: u32,
 }
 
@@ -38,7 +38,16 @@ impl DaemonProcessGuard {
         let pid = child.id();
         assert!(pid > 1, "spawned daemon PID must be > 1, got {pid}");
         daemon_test_registry::register_test_daemon(pid, &daemon_bin);
-        Self { child, pid }
+        Self {
+            child: Some(child),
+            pid,
+        }
+    }
+
+    pub fn adopt_registered_pid(pid: u32, daemon_bin: &PathBuf) -> Self {
+        assert!(pid > 1, "adopted daemon PID must be > 1, got {pid}");
+        daemon_test_registry::register_test_daemon(pid, daemon_bin);
+        Self { child: None, pid }
     }
 
     #[allow(dead_code)]
@@ -56,7 +65,9 @@ impl DaemonProcessGuard {
         let timeout_secs = 4;
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
         while Instant::now() < deadline {
-            if let Ok(Some(status)) = self.child.try_wait() {
+            if let Some(child) = self.child.as_mut()
+                && let Ok(Some(status)) = child.try_wait()
+            {
                 panic!(
                     "daemon exited before readiness (status={status}); expected pid {} at {}",
                     self.pid,
@@ -89,13 +100,52 @@ impl DaemonProcessGuard {
 
 impl Drop for DaemonProcessGuard {
     fn drop(&mut self) {
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+        if let Some(child) = self.child.as_mut() {
+            if child.try_wait().ok().flatten().is_none() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        } else if pid_alive(self.pid as i32) {
+            send_signal(self.pid as i32, 15);
+            for _ in 0..20 {
+                if !pid_alive(self.pid as i32) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            if pid_alive(self.pid as i32) {
+                send_signal(self.pid as i32, 9);
+            }
         }
         daemon_test_registry::unregister_test_daemon(self.pid);
     }
 }
+
+#[cfg(unix)]
+fn pid_alive(pid: i32) -> bool {
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    // SAFETY: signal 0 checks process existence without signaling the process.
+    unsafe { kill(pid, 0) == 0 }
+}
+
+#[cfg(unix)]
+fn send_signal(pid: i32, sig: i32) {
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    // SAFETY: best-effort test cleanup path.
+    let _ = unsafe { kill(pid, sig) };
+}
+
+#[cfg(not(unix))]
+fn pid_alive(_pid: i32) -> bool {
+    false
+}
+
+#[cfg(not(unix))]
+fn send_signal(_pid: i32, _sig: i32) {}
 
 fn daemon_binary_path() -> PathBuf {
     let mut candidate = PathBuf::from(cargo::cargo_bin!("atm"));
