@@ -3256,7 +3256,7 @@ sleep 2
             "isolated daemon runtime dir must exist"
         );
         assert_eq!(created.metadata.runtime_kind, RuntimeKind::Isolated);
-        assert_eq!(created.metadata.allow_live_github_polling, false);
+        assert!(!created.metadata.allow_live_github_polling);
         assert!(
             created.metadata.expires_at.is_some(),
             "isolated runtime metadata must include expires_at"
