@@ -296,7 +296,7 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
     findings.extend(check_config_runtime_drift(team, &args.team));
 
     // Check 5b: hook installation / config audit
-    findings.extend(check_hook_audit(home_dir));
+    findings.extend(check_hook_audit(home_dir, &std::env::current_dir()?));
 
     // Check 6: unified log diagnostics
     let (window_start, mode) =
@@ -605,10 +605,25 @@ fn audit_gemini_command(
     }
 }
 
-fn check_hook_audit(home_dir: &Path) -> Vec<Finding> {
+fn selected_claude_hook_root(home_dir: &Path, current_dir: &Path) -> (PathBuf, bool) {
+    let local_root = current_dir.join(".claude");
+    let global_root = claude_root_dir_for(home_dir);
+    if local_root != global_root && local_root.join("settings.json").exists() {
+        (local_root, true)
+    } else {
+        (global_root, false)
+    }
+}
+
+fn check_hook_audit(home_dir: &Path, current_dir: &Path) -> Vec<Finding> {
     let mut findings = Vec::new();
-    let claude_root = claude_root_dir_for(home_dir);
+    let (claude_root, local_claude_install) = selected_claude_hook_root(home_dir, current_dir);
     let claude_scripts_dir = claude_root.join("scripts");
+    let claude_command_scripts_dir: Option<&Path> = if local_claude_install {
+        None
+    } else {
+        Some(claude_scripts_dir.as_path())
+    };
 
     findings.extend(hook_script_findings(
         &claude_scripts_dir,
@@ -637,56 +652,56 @@ fn check_hook_audit(home_dir: &Path) -> Vec<Finding> {
                         hooks,
                         "SessionStart",
                         "SessionStart",
-                        &session_start_cmd(Some(&claude_scripts_dir)),
+                        &session_start_cmd(claude_command_scripts_dir),
                     );
                     audit_claude_command(
                         &mut findings,
                         hooks,
                         "SessionEnd",
                         "SessionEnd",
-                        &session_end_cmd(Some(&claude_scripts_dir)),
+                        &session_end_cmd(claude_command_scripts_dir),
                     );
                     audit_claude_command(
                         &mut findings,
                         hooks,
                         "PermissionRequest",
                         "PermissionRequest",
-                        &permission_request_cmd(Some(&claude_scripts_dir)),
+                        &permission_request_cmd(claude_command_scripts_dir),
                     );
                     audit_claude_command(
                         &mut findings,
                         hooks,
                         "Stop",
                         "Stop",
-                        &stop_cmd(Some(&claude_scripts_dir)),
+                        &stop_cmd(claude_command_scripts_dir),
                     );
                     audit_claude_command(
                         &mut findings,
                         hooks,
                         "Notification",
                         "Notification(idle_prompt)",
-                        &notification_idle_prompt_cmd(Some(&claude_scripts_dir)),
+                        &notification_idle_prompt_cmd(claude_command_scripts_dir),
                     );
                     audit_claude_command(
                         &mut findings,
                         hooks,
                         "PreToolUse",
                         "PreToolUse(Bash)",
-                        &pre_tool_use_bash_cmd(Some(&claude_scripts_dir)),
+                        &pre_tool_use_bash_cmd(claude_command_scripts_dir),
                     );
                     audit_claude_command(
                         &mut findings,
                         hooks,
                         "PreToolUse",
                         "PreToolUse(Task)",
-                        &pre_tool_use_task_cmd(Some(&claude_scripts_dir)),
+                        &pre_tool_use_task_cmd(claude_command_scripts_dir),
                     );
                     audit_claude_command(
                         &mut findings,
                         hooks,
                         "PostToolUse",
                         "PostToolUse(Bash)",
-                        &post_tool_use_bash_cmd(Some(&claude_scripts_dir)),
+                        &post_tool_use_bash_cmd(claude_command_scripts_dir),
                     );
                 } else {
                     findings.push(finding(
@@ -729,7 +744,7 @@ fn check_hook_audit(home_dir: &Path) -> Vec<Finding> {
                 claude_scripts_dir
                     .join("atm-hook-relay.py")
                     .to_string_lossy()
-                    .to_string(),
+                    .replace('\\', "/"),
             ),
         ];
         match fs::read_to_string(&codex_config_path) {
@@ -2647,7 +2662,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("PATH", "") };
 
-        let findings = check_hook_audit(tmp.path());
+        let findings = check_hook_audit(tmp.path(), tmp.path());
         assert!(findings.iter().any(|f| f.code == "HOOK_SCRIPT_MISSING"));
         assert!(findings.iter().any(|f| f.code == "HOOK_CONFIG_MISSING"));
     }
@@ -2716,10 +2731,110 @@ mod tests {
         )
         .unwrap();
 
-        let findings = check_hook_audit(tmp.path());
+        let findings = check_hook_audit(tmp.path(), tmp.path());
         assert!(
             findings.is_empty(),
             "expected clean hook audit, got: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn check_hook_audit_accepts_project_local_claude_hooks_under_redirected_home() {
+        let _guard = EnvGuard::isolate(&["ATM_HOME", "ATM_TEAM", "ATM_IDENTITY", "PATH"]);
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("PATH", "") };
+
+        let claude_root = project.path().join(".claude");
+        let scripts_dir = claude_root.join("scripts");
+        fs::create_dir_all(&scripts_dir).unwrap();
+        for script in [
+            "session-start.py",
+            "session-end.py",
+            "permission-request-relay.py",
+            "stop-relay.py",
+            "notification-idle-relay.py",
+            "atm-identity-write.py",
+            "gate-agent-spawns.py",
+            "atm-identity-cleanup.py",
+            "atm-hook-relay.py",
+            "atm_hook_lib.py",
+            "teammate-idle-relay.py",
+        ] {
+            fs::write(scripts_dir.join(script), "#!/usr/bin/env python3\n").unwrap();
+        }
+
+        let settings = serde_json::json!({
+            "hooks": {
+                "SessionStart": [{
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": session_start_cmd(None)}]
+                }],
+                "SessionEnd": [{
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": session_end_cmd(None)}]
+                }],
+                "PermissionRequest": [{
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": permission_request_cmd(None)}]
+                }],
+                "Stop": [{
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": stop_cmd(None)}]
+                }],
+                "Notification": [{
+                    "matcher": "idle_prompt",
+                    "hooks": [{"type": "command", "command": notification_idle_prompt_cmd(None)}]
+                }],
+                "PreToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": pre_tool_use_bash_cmd(None)}]},
+                    {"matcher": "Task", "hooks": [{"type": "command", "command": pre_tool_use_task_cmd(None)}]}
+                ],
+                "PostToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": post_tool_use_bash_cmd(None)}]}
+                ]
+            }
+        });
+        fs::write(
+            claude_root.join("settings.json"),
+            serde_json::to_vec_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+
+        let codex_root = home.path().join(".codex");
+        fs::create_dir_all(&codex_root).unwrap();
+        let relay_path_toml = scripts_dir
+            .join("atm-hook-relay.py")
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        fs::write(
+            codex_root.join("config.toml"),
+            format!("notify = [\"python3\", \"{}\"]\n", relay_path_toml),
+        )
+        .unwrap();
+
+        let gemini_root = home.path().join(".gemini");
+        fs::create_dir_all(&gemini_root).unwrap();
+        let gemini_settings = serde_json::json!({
+            "hooks": {
+                "SessionStart": [{"command": format!("python3 \"{}\"", scripts_dir.join("session-start.py").display())}],
+                "SessionEnd": [{"command": format!("python3 \"{}\"", scripts_dir.join("session-end.py").display())}],
+                "AfterAgent": [{"command": format!("python3 \"{}\"", scripts_dir.join("teammate-idle-relay.py").display())}]
+            }
+        });
+        fs::write(
+            gemini_root.join("settings.json"),
+            serde_json::to_vec_pretty(&gemini_settings).unwrap(),
+        )
+        .unwrap();
+
+        let findings = check_hook_audit(home.path(), project.path());
+        assert!(
+            findings.is_empty(),
+            "expected clean local hook audit, got: {:?}",
             findings
         );
     }
