@@ -1,6 +1,6 @@
 # Phase AO Guardrails Sprint Notes
 
-> **Status**: Draft planning note
+> **Status**: Active planning note
 > **Scope**: daemon runtime guardrails and `gh_monitor` observability follow-up
 
 This note captures the current decision for the next short follow-on sprints.
@@ -44,6 +44,8 @@ Acceptance:
 - repo/worktree binaries cannot start against shared `release` or `dev`
 - second daemon for shared `release` or `dev` fails loudly
 - daemon status records runtime owner metadata sufficient to explain refusal
+- `GH-CI-FR-36` sub-requirements for explicit isolated runtime creation, path
+  isolation, TTL metadata, and default no-live-polling remain deferred to AO.2
 
 ## AO.2 Isolated Runtime Creation and TTL
 

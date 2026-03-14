@@ -770,6 +770,7 @@ impl CiMonitorPlugin {
             .join("gh-monitor-state.json")
     }
 
+    #[cfg(unix)]
     fn is_terminal_monitor_state(state: &str) -> bool {
         matches!(
             state.to_ascii_lowercase().as_str(),
@@ -777,6 +778,7 @@ impl CiMonitorPlugin {
         )
     }
 
+    #[cfg(unix)]
     fn was_terminal_notified_by_command_path(&self, ctx: &PluginContext, run_id: u64) -> bool {
         let path = Self::gh_monitor_state_path(ctx);
         let raw = match std::fs::read_to_string(&path) {
@@ -799,6 +801,11 @@ impl CiMonitorPlugin {
                 && record.status.run_id == Some(run_id)
                 && Self::is_terminal_monitor_state(&record.status.state)
         })
+    }
+
+    #[cfg(not(unix))]
+    fn was_terminal_notified_by_command_path(&self, _ctx: &PluginContext, _run_id: u64) -> bool {
+        false
     }
 
     fn team_for_config_error(
