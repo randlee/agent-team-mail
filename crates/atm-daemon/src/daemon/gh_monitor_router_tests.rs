@@ -476,7 +476,7 @@ exit 1
     );
 
     let state_map = load_gh_monitor_state_map(temp.path()).expect("state map");
-    let key = gh_monitor_key("atm-dev", CiMonitorTargetKind::Pr, "123", None, None);
+    let key = gh_monitor_key("atm-dev", CiMonitorTargetKind::Pr, "123", None, Some("o/r"));
     let terminal = state_map.get(&key).expect("status entry");
     assert_eq!(terminal.state, "failure");
 }

@@ -7,8 +7,8 @@
 
 #[cfg(unix)]
 use super::gh_monitor::{
-    fetch_pr_merge_state, is_pr_merge_state_dirty, poll_monitored_run_once, try_find_pr_run_id,
-    try_find_workflow_run_id, wait_for_pr_run_start, RunPollProgress,
+    RunPollProgress, fetch_pr_merge_state, is_pr_merge_state_dirty, poll_monitored_run_once,
+    try_find_pr_run_id, try_find_workflow_run_id, wait_for_pr_run_start,
 };
 use super::github_provider::GitHubActionsProvider;
 #[cfg(unix)]
