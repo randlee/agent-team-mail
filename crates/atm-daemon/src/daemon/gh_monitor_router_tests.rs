@@ -1043,6 +1043,12 @@ async fn test_gh_monitor_control_cross_team_requires_user_authorized() {
     let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
     write_gh_monitor_config(temp.path(), "ops-team");
 
+    let start_req = r#"{"version":1,"request_id":"r-gh-start-cross-team","command":"gh-monitor-control","payload":{"team":"ops-team","action":"start","actor":"team-lead","actor_team":"atm-dev"}}"#;
+    let start_resp = handle_gh_monitor_control_command(start_req, temp.path()).await;
+    assert_eq!(start_resp.status, "error");
+    let start_err = start_resp.error.expect("cross-team start should fail");
+    assert_eq!(start_err.code, "AUTHORIZATION_REQUIRED");
+
     let stop_req = r#"{"version":1,"request_id":"r-gh-stop-cross-team","command":"gh-monitor-control","payload":{"team":"ops-team","action":"stop","actor":"team-lead","actor_team":"atm-dev","drain_timeout_secs":1}}"#;
     let stop_resp = handle_gh_monitor_control_command(stop_req, temp.path()).await;
     assert_eq!(stop_resp.status, "error");
