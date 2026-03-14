@@ -1090,12 +1090,17 @@ impl Plugin for CiMonitorPlugin {
         }
 
         // Determine ATM config root from canonical home resolution.
-        let atm_home = agent_team_mail_core::home::get_home_dir()
-            .map_err(|e| PluginError::Init {
-                message: format!("Could not determine home directory: {e}"),
-                source: None,
-            })?
-            .join(".config/atm");
+        let atm_home = match agent_team_mail_core::home::get_home_dir() {
+            Ok(home_dir) => home_dir.join(".config/atm"),
+            Err(e) => {
+                let err = PluginError::Init {
+                    message: format!("Could not determine home directory: {e}"),
+                    source: None,
+                };
+                self.project_disabled_config_error(ctx, config_table, &err.to_string());
+                return Err(err);
+            }
+        };
 
         // Build the provider registry
         let registry = self.build_registry(&atm_home);
@@ -1110,11 +1115,18 @@ impl Plugin for CiMonitorPlugin {
             // Create the CI provider from the registry
             // Pass provider_config for external providers
             let provider_config = self.config.provider_config.as_ref();
-            self.provider = Some(self.create_provider_from_registry(
+            let provider = match self.create_provider_from_registry(
                 &registry,
                 repo.provider.as_ref(),
                 provider_config,
-            )?);
+            ) {
+                Ok(provider) => provider,
+                Err(err) => {
+                    self.project_disabled_config_error(ctx, config_table, &err.to_string());
+                    return Err(err);
+                }
+            };
+            self.provider = Some(provider);
         }
 
         // Store registry for potential runtime use
@@ -2502,6 +2514,49 @@ repo = "config-owner/config-repo"
         assert!(record.message.as_deref().is_some_and(|message| {
             message.contains("Failed to determine synthetic member join timestamp")
         }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_init_provider_creation_failure_writes_disabled_init_health_record() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let table: toml::Table = toml::from_str(
+            r#"
+team = "dev-team"
+provider = "custom-missing"
+"#,
+        )
+        .unwrap();
+        let ctx = create_mock_context_with_repo_config(teams_root.clone(), Some(table), true);
+        let mut plugin = CiMonitorPlugin::new();
+
+        let err = plugin
+            .init(&ctx)
+            .await
+            .expect_err("init should fail when provider creation fails");
+        assert!(
+            err.to_string()
+                .contains("CI provider 'custom-missing' not registered"),
+            "unexpected init error: {err}"
+        );
+
+        let health_path =
+            agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(temp_dir.path());
+        let raw = std::fs::read_to_string(&health_path).expect("health record");
+        let health: GhMonitorHealthFile = serde_json::from_str(&raw).expect("health json");
+        let record = health
+            .records
+            .iter()
+            .find(|record| record.team == "dev-team")
+            .expect("dev-team health record");
+        assert_eq!(record.availability_state, "disabled_config_error");
+        assert!(record
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("CI provider 'custom-missing' not registered")));
     }
 
     #[tokio::test]
