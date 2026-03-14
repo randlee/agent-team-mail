@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/atm-ci-monitor",
     "crates/atm-core",
     "crates/atm",
     "crates/atm-daemon",
@@ -37,6 +38,7 @@ thiserror = "2.0"
 anyhow = "1.0"
 
 # Internal dependencies
+agent-team-mail-ci-monitor = { path = "crates/atm-ci-monitor", version = "=0.44.9" }
 agent-team-mail-core = { path = "crates/atm-core", version = "=0.44.9" }
 sc-composer = { path = "crates/sc-composer", version = "=0.44.9" }
 sc-observability = { path = "crates/sc-observability", version = "=0.44.9" }

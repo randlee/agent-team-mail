@@ -11,6 +11,4 @@ crate-type = ["cdylib"]
 [workspace]
 
 [dependencies]
-# Use path dependencies to the atm-daemon and atm-core
-agent-team-mail-daemon = { path = "../../crates/atm-daemon" }
-agent-team-mail-core = { path = "../../crates/atm-core" }
+agent-team-mail-ci-monitor = { path = "../../crates/atm-ci-monitor" }
