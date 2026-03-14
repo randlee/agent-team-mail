@@ -39,7 +39,7 @@
 //!
 //! The daemon will automatically discover and load this provider.
 
-use agent_team_mail_daemon::plugins::ci_monitor::{
+use agent_team_mail_ci_monitor::{
     CiFilter, CiJob, CiProvider, CiProviderError, CiProviderFactory, CiPullRequest, CiRun,
     CiRunConclusion, CiRunStatus, CiStep, ErasedCiProvider,
 };
