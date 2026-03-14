@@ -1,8 +1,6 @@
 //! Routing and notification policy for CI monitor alerts.
 
 #[cfg(unix)]
-use agent_team_mail_core::daemon_client::GhMonitorStatus;
-#[cfg(unix)]
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 #[cfg(unix)]
 use agent_team_mail_core::schema::InboxMessage;
@@ -11,6 +9,8 @@ use tracing::warn;
 
 #[cfg(unix)]
 pub(crate) use super::gh_alerts::repo_scope_matches;
+#[cfg(unix)]
+use super::types::CiMonitorStatus;
 
 #[cfg(unix)]
 pub(crate) fn resolve_ci_alert_routing(
@@ -25,7 +25,7 @@ pub(crate) fn resolve_ci_alert_routing(
 #[cfg(unix)]
 pub(crate) fn notify_ci_not_started(
     home: &std::path::Path,
-    status: &GhMonitorStatus,
+    status: &CiMonitorStatus,
     config_cwd: Option<&str>,
 ) {
     super::gh_alerts::emit_ci_not_started_alert(home, status, config_cwd);
@@ -34,7 +34,7 @@ pub(crate) fn notify_ci_not_started(
 #[cfg(unix)]
 pub(crate) fn notify_merge_conflict(
     home: &std::path::Path,
-    status: &GhMonitorStatus,
+    status: &CiMonitorStatus,
     pr_url: Option<&str>,
     merge_state_status: &str,
     run_conclusion: Option<&str>,
@@ -123,7 +123,7 @@ pub(crate) fn notify_gh_monitor_health_transition(
 #[cfg(all(test, unix))]
 mod tests {
     use super::{notify_merge_conflict, resolve_ci_alert_routing};
-    use agent_team_mail_core::daemon_client::{GhMonitorStatus, GhMonitorTargetKind};
+    use crate::plugins::ci_monitor::types::{CiMonitorStatus, CiMonitorTargetKind};
     use agent_team_mail_core::schema::InboxMessage;
     use tempfile::TempDir;
 
@@ -189,13 +189,13 @@ notify_target = "team-lead"
         )
         .unwrap();
 
-        let status = GhMonitorStatus {
+        let status = CiMonitorStatus {
             team: "atm-dev".to_string(),
             configured: true,
             enabled: true,
             config_source: Some("repo".to_string()),
             config_path: Some(repo_dir.join(".atm.toml").to_string_lossy().to_string()),
-            target_kind: GhMonitorTargetKind::Pr,
+            target_kind: CiMonitorTargetKind::Pr,
             target: "123".to_string(),
             state: "merge_conflict".to_string(),
             run_id: Some(99),

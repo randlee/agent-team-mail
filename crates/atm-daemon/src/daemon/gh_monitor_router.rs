@@ -1,5 +1,10 @@
 #[cfg(unix)]
 use crate::plugins::ci_monitor::service;
+#[cfg(unix)]
+use crate::plugins::ci_monitor::types::{
+    CiMonitorControlRequest, CiMonitorHealth, CiMonitorLifecycleAction, CiMonitorRequest,
+    CiMonitorStatus, CiMonitorStatusRequest, CiMonitorTargetKind,
+};
 use agent_team_mail_core::daemon_client::{
     GhMonitorControlRequest, GhMonitorRequest, GhStatusRequest, PROTOCOL_VERSION, SocketError,
     SocketRequest, SocketResponse,
@@ -8,6 +13,116 @@ use agent_team_mail_core::daemon_client::{
 const SOCKET_ERROR_INTERNAL_ERROR: &str = "INTERNAL_ERROR";
 const SOCKET_ERROR_INVALID_PAYLOAD: &str = "INVALID_PAYLOAD";
 const SOCKET_ERROR_VERSION_MISMATCH: &str = "VERSION_MISMATCH";
+
+#[cfg(unix)]
+fn target_kind_from_wire(
+    kind: agent_team_mail_core::daemon_client::GhMonitorTargetKind,
+) -> CiMonitorTargetKind {
+    match kind {
+        agent_team_mail_core::daemon_client::GhMonitorTargetKind::Pr => CiMonitorTargetKind::Pr,
+        agent_team_mail_core::daemon_client::GhMonitorTargetKind::Workflow => {
+            CiMonitorTargetKind::Workflow
+        }
+        agent_team_mail_core::daemon_client::GhMonitorTargetKind::Run => CiMonitorTargetKind::Run,
+    }
+}
+
+#[cfg(unix)]
+fn target_kind_to_wire(
+    kind: CiMonitorTargetKind,
+) -> agent_team_mail_core::daemon_client::GhMonitorTargetKind {
+    match kind {
+        CiMonitorTargetKind::Pr => agent_team_mail_core::daemon_client::GhMonitorTargetKind::Pr,
+        CiMonitorTargetKind::Workflow => {
+            agent_team_mail_core::daemon_client::GhMonitorTargetKind::Workflow
+        }
+        CiMonitorTargetKind::Run => agent_team_mail_core::daemon_client::GhMonitorTargetKind::Run,
+    }
+}
+
+#[cfg(unix)]
+fn lifecycle_action_from_wire(
+    action: agent_team_mail_core::daemon_client::GhMonitorLifecycleAction,
+) -> CiMonitorLifecycleAction {
+    match action {
+        agent_team_mail_core::daemon_client::GhMonitorLifecycleAction::Start => {
+            CiMonitorLifecycleAction::Start
+        }
+        agent_team_mail_core::daemon_client::GhMonitorLifecycleAction::Stop => {
+            CiMonitorLifecycleAction::Stop
+        }
+        agent_team_mail_core::daemon_client::GhMonitorLifecycleAction::Restart => {
+            CiMonitorLifecycleAction::Restart
+        }
+    }
+}
+
+#[cfg(unix)]
+fn monitor_request_from_wire(request: GhMonitorRequest) -> CiMonitorRequest {
+    CiMonitorRequest {
+        team: request.team,
+        target_kind: target_kind_from_wire(request.target_kind),
+        target: request.target,
+        reference: request.reference,
+        start_timeout_secs: request.start_timeout_secs,
+        config_cwd: request.config_cwd,
+    }
+}
+
+#[cfg(unix)]
+fn status_request_from_wire(request: GhStatusRequest) -> CiMonitorStatusRequest {
+    CiMonitorStatusRequest {
+        team: request.team,
+        target_kind: target_kind_from_wire(request.target_kind),
+        target: request.target,
+        reference: request.reference,
+        config_cwd: request.config_cwd,
+    }
+}
+
+#[cfg(unix)]
+fn control_request_from_wire(request: GhMonitorControlRequest) -> CiMonitorControlRequest {
+    CiMonitorControlRequest {
+        team: request.team,
+        action: lifecycle_action_from_wire(request.action),
+        drain_timeout_secs: request.drain_timeout_secs,
+        config_cwd: request.config_cwd,
+    }
+}
+
+#[cfg(unix)]
+fn status_to_wire(status: CiMonitorStatus) -> agent_team_mail_core::daemon_client::GhMonitorStatus {
+    agent_team_mail_core::daemon_client::GhMonitorStatus {
+        team: status.team,
+        configured: status.configured,
+        enabled: status.enabled,
+        config_source: status.config_source,
+        config_path: status.config_path,
+        target_kind: target_kind_to_wire(status.target_kind),
+        target: status.target,
+        state: status.state,
+        run_id: status.run_id,
+        reference: status.reference,
+        updated_at: status.updated_at,
+        message: status.message,
+    }
+}
+
+#[cfg(unix)]
+fn health_to_wire(health: CiMonitorHealth) -> agent_team_mail_core::daemon_client::GhMonitorHealth {
+    agent_team_mail_core::daemon_client::GhMonitorHealth {
+        team: health.team,
+        configured: health.configured,
+        enabled: health.enabled,
+        config_source: health.config_source,
+        config_path: health.config_path,
+        lifecycle_state: health.lifecycle_state,
+        availability_state: health.availability_state,
+        in_flight: health.in_flight,
+        updated_at: health.updated_at,
+        message: health.message,
+    }
+}
 
 pub(crate) fn is_gh_monitor_command(request_str: &str) -> bool {
     request_str.contains(r#""command":"gh-monitor""#)
@@ -112,10 +227,10 @@ pub(crate) async fn handle_gh_monitor_command(
         }
     };
 
-    match service::monitor_request(home, &gh_request).await {
+    match service::monitor_request(home, &monitor_request_from_wire(gh_request)).await {
         Ok(status) => make_ok_response(
             &request.request_id,
-            serde_json::to_value(status).unwrap_or_default(),
+            serde_json::to_value(status_to_wire(status)).unwrap_or_default(),
         ),
         Err(err) => make_error_response(&request.request_id, err.code, &err.message),
     }
@@ -157,10 +272,10 @@ pub(crate) async fn handle_gh_monitor_control_command(
             );
         }
     };
-    match service::control_request(home, &control).await {
+    match service::control_request(home, &control_request_from_wire(control)).await {
         Ok(health) => make_ok_response(
             &request.request_id,
-            serde_json::to_value(health).unwrap_or_default(),
+            serde_json::to_value(health_to_wire(health)).unwrap_or_default(),
         ),
         Err(err) => make_error_response(&request.request_id, err.code, &err.message),
     }
@@ -215,7 +330,7 @@ pub(crate) async fn handle_gh_monitor_health_command(
     match service::health_request(home, &team, config_cwd.as_deref()) {
         Ok(health) => make_ok_response(
             &request.request_id,
-            serde_json::to_value(health).unwrap_or_default(),
+            serde_json::to_value(health_to_wire(health)).unwrap_or_default(),
         ),
         Err(err) => make_error_response(&request.request_id, err.code, &err.message),
     }
@@ -259,10 +374,10 @@ pub(crate) async fn handle_gh_status_command(
         }
     };
 
-    match service::status_request(home, &gh_request) {
+    match service::status_request(home, &status_request_from_wire(gh_request)) {
         Ok(status) => make_ok_response(
             &request.request_id,
-            serde_json::to_value(status).unwrap_or_default(),
+            serde_json::to_value(status_to_wire(status)).unwrap_or_default(),
         ),
         Err(err) => make_error_response(&request.request_id, err.code, &err.message),
     }

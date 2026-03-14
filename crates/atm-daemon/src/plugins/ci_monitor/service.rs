@@ -14,10 +14,10 @@ use super::helpers::{
 use super::provider::ErasedCiProvider;
 #[cfg(unix)]
 use super::routing::{notify_ci_not_started, notify_merge_conflict};
-use super::types::{CiFilter, CiRun, CiRunStatus, GhMonitorConfigState, GhMonitorHealthUpdate};
-use agent_team_mail_core::daemon_client::{
-    GhMonitorControlRequest, GhMonitorHealth, GhMonitorLifecycleAction, GhMonitorRequest,
-    GhMonitorStatus, GhMonitorTargetKind, GhStatusRequest,
+use super::types::{
+    CiFilter, CiMonitorControlRequest, CiMonitorHealth, CiMonitorLifecycleAction, CiMonitorRequest,
+    CiMonitorStatus, CiMonitorStatusRequest, CiMonitorTargetKind, CiRun, CiRunStatus,
+    GhMonitorConfigState, GhMonitorHealthUpdate,
 };
 use tracing::warn;
 
@@ -54,7 +54,7 @@ pub(crate) type CiMonitorServiceResult<T> = std::result::Result<T, CiMonitorServ
 
 #[cfg(unix)]
 fn validate_monitor_request(
-    gh_request: &GhMonitorRequest,
+    gh_request: &CiMonitorRequest,
     config_state: &GhMonitorConfigState,
 ) -> std::result::Result<(), (&'static str, String, Option<String>)> {
     if let Some(reason) = config_state.error.clone() {
@@ -89,7 +89,7 @@ fn validate_monitor_request(
         return Err(("CONFIG_ERROR", message.clone(), Some(message)));
     }
 
-    if matches!(gh_request.target_kind, GhMonitorTargetKind::Workflow)
+    if matches!(gh_request.target_kind, CiMonitorTargetKind::Workflow)
         && gh_request
             .reference
             .as_deref()
@@ -135,8 +135,8 @@ pub(crate) async fn fetch_run_details(
 #[cfg(unix)]
 pub(crate) async fn monitor_request(
     home: &std::path::Path,
-    gh_request: &GhMonitorRequest,
-) -> CiMonitorServiceResult<GhMonitorStatus> {
+    gh_request: &CiMonitorRequest,
+) -> CiMonitorServiceResult<CiMonitorStatus> {
     if gh_request.team.trim().is_empty() {
         return Err(CiMonitorServiceError::new(
             "MISSING_PARAMETER",
@@ -188,7 +188,7 @@ pub(crate) async fn monitor_request(
     let owner_repo = config_state.owner_repo.as_deref().unwrap_or_default();
 
     let now = chrono::Utc::now().to_rfc3339();
-    let mut status = GhMonitorStatus {
+    let mut status = CiMonitorStatus {
         team: gh_request.team.clone(),
         configured: config_state.configured,
         enabled: config_state.enabled,
@@ -205,10 +205,10 @@ pub(crate) async fn monitor_request(
 
     let mut transient_failure: Option<String> = None;
     match gh_request.target_kind {
-        GhMonitorTargetKind::Run => {
+        CiMonitorTargetKind::Run => {
             status.run_id = gh_request.target.parse::<u64>().ok();
         }
-        GhMonitorTargetKind::Workflow => {
+        CiMonitorTargetKind::Workflow => {
             if let Some(reference) = gh_request.reference.as_deref() {
                 match try_find_workflow_run_id(owner_repo, &gh_request.target, reference).await {
                     Ok(Some(run_id)) => status.run_id = Some(run_id),
@@ -222,7 +222,7 @@ pub(crate) async fn monitor_request(
                 }
             }
         }
-        GhMonitorTargetKind::Pr => {
+        CiMonitorTargetKind::Pr => {
             let pr_number = match gh_request.target.parse::<u64>() {
                 Ok(value) if value > 0 => value,
                 _ => {
@@ -369,8 +369,8 @@ pub(crate) async fn monitor_request(
 #[cfg(unix)]
 pub(crate) async fn control_request(
     home: &std::path::Path,
-    control: &GhMonitorControlRequest,
-) -> CiMonitorServiceResult<GhMonitorHealth> {
+    control: &CiMonitorControlRequest,
+) -> CiMonitorServiceResult<CiMonitorHealth> {
     if control.team.trim().is_empty() {
         return Err(CiMonitorServiceError::new(
             "MISSING_PARAMETER",
@@ -382,7 +382,7 @@ pub(crate) async fn control_request(
         evaluate_gh_monitor_config(home, &control.team, control.config_cwd.as_deref());
 
     let health = match control.action {
-        GhMonitorLifecycleAction::Start => set_gh_monitor_health_state(
+        CiMonitorLifecycleAction::Start => set_gh_monitor_health_state(
             home,
             &control.team,
             GhMonitorHealthUpdate {
@@ -399,7 +399,7 @@ pub(crate) async fn control_request(
                 "failed to update monitor lifecycle state: {e}"
             ))
         })?,
-        GhMonitorLifecycleAction::Stop => {
+        CiMonitorLifecycleAction::Stop => {
             let drain_timeout_secs = control.drain_timeout_secs.unwrap_or(30);
             let _ = set_gh_monitor_health_state(
                 home,
@@ -449,7 +449,7 @@ pub(crate) async fn control_request(
                 CiMonitorServiceError::internal(format!("failed to stop monitor lifecycle: {e}"))
             })?
         }
-        GhMonitorLifecycleAction::Restart => {
+        CiMonitorLifecycleAction::Restart => {
             let drain_timeout_secs = control.drain_timeout_secs.unwrap_or(30);
             let _ = set_gh_monitor_health_state(
                 home,
@@ -530,7 +530,7 @@ pub(crate) fn health_request(
     home: &std::path::Path,
     team: &str,
     config_cwd: Option<&str>,
-) -> CiMonitorServiceResult<GhMonitorHealth> {
+) -> CiMonitorServiceResult<CiMonitorHealth> {
     if team.trim().is_empty() {
         return Err(CiMonitorServiceError::new(
             "MISSING_PARAMETER",
@@ -557,8 +557,8 @@ pub(crate) fn health_request(
 #[cfg(unix)]
 pub(crate) fn status_request(
     home: &std::path::Path,
-    gh_request: &GhStatusRequest,
-) -> CiMonitorServiceResult<GhMonitorStatus> {
+    gh_request: &CiMonitorStatusRequest,
+) -> CiMonitorServiceResult<CiMonitorStatus> {
     let config_state =
         evaluate_gh_monitor_config(home, &gh_request.team, gh_request.config_cwd.as_deref());
     if let Some(reason) = config_state.error.as_deref() {
@@ -583,12 +583,12 @@ pub(crate) fn status_request(
         return Ok(status);
     }
 
-    if matches!(gh_request.target_kind, GhMonitorTargetKind::Workflow) {
-        let mut candidates: Vec<&GhMonitorStatus> = state
+    if matches!(gh_request.target_kind, CiMonitorTargetKind::Workflow) {
+        let mut candidates: Vec<&CiMonitorStatus> = state
             .values()
             .filter(|record| {
                 record.team == gh_request.team
-                    && record.target_kind == GhMonitorTargetKind::Workflow
+                    && record.target_kind == CiMonitorTargetKind::Workflow
                     && record.target == gh_request.target
                     && gh_request
                         .reference
