@@ -175,6 +175,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AH | Observability Unification + AG Deferred Closure | Unified JSONL logging pipeline via `sc-observability` crate and baseline observability contracts (OTel/scmux/schook deferred) | COMPLETE |
 | AI | GH Monitor Dashboard + Detailed PR Reporting | `atm gh pr list`, `atm gh pr report`, `--template` rendering, `init-report`; CI rollup neutral/skipped fix | IN-PROGRESS |
 | AM | CI Monitor Subsystem Refactor | Extract CI-monitor subsystem boundaries out of `socket.rs`, split provider-neutral logic from GitHub-specific adapter logic, and stabilize routing/health/test support on `integrate/phase-AM` | IN-PROGRESS |
+| AO | GH Monitor Guardrails + Runtime Admission | Prevent accidental shared-runtime pollers, add isolated-runtime TTL policy, and make GH usage attributable/self-limiting with cached repo-state and operator controls | PLANNED |
 | AJ | Session-ID SSoT Normalization | Canonical `session_id` naming, shared caller resolver, runtime session resolution closure, doctor/session consistency | PLANNED |
 | AK | Mandatory OTel Rollout | Non-optional OTel across in-scope tools with canonical correlation and health/reporting contracts | PLANNED |
 | AM | CI Monitor Refactor | Extract CI monitoring from `socket.rs` into subsystem/service/provider/routing/health boundaries on `integrate/phase-AM` | IN-PROGRESS |
@@ -1595,6 +1596,33 @@ GitHub-specific adapter logic, routing, and health handling live under
 2. CI-monitor business logic lives under `crates/atm-daemon/src/plugins/ci_monitor/`.
 3. GitHub-specific logic is isolated behind one clear adapter boundary.
 4. Subsystem tests are organized around CI-monitor modules instead of socket-only entrypoints.
+
+---
+
+## 17.22 Phase AO: GH Monitor Guardrails + Runtime Admission
+
+**Goal**: Prevent accidental shared-runtime pollers, make isolated test runtimes
+explicit and short-lived, and make GitHub usage attributable, budgeted, and
+operator-controllable.
+
+**Planning doc**: `docs/phase-ao-gh-monitor-guardrails.md`
+**Requirements authority**:
+- `docs/ci-monitoring/requirements.md`
+- `docs/ci-monitoring/architecture.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Branch | Status |
+|---|---|---|---|
+| AO.1 | Shared runtime admission guard (`release`/`dev` only, hard-stop invalid shared launches) | `feature/pAO-s1-runtime-admission` | PLANNED |
+| AO.2 | Explicit isolated runtime creation + 10-minute TTL cleanup policy | `feature/pAO-s2-isolated-runtime` | PLANNED |
+| AO.3 | Shared repo-state cache, team budgets (`100/hour`), doctor audit call, freshness/status surfaces | `feature/pAO-s3-gh-budget-cache` | PLANNED |
+| AO.4 | Single `(team, repo)` lease ownership + hidden human-authorized cross-team stop/disable path | `feature/pAO-s4-operator-control` | PLANNED |
+
+### Exit Criteria
+1. Shared `release` and `dev` runtimes reject invalid owners and duplicate daemon starts.
+2. Isolated runtimes are explicit, short-lived, and do not enable live GH polling by default.
+3. GitHub calls are budgeted per team, counted locally, and surfaced with freshness metadata in `atm gh status` and `atm doctor`.
+4. One active `gh_monitor` owner exists per `(team, repo)`, and operators can stop a runaway monitor with auditable cross-team controls.
 
 ---
 

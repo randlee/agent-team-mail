@@ -21,6 +21,8 @@ how the GitHub implementation fits that architecture. It focuses on:
 - Daemon deployment expectations
 - Gaps between current implementation and required behavior
 - subsystem decomposition and provider boundaries
+- runtime guardrails for shared vs isolated polling
+- cached observability for GitHub API usage
 
 Out of scope: adding new CI providers beyond GitHub Actions (unless required for local projects).
 
@@ -145,9 +147,118 @@ Operational assumptions:
 - `atm-daemon` is responsible for GitHub CI Monitor polling.
 - Team agents do not need to poll CI directly once daemon is running.
 
+### 5.1 Shared runtime policy
+
+ATM has exactly two shared runtimes:
+- `release`
+- `dev`
+
+Both shared runtimes are expected to run release-built binaries from approved
+installed locations. Repo/worktree binaries are not valid shared-runtime
+owners.
+
+Shared-runtime admission should be enforced before daemon startup becomes live:
+- validate runtime kind
+- validate binary location/build class
+- validate that no other daemon already owns the shared runtime
+
+### 5.2 Isolated runtime policy
+
+Any runtime outside the approved shared `release` or `dev` locations is
+`isolated`.
+
+Isolated runtimes should be created explicitly by ATM tooling with:
+- separate `ATM_HOME`
+- separate lock/socket/status paths
+- runtime metadata including `created_at` and `expires_at`
+- default TTL of `10 minutes`
+
+Isolated runtimes are for smoke/debug/test use only and should not enable live
+shared GitHub polling by default.
+
+### 5.3 Operator shutdown model
+
+Operator-facing status must identify:
+- which runtime owns polling
+- which repo/branch or target is being polled
+- the daemon PID/binary/`ATM_HOME`
+- the configured poll interval
+
+This allows operators to stop the correct source without guessing.
+
 ---
 
-## 6. Known Gaps
+## 6. GitHub API Observability
+
+### 6.1 Call attribution
+
+All GitHub CLI/API calls for `gh_monitor` should funnel through one attributed
+call path.
+
+The current natural funnel is `run_gh()` in the GitHub provider. That path
+should attach local accounting metadata for:
+- team
+- repo
+- branch or target ref when known
+- action/arguments
+- daemon/runtime owner
+- duration
+- success/failure
+
+The steady-state polling path should use the repo-wide PR list surface as the
+shared source of truth for monitor subscriptions. Teammate requests attach to
+that shared poller instead of creating parallel GitHub query loops.
+
+### 6.2 Local counters and cached rate-limit state
+
+`atm doctor` should not issue its own live GitHub API calls to answer "who is
+using GitHub?".
+
+Instead, the monitor should maintain cached local state containing:
+- fixed team budget state (initial default `100 calls/hour`)
+- API calls this accounting window
+- counts by repo and branch/ref when known
+- `in_flight` calls
+- cached `rate_limit` snapshot (`remaining`, `limit`, `reset_at`)
+- current polling owner/lease
+
+The polling loop may refresh `gh api rate_limit` at a bounded cadence and cache
+the result for later reporting.
+
+Recommended cadence:
+- idle team/repo poller: at most once every `5 minutes`
+- active team/repo poller with subscriptions: at most once every `1 minute`
+- immediate refresh only when a new subscription arrives and the active-window
+  cache is stale
+
+The shared repo-state cache should have:
+- TTL of `5 minutes`
+- freshness timestamp (`updated_at`)
+- eviction of stale entries after TTL
+- demand-triggered refresh only when cache age exceeds `1 minute` and the
+  shared gate permits the call
+
+All GitHub-monitor-related queries, including workflow/run-specific lookups,
+must pass through the same team/repo budget and authorization gate even when
+their underlying GitHub query differs from the repo-wide PR list poll.
+
+### 6.3 Status surfaces
+
+`atm gh status` and `atm doctor` should read the cached monitor state and show:
+- current poll interval
+- active polling owner
+- API call count for the window
+- counts by repo and branch/ref when known
+- cached rate-limit remaining/reset
+- freshness timestamp for GH-derived state
+- any duplicate-runtime or duplicate-lease conflict
+
+`atm doctor` may perform one live `gh api rate_limit` audit call so the operator
+can compare the live account state with ATM's internal counter/estimate.
+
+---
+
+## 7. Known Gaps
 
 Known gaps:
 
