@@ -5,6 +5,18 @@ use super::types::CiProviderError;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub trait CiProviderRegistryPort: Send + Sync + std::fmt::Debug {
+    fn create_provider(
+        &self,
+        name: &str,
+        config: Option<&toml::Table>,
+    ) -> Result<Box<dyn ErasedCiProvider>, CiProviderError>;
+
+    fn list_provider_names(&self) -> Vec<String>;
+
+    fn provider_count(&self) -> usize;
+}
+
 /// A factory function that creates a CI provider instance
 pub type CiFactoryFn = Arc<
     dyn Fn(Option<&toml::Table>) -> Result<Box<dyn ErasedCiProvider>, CiProviderError>
@@ -105,6 +117,27 @@ impl CiProviderRegistry {
 impl Default for CiProviderRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl CiProviderRegistryPort for CiProviderRegistry {
+    fn create_provider(
+        &self,
+        name: &str,
+        config: Option<&toml::Table>,
+    ) -> Result<Box<dyn ErasedCiProvider>, CiProviderError> {
+        CiProviderRegistry::create_provider(self, name, config)
+    }
+
+    fn list_provider_names(&self) -> Vec<String> {
+        self.list_providers()
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn provider_count(&self) -> usize {
+        self.len()
     }
 }
 

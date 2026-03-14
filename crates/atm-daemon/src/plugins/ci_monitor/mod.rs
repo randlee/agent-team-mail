@@ -33,7 +33,7 @@ pub use github_provider::GitHubActionsProvider;
 pub use loader::CiProviderLoader;
 pub use plugin::CiMonitorPlugin;
 pub use provider::{CiProvider, ErasedCiProvider};
-pub use registry::{CiFactoryFn, CiProviderFactory, CiProviderRegistry};
+pub use registry::{CiFactoryFn, CiProviderFactory, CiProviderRegistry, CiProviderRegistryPort};
 pub use types::{
     CiFilter, CiJob, CiProviderError, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep,
 };

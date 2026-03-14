@@ -5,6 +5,7 @@ use super::gh_monitor::{
     fetch_pr_merge_state, is_pr_merge_state_dirty, monitor_gh_run, try_find_workflow_run_id,
     wait_for_pr_run_start,
 };
+use super::github_provider::GitHubActionsProvider;
 #[cfg(unix)]
 use super::health::set_gh_monitor_health_state;
 use super::helpers::{
@@ -12,6 +13,7 @@ use super::helpers::{
     gh_monitor_key, load_gh_monitor_state_map,
 };
 use super::provider::ErasedCiProvider;
+use super::registry::CiProviderRegistryPort;
 #[cfg(unix)]
 use super::routing::{notify_ci_not_started, notify_merge_conflict};
 use super::types::{
@@ -19,6 +21,7 @@ use super::types::{
     CiMonitorStatus, CiMonitorStatusRequest, CiMonitorTargetKind, CiRun, CiRunStatus,
     GhMonitorConfigState, GhMonitorHealthUpdate,
 };
+use agent_team_mail_core::context::GitProvider as GitProviderType;
 use tracing::warn;
 
 const CI_MONITOR_INTERNAL_ERROR: &str = "INTERNAL_ERROR";
@@ -130,6 +133,62 @@ pub(crate) async fn fetch_run_details(
         .get_run(run_id)
         .await
         .map_err(|e| CiMonitorServiceError::internal(format!("Failed to fetch run details: {e}")))
+}
+
+pub(crate) fn create_provider_from_registry(
+    registry: &dyn CiProviderRegistryPort,
+    provider_name: &str,
+    configured_owner: Option<&str>,
+    configured_repo: Option<&str>,
+    git_provider: Option<&GitProviderType>,
+    config_table: Option<&toml::Table>,
+) -> CiMonitorServiceResult<Box<dyn ErasedCiProvider>> {
+    let (owner, repo) = if let Some(git_provider) = git_provider {
+        match git_provider {
+            GitProviderType::GitHub { owner, repo } => (owner.clone(), repo.clone()),
+            GitProviderType::AzureDevOps { org, project, repo } => {
+                return Err(CiMonitorServiceError::new(
+                    "PROVIDER_ERROR",
+                    format!(
+                        "Azure DevOps not yet supported (org: {org}, project: {project}, repo: {repo})"
+                    ),
+                ));
+            }
+            GitProviderType::GitLab { namespace, repo } => {
+                return Err(CiMonitorServiceError::new(
+                    "PROVIDER_ERROR",
+                    format!("GitLab not yet supported (namespace: {namespace}, repo: {repo})"),
+                ));
+            }
+            GitProviderType::Bitbucket { workspace, repo } => {
+                return Err(CiMonitorServiceError::new(
+                    "PROVIDER_ERROR",
+                    format!("Bitbucket not yet supported (workspace: {workspace}, repo: {repo})"),
+                ));
+            }
+            GitProviderType::Unknown { host } => {
+                return Err(CiMonitorServiceError::new(
+                    "PROVIDER_ERROR",
+                    format!("No CI provider for unknown git host: {host}"),
+                ));
+            }
+        }
+    } else if let (Some(owner), Some(repo)) = (configured_owner, configured_repo) {
+        (owner.to_string(), repo.to_string())
+    } else {
+        return Err(CiMonitorServiceError::new(
+            "PROVIDER_ERROR",
+            "No repository information available",
+        ));
+    };
+
+    if provider_name == "github" {
+        return Ok(Box::new(GitHubActionsProvider::new(owner, repo)));
+    }
+
+    registry
+        .create_provider(provider_name, config_table)
+        .map_err(|e| CiMonitorServiceError::new("PROVIDER_ERROR", e.to_string()))
 }
 
 #[cfg(unix)]
@@ -616,6 +675,9 @@ mod tests {
     use crate::plugins::ci_monitor::mock_support::{
         MockCall, MockCiProvider, create_test_job, create_test_run,
     };
+    use crate::plugins::ci_monitor::registry::CiProviderRegistryPort;
+    use agent_team_mail_core::context::GitProvider as GitProviderType;
+    use std::sync::{Arc, Mutex};
 
     #[tokio::test]
     async fn test_list_completed_runs_uses_completed_filter() {
@@ -667,5 +729,80 @@ mod tests {
         assert_eq!(full_run.id, 42);
         assert_eq!(full_run.jobs.as_ref().map(Vec::len), Some(1));
         assert_eq!(provider.get_calls(), vec![MockCall::GetRun(42)]);
+    }
+
+    #[derive(Debug, Clone)]
+    struct RecordingRegistry {
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RecordingRegistry {
+        fn new() -> Self {
+            Self {
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl CiProviderRegistryPort for RecordingRegistry {
+        fn create_provider(
+            &self,
+            name: &str,
+            _config: Option<&toml::Table>,
+        ) -> Result<Box<dyn ErasedCiProvider>, super::super::types::CiProviderError> {
+            self.calls.lock().unwrap().push(name.to_string());
+            Ok(Box::new(MockCiProvider::new()))
+        }
+
+        fn list_provider_names(&self) -> Vec<String> {
+            vec!["custom".to_string()]
+        }
+
+        fn provider_count(&self) -> usize {
+            1
+        }
+    }
+
+    #[test]
+    fn test_create_provider_from_registry_prefers_git_repo_over_config_repo() {
+        let registry = RecordingRegistry::new();
+        let git_provider = GitProviderType::GitHub {
+            owner: "git-owner".to_string(),
+            repo: "git-repo".to_string(),
+        };
+
+        let provider = create_provider_from_registry(
+            &registry,
+            "github",
+            Some("config-owner"),
+            Some("config-repo"),
+            Some(&git_provider),
+            None,
+        )
+        .expect("provider");
+
+        let debug = format!("{provider:?}");
+        assert!(debug.contains("git-owner"));
+        assert!(debug.contains("git-repo"));
+        assert!(!debug.contains("config-owner"));
+        assert!(registry.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_create_provider_from_registry_uses_injected_registry_for_custom_provider() {
+        let registry = RecordingRegistry::new();
+
+        let provider = create_provider_from_registry(
+            &registry,
+            "custom",
+            Some("config-owner"),
+            Some("config-repo"),
+            None,
+            None,
+        )
+        .expect("provider");
+
+        assert_eq!(provider.provider_name(), "MockCiProvider");
+        assert_eq!(registry.calls.lock().unwrap().as_slice(), &["custom"]);
     }
 }
