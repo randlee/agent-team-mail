@@ -3,9 +3,6 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[cfg(unix)]
-use agent_team_mail_core::daemon_client::{GhMonitorHealth, GhMonitorStatus};
-
 /// Domain-level provider error for CI monitor provider and registry boundaries.
 #[derive(Debug)]
 pub enum CiProviderError {
@@ -44,6 +41,105 @@ impl fmt::Display for CiProviderError {
 }
 
 impl std::error::Error for CiProviderError {}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CiMonitorTargetKind {
+    Pr,
+    Workflow,
+    Run,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CiMonitorRequest {
+    pub(crate) team: String,
+    pub(crate) target_kind: CiMonitorTargetKind,
+    pub(crate) target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) start_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) config_cwd: Option<String>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CiMonitorStatusRequest {
+    pub(crate) team: String,
+    pub(crate) target_kind: CiMonitorTargetKind,
+    pub(crate) target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) config_cwd: Option<String>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CiMonitorLifecycleAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CiMonitorControlRequest {
+    pub(crate) team: String,
+    pub(crate) action: CiMonitorLifecycleAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) drain_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) config_cwd: Option<String>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CiMonitorHealth {
+    pub(crate) team: String,
+    #[serde(default)]
+    pub(crate) configured: bool,
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) config_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) config_path: Option<String>,
+    pub(crate) lifecycle_state: String,
+    pub(crate) availability_state: String,
+    pub(crate) in_flight: u64,
+    pub(crate) updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) message: Option<String>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CiMonitorStatus {
+    pub(crate) team: String,
+    #[serde(default)]
+    pub(crate) configured: bool,
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) config_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) config_path: Option<String>,
+    pub(crate) target_kind: CiMonitorTargetKind,
+    pub(crate) target: String,
+    pub(crate) state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) run_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reference: Option<String>,
+    pub(crate) updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) message: Option<String>,
+}
 
 /// A CI workflow/pipeline run
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,13 +281,13 @@ pub struct CiFilter {
 #[cfg(unix)]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct GhMonitorStateFile {
-    pub(crate) records: Vec<GhMonitorStatus>,
+    pub(crate) records: Vec<CiMonitorStatus>,
 }
 
 #[cfg(unix)]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct GhMonitorHealthFile {
-    pub(crate) records: Vec<GhMonitorHealth>,
+    pub(crate) records: Vec<CiMonitorHealth>,
 }
 
 #[cfg(unix)]

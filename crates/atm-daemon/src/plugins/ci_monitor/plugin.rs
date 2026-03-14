@@ -7,15 +7,14 @@ use super::provider::ErasedCiProvider;
 use super::registry::{CiProviderFactory, CiProviderRegistry};
 #[cfg(unix)]
 use super::service::{fetch_run_details, list_completed_runs};
-#[cfg(unix)]
-use super::types::GhMonitorHealthFile;
 #[cfg(test)]
 use super::types::{CiFilter, CiRunStatus};
 use super::types::{CiJob, CiRunConclusion};
+#[cfg(unix)]
+use super::types::{CiMonitorHealth, GhMonitorHealthFile};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use crate::roster::RosterError;
 use agent_team_mail_core::context::{GitProvider as GitProviderType, RepoContext};
-use agent_team_mail_core::daemon_client::GhMonitorHealth;
 use agent_team_mail_core::schema::{AgentMember, InboxMessage, TeamConfig};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -892,7 +891,7 @@ impl CiMonitorPlugin {
             Err(_) => GhMonitorHealthFile::default(),
         };
 
-        let updated_record = GhMonitorHealth {
+        let updated_record = CiMonitorHealth {
             team: team.to_string(),
             configured: false,
             enabled: false,
