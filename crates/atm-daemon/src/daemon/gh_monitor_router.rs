@@ -1,3 +1,11 @@
+//! Daemon transport adapter for CI monitor commands.
+//!
+//! This module is the only place that should know about daemon-client wire payloads
+//! (`SocketRequest`, `SocketResponse`, `GhMonitorRequest`, etc.). It translates those
+//! transport types into the CI monitor core request/status types, delegates to the
+//! transport-free `plugins::ci_monitor::service` APIs, then maps the results back to
+//! wire responses.
+
 #[cfg(unix)]
 use crate::plugins::ci_monitor::service;
 #[cfg(unix)]
@@ -13,6 +21,12 @@ use agent_team_mail_core::daemon_client::{
 const SOCKET_ERROR_INTERNAL_ERROR: &str = "INTERNAL_ERROR";
 const SOCKET_ERROR_INVALID_PAYLOAD: &str = "INVALID_PAYLOAD";
 const SOCKET_ERROR_VERSION_MISMATCH: &str = "VERSION_MISMATCH";
+
+#[cfg(unix)]
+struct ParsedWireRequest<T> {
+    request_id: String,
+    payload: T,
+}
 
 #[cfg(unix)]
 fn target_kind_from_wire(
@@ -67,6 +81,106 @@ fn monitor_request_from_wire(request: GhMonitorRequest) -> CiMonitorRequest {
         start_timeout_secs: request.start_timeout_secs,
         config_cwd: request.config_cwd,
     }
+}
+
+#[cfg(unix)]
+#[allow(clippy::result_large_err)]
+fn parse_wire_request<T>(
+    request_str: &str,
+    request_label: &str,
+) -> Result<ParsedWireRequest<T>, SocketResponse>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let request: SocketRequest = match serde_json::from_str(request_str) {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(make_error_response(
+                "unknown",
+                "INVALID_REQUEST",
+                &format!("Failed to parse {request_label} request: {e}"),
+            ));
+        }
+    };
+
+    if request.version != PROTOCOL_VERSION {
+        return Err(make_error_response(
+            &request.request_id,
+            SOCKET_ERROR_VERSION_MISMATCH,
+            &format!(
+                "Unsupported protocol version {}; server supports {}",
+                request.version, PROTOCOL_VERSION
+            ),
+        ));
+    }
+
+    let payload: T = match serde_json::from_value(request.payload) {
+        Ok(payload) => payload,
+        Err(e) => {
+            return Err(make_error_response(
+                &request.request_id,
+                SOCKET_ERROR_INVALID_PAYLOAD,
+                &format!("Failed to parse {request_label} payload: {e}"),
+            ));
+        }
+    };
+
+    Ok(ParsedWireRequest {
+        request_id: request.request_id,
+        payload,
+    })
+}
+
+#[cfg(unix)]
+#[allow(clippy::result_large_err)]
+fn parse_health_request(
+    request_str: &str,
+) -> Result<ParsedWireRequest<(String, Option<String>)>, SocketResponse> {
+    let request: SocketRequest = match serde_json::from_str(request_str) {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(make_error_response(
+                "unknown",
+                "INVALID_REQUEST",
+                &format!("Failed to parse gh-monitor-health request: {e}"),
+            ));
+        }
+    };
+    if request.version != PROTOCOL_VERSION {
+        return Err(make_error_response(
+            &request.request_id,
+            SOCKET_ERROR_VERSION_MISMATCH,
+            &format!(
+                "Unsupported protocol version {}; server supports {}",
+                request.version, PROTOCOL_VERSION
+            ),
+        ));
+    }
+
+    let team = request
+        .payload
+        .get("team")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let config_cwd = request
+        .payload
+        .get("config_cwd")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    if team.is_empty() {
+        return Err(make_error_response(
+            &request.request_id,
+            "MISSING_PARAMETER",
+            "Missing required payload field: 'team'",
+        ));
+    }
+
+    Ok(ParsedWireRequest {
+        request_id: request.request_id,
+        payload: (team, config_cwd),
+    })
 }
 
 #[cfg(unix)]
@@ -194,45 +308,20 @@ pub(crate) async fn handle_gh_monitor_command(
     request_str: &str,
     home: &std::path::Path,
 ) -> SocketResponse {
-    let request: SocketRequest = match serde_json::from_str(request_str) {
-        Ok(r) => r,
-        Err(e) => {
-            return make_error_response(
-                "unknown",
-                "INVALID_REQUEST",
-                &format!("Failed to parse gh-monitor request: {e}"),
-            );
-        }
-    };
-
-    if request.version != PROTOCOL_VERSION {
-        return make_error_response(
-            &request.request_id,
-            SOCKET_ERROR_VERSION_MISMATCH,
-            &format!(
-                "Unsupported protocol version {}; server supports {}",
-                request.version, PROTOCOL_VERSION
-            ),
-        );
-    }
-
-    let gh_request: GhMonitorRequest = match serde_json::from_value(request.payload.clone()) {
-        Ok(payload) => payload,
-        Err(e) => {
-            return make_error_response(
-                &request.request_id,
-                SOCKET_ERROR_INVALID_PAYLOAD,
-                &format!("Failed to parse gh-monitor payload: {e}"),
-            );
-        }
+    let ParsedWireRequest {
+        request_id,
+        payload: gh_request,
+    } = match parse_wire_request::<GhMonitorRequest>(request_str, "gh-monitor") {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
     };
 
     match service::monitor_request(home, &monitor_request_from_wire(gh_request)).await {
         Ok(status) => make_ok_response(
-            &request.request_id,
+            &request_id,
             serde_json::to_value(status_to_wire(status)).unwrap_or_default(),
         ),
-        Err(err) => make_error_response(&request.request_id, err.code, &err.message),
+        Err(err) => make_error_response(&request_id, err.code, &err.message),
     }
 }
 
@@ -241,43 +330,19 @@ pub(crate) async fn handle_gh_monitor_control_command(
     request_str: &str,
     home: &std::path::Path,
 ) -> SocketResponse {
-    let request: SocketRequest = match serde_json::from_str(request_str) {
-        Ok(r) => r,
-        Err(e) => {
-            return make_error_response(
-                "unknown",
-                "INVALID_REQUEST",
-                &format!("Failed to parse gh-monitor-control request: {e}"),
-            );
-        }
-    };
-    if request.version != PROTOCOL_VERSION {
-        return make_error_response(
-            &request.request_id,
-            SOCKET_ERROR_VERSION_MISMATCH,
-            &format!(
-                "Unsupported protocol version {}; server supports {}",
-                request.version, PROTOCOL_VERSION
-            ),
-        );
-    }
-
-    let control: GhMonitorControlRequest = match serde_json::from_value(request.payload.clone()) {
-        Ok(payload) => payload,
-        Err(e) => {
-            return make_error_response(
-                &request.request_id,
-                SOCKET_ERROR_INVALID_PAYLOAD,
-                &format!("Failed to parse gh-monitor-control payload: {e}"),
-            );
-        }
+    let ParsedWireRequest {
+        request_id,
+        payload: control,
+    } = match parse_wire_request::<GhMonitorControlRequest>(request_str, "gh-monitor-control") {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
     };
     match service::control_request(home, &control_request_from_wire(control)).await {
         Ok(health) => make_ok_response(
-            &request.request_id,
+            &request_id,
             serde_json::to_value(health_to_wire(health)).unwrap_or_default(),
         ),
-        Err(err) => make_error_response(&request.request_id, err.code, &err.message),
+        Err(err) => make_error_response(&request_id, err.code, &err.message),
     }
 }
 
@@ -286,53 +351,20 @@ pub(crate) async fn handle_gh_monitor_health_command(
     request_str: &str,
     home: &std::path::Path,
 ) -> SocketResponse {
-    let request: SocketRequest = match serde_json::from_str(request_str) {
-        Ok(r) => r,
-        Err(e) => {
-            return make_error_response(
-                "unknown",
-                "INVALID_REQUEST",
-                &format!("Failed to parse gh-monitor-health request: {e}"),
-            );
-        }
+    let ParsedWireRequest {
+        request_id,
+        payload: (team, config_cwd),
+    } = match parse_health_request(request_str) {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
     };
-    if request.version != PROTOCOL_VERSION {
-        return make_error_response(
-            &request.request_id,
-            SOCKET_ERROR_VERSION_MISMATCH,
-            &format!(
-                "Unsupported protocol version {}; server supports {}",
-                request.version, PROTOCOL_VERSION
-            ),
-        );
-    }
-
-    let team = request
-        .payload
-        .get("team")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    let config_cwd = request
-        .payload
-        .get("config_cwd")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    if team.is_empty() {
-        return make_error_response(
-            &request.request_id,
-            "MISSING_PARAMETER",
-            "Missing required payload field: 'team'",
-        );
-    }
 
     match service::health_request(home, &team, config_cwd.as_deref()) {
         Ok(health) => make_ok_response(
-            &request.request_id,
+            &request_id,
             serde_json::to_value(health_to_wire(health)).unwrap_or_default(),
         ),
-        Err(err) => make_error_response(&request.request_id, err.code, &err.message),
+        Err(err) => make_error_response(&request_id, err.code, &err.message),
     }
 }
 
@@ -341,45 +373,20 @@ pub(crate) async fn handle_gh_status_command(
     request_str: &str,
     home: &std::path::Path,
 ) -> SocketResponse {
-    let request: SocketRequest = match serde_json::from_str(request_str) {
-        Ok(r) => r,
-        Err(e) => {
-            return make_error_response(
-                "unknown",
-                "INVALID_REQUEST",
-                &format!("Failed to parse gh-status request: {e}"),
-            );
-        }
-    };
-
-    if request.version != PROTOCOL_VERSION {
-        return make_error_response(
-            &request.request_id,
-            SOCKET_ERROR_VERSION_MISMATCH,
-            &format!(
-                "Unsupported protocol version {}; server supports {}",
-                request.version, PROTOCOL_VERSION
-            ),
-        );
-    }
-
-    let gh_request: GhStatusRequest = match serde_json::from_value(request.payload.clone()) {
-        Ok(payload) => payload,
-        Err(e) => {
-            return make_error_response(
-                &request.request_id,
-                SOCKET_ERROR_INVALID_PAYLOAD,
-                &format!("Failed to parse gh-status payload: {e}"),
-            );
-        }
+    let ParsedWireRequest {
+        request_id,
+        payload: gh_request,
+    } = match parse_wire_request::<GhStatusRequest>(request_str, "gh-status") {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
     };
 
     match service::status_request(home, &status_request_from_wire(gh_request)) {
         Ok(status) => make_ok_response(
-            &request.request_id,
+            &request_id,
             serde_json::to_value(status_to_wire(status)).unwrap_or_default(),
         ),
-        Err(err) => make_error_response(&request.request_id, err.code, &err.message),
+        Err(err) => make_error_response(&request_id, err.code, &err.message),
     }
 }
 
