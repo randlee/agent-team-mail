@@ -2805,12 +2805,14 @@ mod tests {
 
         let codex_root = home.path().join(".codex");
         fs::create_dir_all(&codex_root).unwrap();
+        let relay_path_toml = scripts_dir
+            .join("atm-hook-relay.py")
+            .display()
+            .to_string()
+            .replace('\\', "/");
         fs::write(
             codex_root.join("config.toml"),
-            format!(
-                "notify = [\"python3\", \"{}\"]\n",
-                scripts_dir.join("atm-hook-relay.py").display()
-            ),
+            format!("notify = [\"python3\", \"{}\"]\n", relay_path_toml),
         )
         .unwrap();
 
