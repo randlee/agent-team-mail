@@ -3,13 +3,17 @@ use std::collections::HashMap;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 
+use agent_team_mail_core::daemon_client::isolated_runtime_allows_live_github;
 #[cfg(unix)]
-use agent_team_mail_core::daemon_client::{GhMonitorStatus, GhMonitorTargetKind};
+use agent_team_mail_core::gh_monitor_observability::read_gh_repo_state_record;
 #[cfg(unix)]
 use anyhow::Result;
 
 #[cfg(unix)]
-use super::types::{GhMonitorConfigState, GhMonitorStateFile};
+use super::types::{
+    CiMonitorStatus, CiMonitorTargetKind, GhMonitorConfigState, GhMonitorStateFile,
+    GhMonitorStateRecord,
+};
 
 #[cfg(unix)]
 pub(crate) fn count_in_flight_monitors(home: &Path, team: &str) -> u64 {
@@ -17,7 +21,10 @@ pub(crate) fn count_in_flight_monitors(home: &Path, team: &str) -> u64 {
         .ok()
         .map(|map| {
             map.values()
-                .filter(|status| status.team == team && status.state == "tracking")
+                .filter(|status| {
+                    status.team == team
+                        && matches!(status.state.as_str(), "tracking" | "monitoring")
+                })
                 .count() as u64
         })
         .unwrap_or(0)
@@ -103,12 +110,28 @@ pub(crate) fn evaluate_gh_monitor_config(
         return state;
     }
 
+    match isolated_runtime_allows_live_github(home) {
+        Ok(false) => {
+            state.enabled = false;
+            state.error = Some(
+                "gh_monitor disabled in isolated runtime unless explicitly allowed".to_string(),
+            );
+            return state;
+        }
+        Ok(true) => {}
+        Err(e) => {
+            state.enabled = false;
+            state.error = Some(format!("failed to resolve runtime GitHub policy: {e}"));
+            return state;
+        }
+    }
+
     state
 }
 
 #[cfg(unix)]
 pub(crate) fn apply_config_state_to_status(
-    status: &mut GhMonitorStatus,
+    status: &mut CiMonitorStatus,
     config_state: &GhMonitorConfigState,
 ) {
     status.configured = config_state.configured;
@@ -138,67 +161,171 @@ fn gh_monitor_state_path(home: &Path) -> PathBuf {
 #[cfg(unix)]
 pub(crate) fn gh_monitor_key(
     team: &str,
-    target_kind: GhMonitorTargetKind,
+    target_kind: CiMonitorTargetKind,
     target: &str,
     reference: Option<&str>,
+    repo_scope: Option<&str>,
 ) -> String {
     let kind = match target_kind {
-        GhMonitorTargetKind::Pr => "pr",
-        GhMonitorTargetKind::Workflow => "workflow",
-        GhMonitorTargetKind::Run => "run",
+        CiMonitorTargetKind::Pr => "pr",
+        CiMonitorTargetKind::Workflow => "workflow",
+        CiMonitorTargetKind::Run => "run",
     };
     let reference = reference.unwrap_or_default();
+    let repo_scope = repo_scope.unwrap_or_default();
     format!(
-        "{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}",
         team.trim(),
         kind,
         target.trim(),
-        reference.trim()
+        reference.trim(),
+        repo_scope.trim().to_lowercase()
     )
 }
 
 #[cfg(unix)]
-pub(crate) fn load_gh_monitor_state_map(home: &Path) -> Result<HashMap<String, GhMonitorStatus>> {
-    let path = gh_monitor_state_path(home);
-    if !path.exists() {
-        return Ok(HashMap::new());
-    }
-    let raw = std::fs::read_to_string(&path)?;
-    let state = serde_json::from_str::<GhMonitorStateFile>(&raw)?;
-    let mut map = HashMap::new();
-    for record in state.records {
-        let key = gh_monitor_key(
-            &record.team,
-            record.target_kind,
-            &record.target,
-            record.reference.as_deref(),
-        );
-        map.insert(key, record);
-    }
-    Ok(map)
+pub(crate) fn load_gh_monitor_state_map(home: &Path) -> Result<HashMap<String, CiMonitorStatus>> {
+    Ok(load_gh_monitor_state_records(home)?
+        .into_iter()
+        .map(|record| {
+            let key = gh_monitor_key(
+                &record.status.team,
+                record.status.target_kind,
+                &record.status.target,
+                record.status.reference.as_deref(),
+                record.repo_scope.as_deref(),
+            );
+            (key, record.status)
+        })
+        .collect())
 }
 
 #[cfg(unix)]
-pub(crate) fn upsert_gh_monitor_status(home: &Path, status: GhMonitorStatus) -> Result<()> {
-    let mut map = load_gh_monitor_state_map(home)?;
+pub(crate) fn load_gh_monitor_state_records(home: &Path) -> Result<Vec<GhMonitorStateRecord>> {
+    let path = gh_monitor_state_path(home);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    let state = serde_json::from_str::<GhMonitorStateFile>(&raw)?;
+    Ok(state.records)
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn upsert_gh_monitor_status(home: &Path, status: CiMonitorStatus) -> Result<()> {
+    upsert_gh_monitor_status_for_repo(home, status, None)
+}
+
+#[cfg(unix)]
+pub(crate) fn upsert_gh_monitor_status_for_repo(
+    home: &Path,
+    mut status: CiMonitorStatus,
+    repo_scope: Option<&str>,
+) -> Result<()> {
+    if let Some(repo_scope) = repo_scope
+        && let Ok(Some(repo_state)) = read_gh_repo_state_record(home, &status.team, repo_scope)
+    {
+        status.repo_state_updated_at = Some(repo_state.updated_at);
+    }
+
+    let path = gh_monitor_state_path(home);
+    let mut map: HashMap<String, GhMonitorStateRecord> = if path.exists() {
+        let raw = std::fs::read_to_string(&path)?;
+        let state = serde_json::from_str::<GhMonitorStateFile>(&raw)?;
+        state
+            .records
+            .into_iter()
+            .map(|record| {
+                let key = gh_monitor_key(
+                    &record.status.team,
+                    record.status.target_kind,
+                    &record.status.target,
+                    record.status.reference.as_deref(),
+                    record.repo_scope.as_deref(),
+                );
+                (key, record)
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
     let key = gh_monitor_key(
         &status.team,
         status.target_kind,
         &status.target,
         status.reference.as_deref(),
+        repo_scope,
     );
-    map.insert(key, status);
-    let mut records: Vec<GhMonitorStatus> = map.into_values().collect();
+    map.insert(
+        key,
+        GhMonitorStateRecord {
+            repo_scope: repo_scope.map(|value| value.trim().to_lowercase()),
+            status,
+        },
+    );
+    let mut records: Vec<GhMonitorStateRecord> = map.into_values().collect();
     records.sort_by(|a, b| {
-        let ak = gh_monitor_key(&a.team, a.target_kind, &a.target, a.reference.as_deref());
-        let bk = gh_monitor_key(&b.team, b.target_kind, &b.target, b.reference.as_deref());
+        let ak = gh_monitor_key(
+            &a.status.team,
+            a.status.target_kind,
+            &a.status.target,
+            a.status.reference.as_deref(),
+            a.repo_scope.as_deref(),
+        );
+        let bk = gh_monitor_key(
+            &b.status.team,
+            b.status.target_kind,
+            &b.status.target,
+            b.status.reference.as_deref(),
+            b.repo_scope.as_deref(),
+        );
         ak.cmp(&bk)
     });
     let state = GhMonitorStateFile { records };
-    let path = gh_monitor_state_path(home);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(path, serde_json::to_string_pretty(&state)?)?;
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::evaluate_gh_monitor_config;
+
+    #[test]
+    fn test_evaluate_gh_monitor_config_disables_isolated_runtime_by_default() {
+        let runtime = agent_team_mail_core::daemon_client::create_isolated_runtime_root(
+            Some("ci-monitor"),
+            std::time::Duration::from_secs(600),
+            false,
+        )
+        .unwrap();
+
+        std::fs::write(
+            runtime.home.join(".atm.toml"),
+            r#"
+[core]
+default_team = "atm-dev"
+identity = "team-lead"
+
+[plugins.gh_monitor]
+enabled = true
+team = "atm-dev"
+repo = "randlee/agent-team-mail"
+"#,
+        )
+        .unwrap();
+
+        let state = evaluate_gh_monitor_config(&runtime.home, "atm-dev", None);
+        assert!(state.configured, "config should still be discovered");
+        assert!(!state.enabled, "isolated runtime must disable live polling");
+        assert!(
+            state
+                .error
+                .as_deref()
+                .is_some_and(|msg| msg.contains("isolated runtime")),
+            "isolated runtime rejection should be explicit"
+        );
+    }
 }

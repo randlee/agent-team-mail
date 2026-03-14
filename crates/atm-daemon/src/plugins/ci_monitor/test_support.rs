@@ -1,9 +1,21 @@
 use std::path::Path;
 
+use agent_team_mail_core::daemon_client::{RuntimeKind, RuntimeMetadata, write_runtime_metadata};
 use agent_team_mail_core::schema::InboxMessage;
 use tempfile::TempDir;
 
+fn allow_isolated_live_github(home: &Path) {
+    let metadata = RuntimeMetadata {
+        runtime_kind: RuntimeKind::Isolated,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        expires_at: Some((chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339()),
+        allow_live_github_polling: true,
+    };
+    write_runtime_metadata(home, &metadata).unwrap();
+}
+
 pub(crate) fn write_gh_monitor_config(home: &Path, team: &str) {
+    allow_isolated_live_github(home);
     let cfg_dir = home.join(".config/atm");
     std::fs::create_dir_all(&cfg_dir).unwrap();
     let config = format!(
@@ -23,6 +35,9 @@ poll_interval_secs = 60
 }
 
 pub(crate) fn write_repo_gh_monitor_config(repo_dir: &Path, team: &str) {
+    if let Some(home) = repo_dir.parent() {
+        allow_isolated_live_github(home);
+    }
     std::fs::create_dir_all(repo_dir).unwrap();
     let config = format!(
         r#"[core]
@@ -41,6 +56,7 @@ poll_interval_secs = 60
 }
 
 pub(crate) fn write_invalid_gh_monitor_config(home: &Path, team: &str) {
+    allow_isolated_live_github(home);
     let cfg_dir = home.join(".config/atm");
     std::fs::create_dir_all(&cfg_dir).unwrap();
     let config = format!(

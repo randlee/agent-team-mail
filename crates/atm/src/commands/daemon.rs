@@ -1,6 +1,7 @@
 //! Daemon management commands
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
+use agent_team_mail_core::daemon_client::RuntimeOwnerMetadata;
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
 use anyhow::{Context, Result};
@@ -13,7 +14,9 @@ use uuid::Uuid;
 
 use crate::commands::logging_health::{LoggingHealthSnapshot, build_logging_health_contract};
 use crate::util::settings::{get_home_dir, teams_root_dir_for};
-use agent_team_mail_core::daemon_client::daemon_status_path_for;
+use agent_team_mail_core::daemon_client::{
+    create_isolated_runtime_root, daemon_status_path_for, reap_expired_isolated_runtime_roots,
+};
 use std::path::{Path, PathBuf};
 
 const DEFAULT_DAEMON_STOP_TIMEOUT_SECS: u64 = 60;
@@ -45,6 +48,8 @@ enum DaemonCommands {
     Stop(StopArgs),
     /// Restart the daemon (stop then autostart)
     Restart(RestartArgs),
+    /// Create an explicit isolated ATM runtime root for smoke/debug/test work
+    Isolated(IsolatedArgs),
 }
 
 /// Stop the running daemon
@@ -61,6 +66,26 @@ pub struct RestartArgs {
     /// Wait timeout in seconds for graceful shutdown before restart (default 60)
     #[arg(long, default_value_t = DEFAULT_DAEMON_STOP_TIMEOUT_SECS)]
     timeout: u64,
+}
+
+/// Create an isolated ATM runtime root.
+#[derive(Args, Debug)]
+pub struct IsolatedArgs {
+    /// Optional label to include in the isolated runtime directory name
+    #[arg(long)]
+    name: Option<String>,
+
+    /// TTL in minutes before the isolated runtime becomes cleanup-eligible
+    #[arg(long, default_value_t = 10)]
+    ttl_minutes: u64,
+
+    /// Allow live GitHub polling in this isolated runtime
+    #[arg(long)]
+    allow_live_github: bool,
+
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
 }
 
 /// Show daemon status
@@ -84,7 +109,60 @@ pub fn execute(args: DaemonArgs) -> Result<()> {
         DaemonCommands::Status(status_args) => execute_status(status_args),
         DaemonCommands::Stop(stop_args) => execute_stop(stop_args.timeout.max(1)),
         DaemonCommands::Restart(restart_args) => execute_restart(restart_args.timeout.max(1)),
+        DaemonCommands::Isolated(isolated_args) => execute_isolated(isolated_args),
     }
+}
+
+fn execute_isolated(args: IsolatedArgs) -> Result<()> {
+    let reaped = reap_expired_isolated_runtime_roots()?;
+    let created = create_isolated_runtime_root(
+        args.name.as_deref(),
+        Duration::from_secs(args.ttl_minutes.max(1) * 60),
+        args.allow_live_github,
+    )?;
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "atm_home": created.home,
+                "runtime_dir": created.runtime_dir,
+                "socket_path": created.socket_path,
+                "lock_path": created.lock_path,
+                "status_path": created.status_path,
+                "runtime_kind": created.metadata.runtime_kind.as_str(),
+                "created_at": created.metadata.created_at,
+                "expires_at": created.metadata.expires_at,
+                "allow_live_github_polling": created.metadata.allow_live_github_polling,
+                "reaped_count": reaped.len(),
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("Created isolated ATM runtime:");
+    println!("ATM_HOME:           {}", created.home.display());
+    println!("Runtime Dir:        {}", created.runtime_dir.display());
+    println!("Socket:             {}", created.socket_path.display());
+    println!("Lock:               {}", created.lock_path.display());
+    println!("Status:             {}", created.status_path.display());
+    println!("Created At:         {}", created.metadata.created_at);
+    println!(
+        "Expires At:         {}",
+        created.metadata.expires_at.as_deref().unwrap_or("none")
+    );
+    println!(
+        "Live GH Polling:    {}",
+        if created.metadata.allow_live_github_polling {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    if !reaped.is_empty() {
+        println!("Reaped Expired:     {}", reaped.len());
+    }
+    Ok(())
 }
 
 fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> Result<()> {
@@ -769,6 +847,13 @@ fn execute_status(args: StatusArgs) -> Result<()> {
         println!("Version:     {}", status.version);
         println!("Uptime:      {}", format_duration(status.uptime_secs));
         println!("Last update: {}", status.timestamp);
+        println!(
+            "Runtime:     {} ({})",
+            status.owner.runtime_kind.as_str(),
+            status.owner.build_profile.as_str()
+        );
+        println!("Executable:  {}", status.owner.executable_path);
+        println!("ATM_HOME:    {}", status.owner.home_scope);
 
         if is_stale {
             println!();
@@ -909,6 +994,8 @@ struct DaemonStatus {
     pid: u32,
     version: String,
     uptime_secs: u64,
+    #[serde(default)]
+    owner: RuntimeOwnerMetadata,
     plugins: Vec<PluginStatus>,
     teams: Vec<String>,
     #[serde(default)]

@@ -3,7 +3,8 @@
 use agent_team_mail_core::config::Config;
 use agent_team_mail_core::context::{GitProvider, Platform, RepoContext, SystemContext};
 use agent_team_mail_daemon::plugin::{MailService, Plugin, PluginContext};
-use agent_team_mail_daemon::plugins::ci_monitor::{CiMonitorPlugin, MockCall, MockCiProvider};
+use agent_team_mail_daemon::plugins::ci_monitor::CiMonitorPlugin;
+use agent_team_mail_daemon::plugins::ci_monitor::mock_support::{MockCall, MockCiProvider};
 use agent_team_mail_daemon::roster::RosterService;
 use serial_test::serial;
 use std::path::Path;
