@@ -732,7 +732,7 @@ fn test_classify_failure_infra_when_runner_failure_detected() {
             conclusion: Some("failure".to_string()),
             started_at: None,
             completed_at: None,
-            steps: vec![gh_monitor::GhRunStep {
+            steps: vec![crate::plugins::ci_monitor::github_schema::GhRunStep {
                 name: "Set up runner".to_string(),
                 status: Some("completed".to_string()),
                 conclusion: Some("failure".to_string()),

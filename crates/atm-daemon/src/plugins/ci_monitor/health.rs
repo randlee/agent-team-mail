@@ -37,6 +37,7 @@ pub(crate) fn default_gh_monitor_health(team: &str) -> CiMonitorHealth {
         budget_used_in_window: None,
         rate_limit_remaining: None,
         rate_limit_limit: None,
+        rate_limit_reset_at: None,
         poll_owner: None,
         owner_runtime_kind: None,
         owner_pid: None,
@@ -57,6 +58,10 @@ pub(crate) fn apply_repo_state_to_health(
     current.budget_used_in_window = Some(repo_state.budget_used_in_window);
     current.rate_limit_remaining = repo_state.rate_limit.as_ref().map(|rate| rate.remaining);
     current.rate_limit_limit = repo_state.rate_limit.as_ref().map(|rate| rate.limit);
+    current.rate_limit_reset_at = repo_state
+        .rate_limit
+        .as_ref()
+        .and_then(|rate| rate.reset_at.clone());
     current.owner_repo = Some(repo_state.repo.clone());
     current.owner_poll_interval_secs = Some(if repo_state.in_flight > 0 {
         repo_state.active_poll_interval_secs
@@ -166,6 +171,7 @@ pub(crate) fn write_health_record(
         budget_used_in_window: None,
         rate_limit_remaining: None,
         rate_limit_limit: None,
+        rate_limit_reset_at: None,
         poll_owner: None,
         owner_runtime_kind: None,
         owner_pid: None,
