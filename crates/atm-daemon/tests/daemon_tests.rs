@@ -243,6 +243,57 @@ async fn wait_until(timeout_ms: u64, mut pred: impl FnMut() -> bool) -> bool {
     pred()
 }
 
+async fn wait_for_task_running<T>(task: &tokio::task::JoinHandle<T>, timeout_ms: u64) -> bool {
+    wait_until(timeout_ms, || !task.is_finished()).await
+}
+
+async fn wait_for_recorded_event(
+    events: &Arc<Mutex<Vec<String>>>,
+    expected: &str,
+    timeout_ms: u64,
+) -> bool {
+    wait_until(timeout_ms, || {
+        events.lock().unwrap().iter().any(|event| event == expected)
+    })
+    .await
+}
+
+fn wait_for_child_running(child: &mut std::process::Child, timeout_ms: u64) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    while std::time::Instant::now() < deadline {
+        if child
+            .try_wait()
+            .expect("failed to poll child process")
+            .is_none()
+        {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    child
+        .try_wait()
+        .expect("failed to poll child process at timeout")
+        .is_none()
+}
+
+fn wait_for_child_exit(child: &mut std::process::Child, timeout_ms: u64) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    while std::time::Instant::now() < deadline {
+        if child
+            .try_wait()
+            .expect("failed to poll child process for exit")
+            .is_some()
+        {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    child
+        .try_wait()
+        .expect("failed to poll child process at exit timeout")
+        .is_some()
+}
+
 /// Create a test status writer
 fn create_test_status_writer(temp_dir: &TempDir) -> Arc<StatusWriter> {
     Arc::new(StatusWriter::new(
@@ -302,8 +353,10 @@ async fn test_daemon_starts_and_loads_mock_plugin() {
         .await
     });
 
-    // Wait a bit for daemon to start
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        wait_for_recorded_event(&events, "test-plugin:run", 1_000).await,
+        "daemon should reach plugin run state before cancellation"
+    );
 
     // Cancel the daemon
     cancel.cancel();
@@ -367,7 +420,14 @@ async fn test_signal_triggers_graceful_shutdown() {
         .await
     });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        wait_for_recorded_event(&events, "plugin1:run", 1_000).await,
+        "plugin1 should reach run state before cancellation"
+    );
+    assert!(
+        wait_for_recorded_event(&events, "plugin2:run", 1_000).await,
+        "plugin2 should reach run state before cancellation"
+    );
 
     // Simulate signal by cancelling the token
     cancel.cancel();
@@ -415,7 +475,10 @@ async fn test_plugin_lifecycle_order() {
         .await
     });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        wait_for_recorded_event(&events, "plugin:run", 1_000).await,
+        "plugin should reach run state before cancellation"
+    );
     cancel.cancel();
 
     daemon_task.await.unwrap().unwrap();
@@ -465,8 +528,10 @@ async fn test_spool_drain_runs_on_interval() {
         .await
     });
 
-    // Let the daemon run for a bit to allow spool drain to run
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        wait_for_task_running(&daemon_task, 1_000).await,
+        "daemon task should remain running long enough to service background loops"
+    );
 
     cancel.cancel();
 
@@ -735,7 +800,10 @@ async fn test_graceful_shutdown_with_timeout() {
         .await
     });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        wait_for_recorded_event(&events, "slow-shutdown:run", 1_000).await,
+        "slow-shutdown plugin should enter run before cancellation"
+    );
     cancel.cancel();
 
     // The daemon should complete even though the plugin shutdown is slow
@@ -793,7 +861,10 @@ async fn test_empty_registry_runs_successfully() {
         .await
     });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        wait_for_task_running(&daemon_task, 1_000).await,
+        "daemon task should remain live before cancellation"
+    );
     cancel.cancel();
 
     let result = daemon_task.await.unwrap();
@@ -836,7 +907,18 @@ async fn test_multiple_plugins_run_concurrently() {
         .await
     });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        wait_for_recorded_event(&events, "plugin1:run", 1_000).await,
+        "plugin1 should reach run state before cancellation"
+    );
+    assert!(
+        wait_for_recorded_event(&events, "plugin2:run", 1_000).await,
+        "plugin2 should reach run state before cancellation"
+    );
+    assert!(
+        wait_for_recorded_event(&events, "plugin3:run", 1_000).await,
+        "plugin3 should reach run state before cancellation"
+    );
     cancel.cancel();
 
     let result = daemon_task.await.unwrap();
@@ -889,7 +971,16 @@ async fn test_plugin_run_failure_isolated_from_sibling_plugins() {
         .await
     });
 
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    let sibling_running = wait_until(1_000, || {
+        let recorded_events = events.lock().unwrap();
+        recorded_events.contains(&"gh-monitor:run_failed".to_string())
+            && recorded_events.contains(&"worker-adapter:run".to_string())
+    })
+    .await;
+    assert!(
+        sibling_running,
+        "expected failing and sibling plugin states before cancellation"
+    );
 
     {
         let recorded_events = events.lock().unwrap();
@@ -928,13 +1019,8 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
         .spawn()
         .expect("failed to spawn first daemon");
 
-    // Give the first daemon a brief moment to acquire lock and bind socket.
-    std::thread::sleep(Duration::from_millis(300));
     assert!(
-        first
-            .try_wait()
-            .expect("failed to poll first daemon")
-            .is_none(),
+        wait_for_child_running(&mut first, 1_000),
         "first daemon should still be running"
     );
 
@@ -954,5 +1040,8 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
     );
 
     let _ = first.kill();
-    let _ = first.wait();
+    assert!(
+        wait_for_child_exit(&mut first, 1_000),
+        "first daemon should exit promptly after kill"
+    );
 }
