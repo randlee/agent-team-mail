@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use anyhow::Result;
+#[cfg(unix)]
+use agent_team_mail_core::gh_monitor_observability::read_gh_repo_state_record;
 #[cfg(all(test, unix))]
 use tracing::warn;
 
@@ -26,6 +28,12 @@ pub(crate) fn default_gh_monitor_health(team: &str) -> CiMonitorHealth {
         in_flight: 0,
         updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         message: None,
+        repo_state_updated_at: None,
+        budget_limit_per_hour: None,
+        budget_used_in_window: None,
+        rate_limit_remaining: None,
+        rate_limit_limit: None,
+        poll_owner: None,
     }
 }
 
@@ -91,6 +99,12 @@ pub(crate) fn write_health_record(
         in_flight: 0,
         updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         message: Some(message.to_string()),
+        repo_state_updated_at: None,
+        budget_limit_per_hour: None,
+        budget_used_in_window: None,
+        rate_limit_remaining: None,
+        rate_limit_limit: None,
+        poll_owner: None,
     };
 
     if let Err(e) = upsert_gh_monitor_health(home, updated_record) {
@@ -126,6 +140,22 @@ pub(crate) fn set_gh_monitor_health_state(
         current.enabled = config_state.enabled;
         current.config_source = config_state.config_source.clone();
         current.config_path = config_state.config_path.clone();
+        if let Some(repo_scope) = config_state.owner_repo.as_deref()
+            && let Ok(Some(repo_state)) = read_gh_repo_state_record(home, team, repo_scope)
+        {
+            current.repo_state_updated_at = Some(repo_state.updated_at.clone());
+            current.budget_limit_per_hour = Some(repo_state.budget_limit_per_hour);
+            current.budget_used_in_window = Some(repo_state.budget_used_in_window);
+            current.rate_limit_remaining =
+                repo_state.rate_limit.as_ref().map(|rate| rate.remaining);
+            current.rate_limit_limit = repo_state.rate_limit.as_ref().map(|rate| rate.limit);
+            current.poll_owner = repo_state.owner.as_ref().map(|owner| {
+                format!(
+                    "{} pid={} runtime={} home={}",
+                    owner.executable_path, owner.pid, owner.runtime, owner.home_scope
+                )
+            });
+        }
     }
     current.updated_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     current.message = update.message;

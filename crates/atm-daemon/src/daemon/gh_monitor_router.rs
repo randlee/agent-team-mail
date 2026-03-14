@@ -254,6 +254,7 @@ fn status_to_wire(status: CiMonitorStatus) -> agent_team_mail_core::daemon_clien
         reference: status.reference,
         updated_at: status.updated_at,
         message: status.message,
+        repo_state_updated_at: status.repo_state_updated_at,
     }
 }
 
@@ -270,6 +271,12 @@ fn health_to_wire(health: CiMonitorHealth) -> agent_team_mail_core::daemon_clien
         in_flight: health.in_flight,
         updated_at: health.updated_at,
         message: health.message,
+        repo_state_updated_at: health.repo_state_updated_at,
+        budget_limit_per_hour: health.budget_limit_per_hour,
+        budget_used_in_window: health.budget_used_in_window,
+        rate_limit_remaining: health.rate_limit_remaining,
+        rate_limit_limit: health.rate_limit_limit,
+        poll_owner: health.poll_owner,
     }
 }
 
@@ -408,7 +415,7 @@ pub(crate) async fn handle_gh_monitor_health_command(
         Err(response) => return response,
     };
 
-    match service::health_request(home, &team, config_cwd.as_deref()) {
+    match service::health_request(home, &team, config_cwd.as_deref(), _repo.as_deref()) {
         Ok(health) => make_ok_response(
             &request_id,
             serde_json::to_value(health_to_wire(health)).unwrap_or_default(),

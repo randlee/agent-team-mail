@@ -27,6 +27,7 @@ use super::types::{
     GhMonitorConfigState, GhMonitorHealthUpdate, OwnedGhAlertTargets,
 };
 use agent_team_mail_core::context::GitProvider as GitProviderType;
+use agent_team_mail_core::gh_monitor_observability::{GhCliObserverContext, build_gh_cli_observer};
 use tracing::warn;
 
 pub(crate) use agent_team_mail_ci_monitor::service::{
@@ -34,6 +35,8 @@ pub(crate) use agent_team_mail_ci_monitor::service::{
 };
 
 pub(crate) fn create_provider_from_registry(
+    home: &std::path::Path,
+    team: &str,
     registry: &dyn CiProviderRegistryPort,
     provider_name: &str,
     configured_owner: Option<&str>,
@@ -81,7 +84,15 @@ pub(crate) fn create_provider_from_registry(
     };
 
     if provider_name == "github" {
-        return Ok(Box::new(GitHubActionsProvider::new(owner, repo)));
+        let observer = build_gh_cli_observer(GhCliObserverContext {
+            home: home.to_path_buf(),
+            team: team.to_string(),
+            repo: format!("{owner}/{repo}"),
+            runtime: "atm-daemon".to_string(),
+        });
+        return Ok(Box::new(
+            GitHubActionsProvider::new(owner, repo).with_observer(observer),
+        ));
     }
 
     registry
@@ -219,6 +230,7 @@ pub(crate) async fn monitor_request(
         reference: gh_request.reference.clone(),
         updated_at: now,
         message: None,
+        repo_state_updated_at: None,
     };
 
     let mut transient_failure: Option<String> = None;
@@ -228,7 +240,15 @@ pub(crate) async fn monitor_request(
         }
         CiMonitorTargetKind::Workflow => {
             if let Some(reference) = gh_request.reference.as_deref() {
-                match try_find_workflow_run_id(owner_repo, &gh_request.target, reference).await {
+                match try_find_workflow_run_id(
+                    home,
+                    &gh_request.team,
+                    owner_repo,
+                    &gh_request.target,
+                    reference,
+                )
+                .await
+                {
                     Ok(Some(run_id)) => status.run_id = Some(run_id),
                     Ok(None) => {}
                     Err(e) => {
@@ -251,7 +271,7 @@ pub(crate) async fn monitor_request(
                 }
             };
             let mut preflight_blocked = false;
-            match fetch_pr_merge_state(owner_repo, pr_number).await {
+            match fetch_pr_merge_state(home, &gh_request.team, owner_repo, pr_number).await {
                 Ok(Some(pr_view)) => {
                     if let Some(merge_state_status) = pr_view.merge_state_status.as_deref()
                         && is_pr_merge_state_dirty(merge_state_status)
@@ -289,7 +309,15 @@ pub(crate) async fn monitor_request(
                     status.message =
                         Some("No workflow run observed before start-timeout (0s).".to_string());
                 } else {
-                    match wait_for_pr_run_start(owner_repo, pr_number, timeout_secs).await {
+                    match wait_for_pr_run_start(
+                        home,
+                        &gh_request.team,
+                        owner_repo,
+                        pr_number,
+                        timeout_secs,
+                    )
+                    .await
+                    {
                         Ok(Some(run_id)) => {
                             status.run_id = Some(run_id);
                         }
@@ -564,6 +592,7 @@ pub(crate) fn health_request(
     home: &std::path::Path,
     team: &str,
     config_cwd: Option<&str>,
+    repo_scope: Option<&str>,
 ) -> CiMonitorServiceResult<CiMonitorHealth> {
     if team.trim().is_empty() {
         return Err(CiMonitorServiceError::new(
@@ -584,6 +613,24 @@ pub(crate) fn health_request(
     if let Some(reason) = config_state.error.as_deref() {
         health.availability_state = "disabled_config_error".to_string();
         health.message = Some(reason.to_string());
+    }
+    if let Some(repo_scope) = repo_scope.or(config_state.owner_repo.as_deref())
+        && let Ok(Some(repo_state)) =
+            agent_team_mail_core::gh_monitor_observability::read_gh_repo_state_record(
+                home, team, repo_scope,
+            )
+    {
+        health.repo_state_updated_at = Some(repo_state.updated_at.clone());
+        health.budget_limit_per_hour = Some(repo_state.budget_limit_per_hour);
+        health.budget_used_in_window = Some(repo_state.budget_used_in_window);
+        health.rate_limit_remaining = repo_state.rate_limit.as_ref().map(|rate| rate.remaining);
+        health.rate_limit_limit = repo_state.rate_limit.as_ref().map(|rate| rate.limit);
+        health.poll_owner = repo_state.owner.as_ref().map(|owner| {
+            format!(
+                "{} pid={} runtime={} home={}",
+                owner.executable_path, owner.pid, owner.runtime, owner.home_scope
+            )
+        });
     }
     Ok(health)
 }

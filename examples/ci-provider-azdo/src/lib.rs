@@ -166,6 +166,18 @@ impl CiProvider for AzurePipelinesProvider {
         }))
     }
 
+    async fn run_gh(
+        &self,
+        _action: &str,
+        _args: &[&str],
+        _branch: Option<&str>,
+        _reference: Option<&str>,
+    ) -> Result<String, CiProviderError> {
+        Err(CiProviderError::runtime(
+            "Azure Pipelines provider does not support gh passthrough",
+        ))
+    }
+
     fn provider_name(&self) -> &str {
         "Azure Pipelines (stub)"
     }
