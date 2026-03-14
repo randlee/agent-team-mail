@@ -735,7 +735,10 @@ mod tests {
                     rate_limit: None,
                     owner: Some(GhRuntimeOwner {
                         runtime: "dev".to_string(),
-                        executable_path: "/tmp/foreign-atm-daemon".to_string(),
+                        executable_path: std::env::temp_dir()
+                            .join("foreign-atm-daemon")
+                            .to_string_lossy()
+                            .to_string(),
                         home_scope: temp.path().to_string_lossy().to_string(),
                         pid: child.id(),
                     }),

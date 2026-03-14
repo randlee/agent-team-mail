@@ -10,7 +10,15 @@ struct RegistryEntry {
 }
 
 fn registry_path() -> std::path::PathBuf {
-    std::env::temp_dir().join("atm-test-daemon-registry.json")
+    let binary_name = std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "unknown-test-binary".to_string());
+    std::env::temp_dir().join(format!("atm-test-daemon-registry-{binary_name}.json"))
 }
 
 fn load_entries() -> Vec<RegistryEntry> {

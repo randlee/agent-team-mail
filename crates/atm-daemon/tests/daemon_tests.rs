@@ -13,7 +13,10 @@ use agent_team_mail_daemon::plugin::{
     Capability, MailService, Plugin, PluginContext, PluginError, PluginMetadata, PluginRegistry,
 };
 use agent_team_mail_daemon::roster::RosterService;
+// These daemon integration tests still serialize because the helper contexts
+// mutate ATM_HOME process-wide before constructing shared daemon state.
 use serial_test::serial;
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -274,24 +277,6 @@ fn wait_for_child_running(child: &mut std::process::Child, timeout_ms: u64) -> b
         .try_wait()
         .expect("failed to poll child process at timeout")
         .is_none()
-}
-
-fn wait_for_child_exit(child: &mut std::process::Child, timeout_ms: u64) -> bool {
-    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
-    while std::time::Instant::now() < deadline {
-        if child
-            .try_wait()
-            .expect("failed to poll child process for exit")
-            .is_some()
-        {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    child
-        .try_wait()
-        .expect("failed to poll child process at exit timeout")
-        .is_some()
 }
 
 /// Create a test status writer
@@ -569,7 +554,7 @@ async fn test_startup_reconcile_seeds_roster_without_interval_delay() {
                 "agentType": "general-purpose",
                 "model": "unknown",
                 "joinedAt": 1,
-                "cwd": "/tmp",
+                "cwd": cwd,
                 "subscriptions": [],
                 "isActive": false
             }
@@ -724,7 +709,7 @@ async fn test_config_watch_event_updates_and_removes_members() {
                 "agentType": "general-purpose",
                 "model": "unknown",
                 "joinedAt": 1,
-                "cwd": "/tmp",
+                "cwd": temp_dir.path().display().to_string(),
                 "subscriptions": [],
                 "isActive": true
             }
@@ -1016,6 +1001,8 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
 
     let mut first = std::process::Command::new(bin)
         .env("ATM_HOME", temp_dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .expect("failed to spawn first daemon");
 
@@ -1039,9 +1026,6 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
         "second daemon error should indicate lock contention, got: {stderr}"
     );
 
-    let _ = first.kill();
-    assert!(
-        wait_for_child_exit(&mut first, 1_000),
-        "first daemon should exit promptly after kill"
-    );
+    first.kill().expect("failed to kill first daemon");
+    let _status = first.wait().expect("failed to wait for first daemon exit");
 }
