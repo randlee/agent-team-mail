@@ -20,8 +20,8 @@ use super::helpers::{
 use super::routing::{notify_ci_not_started, notify_merge_conflict};
 use super::types::{
     CiMonitorControlRequest, CiMonitorHealth, CiMonitorLifecycleAction, CiMonitorRequest,
-    CiMonitorStatus, CiMonitorStatusRequest, CiMonitorTargetKind, GhMonitorConfigState,
-    GhMonitorHealthUpdate,
+    CiMonitorStatus, CiMonitorStatusRequest, CiMonitorTargetKind, GhAlertTargets,
+    GhMonitorConfigState, GhMonitorHealthUpdate, OwnedGhAlertTargets,
 };
 use tracing::warn;
 
@@ -88,6 +88,9 @@ fn validate_monitor_request(
 pub(crate) async fn monitor_request(
     home: &std::path::Path,
     gh_request: &CiMonitorRequest,
+    repo_scope: Option<&str>,
+    caller_agent: Option<&str>,
+    cc: &[String],
 ) -> CiMonitorServiceResult<CiMonitorStatus> {
     if gh_request.team.trim().is_empty() {
         return Err(CiMonitorServiceError::new(
@@ -137,7 +140,10 @@ pub(crate) async fn monitor_request(
         return Err(CiMonitorServiceError::new(code, message));
     }
 
-    let owner_repo = config_state.owner_repo.as_deref().unwrap_or_default();
+    let owner_repo = repo_scope
+        .filter(|value| !value.trim().is_empty())
+        .or(config_state.owner_repo.as_deref())
+        .unwrap_or_default();
 
     let now = chrono::Utc::now().to_rfc3339();
     let mut status = CiMonitorStatus {
@@ -201,6 +207,7 @@ pub(crate) async fn monitor_request(
                             merge_state_status,
                             None,
                             gh_request.config_cwd.as_deref(),
+                            GhAlertTargets { caller_agent, cc },
                         );
                         preflight_blocked = true;
                     }
@@ -245,28 +252,41 @@ pub(crate) async fn monitor_request(
         }
     }
 
-    super::helpers::upsert_gh_monitor_status(home, status.clone()).map_err(|e| {
-        let _ = set_gh_monitor_health_state(
-            home,
-            &gh_request.team,
-            GhMonitorHealthUpdate {
-                availability_state: Some("degraded"),
-                message: Some(format!("failed to persist monitor status: {e}")),
-                config_state: Some(&config_state),
-                config_cwd: gh_request.config_cwd.as_deref(),
-                ..Default::default()
-            },
-        );
-        CiMonitorServiceError::internal(format!("Failed to persist gh monitor state: {e}"))
-    })?;
+    super::helpers::upsert_gh_monitor_status_for_repo(home, status.clone(), repo_scope).map_err(
+        |e| {
+            let _ = set_gh_monitor_health_state(
+                home,
+                &gh_request.team,
+                GhMonitorHealthUpdate {
+                    availability_state: Some("degraded"),
+                    message: Some(format!("failed to persist monitor status: {e}")),
+                    config_state: Some(&config_state),
+                    config_cwd: gh_request.config_cwd.as_deref(),
+                    ..Default::default()
+                },
+            );
+            CiMonitorServiceError::internal(format!("Failed to persist gh monitor state: {e}"))
+        },
+    )?;
 
     if status.state == "ci_not_started" {
-        notify_ci_not_started(home, &status, gh_request.config_cwd.as_deref());
+        notify_ci_not_started(
+            home,
+            &status,
+            gh_request.config_cwd.as_deref(),
+            repo_scope,
+            GhAlertTargets { caller_agent, cc },
+        );
     } else if let Some(run_id) = status.run_id {
         let home = home.to_path_buf();
         let status_seed = status.clone();
         let gh_request = gh_request.clone();
         let owner_repo = owner_repo.to_string();
+        let repo_scope = repo_scope.map(str::to_string);
+        let alert_targets = OwnedGhAlertTargets {
+            caller_agent: caller_agent.map(str::to_string),
+            cc: cc.to_vec(),
+        };
         tokio::spawn(async move {
             if let Err(e) = monitor_gh_run(
                 home.as_path(),
@@ -274,6 +294,8 @@ pub(crate) async fn monitor_request(
                 &gh_request,
                 &owner_repo,
                 run_id,
+                repo_scope.as_deref(),
+                alert_targets.borrowed(),
             )
             .await
             {
@@ -510,6 +532,7 @@ pub(crate) fn health_request(
 pub(crate) fn status_request(
     home: &std::path::Path,
     gh_request: &CiMonitorStatusRequest,
+    repo_scope: Option<&str>,
 ) -> CiMonitorServiceResult<CiMonitorStatus> {
     let config_state =
         evaluate_gh_monitor_config(home, &gh_request.team, gh_request.config_cwd.as_deref());
@@ -529,6 +552,7 @@ pub(crate) fn status_request(
         gh_request.target_kind,
         &gh_request.target,
         gh_request.reference.as_deref(),
+        repo_scope,
     );
     if let Some(mut status) = state.get(&key).cloned() {
         apply_config_state_to_status(&mut status, &config_state);

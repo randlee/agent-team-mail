@@ -30,6 +30,14 @@ pub struct GhArgs {
     #[arg(long)]
     team: Option<String>,
 
+    /// Repository override (`owner/repo` or GitHub URL)
+    #[arg(long, global = true, value_name = "OWNER/REPO|URL")]
+    repo: Option<String>,
+
+    /// Additional ATM recipients for copied monitor notifications
+    #[arg(long = "cc", global = true, value_name = "AGENT[@TEAM]")]
+    cc: Vec<String>,
+
     /// Output as JSON
     #[arg(long, global = true)]
     json: bool,
@@ -55,10 +63,6 @@ struct InitArgs {
     /// Do not write files; print planned config changes only
     #[arg(long)]
     dry_run: bool,
-
-    /// Repository override (`owner/repo` or `repo`)
-    #[arg(long, value_name = "OWNER/REPO|REPO")]
-    repo: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -400,9 +404,14 @@ pub fn execute(args: GhArgs) -> Result<()> {
             let health = resolve_namespace_health(team, &current_dir, &plugin_state)?;
             print_namespace_status(&health, args.json)
         }
-        Some(GhCommand::Init(init_args)) => {
-            execute_init(team, &current_dir, &home_dir, init_args, args.json)
-        }
+        Some(GhCommand::Init(init_args)) => execute_init(
+            team,
+            &current_dir,
+            &home_dir,
+            init_args,
+            args.repo.as_deref(),
+            args.json,
+        ),
         Some(GhCommand::Status(status_args)) => {
             validate_status_args(&status_args)?;
             if status_args.target_kind.is_none() {
@@ -418,6 +427,10 @@ pub fn execute(args: GhArgs) -> Result<()> {
                 team: team.to_string(),
                 target_kind: status_kind_to_wire(status_args.target_kind.expect("validated")),
                 target: status_args.target.expect("validated"),
+                repo: Some(resolve_daemon_repo_scope(
+                    args.repo.as_deref(),
+                    &current_dir,
+                )?),
                 reference: status_args.reference,
                 config_cwd: Some(current_dir.to_string_lossy().to_string()),
             };
@@ -474,9 +487,15 @@ pub fn execute(args: GhArgs) -> Result<()> {
                         team: team.to_string(),
                         target_kind: GhMonitorTargetKind::Pr,
                         target: pr.number.to_string(),
+                        repo: Some(resolve_daemon_repo_scope(
+                            args.repo.as_deref(),
+                            &current_dir,
+                        )?),
                         reference: None,
                         start_timeout_secs: Some(pr.start_timeout_secs),
                         config_cwd: Some(current_dir.to_string_lossy().to_string()),
+                        caller_agent: Some(resolve_monitor_caller_identity(&config)),
+                        cc: args.cc.clone(),
                     };
                     GhOutput::MonitorStatus(gh_monitor(&request)?.ok_or_else(|| {
                         anyhow::anyhow!("daemon is not reachable for atm gh monitor command")
@@ -487,9 +506,15 @@ pub fn execute(args: GhArgs) -> Result<()> {
                         team: team.to_string(),
                         target_kind: GhMonitorTargetKind::Workflow,
                         target: workflow.name,
+                        repo: Some(resolve_daemon_repo_scope(
+                            args.repo.as_deref(),
+                            &current_dir,
+                        )?),
                         reference: Some(workflow.reference),
                         start_timeout_secs: Some(workflow.start_timeout_secs),
                         config_cwd: Some(current_dir.to_string_lossy().to_string()),
+                        caller_agent: Some(resolve_monitor_caller_identity(&config)),
+                        cc: args.cc.clone(),
                     };
                     GhOutput::MonitorStatus(gh_monitor(&request)?.ok_or_else(|| {
                         anyhow::anyhow!("daemon is not reachable for atm gh monitor command")
@@ -500,9 +525,15 @@ pub fn execute(args: GhArgs) -> Result<()> {
                         team: team.to_string(),
                         target_kind: GhMonitorTargetKind::Run,
                         target: run.run_id.to_string(),
+                        repo: Some(resolve_daemon_repo_scope(
+                            args.repo.as_deref(),
+                            &current_dir,
+                        )?),
                         reference: None,
                         start_timeout_secs: None,
                         config_cwd: Some(current_dir.to_string_lossy().to_string()),
+                        caller_agent: Some(resolve_monitor_caller_identity(&config)),
+                        cc: args.cc.clone(),
                     };
                     GhOutput::MonitorStatus(gh_monitor(&request)?.ok_or_else(|| {
                         anyhow::anyhow!("daemon is not reachable for atm gh monitor command")
@@ -512,6 +543,11 @@ pub fn execute(args: GhArgs) -> Result<()> {
                     let request = GhMonitorControlRequest {
                         team: team.to_string(),
                         action: GhMonitorLifecycleAction::Start,
+                        repo: args
+                            .repo
+                            .as_deref()
+                            .map(resolve_repo_override)
+                            .transpose()?,
                         drain_timeout_secs: None,
                         config_cwd: Some(current_dir.to_string_lossy().to_string()),
                     };
@@ -523,6 +559,11 @@ pub fn execute(args: GhArgs) -> Result<()> {
                     let request = GhMonitorControlRequest {
                         team: team.to_string(),
                         action: GhMonitorLifecycleAction::Stop,
+                        repo: args
+                            .repo
+                            .as_deref()
+                            .map(resolve_repo_override)
+                            .transpose()?,
                         drain_timeout_secs: Some(stop.drain_timeout_secs),
                         config_cwd: Some(current_dir.to_string_lossy().to_string()),
                     };
@@ -534,6 +575,11 @@ pub fn execute(args: GhArgs) -> Result<()> {
                     let request = GhMonitorControlRequest {
                         team: team.to_string(),
                         action: GhMonitorLifecycleAction::Restart,
+                        repo: args
+                            .repo
+                            .as_deref()
+                            .map(resolve_repo_override)
+                            .transpose()?,
                         drain_timeout_secs: Some(restart.drain_timeout_secs),
                         config_cwd: Some(current_dir.to_string_lossy().to_string()),
                     };
@@ -1691,12 +1737,13 @@ fn execute_init(
     current_dir: &Path,
     home_dir: &Path,
     args: InitArgs,
+    repo_override: Option<&str>,
     json: bool,
 ) -> Result<()> {
     validate_gh_cli_prerequisites()?;
 
     let detected = detect_github_remote(current_dir);
-    let (owner, repo) = resolve_repo_coordinates(args.repo.as_deref(), detected.as_ref())?;
+    let (owner, repo) = resolve_repo_coordinates(repo_override, detected.as_ref())?;
     let config_path = choose_init_config_path(current_dir, home_dir);
 
     let mut document = if config_path.exists() {
@@ -1856,6 +1903,28 @@ fn detect_github_remote(current_dir: &Path) -> Option<(String, String)> {
     }
 }
 
+fn resolve_repo_override(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        bail!("--repo cannot be empty");
+    }
+
+    if let GitProvider::GitHub { owner, repo } = GitProvider::detect_from_url(trimmed) {
+        return Ok(format!("{owner}/{repo}"));
+    }
+
+    if let Some((owner, repo)) = trimmed.split_once('/') {
+        let owner = owner.trim();
+        let repo = repo.trim().trim_end_matches(".git");
+        if owner.is_empty() || repo.is_empty() {
+            bail!("--repo must be `owner/repo` or a full GitHub URL");
+        }
+        return Ok(format!("{owner}/{repo}"));
+    }
+
+    bail!("--repo must be `owner/repo` or a full GitHub URL")
+}
+
 fn resolve_repo_coordinates(
     repo_arg: Option<&str>,
     detected: Option<&(String, String)>,
@@ -1866,11 +1935,15 @@ fn resolve_repo_coordinates(
             bail!("--repo cannot be empty");
         }
 
+        if let GitProvider::GitHub { owner, repo } = GitProvider::detect_from_url(trimmed) {
+            return Ok((Some(owner.clone()), format!("{owner}/{repo}")));
+        }
+
         if let Some((owner, repo)) = trimmed.split_once('/') {
             let owner = owner.trim();
-            let repo = repo.trim();
+            let repo = repo.trim().trim_end_matches(".git");
             if owner.is_empty() || repo.is_empty() {
-                bail!("--repo must be `owner/repo` or `repo`");
+                bail!("--repo must be `owner/repo`, `repo`, or a full GitHub URL");
             }
             return Ok((Some(owner.to_string()), format!("{owner}/{repo}")));
         }
@@ -1890,6 +1963,28 @@ fn resolve_repo_coordinates(
     bail!(
         "Could not determine GitHub repository from git remote. Use `atm gh init --repo <owner/repo>`"
     )
+}
+
+fn resolve_daemon_repo_scope(repo_arg: Option<&str>, current_dir: &Path) -> Result<String> {
+    if let Some(raw) = repo_arg {
+        return resolve_repo_override(raw);
+    }
+
+    if let Some((owner, repo)) = detect_github_remote(current_dir) {
+        return Ok(format!("{owner}/{repo}"));
+    }
+
+    bail!(
+        "Could not determine GitHub repository from current directory. Run from a git checkout with a GitHub remote or pass `--repo <owner/repo>`."
+    )
+}
+
+fn resolve_monitor_caller_identity(config: &Config) -> String {
+    std::env::var("ATM_IDENTITY")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| config.core.identity.clone())
 }
 
 fn choose_init_config_path(current_dir: &Path, home_dir: &Path) -> PathBuf {

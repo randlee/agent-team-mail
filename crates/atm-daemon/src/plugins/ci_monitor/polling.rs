@@ -14,6 +14,7 @@ use super::helpers::upsert_gh_monitor_status;
 use super::provider::ErasedCiProvider;
 use super::types::{
     CiJob, CiMonitorRequest, CiMonitorStatus, CiMonitorTargetKind, CiRun, CiRunStatus, CiStep,
+    GhAlertTargets,
 };
 use crate::plugin::PluginError;
 use tracing::warn;
@@ -51,6 +52,7 @@ pub(crate) async fn monitor_run(
             &status_seed.team,
             gh_request.config_cwd.as_deref(),
             expected_repo.as_deref(),
+            GhAlertTargets::default(),
         );
 
         let completed_jobs: Vec<CiJob> = run
@@ -169,6 +171,7 @@ pub(crate) async fn monitor_run(
                             merge_state_status,
                             run.conclusion.map(ci_conclusion_label),
                             gh_request.config_cwd.as_deref(),
+                            GhAlertTargets::default(),
                         );
                     }
                 }
