@@ -31,7 +31,7 @@ pub(crate) mod types;
 pub use config::{CiMonitorConfig, DedupStrategy, NotifyTarget};
 pub use plugin::CiMonitorPlugin;
 pub use provider::{CiProvider, ErasedCiProvider};
-pub use registry::CiProviderFactory;
+pub use registry::{CiProviderFactory, CiProviderRegistry};
 pub use types::{
     CiFilter, CiJob, CiProviderError, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep,
 };
