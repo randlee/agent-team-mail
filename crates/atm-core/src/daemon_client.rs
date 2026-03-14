@@ -609,8 +609,7 @@ fn looks_like_repo_or_worktree_binary(path: &Path) -> bool {
 }
 
 fn is_approved_release_binary(path: &Path, input: &RuntimePolicyInput) -> bool {
-    let in_bin_dir =
-        path.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("bin"));
+    let in_bin_dir = path.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("bin"));
     in_bin_dir
         && path.file_name() == Some(std::ffi::OsStr::new("atm-daemon"))
         && !path.starts_with(default_dev_runtime_root_for(&input.os_home))
@@ -648,7 +647,9 @@ fn classify_runtime_kind_from_paths(home_scope: &Path, os_home: &Path) -> Runtim
     }
 }
 
-fn validate_runtime_admission_input(input: &RuntimePolicyInput) -> anyhow::Result<RuntimeOwnerMetadata> {
+fn validate_runtime_admission_input(
+    input: &RuntimePolicyInput,
+) -> anyhow::Result<RuntimeOwnerMetadata> {
     let owner = evaluate_runtime_owner_metadata(input);
 
     if matches!(owner.runtime_kind, RuntimeKind::Isolated) {
@@ -683,7 +684,10 @@ fn validate_runtime_admission_input(input: &RuntimePolicyInput) -> anyhow::Resul
     Ok(owner)
 }
 
-pub fn validate_runtime_admission(home: &Path, daemon_bin: &Path) -> anyhow::Result<RuntimeOwnerMetadata> {
+pub fn validate_runtime_admission(
+    home: &Path,
+    daemon_bin: &Path,
+) -> anyhow::Result<RuntimeOwnerMetadata> {
     let os_home = crate::home::get_os_home_dir()?;
     let input = RuntimePolicyInput {
         home_scope: home.to_path_buf(),
@@ -3230,8 +3234,7 @@ sleep 2
             build_profile: BuildProfile::Debug,
         };
 
-        let err =
-            validate_runtime_admission_input(&input).expect_err("debug build must be denied");
+        let err = validate_runtime_admission_input(&input).expect_err("debug build must be denied");
         assert!(err.to_string().contains("requires a release build"));
     }
 
@@ -3261,7 +3264,10 @@ sleep 2
 
         let persisted = read_runtime_metadata(&created.home).expect("persisted metadata");
         assert_eq!(persisted, created.metadata);
-        assert_eq!(runtime_kind_for_home(&created.home).unwrap(), RuntimeKind::Isolated);
+        assert_eq!(
+            runtime_kind_for_home(&created.home).unwrap(),
+            RuntimeKind::Isolated
+        );
         assert!(
             !isolated_runtime_allows_live_github(&created.home).unwrap(),
             "isolated runtime should deny live GitHub polling by default"
@@ -3285,7 +3291,10 @@ sleep 2
 
         let reaped = reap_expired_isolated_runtime_roots_with_base(base.path()).unwrap();
         assert_eq!(reaped, vec![home.clone()]);
-        assert!(!home.exists(), "expired dead isolated runtime should be reaped");
+        assert!(
+            !home.exists(),
+            "expired dead isolated runtime should be reaped"
+        );
     }
 
     #[cfg(unix)]

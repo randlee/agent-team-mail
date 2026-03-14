@@ -53,7 +53,10 @@ async fn main() -> Result<()> {
     // Determine home directory early for lock/log path resolution.
     let home_dir =
         agent_team_mail_core::home::get_home_dir().context("Failed to determine home directory")?;
-    let runtime_owner = agent_team_mail_core::daemon_client::validate_runtime_admission_for_current_process(&home_dir)
+    let runtime_owner =
+        agent_team_mail_core::daemon_client::validate_runtime_admission_for_current_process(
+            &home_dir,
+        )
         .context("Shared runtime admission failed")?;
 
     // Enforce single-instance daemon ownership with an exclusive process lock.

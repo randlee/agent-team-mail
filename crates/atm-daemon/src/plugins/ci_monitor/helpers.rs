@@ -3,9 +3,9 @@ use std::collections::HashMap;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 
+use agent_team_mail_core::daemon_client::isolated_runtime_allows_live_github;
 #[cfg(unix)]
 use anyhow::Result;
-use agent_team_mail_core::daemon_client::isolated_runtime_allows_live_github;
 
 #[cfg(unix)]
 use super::types::{
@@ -108,8 +108,9 @@ pub(crate) fn evaluate_gh_monitor_config(
     match isolated_runtime_allows_live_github(home) {
         Ok(false) => {
             state.enabled = false;
-            state.error =
-                Some("gh_monitor disabled in isolated runtime unless explicitly allowed".to_string());
+            state.error = Some(
+                "gh_monitor disabled in isolated runtime unless explicitly allowed".to_string(),
+            );
             return state;
         }
         Ok(true) => {}

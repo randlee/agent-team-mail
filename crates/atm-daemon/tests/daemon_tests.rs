@@ -251,7 +251,11 @@ fn create_test_status_writer(temp_dir: &TempDir) -> Arc<StatusWriter> {
         RuntimeOwnerMetadata {
             runtime_kind: RuntimeKind::Isolated,
             build_profile: BuildProfile::Release,
-            executable_path: temp_dir.path().join("atm-daemon").to_string_lossy().into_owned(),
+            executable_path: temp_dir
+                .path()
+                .join("atm-daemon")
+                .to_string_lossy()
+                .into_owned(),
             home_scope: temp_dir.path().to_string_lossy().into_owned(),
         },
     ))
