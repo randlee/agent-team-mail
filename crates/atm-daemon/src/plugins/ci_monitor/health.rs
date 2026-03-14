@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
-use agent_team_mail_core::daemon_client::GhMonitorHealth;
+use agent_team_mail_ci_monitor::GhRepoStateRecord;
+#[cfg(unix)]
+use agent_team_mail_core::gh_monitor_observability::read_gh_repo_state_record;
 #[cfg(unix)]
 use anyhow::Result;
 #[cfg(all(test, unix))]
@@ -13,11 +15,11 @@ use tracing::warn;
 #[cfg(unix)]
 use super::routing::notify_gh_monitor_health_transition as emit_gh_monitor_health_transition;
 #[cfg(unix)]
-use super::types::{GhMonitorHealthFile, GhMonitorHealthUpdate};
+use super::types::{CiMonitorHealth, GhMonitorHealthFile, GhMonitorHealthUpdate};
 
 #[cfg(unix)]
-pub(crate) fn default_gh_monitor_health(team: &str) -> GhMonitorHealth {
-    GhMonitorHealth {
+pub(crate) fn default_gh_monitor_health(team: &str) -> CiMonitorHealth {
+    CiMonitorHealth {
         team: team.to_string(),
         configured: false,
         enabled: false,
@@ -28,6 +30,52 @@ pub(crate) fn default_gh_monitor_health(team: &str) -> GhMonitorHealth {
         in_flight: 0,
         updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         message: None,
+        repo_state_updated_at: None,
+        budget_limit_per_hour: None,
+        budget_used_in_window: None,
+        rate_limit_remaining: None,
+        rate_limit_limit: None,
+        poll_owner: None,
+        owner_runtime_kind: None,
+        owner_pid: None,
+        owner_binary_path: None,
+        owner_atm_home: None,
+        owner_repo: None,
+        owner_poll_interval_secs: None,
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn apply_repo_state_to_health(
+    current: &mut CiMonitorHealth,
+    repo_state: &GhRepoStateRecord,
+) {
+    current.repo_state_updated_at = Some(repo_state.updated_at.clone());
+    current.budget_limit_per_hour = Some(repo_state.budget_limit_per_hour);
+    current.budget_used_in_window = Some(repo_state.budget_used_in_window);
+    current.rate_limit_remaining = repo_state.rate_limit.as_ref().map(|rate| rate.remaining);
+    current.rate_limit_limit = repo_state.rate_limit.as_ref().map(|rate| rate.limit);
+    current.owner_repo = Some(repo_state.repo.clone());
+    current.owner_poll_interval_secs = Some(if repo_state.in_flight > 0 {
+        repo_state.active_poll_interval_secs
+    } else {
+        repo_state.idle_poll_interval_secs
+    });
+    if let Some(owner) = repo_state.owner.as_ref() {
+        current.poll_owner = Some(format!(
+            "{} pid={} runtime={} home={}",
+            owner.executable_path, owner.pid, owner.runtime, owner.home_scope
+        ));
+        current.owner_runtime_kind = Some(owner.runtime.clone());
+        current.owner_pid = Some(owner.pid);
+        current.owner_binary_path = Some(owner.executable_path.clone());
+        current.owner_atm_home = Some(owner.home_scope.clone());
+    } else {
+        current.poll_owner = None;
+        current.owner_runtime_kind = None;
+        current.owner_pid = None;
+        current.owner_binary_path = None;
+        current.owner_atm_home = None;
     }
 }
 
@@ -37,7 +85,7 @@ fn gh_monitor_health_path(home: &Path) -> PathBuf {
 }
 
 #[cfg(unix)]
-pub(crate) fn load_gh_monitor_health_map(home: &Path) -> Result<HashMap<String, GhMonitorHealth>> {
+pub(crate) fn load_gh_monitor_health_map(home: &Path) -> Result<HashMap<String, CiMonitorHealth>> {
     let path = gh_monitor_health_path(home);
     if !path.exists() {
         return Ok(HashMap::new());
@@ -52,10 +100,10 @@ pub(crate) fn load_gh_monitor_health_map(home: &Path) -> Result<HashMap<String, 
 }
 
 #[cfg(unix)]
-pub(crate) fn upsert_gh_monitor_health(home: &Path, health: GhMonitorHealth) -> Result<()> {
+pub(crate) fn upsert_gh_monitor_health(home: &Path, health: CiMonitorHealth) -> Result<()> {
     let mut map = load_gh_monitor_health_map(home)?;
     map.insert(health.team.clone(), health);
-    let mut records: Vec<GhMonitorHealth> = map.into_values().collect();
+    let mut records: Vec<CiMonitorHealth> = map.into_values().collect();
     records.sort_by(|a, b| a.team.cmp(&b.team));
     let file = GhMonitorHealthFile { records };
     let path = gh_monitor_health_path(home);
@@ -67,7 +115,7 @@ pub(crate) fn upsert_gh_monitor_health(home: &Path, health: GhMonitorHealth) -> 
 }
 
 #[cfg(unix)]
-pub(crate) fn read_gh_monitor_health(home: &Path, team: &str) -> Result<GhMonitorHealth> {
+pub(crate) fn read_gh_monitor_health(home: &Path, team: &str) -> Result<CiMonitorHealth> {
     let map = load_gh_monitor_health_map(home)?;
     Ok(map
         .get(team)
@@ -82,7 +130,7 @@ pub(crate) fn write_health_record(
     availability_state: &str,
     message: &str,
 ) {
-    let updated_record = GhMonitorHealth {
+    let updated_record = CiMonitorHealth {
         team: team.to_string(),
         configured: false,
         enabled: false,
@@ -93,6 +141,18 @@ pub(crate) fn write_health_record(
         in_flight: 0,
         updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         message: Some(message.to_string()),
+        repo_state_updated_at: None,
+        budget_limit_per_hour: None,
+        budget_used_in_window: None,
+        rate_limit_remaining: None,
+        rate_limit_limit: None,
+        poll_owner: None,
+        owner_runtime_kind: None,
+        owner_pid: None,
+        owner_binary_path: None,
+        owner_atm_home: None,
+        owner_repo: None,
+        owner_poll_interval_secs: None,
     };
 
     if let Err(e) = upsert_gh_monitor_health(home, updated_record) {
@@ -110,7 +170,7 @@ pub(crate) fn set_gh_monitor_health_state(
     home: &Path,
     team: &str,
     update: GhMonitorHealthUpdate<'_>,
-) -> Result<GhMonitorHealth> {
+) -> Result<CiMonitorHealth> {
     let mut current = read_gh_monitor_health(home, team)?;
     let old_availability = current.availability_state.clone();
 
@@ -128,6 +188,11 @@ pub(crate) fn set_gh_monitor_health_state(
         current.enabled = config_state.enabled;
         current.config_source = config_state.config_source.clone();
         current.config_path = config_state.config_path.clone();
+        if let Some(repo_scope) = config_state.owner_repo.as_deref()
+            && let Ok(Some(repo_state)) = read_gh_repo_state_record(home, team, repo_scope)
+        {
+            apply_repo_state_to_health(&mut current, &repo_state);
+        }
     }
     current.updated_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     current.message = update.message;

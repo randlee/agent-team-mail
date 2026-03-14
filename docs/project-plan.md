@@ -175,9 +175,9 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AH | Observability Unification + AG Deferred Closure | Unified JSONL logging pipeline via `sc-observability` crate and baseline observability contracts (OTel/scmux/schook deferred) | COMPLETE |
 | AI | GH Monitor Dashboard + Detailed PR Reporting | `atm gh pr list`, `atm gh pr report`, `--template` rendering, `init-report`; CI rollup neutral/skipped fix | IN-PROGRESS |
 | AM | CI Monitor Subsystem Refactor | Extract CI-monitor subsystem boundaries out of `socket.rs`, split provider-neutral logic from GitHub-specific adapter logic, and stabilize routing/health/test support on `integrate/phase-AM` | IN-PROGRESS |
+| AO | GH Monitor Guardrails + Runtime Admission | Prevent accidental shared-runtime pollers, add isolated-runtime TTL policy, and make GH usage attributable/self-limiting with cached repo-state and operator controls | PLANNED |
 | AJ | Session-ID SSoT Normalization | Canonical `session_id` naming, shared caller resolver, runtime session resolution closure, doctor/session consistency | PLANNED |
 | AK | Mandatory OTel Rollout | Non-optional OTel across in-scope tools with canonical correlation and health/reporting contracts | PLANNED |
-| AM | CI Monitor Refactor | Extract CI monitoring from `socket.rs` into subsystem/service/provider/routing/health boundaries on `integrate/phase-AM` | IN-PROGRESS |
 
 ---
 
@@ -1595,6 +1595,102 @@ GitHub-specific adapter logic, routing, and health handling live under
 2. CI-monitor business logic lives under `crates/atm-daemon/src/plugins/ci_monitor/`.
 3. GitHub-specific logic is isolated behind one clear adapter boundary.
 4. Subsystem tests are organized around CI-monitor modules instead of socket-only entrypoints.
+
+---
+
+## 17.22 Phase AN: CI Monitor Extraction Readiness
+
+**Goal**: Prepare CI monitor code for clean extraction by tightening daemon/core
+boundaries, narrowing the production module surface, moving reusable logic into
+the extracted crate boundary, and landing the multi-repo `atm gh` contract.
+
+**Integration branch**: `integrate/phase-AN`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Branch | Status |
+|---|---|---|---|
+| AN.1 | CI core boundary cleanup | `feature/pAN-s1-ci-core-boundary` | COMPLETE |
+| AN.2 | Service split from daemon wire types | `feature/pAN-s2-service-split` | COMPLETE |
+| AN.3 | Trait injection for provider/registry seams | `feature/pAN-s3-trait-injection` | COMPLETE |
+| AN.4 | Narrow production `mod.rs` surface | `feature/pAN-s4-mod-narrowing` | IN-PROGRESS |
+| AN.5 | Transport adapter boundary in `gh_monitor_router` | `feature/pAN-s5-plugin-init-split` | IN-PROGRESS |
+| AN.6 | Extract `agent-team-mail-ci-monitor` crate | `feature/pAN-s6-crate-extraction` | IN-PROGRESS |
+| AN.7 | Multi-repo `atm gh` routing and repo inference | `feature/pAN-s7-multi-repo-gh` | IN-PROGRESS |
+| AN.8 | Phase AO guardrail planning and requirements closure | `feature/pAN-s8-gh-monitor-guardrails` | IN-PROGRESS |
+
+### Exit Criteria
+1. Reusable CI monitor logic is isolated behind crate-friendly boundaries.
+2. Daemon-only transport and lifecycle adapters remain in `atm-daemon`.
+3. The extracted `agent-team-mail-ci-monitor` crate owns the shared CI-monitor
+   core surface.
+4. Multi-repo `atm gh` routing is stable and Phase AO planning is ready to
+   begin.
+
+## 17.23 Phase AO: GH Monitor Guardrails + Runtime Admission
+
+**Goal**: Prevent accidental shared-runtime pollers, make isolated test runtimes
+explicit and short-lived, and make GitHub usage attributable, budgeted, and
+operator-controllable.
+
+**Prerequisites**: Phase AN merged to `develop`.
+**Integration branch**: `integrate/phase-AO`
+
+**Planning doc**: `docs/phase-ao-gh-monitor-guardrails.md`
+**Requirements authority**:
+- `docs/ci-monitoring/requirements.md`
+- `docs/ci-monitoring/architecture.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Branch | Status |
+|---|---|---|---|
+| AO.1 | Shared runtime admission guard (`release`/`dev` only, hard-stop invalid shared launches) | `feature/pAO-s1-runtime-admission` | PLANNED |
+| AO.2 | Explicit isolated runtime creation + 10-minute TTL cleanup policy | `feature/pAO-s2-isolated-runtime-ttl` | ACTIVE |
+| AO.3 | Shared repo-state cache, single `(team, repo)` shared poller, PR-list primary poll surface, bounded poll cadence, team budgets (`100/hour`), attributed `run_gh()` path, merge-conflict checks, and config/init parity | `feature/pAO-s3-gh-budget-cache` | PLANNED |
+| AO.4 | Single `(team, repo)` lease ownership + hidden human-authorized cross-team stop/disable path with operator-facing owner metadata | `feature/pAO-s4-operator-control` | PLANNED |
+| AO.5 | Post-integration deletion sprint: simplify runtime/poller paths and narrow final contracts | `feature/pAO-s5-path-contract-simplification` | PLANNED |
+
+### Exit Criteria
+1. Shared `release` and `dev` runtimes reject invalid owners and duplicate daemon starts.
+2. Isolated runtimes are explicit, short-lived, and do not enable live GH polling by default.
+3. GitHub calls are budgeted per team, counted locally, and surfaced with freshness metadata in `atm gh status` and `atm doctor`; one shared `(team, repo)` poller uses the repo-wide PR list view as its primary poll surface, polling at most once per 5 minutes when idle and once per 1 minute when active (`GH-CI-FR-10a`, `GH-CI-FR-10b`, `GH-CI-FR-10c`); pre-run/post-completion merge-conflict checks plus config/init parity remain on the attributed `run_gh()` path.
+4. One active `gh_monitor` owner exists per `(team, repo)`, operator-facing status shows the active owner metadata, and operators can stop a runaway monitor with auditable cross-team controls.
+5. Transitional runtime, polling, and state paths preserved during AO are removed or narrowed so the post-AO implementation exposes only the canonical contracts.
+
+**Dependency graph**: AO.1 → AO.2 → AO.3 → AO.4 → AO.5
+
+---
+
+## 17.24 Phase AP: Test Stability and Harness Hardening
+
+**Goal**: eliminate hang-prone, flaky, and operationally unsafe test patterns
+that can block CI without clearly identifying the failing test or resource.
+
+**Prerequisites**: Phase AN merged to `develop`; Phase AO may proceed in
+parallel, but AP.1 should start before new daemon-heavy test coverage expands.
+**Integration branch**: `integrate/phase-AP`
+
+**Planning doc**: `docs/phase-ap-test-hardening.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Branch | Status |
+|---|---|---|---|
+| AP.1 | Environment/process safety: scoped `ATM_HOME`, subprocess RAII, autostart diagnostics | `feature/pAP-s1-process-safety` | PLANNED |
+| AP.2 | Deterministic timing: replace wall-clock sleeps, bound loop/watcher waits, improve test attribution | `feature/pAP-s2-deterministic-timing` | PLANNED |
+| AP.3 | Pathing/serialization cleanup and final audit | `feature/pAP-s3-test-hygiene-audit` | PLANNED |
+
+### Exit Criteria
+1. Blocking/high-priority tests no longer rely on raw wall-clock sleeps as their
+   sole synchronization mechanism.
+2. Test helpers and integration tests do not leak daemon/subprocess children on
+   panic.
+3. Shared mutable environment state (`ATM_HOME`, shared runtime paths) is scoped
+   safely or serialized explicitly.
+4. Cross-platform fixtures avoid hardcoded `/tmp`, and risky integration suites
+   fail with bounded, attributable diagnostics instead of hanging silently.
+5. Duplicate low-value tests and ad hoc helper paths are removed where they do
+   not provide unique coverage, leaving a smaller canonical harness.
+
+**Dependency graph**: AP.1 → AP.2 → AP.3
 
 ---
 

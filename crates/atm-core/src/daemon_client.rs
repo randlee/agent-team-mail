@@ -32,7 +32,8 @@
 //! are surfaced as `Err`.
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Protocol version for the socket JSON protocol.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -41,18 +42,106 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///
 /// This metadata is used by CLI autostart/health paths to validate daemon
 /// identity (PID/home scope/executable) before trusting a pre-existing process.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DaemonLockMetadata {
-    /// Daemon PID that currently owns the lock.
-    pub pid: u32,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeKind {
+    #[default]
+    Isolated,
+    Release,
+    Dev,
+}
+
+impl RuntimeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Release => "release",
+            Self::Dev => "dev",
+            Self::Isolated => "isolated",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildProfile {
+    Release,
+    #[default]
+    Debug,
+}
+
+impl BuildProfile {
+    pub fn current() -> Self {
+        if cfg!(debug_assertions) {
+            Self::Debug
+        } else {
+            Self::Release
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Release => "release",
+            Self::Debug => "debug",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct RuntimeOwnerMetadata {
+    /// Runtime classification for the current daemon instance.
+    pub runtime_kind: RuntimeKind,
+    /// Build profile of the daemon binary.
+    pub build_profile: BuildProfile,
     /// Canonicalized executable path of the daemon process when available.
     pub executable_path: String,
     /// Canonicalized ATM home scope used by the daemon instance.
     pub home_scope: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeMetadata {
+    /// Runtime classification for this ATM home.
+    pub runtime_kind: RuntimeKind,
+    /// RFC3339 UTC timestamp when the runtime root was created.
+    pub created_at: String,
+    /// RFC3339 UTC timestamp when the isolated runtime lease expires.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    /// Whether this runtime may perform live GitHub polling.
+    #[serde(default)]
+    pub allow_live_github_polling: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedIsolatedRuntime {
+    pub home: PathBuf,
+    pub runtime_dir: PathBuf,
+    pub socket_path: PathBuf,
+    pub lock_path: PathBuf,
+    pub status_path: PathBuf,
+    pub metadata: RuntimeMetadata,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DaemonLockMetadata {
+    /// Daemon PID that currently owns the lock.
+    pub pid: u32,
+    /// Runtime owner metadata for the daemon instance.
+    #[serde(flatten, default)]
+    pub owner: RuntimeOwnerMetadata,
     /// Daemon version string.
     pub version: String,
     /// RFC3339 UTC timestamp for metadata write.
     pub written_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimePolicyInput {
+    home_scope: PathBuf,
+    daemon_bin: PathBuf,
+    os_home: PathBuf,
+    temp_root: PathBuf,
+    build_profile: BuildProfile,
 }
 
 /// Identifies the origin of a lifecycle event sent via the `hook-event` command.
@@ -421,6 +510,11 @@ pub fn daemon_lock_metadata_path_for(home: &std::path::Path) -> PathBuf {
     daemon_runtime_dir_for(home).join("daemon.lock.meta.json")
 }
 
+/// Compute the daemon lock metadata write lock path for an explicit ATM home.
+pub fn daemon_lock_metadata_write_lock_path_for(home: &std::path::Path) -> PathBuf {
+    daemon_runtime_dir_for(home).join("daemon.lock.meta.lock")
+}
+
 /// Compute the daemon startup serialization lock path.
 ///
 /// The path is `${ATM_HOME}/.atm/daemon/daemon-start.lock`.
@@ -450,37 +544,427 @@ pub fn daemon_gh_monitor_health_path_for(home: &std::path::Path) -> PathBuf {
     daemon_runtime_dir_for(home).join("gh-monitor-health.json")
 }
 
-/// Write daemon lock metadata atomically for the current process.
-///
-/// Called by `atm-daemon` after lock acquisition so CLI identity checks can
-/// validate PID/home-scope/executable coherence.
-pub fn write_daemon_lock_metadata(home: &std::path::Path, version: &str) -> anyhow::Result<()> {
-    let metadata_path = daemon_lock_metadata_path_for(home);
+/// Compute the runtime metadata path for an explicit ATM home.
+pub fn daemon_runtime_metadata_path_for(home: &std::path::Path) -> PathBuf {
+    daemon_runtime_dir_for(home).join("runtime.json")
+}
+
+/// Compute the runtime metadata write lock path for an explicit ATM home.
+pub fn daemon_runtime_metadata_write_lock_path_for(home: &std::path::Path) -> PathBuf {
+    daemon_runtime_dir_for(home).join("runtime.lock")
+}
+
+fn canonicalize_lossy(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn default_dev_runtime_root_for(os_home: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(local) = dirs::data_local_dir() {
+            return local.join("atm-dev");
+        }
+        os_home.join("AppData").join("Local").join("atm-dev")
+    }
+
+    #[cfg(not(windows))]
+    {
+        os_home.join(".local").join("atm-dev")
+    }
+}
+
+fn default_dev_runtime_home_for(os_home: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        default_dev_runtime_root_for(os_home).join("home")
+    }
+
+    #[cfg(not(windows))]
+    {
+        os_home
+            .join(".local")
+            .join("share")
+            .join("atm-dev")
+            .join("home")
+    }
+}
+
+fn looks_like_repo_or_worktree_binary(path: &Path) -> bool {
+    if path
+        .components()
+        .any(|component| component.as_os_str() == "target")
+    {
+        return true;
+    }
+
+    let mut current = path.parent();
+    while let Some(dir) = current {
+        if dir.join(".git").exists() {
+            return true;
+        }
+        current = dir.parent();
+    }
+
+    false
+}
+
+fn is_approved_release_binary(path: &Path, input: &RuntimePolicyInput) -> bool {
+    let in_bin_dir = path.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("bin"));
+    in_bin_dir
+        && path.file_name() == Some(std::ffi::OsStr::new("atm-daemon"))
+        && !path.starts_with(default_dev_runtime_root_for(&input.os_home))
+        && !path.starts_with(&input.temp_root)
+        && !looks_like_repo_or_worktree_binary(path)
+}
+
+fn is_approved_dev_binary(path: &Path, input: &RuntimePolicyInput) -> bool {
+    path.file_name() == Some(std::ffi::OsStr::new("atm-daemon"))
+        && path.starts_with(default_dev_runtime_root_for(&input.os_home))
+        && !looks_like_repo_or_worktree_binary(path)
+}
+
+fn evaluate_runtime_owner_metadata(input: &RuntimePolicyInput) -> RuntimeOwnerMetadata {
+    let home_scope = canonicalize_lossy(&input.home_scope);
+    let daemon_bin = canonicalize_lossy(&input.daemon_bin);
+    let os_home = canonicalize_lossy(&input.os_home);
+    let runtime_kind = classify_runtime_kind_from_paths(&home_scope, &os_home);
+
+    RuntimeOwnerMetadata {
+        runtime_kind,
+        build_profile: input.build_profile.clone(),
+        executable_path: daemon_bin.to_string_lossy().to_string(),
+        home_scope: home_scope.to_string_lossy().to_string(),
+    }
+}
+
+fn classify_runtime_kind_from_paths(home_scope: &Path, os_home: &Path) -> RuntimeKind {
+    if home_scope == os_home {
+        RuntimeKind::Release
+    } else if home_scope == canonicalize_lossy(&default_dev_runtime_home_for(os_home)) {
+        RuntimeKind::Dev
+    } else {
+        RuntimeKind::Isolated
+    }
+}
+
+fn validate_runtime_admission_input(
+    input: &RuntimePolicyInput,
+) -> anyhow::Result<RuntimeOwnerMetadata> {
+    let owner = evaluate_runtime_owner_metadata(input);
+
+    if matches!(owner.runtime_kind, RuntimeKind::Isolated) {
+        return Ok(owner);
+    }
+
+    if owner.build_profile != BuildProfile::Release {
+        anyhow::bail!(
+            "shared {} runtime requires a release build; refusing daemon at {} (build_profile={})",
+            owner.runtime_kind.as_str(),
+            owner.executable_path,
+            owner.build_profile.as_str()
+        );
+    }
+
+    let daemon_bin = PathBuf::from(&owner.executable_path);
+    let approved = match owner.runtime_kind {
+        RuntimeKind::Release => is_approved_release_binary(&daemon_bin, input),
+        RuntimeKind::Dev => is_approved_dev_binary(&daemon_bin, input),
+        RuntimeKind::Isolated => true,
+    };
+
+    if !approved {
+        anyhow::bail!(
+            "shared {} runtime requires an approved installed daemon binary; refusing {} for ATM_HOME={}",
+            owner.runtime_kind.as_str(),
+            owner.executable_path,
+            owner.home_scope
+        );
+    }
+
+    Ok(owner)
+}
+
+pub fn validate_runtime_admission(
+    home: &Path,
+    daemon_bin: &Path,
+) -> anyhow::Result<RuntimeOwnerMetadata> {
+    let os_home = crate::home::get_os_home_dir()?;
+    let input = RuntimePolicyInput {
+        home_scope: home.to_path_buf(),
+        daemon_bin: daemon_bin.to_path_buf(),
+        os_home,
+        temp_root: std::env::temp_dir(),
+        build_profile: BuildProfile::current(),
+    };
+    validate_runtime_admission_input(&input)
+}
+
+pub fn validate_runtime_admission_for_current_process(
+    home: &Path,
+) -> anyhow::Result<RuntimeOwnerMetadata> {
+    let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("atm-daemon"));
+    validate_runtime_admission(home, &current_exe)
+}
+
+pub fn runtime_kind_for_home(home: &Path) -> anyhow::Result<RuntimeKind> {
+    let os_home = crate::home::get_os_home_dir()?;
+    let canonical_home = canonicalize_lossy(home);
+    let canonical_os_home = canonicalize_lossy(&os_home);
+    Ok(classify_runtime_kind_from_paths(
+        &canonical_home,
+        &canonical_os_home,
+    ))
+}
+
+pub fn read_runtime_metadata(home: &Path) -> Option<RuntimeMetadata> {
+    let path = daemon_runtime_metadata_path_for(home);
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+pub fn write_runtime_metadata(home: &Path, metadata: &RuntimeMetadata) -> anyhow::Result<()> {
+    use crate::io::atomic::atomic_swap;
+    use crate::io::lock::acquire_lock;
+    use std::io::Write;
+
+    let metadata_path = daemon_runtime_metadata_path_for(home);
+    let metadata_lock_path = daemon_runtime_metadata_write_lock_path_for(home);
     if let Some(parent) = metadata_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    let executable_path = std::env::current_exe()
-        .ok()
-        .and_then(|p| std::fs::canonicalize(p).ok())
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| "<unknown>".to_string());
-    let home_scope = std::fs::canonicalize(home)
-        .unwrap_or_else(|_| home.to_path_buf())
-        .to_string_lossy()
-        .to_string();
+    let _guard = acquire_lock(&metadata_lock_path, 10)?;
+    let _current = read_runtime_metadata(home);
+
+    let json = serde_json::to_vec_pretty(metadata)?;
+    let tmp = metadata_path.with_extension("json.tmp");
+    let mut tmp_file = std::fs::File::create(&tmp)?;
+    tmp_file.write_all(&json)?;
+    tmp_file.sync_all()?;
+    drop(tmp_file);
+
+    if !metadata_path.exists() {
+        let placeholder = std::fs::File::create(&metadata_path)?;
+        placeholder.sync_all()?;
+    }
+
+    atomic_swap(&metadata_path, &tmp)?;
+    if tmp.exists() {
+        std::fs::remove_file(&tmp)?;
+    }
+    Ok(())
+}
+
+fn isolated_runtime_root_dir(base_root: Option<&Path>) -> PathBuf {
+    base_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("atm-isolated")
+}
+
+fn isolated_runtime_slug(label: Option<&str>) -> String {
+    let trimmed = label.unwrap_or("runtime").trim();
+    let mut slug = String::new();
+    for ch in trimmed.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else if (ch == '-' || ch == '_') && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        "runtime".to_string()
+    } else {
+        slug.to_string()
+    }
+}
+
+fn create_isolated_runtime_root_with_base(
+    base_root: &Path,
+    label: Option<&str>,
+    ttl: Duration,
+    allow_live_github_polling: bool,
+) -> anyhow::Result<CreatedIsolatedRuntime> {
+    let _ = reap_expired_isolated_runtime_roots_with_base(base_root);
+
+    let runtime_root = isolated_runtime_root_dir(Some(base_root));
+    std::fs::create_dir_all(&runtime_root)?;
+
+    let now = chrono::Utc::now();
+    let ttl = chrono::Duration::from_std(ttl)
+        .map_err(|e| anyhow::anyhow!("invalid isolated runtime ttl: {e}"))?;
+    let expires_at = now + ttl;
+    let slug = isolated_runtime_slug(label);
+    let home = runtime_root.join(format!(
+        "{}-{}-{}",
+        slug,
+        now.timestamp_millis(),
+        std::process::id()
+    ));
+    let runtime_dir = daemon_runtime_dir_for(&home);
+    std::fs::create_dir_all(&runtime_dir)?;
+
+    let metadata = RuntimeMetadata {
+        runtime_kind: RuntimeKind::Isolated,
+        created_at: now.to_rfc3339(),
+        expires_at: Some(expires_at.to_rfc3339()),
+        allow_live_github_polling,
+    };
+    write_runtime_metadata(&home, &metadata)?;
+
+    Ok(CreatedIsolatedRuntime {
+        home: home.clone(),
+        runtime_dir,
+        socket_path: daemon_runtime_dir_for(&home).join("atm-daemon.sock"),
+        lock_path: daemon_runtime_dir_for(&home).join("daemon.lock"),
+        status_path: daemon_runtime_dir_for(&home).join("status.json"),
+        metadata,
+    })
+}
+
+pub fn create_isolated_runtime_root(
+    label: Option<&str>,
+    ttl: Duration,
+    allow_live_github_polling: bool,
+) -> anyhow::Result<CreatedIsolatedRuntime> {
+    create_isolated_runtime_root_with_base(
+        &std::env::temp_dir(),
+        label,
+        ttl,
+        allow_live_github_polling,
+    )
+}
+
+fn reap_expired_isolated_runtime_roots_with_base(base_root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let root = isolated_runtime_root_dir(Some(base_root));
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let now = chrono::Utc::now();
+    let mut reaped = Vec::new();
+    for entry in std::fs::read_dir(&root)? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let home = entry.path();
+        if !home.is_dir() {
+            continue;
+        }
+
+        let Some(metadata) = read_runtime_metadata(&home) else {
+            continue;
+        };
+        if metadata.runtime_kind != RuntimeKind::Isolated {
+            continue;
+        }
+
+        let Some(expires_at) = metadata.expires_at.as_deref() else {
+            continue;
+        };
+        let Ok(expires_at) = chrono::DateTime::parse_from_rfc3339(expires_at) else {
+            continue;
+        };
+        if expires_at.with_timezone(&chrono::Utc) > now {
+            continue;
+        }
+
+        let pid_path = daemon_runtime_dir_for(&home).join("atm-daemon.pid");
+        let runtime_pid = std::fs::read_to_string(&pid_path)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<i32>().ok());
+        #[cfg(unix)]
+        let alive = runtime_pid.is_some_and(pid_alive);
+        #[cfg(not(unix))]
+        let alive = false;
+        if alive {
+            continue;
+        }
+
+        if std::fs::remove_dir_all(&home).is_ok() {
+            reaped.push(home);
+        }
+    }
+
+    Ok(reaped)
+}
+
+pub fn reap_expired_isolated_runtime_roots() -> anyhow::Result<Vec<PathBuf>> {
+    reap_expired_isolated_runtime_roots_with_base(&std::env::temp_dir())
+}
+
+pub fn isolated_runtime_allows_live_github(home: &Path) -> anyhow::Result<bool> {
+    if runtime_kind_for_home(home)? != RuntimeKind::Isolated {
+        return Ok(true);
+    }
+
+    Ok(read_runtime_metadata(home)
+        .map(|metadata| metadata.allow_live_github_polling)
+        .unwrap_or(false))
+}
+
+pub fn read_daemon_lock_metadata(home: &Path) -> Option<DaemonLockMetadata> {
+    let path = daemon_lock_metadata_path_for(home);
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+pub fn format_runtime_owner_summary(owner: &RuntimeOwnerMetadata) -> String {
+    format!(
+        "runtime_kind={} build_profile={} executable={} home_scope={}",
+        owner.runtime_kind.as_str(),
+        owner.build_profile.as_str(),
+        owner.executable_path,
+        owner.home_scope
+    )
+}
+
+/// Write daemon lock metadata atomically for the current process.
+///
+/// Called by `atm-daemon` after lock acquisition so CLI identity checks can
+/// validate PID/home-scope/executable coherence.
+pub fn write_daemon_lock_metadata(
+    home: &std::path::Path,
+    version: &str,
+    owner: &RuntimeOwnerMetadata,
+) -> anyhow::Result<()> {
+    use crate::io::atomic::atomic_swap;
+    use crate::io::lock::acquire_lock;
+    use std::io::Write;
+
+    let metadata_path = daemon_lock_metadata_path_for(home);
+    let metadata_lock_path = daemon_lock_metadata_write_lock_path_for(home);
+    if let Some(parent) = metadata_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let _guard = acquire_lock(&metadata_lock_path, 10)?;
+    let _current = read_daemon_lock_metadata(home);
 
     let metadata = DaemonLockMetadata {
         pid: std::process::id(),
-        executable_path,
-        home_scope,
+        owner: owner.clone(),
         version: version.to_string(),
         written_at: chrono::Utc::now().to_rfc3339(),
     };
     let json = serde_json::to_vec_pretty(&metadata)?;
     let tmp = metadata_path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(tmp, metadata_path)?;
+    let mut tmp_file = std::fs::File::create(&tmp)?;
+    tmp_file.write_all(&json)?;
+    tmp_file.sync_all()?;
+    drop(tmp_file);
+
+    if !metadata_path.exists() {
+        let placeholder = std::fs::File::create(&metadata_path)?;
+        placeholder.sync_all()?;
+    }
+
+    atomic_swap(&metadata_path, &tmp)?;
+    if tmp.exists() {
+        std::fs::remove_file(&tmp)?;
+    }
     Ok(())
 }
 
@@ -869,11 +1353,17 @@ pub struct GhMonitorRequest {
     pub target_kind: GhMonitorTargetKind,
     pub target: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_timeout_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cc: Vec<String>,
 }
 
 /// Request payload for daemon-routed `gh-status` command.
@@ -882,6 +1372,8 @@ pub struct GhStatusRequest {
     pub team: String,
     pub target_kind: GhMonitorTargetKind,
     pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -903,9 +1395,19 @@ pub struct GhMonitorControlRequest {
     pub team: String,
     pub action: GhMonitorLifecycleAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drain_timeout_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_team: Option<String>,
+    #[serde(default)]
+    pub user_authorized: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_reason: Option<String>,
 }
 
 /// Daemon response payload for `gh-monitor-control` / `gh-monitor-health`.
@@ -926,6 +1428,30 @@ pub struct GhMonitorHealth {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_state_updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_limit_per_hour: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_used_in_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_remaining: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_limit: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_runtime_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_binary_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_atm_home: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_poll_interval_secs: Option<u64>,
 }
 
 /// Daemon response payload for `gh-monitor`/`gh-status`.
@@ -950,6 +1476,8 @@ pub struct GhMonitorStatus {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_state_updated_at: Option<String>,
 }
 
 /// Query the daemon for the session record of a named agent.
@@ -1288,13 +1816,14 @@ pub fn gh_monitor_control(
 /// Query daemon-routed GitHub monitor plugin health
 /// (`command: "gh-monitor-health"`).
 pub fn gh_monitor_health(team: &str) -> anyhow::Result<Option<GhMonitorHealth>> {
-    gh_monitor_health_with_context(team, None)
+    gh_monitor_health_with_context(team, None, None)
 }
 
 /// Query daemon-routed GitHub monitor plugin health with explicit config cwd.
 pub fn gh_monitor_health_with_context(
     team: &str,
     config_cwd: Option<String>,
+    repo: Option<String>,
 ) -> anyhow::Result<Option<GhMonitorHealth>> {
     let socket_request = SocketRequest {
         version: PROTOCOL_VERSION,
@@ -1303,6 +1832,7 @@ pub fn gh_monitor_health_with_context(
         payload: serde_json::json!({
             "team": team,
             "config_cwd": config_cwd,
+            "repo": repo,
         }),
     };
 
@@ -1591,12 +2121,26 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     }
 
     let daemon_bin = resolve_daemon_binary();
+    let daemon_bin_path = PathBuf::from(&daemon_bin);
+    let runtime_owner = validate_runtime_admission(&home, &daemon_bin_path).map_err(|e| {
+        let error = e.to_string();
+        emit_event_best_effort(EventFields {
+            level: "error",
+            source: "atm",
+            action: "daemon_autostart_failure",
+            result: Some("runtime_admission_denied".to_string()),
+            target: Some(daemon_bin_path.display().to_string()),
+            error: Some(error.clone()),
+            ..Default::default()
+        });
+        anyhow::anyhow!("{error}")
+    })?;
     emit_event_best_effort(EventFields {
         level: "info",
         source: "atm",
         action: "daemon_autostart_attempt",
         result: Some("attempt".to_string()),
-        target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
+        target: Some(daemon_bin_path.display().to_string()),
         ..Default::default()
     });
     let stderr_capture = std::env::temp_dir().join(format!(
@@ -1634,7 +2178,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
                 source: "atm",
                 action: "daemon_autostart_failure",
                 result: Some("spawn_error".to_string()),
-                target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
+                target: Some(daemon_bin_path.display().to_string()),
                 error: Some(error.clone()),
                 ..Default::default()
             });
@@ -1650,7 +2194,11 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
                 source: "atm",
                 action: "daemon_autostart_success",
                 result: Some("ok".to_string()),
-                target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
+                target: Some(format!(
+                    "{} {}",
+                    daemon_bin_path.display(),
+                    format_runtime_owner_summary(&runtime_owner)
+                )),
                 ..Default::default()
             });
             return Ok(());
@@ -1681,7 +2229,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
                 source: "atm",
                 action: "daemon_autostart_failure",
                 result: Some("process_exit".to_string()),
-                target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
+                target: Some(daemon_bin_path.display().to_string()),
                 error: Some(error.clone()),
                 ..Default::default()
             });
@@ -1706,7 +2254,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         source: "atm",
         action: "daemon_autostart_timeout",
         result: Some("timeout".to_string()),
-        target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
+        target: Some(daemon_bin_path.display().to_string()),
         error: Some(timeout_error.clone()),
         ..Default::default()
     });
@@ -1715,7 +2263,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         source: "atm",
         action: "daemon_autostart_failure",
         result: Some("timeout".to_string()),
-        target: Some(std::path::PathBuf::from(&daemon_bin).display().to_string()),
+        target: Some(daemon_bin_path.display().to_string()),
         error: Some(timeout_error.clone()),
         ..Default::default()
     });
@@ -1833,10 +2381,10 @@ fn evaluate_daemon_identity_mismatch(
             ));
         }
 
-        if !meta.home_scope.is_empty() && meta.home_scope != expected_home {
+        if !meta.owner.home_scope.is_empty() && meta.owner.home_scope != expected_home {
             return Some(format!(
                 "daemon identity mismatch: home scope '{}' != expected '{}'",
-                meta.home_scope, expected_home
+                meta.owner.home_scope, expected_home
             ));
         }
 
@@ -2202,11 +2750,15 @@ mod tests {
     fn fake_lock_metadata(home: &str, pid: u32) -> DaemonLockMetadata {
         DaemonLockMetadata {
             pid,
-            executable_path: std::env::temp_dir()
-                .join("fake-atm-daemon")
-                .to_string_lossy()
-                .into_owned(),
-            home_scope: home.to_string(),
+            owner: RuntimeOwnerMetadata {
+                runtime_kind: RuntimeKind::Isolated,
+                build_profile: BuildProfile::Release,
+                executable_path: std::env::temp_dir()
+                    .join("fake-atm-daemon")
+                    .to_string_lossy()
+                    .into_owned(),
+                home_scope: home.to_string(),
+            },
             version: "0.0.1".to_string(),
             written_at: chrono::Utc::now().to_rfc3339(),
         }
@@ -2646,8 +3198,17 @@ sleep 2
     fn test_write_daemon_lock_metadata_contains_identity_fields() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
+        let owner = RuntimeOwnerMetadata {
+            runtime_kind: RuntimeKind::Isolated,
+            build_profile: BuildProfile::Release,
+            executable_path: std::env::temp_dir()
+                .join("isolated-atm-daemon")
+                .to_string_lossy()
+                .into_owned(),
+            home_scope: home.to_string_lossy().into_owned(),
+        };
 
-        write_daemon_lock_metadata(home, "9.9.9-test").expect("write lock metadata");
+        write_daemon_lock_metadata(home, "9.9.9-test", &owner).expect("write lock metadata");
 
         let path = home.join(".atm/daemon/daemon.lock.meta.json");
         let raw = std::fs::read_to_string(&path).expect("read lock metadata");
@@ -2656,12 +3217,146 @@ sleep 2
         assert_eq!(meta.pid, std::process::id());
         assert_eq!(meta.version, "9.9.9-test");
         assert!(
-            !meta.executable_path.trim().is_empty(),
+            !meta.owner.executable_path.trim().is_empty(),
             "executable path must be populated"
         );
         assert!(
-            !meta.home_scope.trim().is_empty(),
+            !meta.owner.home_scope.trim().is_empty(),
             "home scope must be populated"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_runtime_admission_accepts_shared_dev_install() {
+        let root = tempfile::tempdir().unwrap();
+        let os_home = root.path().join("home");
+        let input = RuntimePolicyInput {
+            home_scope: default_dev_runtime_home_for(&os_home),
+            daemon_bin: default_dev_runtime_root_for(&os_home)
+                .join("current")
+                .join("bin")
+                .join("atm-daemon"),
+            os_home: os_home.clone(),
+            temp_root: root.path().join("tmp"),
+            build_profile: BuildProfile::Release,
+        };
+
+        let owner = validate_runtime_admission_input(&input).expect("dev install should be valid");
+        assert_eq!(owner.runtime_kind, RuntimeKind::Dev);
+        assert_eq!(owner.build_profile, BuildProfile::Release);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_runtime_admission_rejects_repo_binary_for_shared_dev_runtime() {
+        let root = tempfile::tempdir().unwrap();
+        let os_home = root.path().join("home");
+        let repo = root.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let input = RuntimePolicyInput {
+            home_scope: default_dev_runtime_home_for(&os_home),
+            daemon_bin: repo.join("target").join("release").join("atm-daemon"),
+            os_home,
+            temp_root: root.path().join("tmp"),
+            build_profile: BuildProfile::Release,
+        };
+
+        let err = validate_runtime_admission_input(&input).expect_err("repo binary must be denied");
+        assert!(err.to_string().contains("approved installed daemon binary"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_runtime_admission_rejects_debug_build_for_shared_release_runtime() {
+        let root = tempfile::tempdir().unwrap();
+        let os_home = root.path().join("home");
+        let input = RuntimePolicyInput {
+            home_scope: os_home.clone(),
+            daemon_bin: PathBuf::from("/opt/homebrew/bin/atm-daemon"),
+            os_home,
+            temp_root: root.path().join("tmp"),
+            build_profile: BuildProfile::Debug,
+        };
+
+        let err = validate_runtime_admission_input(&input).expect_err("debug build must be denied");
+        assert!(err.to_string().contains("requires a release build"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_create_isolated_runtime_root_writes_metadata_and_paths() {
+        let base = tempfile::tempdir().unwrap();
+        let created = create_isolated_runtime_root_with_base(
+            base.path(),
+            Some("smoke-test"),
+            Duration::from_secs(600),
+            false,
+        )
+        .expect("create isolated runtime");
+
+        assert!(created.home.exists(), "isolated ATM_HOME must exist");
+        assert!(
+            created.runtime_dir.exists(),
+            "isolated daemon runtime dir must exist"
+        );
+        assert_eq!(created.metadata.runtime_kind, RuntimeKind::Isolated);
+        assert!(!created.metadata.allow_live_github_polling);
+        assert!(
+            created.metadata.expires_at.is_some(),
+            "isolated runtime metadata must include expires_at"
+        );
+
+        let persisted = read_runtime_metadata(&created.home).expect("persisted metadata");
+        assert_eq!(persisted, created.metadata);
+        assert_eq!(
+            runtime_kind_for_home(&created.home).unwrap(),
+            RuntimeKind::Isolated
+        );
+        assert!(
+            !isolated_runtime_allows_live_github(&created.home).unwrap(),
+            "isolated runtime should deny live GitHub polling by default"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_reap_expired_isolated_runtime_roots_removes_dead_runtime() {
+        let base = tempfile::tempdir().unwrap();
+        let root = isolated_runtime_root_dir(Some(base.path()));
+        let home = root.join("expired-runtime");
+        std::fs::create_dir_all(daemon_runtime_dir_for(&home)).unwrap();
+        let metadata = RuntimeMetadata {
+            runtime_kind: RuntimeKind::Isolated,
+            created_at: "2026-03-14T00:00:00Z".to_string(),
+            expires_at: Some("2026-03-14T00:10:00Z".to_string()),
+            allow_live_github_polling: false,
+        };
+        write_runtime_metadata(&home, &metadata).unwrap();
+
+        let reaped = reap_expired_isolated_runtime_roots_with_base(base.path()).unwrap();
+        assert_eq!(reaped, vec![home.clone()]);
+        assert!(
+            !home.exists(),
+            "expired dead isolated runtime should be reaped"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_isolated_runtime_allows_live_github_when_explicitly_enabled() {
+        let base = tempfile::tempdir().unwrap();
+        let created = create_isolated_runtime_root_with_base(
+            base.path(),
+            Some("live-gh"),
+            Duration::from_secs(600),
+            true,
+        )
+        .expect("create isolated runtime");
+
+        assert!(
+            isolated_runtime_allows_live_github(&created.home).unwrap(),
+            "explicit isolated runtime override should enable live GitHub polling"
         );
     }
 
@@ -2795,11 +3490,15 @@ sleep 2
         fs::write(home.join(".atm/daemon/atm-daemon.pid"), "999999\n").unwrap();
         let stale = DaemonLockMetadata {
             pid: 999999,
-            executable_path: std::env::temp_dir()
-                .join("old-atm-daemon")
-                .to_string_lossy()
-                .to_string(),
-            home_scope: home.to_string_lossy().to_string(),
+            owner: RuntimeOwnerMetadata {
+                runtime_kind: RuntimeKind::Isolated,
+                build_profile: BuildProfile::Release,
+                executable_path: std::env::temp_dir()
+                    .join("old-atm-daemon")
+                    .to_string_lossy()
+                    .to_string(),
+                home_scope: home.to_string_lossy().to_string(),
+            },
             version: "0.0.1".to_string(),
             written_at: chrono::Utc::now().to_rfc3339(),
         };
@@ -2998,11 +3697,15 @@ sleep 8
             .unwrap();
         let stale_metadata = DaemonLockMetadata {
             pid: stale_pid,
-            executable_path: stale_script.to_string_lossy().to_string(),
-            home_scope: std::fs::canonicalize(&home)
-                .unwrap_or_else(|_| home.clone())
-                .to_string_lossy()
-                .to_string(),
+            owner: RuntimeOwnerMetadata {
+                runtime_kind: RuntimeKind::Isolated,
+                build_profile: BuildProfile::Release,
+                executable_path: stale_script.to_string_lossy().to_string(),
+                home_scope: std::fs::canonicalize(&home)
+                    .unwrap_or_else(|_| home.clone())
+                    .to_string_lossy()
+                    .to_string(),
+            },
             version: "0.0.1".to_string(),
             written_at: chrono::Utc::now().to_rfc3339(),
         };

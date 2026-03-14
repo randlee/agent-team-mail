@@ -1,8 +1,6 @@
 //! Routing and notification policy for CI monitor alerts.
 
 #[cfg(unix)]
-use agent_team_mail_core::daemon_client::GhMonitorStatus;
-#[cfg(unix)]
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 #[cfg(unix)]
 use agent_team_mail_core::schema::InboxMessage;
@@ -11,6 +9,8 @@ use tracing::warn;
 
 #[cfg(unix)]
 pub(crate) use super::gh_alerts::repo_scope_matches;
+#[cfg(unix)]
+use super::types::{CiMonitorStatus, GhAlertTargets};
 
 #[cfg(unix)]
 pub(crate) fn resolve_ci_alert_routing(
@@ -18,27 +18,43 @@ pub(crate) fn resolve_ci_alert_routing(
     team: &str,
     config_cwd: Option<&str>,
     expected_repo_slug: Option<&str>,
+    alert_targets: GhAlertTargets<'_>,
 ) -> (String, Vec<(String, String)>) {
-    super::gh_alerts::resolve_ci_alert_routing(home, team, config_cwd, expected_repo_slug)
+    super::gh_alerts::resolve_ci_alert_routing(
+        home,
+        team,
+        config_cwd,
+        expected_repo_slug,
+        alert_targets,
+    )
 }
 
 #[cfg(unix)]
 pub(crate) fn notify_ci_not_started(
     home: &std::path::Path,
-    status: &GhMonitorStatus,
+    status: &CiMonitorStatus,
     config_cwd: Option<&str>,
+    repo_scope: Option<&str>,
+    alert_targets: GhAlertTargets<'_>,
 ) {
-    super::gh_alerts::emit_ci_not_started_alert(home, status, config_cwd);
+    super::gh_alerts::emit_ci_not_started_alert(
+        home,
+        status,
+        config_cwd,
+        repo_scope,
+        alert_targets,
+    );
 }
 
 #[cfg(unix)]
 pub(crate) fn notify_merge_conflict(
     home: &std::path::Path,
-    status: &GhMonitorStatus,
+    status: &CiMonitorStatus,
     pr_url: Option<&str>,
     merge_state_status: &str,
     run_conclusion: Option<&str>,
     config_cwd: Option<&str>,
+    alert_targets: GhAlertTargets<'_>,
 ) {
     super::gh_alerts::emit_merge_conflict_alert(
         home,
@@ -47,6 +63,7 @@ pub(crate) fn notify_merge_conflict(
         merge_state_status,
         run_conclusion,
         config_cwd,
+        alert_targets,
     );
 }
 
@@ -79,7 +96,8 @@ pub(crate) fn notify_gh_monitor_health_transition(
         ..Default::default()
     });
 
-    let (from_agent, targets) = resolve_ci_alert_routing(home, team, config_cwd, None);
+    let (from_agent, targets) =
+        resolve_ci_alert_routing(home, team, config_cwd, None, GhAlertTargets::default());
     let text = format!(
         "[gh_monitor] availability transition {} -> {}\nreason: {}",
         old_state, new_state, reason
@@ -123,7 +141,7 @@ pub(crate) fn notify_gh_monitor_health_transition(
 #[cfg(all(test, unix))]
 mod tests {
     use super::{notify_merge_conflict, resolve_ci_alert_routing};
-    use agent_team_mail_core::daemon_client::{GhMonitorStatus, GhMonitorTargetKind};
+    use crate::plugins::ci_monitor::types::{CiMonitorStatus, CiMonitorTargetKind, GhAlertTargets};
     use agent_team_mail_core::schema::InboxMessage;
     use tempfile::TempDir;
 
@@ -157,12 +175,55 @@ repo = "randlee/agent-team-mail"
             "atm-dev",
             Some(repo_dir.to_string_lossy().as_ref()),
             Some("randlee/agent-team-mail"),
+            GhAlertTargets::default(),
         );
 
         assert_eq!(from_agent, "gh-monitor");
         assert_eq!(
             targets,
             vec![("team-lead".to_string(), "atm-dev".to_string())]
+        );
+    }
+
+    #[test]
+    fn gh_multi_fr_3_and_4_route_to_caller_with_cc_recipients() {
+        let temp = TempDir::new().unwrap();
+        let repo_dir = temp.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::fs::write(
+            repo_dir.join(".atm.toml"),
+            r#"[core]
+default_team = "atm-dev"
+identity = "team-lead"
+
+[plugins.gh_monitor]
+enabled = true
+team = "atm-dev"
+agent = "gh-monitor"
+repo = "randlee/agent-team-mail"
+notify_target = "team-lead"
+"#,
+        )
+        .unwrap();
+
+        let (_, targets) = resolve_ci_alert_routing(
+            temp.path(),
+            "atm-dev",
+            Some(repo_dir.to_string_lossy().as_ref()),
+            Some("randlee/agent-team-mail"),
+            GhAlertTargets {
+                caller_agent: Some("arch-ctm"),
+                cc: &["qa-bot".to_string(), "ops@ops-team".to_string()],
+            },
+        );
+
+        assert_eq!(
+            targets,
+            vec![
+                ("arch-ctm".to_string(), "atm-dev".to_string()),
+                ("qa-bot".to_string(), "atm-dev".to_string()),
+                ("ops".to_string(), "ops-team".to_string()),
+            ]
         );
     }
 
@@ -189,19 +250,20 @@ notify_target = "team-lead"
         )
         .unwrap();
 
-        let status = GhMonitorStatus {
+        let status = CiMonitorStatus {
             team: "atm-dev".to_string(),
             configured: true,
             enabled: true,
             config_source: Some("repo".to_string()),
             config_path: Some(repo_dir.join(".atm.toml").to_string_lossy().to_string()),
-            target_kind: GhMonitorTargetKind::Pr,
+            target_kind: CiMonitorTargetKind::Pr,
             target: "123".to_string(),
             state: "merge_conflict".to_string(),
             run_id: Some(99),
             reference: None,
             updated_at: chrono::Utc::now().to_rfc3339(),
             message: Some("preflight dirty".to_string()),
+            repo_state_updated_at: None,
         };
 
         notify_merge_conflict(
@@ -211,6 +273,7 @@ notify_target = "team-lead"
             "DIRTY",
             Some("failure"),
             Some(repo_dir.to_string_lossy().as_ref()),
+            GhAlertTargets::default(),
         );
 
         let inbox = read_inbox(&inbox_dir.join("team-lead.json"));

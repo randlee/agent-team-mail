@@ -12,8 +12,10 @@ use crate::plugins::ci_monitor::test_support::{
     EnvGuard, install_fake_gh_script, read_team_inbox_messages, write_gh_monitor_config,
     write_hook_auth_team_config, write_invalid_gh_monitor_config, write_repo_gh_monitor_config,
 };
-use crate::plugins::ci_monitor::types::GhMonitorHealthUpdate;
-use agent_team_mail_core::daemon_client::{GhMonitorRequest, GhMonitorStatus, GhMonitorTargetKind};
+use crate::plugins::ci_monitor::types::{
+    CiMonitorRequest, CiMonitorStatus, CiMonitorTargetKind, GhAlertTargets, GhMonitorHealthUpdate,
+};
+use agent_team_mail_core::gh_monitor_observability::update_gh_repo_state_in_flight;
 use serial_test::serial;
 use tempfile::TempDir;
 
@@ -67,6 +69,7 @@ notify_target = "team-lead"
         "scmux-dev",
         Some(repo_dir.to_string_lossy().as_ref()),
         Some("randlee/scmux"),
+        GhAlertTargets::default(),
     );
     assert_eq!(from_agent, "gh-monitor");
     assert_eq!(
@@ -79,6 +82,7 @@ notify_target = "team-lead"
         "scmux-dev",
         Some(repo_dir.to_string_lossy().as_ref()),
         Some("randlee/agent-team-mail"),
+        GhAlertTargets::default(),
     );
     assert!(
         wrong_repo_targets.is_empty(),
@@ -90,6 +94,7 @@ notify_target = "team-lead"
         "atm-dev",
         Some(repo_dir.to_string_lossy().as_ref()),
         Some("randlee/scmux"),
+        GhAlertTargets::default(),
     );
     assert!(
         wrong_team_targets.is_empty(),
@@ -167,7 +172,7 @@ exit 1
     );
 
     let req_json = format!(
-        r#"{{"version":1,"request_id":"r-gh-preflight-dirty","command":"gh-monitor","payload":{{"team":"atm-dev","target_kind":"pr","target":"123","start_timeout_secs":30,"config_cwd":"{}"}}}}"#,
+        r#"{{"version":1,"request_id":"r-gh-preflight-dirty","command":"gh-monitor","payload":{{"team":"atm-dev","target_kind":"pr","target":"123","repo":"o/r","caller_agent":"team-lead","start_timeout_secs":30,"config_cwd":"{}"}}}}"#,
         temp.path().display()
     );
     let resp = handle_gh_monitor_command(&req_json, temp.path()).await;
@@ -272,32 +277,44 @@ exit 1
 "#,
     );
 
-    let status_seed = GhMonitorStatus {
+    let status_seed = CiMonitorStatus {
         team: "atm-dev".to_string(),
         configured: true,
         enabled: true,
         config_source: None,
         config_path: None,
-        target_kind: GhMonitorTargetKind::Pr,
+        target_kind: CiMonitorTargetKind::Pr,
         target: "123".to_string(),
         state: "monitoring".to_string(),
         run_id: Some(42),
         reference: None,
         updated_at: chrono::Utc::now().to_rfc3339(),
         message: None,
+        repo_state_updated_at: None,
     };
-    let gh_request = GhMonitorRequest {
+    let gh_request = CiMonitorRequest {
         team: "atm-dev".to_string(),
-        target_kind: GhMonitorTargetKind::Pr,
+        target_kind: CiMonitorTargetKind::Pr,
         target: "123".to_string(),
         reference: None,
         start_timeout_secs: Some(120),
         config_cwd: Some(temp.path().to_string_lossy().to_string()),
     };
 
-    gh_monitor::monitor_gh_run(temp.path(), &status_seed, &gh_request, "o/r", 42)
-        .await
-        .expect("monitor_gh_run should complete");
+    gh_monitor::monitor_gh_run(
+        temp.path(),
+        &status_seed,
+        &gh_request,
+        "o/r",
+        42,
+        Some("o/r"),
+        GhAlertTargets {
+            caller_agent: Some("team-lead"),
+            cc: &[],
+        },
+    )
+    .await
+    .expect("monitor_gh_run should complete");
 
     let inbox = read_team_inbox_messages(temp.path(), "atm-dev", "team-lead");
     assert!(
@@ -336,32 +353,41 @@ exit 1
 "#,
     );
 
-    let status_seed = GhMonitorStatus {
+    let status_seed = CiMonitorStatus {
         team: "atm-dev".to_string(),
         configured: true,
         enabled: true,
         config_source: None,
         config_path: None,
-        target_kind: GhMonitorTargetKind::Pr,
+        target_kind: CiMonitorTargetKind::Pr,
         target: "123".to_string(),
         state: "monitoring".to_string(),
         run_id: Some(42),
         reference: None,
         updated_at: chrono::Utc::now().to_rfc3339(),
         message: None,
+        repo_state_updated_at: None,
     };
-    let gh_request = GhMonitorRequest {
+    let gh_request = CiMonitorRequest {
         team: "atm-dev".to_string(),
-        target_kind: GhMonitorTargetKind::Pr,
+        target_kind: CiMonitorTargetKind::Pr,
         target: "123".to_string(),
         reference: None,
         start_timeout_secs: Some(120),
         config_cwd: None,
     };
 
-    gh_monitor::monitor_gh_run(temp.path(), &status_seed, &gh_request, "o/r", 42)
-        .await
-        .expect("monitor_gh_run should complete");
+    gh_monitor::monitor_gh_run(
+        temp.path(),
+        &status_seed,
+        &gh_request,
+        "o/r",
+        42,
+        None,
+        GhAlertTargets::default(),
+    )
+    .await
+    .expect("monitor_gh_run should complete");
 
     let inbox = read_team_inbox_messages(temp.path(), "atm-dev", "team-lead");
     assert!(
@@ -407,23 +433,24 @@ exit 1
 "#,
     );
 
-    let status_seed = GhMonitorStatus {
+    let status_seed = CiMonitorStatus {
         team: "atm-dev".to_string(),
         configured: true,
         enabled: true,
         config_source: None,
         config_path: None,
-        target_kind: GhMonitorTargetKind::Pr,
+        target_kind: CiMonitorTargetKind::Pr,
         target: "123".to_string(),
         state: "tracking".to_string(),
         run_id: Some(42),
         reference: None,
         updated_at: chrono::Utc::now().to_rfc3339(),
         message: None,
+        repo_state_updated_at: None,
     };
-    let gh_request = GhMonitorRequest {
+    let gh_request = CiMonitorRequest {
         team: "atm-dev".to_string(),
-        target_kind: GhMonitorTargetKind::Pr,
+        target_kind: CiMonitorTargetKind::Pr,
         target: "123".to_string(),
         reference: None,
         start_timeout_secs: Some(120),
@@ -431,9 +458,17 @@ exit 1
     };
 
     let started = std::time::Instant::now();
-    gh_monitor::monitor_gh_run(temp.path(), &status_seed, &gh_request, "o/r", 42)
-        .await
-        .expect("monitor_gh_run should complete");
+    gh_monitor::monitor_gh_run(
+        temp.path(),
+        &status_seed,
+        &gh_request,
+        "o/r",
+        42,
+        None,
+        GhAlertTargets::default(),
+    )
+    .await
+    .expect("monitor_gh_run should complete");
     let elapsed = started.elapsed();
 
     assert!(
@@ -442,7 +477,7 @@ exit 1
     );
 
     let state_map = load_gh_monitor_state_map(temp.path()).expect("state map");
-    let key = gh_monitor_key("atm-dev", GhMonitorTargetKind::Pr, "123", None);
+    let key = gh_monitor_key("atm-dev", CiMonitorTargetKind::Pr, "123", None, Some("o/r"));
     let terminal = state_map.get(&key).expect("status entry");
     assert_eq!(terminal.state, "failure");
 }
@@ -492,23 +527,24 @@ fn test_derive_pr_url_prefers_pr_target_fallback() {
         attempt: Some(1),
         pull_requests: Vec::new(),
     };
-    let status_seed = GhMonitorStatus {
+    let status_seed = CiMonitorStatus {
         team: "atm-dev".to_string(),
         configured: true,
         enabled: true,
         config_source: None,
         config_path: None,
-        target_kind: GhMonitorTargetKind::Pr,
+        target_kind: CiMonitorTargetKind::Pr,
         target: "123".to_string(),
         state: "monitoring".to_string(),
         run_id: Some(42),
         reference: None,
         updated_at: "2026-03-06T00:00:00Z".to_string(),
         message: None,
+        repo_state_updated_at: None,
     };
-    let request = GhMonitorRequest {
+    let request = CiMonitorRequest {
         team: "atm-dev".to_string(),
-        target_kind: GhMonitorTargetKind::Pr,
+        target_kind: CiMonitorTargetKind::Pr,
         target: "123".to_string(),
         reference: None,
         start_timeout_secs: Some(120),
@@ -538,7 +574,7 @@ echo "unexpected gh args: $*" >&2
 exit 1
 "#,
     );
-    let run_id = gh_monitor::wait_for_pr_run_start("o/r", 123, 1)
+    let run_id = gh_monitor::wait_for_pr_run_start(temp.path(), "atm-dev", "o/r", 123, 1)
         .await
         .unwrap();
     assert_eq!(run_id, Some(222222));
@@ -547,7 +583,7 @@ exit 1
 #[tokio::test]
 #[cfg(unix)]
 #[serial]
-async fn test_run_gh_command_for_repo_injects_repo_scope_flag() {
+async fn test_fetch_run_view_injects_repo_scope_flag() {
     use std::os::unix::fs::PermissionsExt;
 
     let temp = TempDir::new().unwrap();
@@ -555,8 +591,8 @@ async fn test_run_gh_command_for_repo_injects_repo_scope_flag() {
     std::fs::write(
         &script_path,
         r#"#!/bin/sh
-if [ "$1" = "-R" ] && [ "$2" = "o/r" ] && [ "$3" = "run" ] && [ "$4" = "list" ]; then
-  echo "ok"
+if [ "$1" = "-R" ] && [ "$2" = "o/r" ] && [ "$3" = "run" ] && [ "$4" = "view" ] && [ "$5" = "42" ]; then
+  echo '{"databaseId":42,"name":"CI","status":"completed","conclusion":"success","headBranch":"main","headSha":"abc123","url":"https://github.com/o/r/actions/runs/42","jobs":[],"attempt":1,"pullRequests":[]}'
   exit 0
 fi
 echo "missing -R scope: $*" >&2
@@ -576,10 +612,10 @@ exit 1
     };
     let _path_guard = EnvGuard::set("PATH", &new_path);
 
-    let output = gh_monitor::run_gh_command_for_repo("o/r", &["run", "list"])
+    let output = gh_monitor::fetch_run_view(temp.path(), "atm-dev", "o/r", 42)
         .await
         .unwrap();
-    assert_eq!(output, "ok");
+    assert_eq!(output.database_id, 42);
 }
 
 #[tokio::test]
@@ -605,6 +641,7 @@ async fn test_handle_gh_monitor_command_rejects_config_team_mismatch() {
 #[tokio::test]
 #[cfg(unix)]
 async fn test_build_failure_payload_contains_required_fields() {
+    let temp = TempDir::new().unwrap();
     let run = gh_monitor::GhRunView {
         database_id: 42,
         name: "ci".to_string(),
@@ -617,30 +654,39 @@ async fn test_build_failure_payload_contains_required_fields() {
         attempt: Some(2),
         pull_requests: Vec::new(),
     };
-    let status_seed = GhMonitorStatus {
+    let status_seed = CiMonitorStatus {
         team: "atm-dev".to_string(),
         configured: true,
         enabled: true,
         config_source: None,
         config_path: None,
-        target_kind: GhMonitorTargetKind::Pr,
+        target_kind: CiMonitorTargetKind::Pr,
         target: "123".to_string(),
         state: "monitoring".to_string(),
         run_id: Some(42),
         reference: None,
         updated_at: "2026-03-06T00:00:00Z".to_string(),
         message: None,
+        repo_state_updated_at: None,
     };
-    let request = GhMonitorRequest {
+    let request = CiMonitorRequest {
         team: "atm-dev".to_string(),
-        target_kind: GhMonitorTargetKind::Pr,
+        target_kind: CiMonitorTargetKind::Pr,
         target: "123".to_string(),
         reference: None,
         start_timeout_secs: Some(120),
         config_cwd: None,
     };
-    let payload =
-        gh_monitor::build_failure_payload(&run, &status_seed, &request, "o/r", "corr-1").await;
+    let payload = gh_monitor::build_failure_payload(
+        temp.path(),
+        "atm-dev",
+        &run,
+        &status_seed,
+        &request,
+        "o/r",
+        "corr-1",
+    )
+    .await;
     for required in [
         "run_url:",
         "failed_job_urls:",
@@ -789,24 +835,73 @@ async fn test_gh_monitor_uses_repo_config_source_from_payload_cwd() {
 #[tokio::test]
 #[cfg(unix)]
 #[serial]
+async fn test_gh_status_distinguishes_repo_scopes_for_same_target() {
+    let temp = TempDir::new().unwrap();
+    let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+    write_gh_monitor_config(temp.path(), "atm-dev");
+
+    let status_a = CiMonitorStatus {
+        team: "atm-dev".to_string(),
+        configured: true,
+        enabled: true,
+        config_source: Some("repo".to_string()),
+        config_path: Some(temp.path().join(".atm.toml").to_string_lossy().to_string()),
+        target_kind: CiMonitorTargetKind::Run,
+        target: "42".to_string(),
+        state: "tracking".to_string(),
+        run_id: Some(42),
+        reference: None,
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        message: Some("repo a".to_string()),
+        repo_state_updated_at: None,
+    };
+    let status_b = CiMonitorStatus {
+        message: Some("repo b".to_string()),
+        ..status_a.clone()
+    };
+
+    crate::plugins::ci_monitor::helpers::upsert_gh_monitor_status_for_repo(
+        temp.path(),
+        status_a,
+        Some("acme/repo-a"),
+    )
+    .unwrap();
+    crate::plugins::ci_monitor::helpers::upsert_gh_monitor_status_for_repo(
+        temp.path(),
+        status_b,
+        Some("acme/repo-b"),
+    )
+    .unwrap();
+
+    let req_json = r#"{"version":1,"request_id":"r-gh-repo-status","command":"gh-status","payload":{"team":"atm-dev","target_kind":"run","target":"42","repo":"acme/repo-b"}}"#;
+    let resp = handle_gh_status_command(req_json, temp.path()).await;
+    assert_eq!(resp.status, "ok");
+    let payload = resp.payload.unwrap();
+    assert_eq!(payload["message"].as_str(), Some("repo b"));
+}
+
+#[tokio::test]
+#[cfg(unix)]
+#[serial]
 async fn test_gh_status_uses_global_config_source_when_repo_missing() {
     let temp = TempDir::new().unwrap();
     let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
     write_gh_monitor_config(temp.path(), "atm-dev");
 
-    let status_seed = GhMonitorStatus {
+    let status_seed = CiMonitorStatus {
         team: "atm-dev".to_string(),
         configured: true,
         enabled: true,
         config_source: None,
         config_path: None,
-        target_kind: GhMonitorTargetKind::Run,
+        target_kind: CiMonitorTargetKind::Run,
         target: "9001".to_string(),
         state: "monitoring".to_string(),
         run_id: Some(9001),
         reference: None,
         updated_at: "2026-03-06T00:00:00Z".to_string(),
         message: None,
+        repo_state_updated_at: None,
     };
     upsert_gh_monitor_status(temp.path(), status_seed).unwrap();
 
@@ -862,33 +957,35 @@ async fn test_gh_status_workflow_reference_disambiguates_parallel_runs() {
     let temp = TempDir::new().unwrap();
     let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
     write_gh_monitor_config(temp.path(), "atm-dev");
-    let status_a = GhMonitorStatus {
+    let status_a = CiMonitorStatus {
         team: "atm-dev".to_string(),
         configured: true,
         enabled: true,
         config_source: None,
         config_path: None,
-        target_kind: GhMonitorTargetKind::Workflow,
+        target_kind: CiMonitorTargetKind::Workflow,
         target: "ci".to_string(),
         state: "monitoring".to_string(),
         run_id: Some(111),
         reference: Some("develop".to_string()),
         updated_at: "2026-03-06T00:00:10Z".to_string(),
         message: None,
+        repo_state_updated_at: None,
     };
-    let status_b = GhMonitorStatus {
+    let status_b = CiMonitorStatus {
         team: "atm-dev".to_string(),
         configured: true,
         enabled: true,
         config_source: None,
         config_path: None,
-        target_kind: GhMonitorTargetKind::Workflow,
+        target_kind: CiMonitorTargetKind::Workflow,
         target: "ci".to_string(),
         state: "monitoring".to_string(),
         run_id: Some(222),
         reference: Some("release/v1".to_string()),
         updated_at: "2026-03-06T00:00:11Z".to_string(),
         message: None,
+        repo_state_updated_at: None,
     };
     upsert_gh_monitor_status(temp.path(), status_a).unwrap();
     upsert_gh_monitor_status(temp.path(), status_b).unwrap();
@@ -933,6 +1030,55 @@ async fn test_gh_monitor_control_start_stop_restart_and_health() {
     let health = health_resp.payload.unwrap();
     assert_eq!(health["team"].as_str(), Some("atm-dev"));
     assert_eq!(health["lifecycle_state"].as_str(), Some("running"));
+}
+
+#[tokio::test]
+#[cfg(unix)]
+#[serial]
+async fn test_gh_monitor_control_cross_team_requires_user_authorized() {
+    let temp = TempDir::new().unwrap();
+    let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+    write_gh_monitor_config(temp.path(), "ops-team");
+
+    let stop_req = r#"{"version":1,"request_id":"r-gh-stop-cross-team","command":"gh-monitor-control","payload":{"team":"ops-team","action":"stop","actor":"team-lead","actor_team":"atm-dev","drain_timeout_secs":1}}"#;
+    let stop_resp = handle_gh_monitor_control_command(stop_req, temp.path()).await;
+    assert_eq!(stop_resp.status, "error");
+    let err = stop_resp.error.expect("cross-team stop should fail");
+    assert_eq!(err.code, "AUTHORIZATION_REQUIRED");
+}
+
+#[tokio::test]
+#[cfg(unix)]
+#[serial]
+async fn test_gh_monitor_health_includes_owner_metadata_fields() {
+    let temp = TempDir::new().unwrap();
+    let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+    write_gh_monitor_config(temp.path(), "atm-dev");
+    update_gh_repo_state_in_flight(temp.path(), "atm-dev", "o/r", 1, "atm-daemon").unwrap();
+
+    let health_req = r#"{"version":1,"request_id":"r-gh-health-owner","command":"gh-monitor-health","payload":{"team":"atm-dev"}}"#;
+    let health_resp = handle_gh_monitor_health_command(health_req, temp.path()).await;
+    assert_eq!(health_resp.status, "ok");
+    let health = health_resp.payload.unwrap();
+    assert_eq!(health["owner_runtime_kind"].as_str(), Some("isolated"));
+    assert_eq!(health["owner_repo"].as_str(), Some("o/r"));
+    assert_eq!(health["owner_poll_interval_secs"].as_u64(), Some(60));
+    assert_eq!(
+        health["owner_pid"].as_u64(),
+        Some(std::process::id() as u64)
+    );
+    assert!(
+        health["owner_binary_path"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("agent_team_mail_daemon"),
+        "expected owner_binary_path in health payload: {health:?}"
+    );
+    let canonical_home = std::fs::canonicalize(temp.path()).unwrap();
+    assert_eq!(
+        health["owner_atm_home"].as_str(),
+        Some(canonical_home.to_string_lossy().as_ref())
+    );
 }
 
 #[tokio::test]

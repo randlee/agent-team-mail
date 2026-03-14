@@ -95,11 +95,10 @@ The daemon takes ownership and will free the pointer using `Box::from_raw()`.
 
 ### Provider Implementation
 
-Implement the `CiProvider` trait:
+Implement the `CiProvider` trait from the extracted CI-monitor core crate:
 
 ```rust
-use agent_team_mail_daemon::plugins::ci_monitor::{CiProvider, CiRun, CiFilter};
-use agent_team_mail_daemon::plugin::PluginError;
+use agent_team_mail_ci_monitor::{CiFilter, CiProvider, CiProviderError, CiRun};
 
 #[derive(Debug)]
 pub struct AzurePipelinesProvider {
@@ -109,15 +108,15 @@ pub struct AzurePipelinesProvider {
 }
 
 impl CiProvider for AzurePipelinesProvider {
-    async fn list_runs(&self, filter: &CiFilter) -> Result<Vec<CiRun>, PluginError> {
+    async fn list_runs(&self, filter: &CiFilter) -> Result<Vec<CiRun>, CiProviderError> {
         // Call az pipelines runs list ...
     }
 
-    async fn get_run(&self, run_id: u64) -> Result<CiRun, PluginError> {
+    async fn get_run(&self, run_id: u64) -> Result<CiRun, CiProviderError> {
         // Call az pipelines runs show ...
     }
 
-    async fn get_job_log(&self, job_id: u64) -> Result<String, PluginError> {
+    async fn get_job_log(&self, job_id: u64) -> Result<String, CiProviderError> {
         // Fetch job logs
     }
 
@@ -133,7 +132,7 @@ The factory receives optional configuration from `.atm.toml` and returns a boxed
 
 ```rust
 use std::sync::Arc;
-use agent_team_mail_daemon::plugins::ci_monitor::{CiProviderFactory, ErasedCiProvider};
+use agent_team_mail_ci_monitor::{CiProviderFactory, ErasedCiProvider};
 
 #[no_mangle]
 pub extern "C" fn atm_create_ci_provider_factory() -> *mut CiProviderFactory {
@@ -201,6 +200,5 @@ GET https://dev.azure.com/{organization}/{project}/_apis/build/builds/{buildId}/
 
 ## See Also
 
-- Provider trait: `crates/atm-daemon/src/plugins/ci_monitor/provider.rs`
-- Registry: `crates/atm-daemon/src/plugins/ci_monitor/registry.rs`
-- GitHub Actions provider: `crates/atm-daemon/src/plugins/ci_monitor/github.rs`
+- Core crate: `crates/atm-ci-monitor`
+- Daemon adapter: `crates/atm-daemon/src/plugins/ci_monitor/`
