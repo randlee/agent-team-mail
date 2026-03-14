@@ -2465,6 +2465,7 @@ repo = "config-owner/config-repo"
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_init_joined_at_failure_writes_disabled_init_health_record() {
         use crate::plugins::ci_monitor::MockCiProvider;
