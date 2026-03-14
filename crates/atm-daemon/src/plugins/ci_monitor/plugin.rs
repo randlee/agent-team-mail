@@ -3,7 +3,7 @@
 use super::config::{CiMonitorConfig, DedupStrategy};
 use super::loader::CiProviderLoader;
 use super::provider::ErasedCiProvider;
-use super::registry::{CiProviderFactory, CiProviderRegistry};
+use super::registry::{CiProviderFactory, CiProviderRegistry, CiProviderRegistryPort};
 #[cfg(unix)]
 use super::service::{create_provider_from_registry, fetch_run_details, list_completed_runs};
 #[cfg(test)]
@@ -67,7 +67,7 @@ pub struct CiMonitorPlugin {
     /// Plugin configuration from [plugins.gh_monitor]
     config: CiMonitorConfig,
     /// Provider registry for runtime provider selection
-    registry: Option<CiProviderRegistry>,
+    registry: Option<Box<dyn CiProviderRegistryPort>>,
     /// Provider loader (kept alive to hold dynamic libraries)
     loader: Option<CiProviderLoader>,
     /// Cached context for runtime use
@@ -151,6 +151,12 @@ impl CiMonitorPlugin {
         self
     }
 
+    #[cfg(test)]
+    fn with_registry(mut self, registry: Box<dyn CiProviderRegistryPort>) -> Self {
+        self.registry = Some(registry);
+        self
+    }
+
     fn synthetic_member_joined_at_ms(&self) -> Result<u64, PluginError> {
         #[cfg(test)]
         if let Some(ref err_msg) = self.joined_at_error {
@@ -172,7 +178,7 @@ impl CiMonitorPlugin {
     }
 
     /// Build the provider registry with built-in and external providers
-    fn build_registry(&mut self, atm_home: &std::path::Path) -> CiProviderRegistry {
+    fn build_registry(&mut self, atm_home: &std::path::Path) -> Box<dyn CiProviderRegistryPort> {
         let mut registry = CiProviderRegistry::new();
 
         // Register built-in GitHub Actions provider
@@ -214,7 +220,7 @@ impl CiMonitorPlugin {
         // Keep loader alive so dynamic libraries stay loaded
         self.loader = Some(loader);
 
-        registry
+        Box::new(registry)
     }
 
     /// Generate a deduplication key for a run based on configured strategy
@@ -1032,12 +1038,17 @@ impl Plugin for CiMonitorPlugin {
             }
         };
 
-        // Build the provider registry
-        let registry = self.build_registry(&atm_home);
+        if self.registry.is_none() {
+            self.registry = Some(self.build_registry(&atm_home));
+        }
+        let registry = self
+            .registry
+            .as_ref()
+            .expect("registry must be initialized before provider creation");
         debug!(
             "Provider registry initialized with {} providers: {:?}",
-            registry.len(),
-            registry.list_providers()
+            registry.provider_count(),
+            registry.list_provider_names()
         );
 
         // Create provider if not already injected (for testing)
@@ -1046,7 +1057,7 @@ impl Plugin for CiMonitorPlugin {
             // Pass provider_config for external providers
             let provider_config = self.config.provider_config.as_ref();
             let provider = match create_provider_from_registry(
-                &registry,
+                registry.as_ref(),
                 &self.config.provider,
                 self.config.owner.as_deref(),
                 self.config.repo.as_deref(),
@@ -1064,9 +1075,6 @@ impl Plugin for CiMonitorPlugin {
             };
             self.provider = Some(provider);
         }
-
-        // Store registry for potential runtime use
-        self.registry = Some(registry);
 
         // Register synthetic member
         let now_ms = match self.synthetic_member_joined_at_ms() {
@@ -1411,6 +1419,42 @@ impl Plugin for CiMonitorPlugin {
 mod tests {
     use super::*;
     use agent_team_mail_core::context::GitProvider as GitProviderType;
+    use std::sync::Mutex;
+
+    #[derive(Debug)]
+    struct RecordingRegistry {
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl RecordingRegistry {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl CiProviderRegistryPort for RecordingRegistry {
+        fn create_provider(
+            &self,
+            name: &str,
+            _config: Option<&toml::Table>,
+        ) -> Result<Box<dyn ErasedCiProvider>, crate::plugins::ci_monitor::CiProviderError>
+        {
+            self.calls.lock().unwrap().push(name.to_string());
+            Ok(Box::new(
+                crate::plugins::ci_monitor::mock_support::MockCiProvider::new(),
+            ))
+        }
+
+        fn list_provider_names(&self) -> Vec<String> {
+            vec!["custom".to_string()]
+        }
+
+        fn provider_count(&self) -> usize {
+            1
+        }
+    }
 
     #[test]
     fn test_plugin_metadata() {
@@ -2498,6 +2542,79 @@ provider = "custom-missing"
         assert!(record.message.as_deref().is_some_and(|message| {
             message.contains("CI provider 'custom-missing' not registered")
         }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_init_uses_injected_registry_through_plugin_init_path() {
+        use agent_team_mail_core::schema::{AgentMember, TeamConfig};
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let team_dir = teams_root.join("dev-team");
+        let inboxes_dir = team_dir.join("inboxes");
+        std::fs::create_dir_all(&inboxes_dir).unwrap();
+        std::fs::write(inboxes_dir.join("ci-monitor.json"), "[]").unwrap();
+
+        let team_config = TeamConfig {
+            name: "dev-team".to_string(),
+            description: None,
+            created_at: 1234567890,
+            lead_agent_id: "lead@dev-team".to_string(),
+            lead_session_id: "session-123".to_string(),
+            members: vec![AgentMember {
+                agent_id: "lead@dev-team".to_string(),
+                name: "lead".to_string(),
+                agent_type: "general-purpose".to_string(),
+                model: "claude-opus-4-6".to_string(),
+                prompt: None,
+                color: None,
+                plan_mode_required: None,
+                joined_at: 1234567890,
+                tmux_pane_id: None,
+                cwd: ".".to_string(),
+                subscriptions: Vec::new(),
+                backend_type: None,
+                is_active: None,
+                last_active: None,
+                session_id: None,
+                external_backend_type: None,
+                external_model: None,
+                unknown_fields: std::collections::HashMap::new(),
+            }],
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        std::fs::create_dir_all(&team_dir).unwrap();
+        std::fs::write(
+            team_dir.join("config.json"),
+            serde_json::to_string_pretty(&team_config).unwrap(),
+        )
+        .unwrap();
+
+        let table: toml::Table = toml::from_str(
+            r#"
+team = "dev-team"
+provider = "custom"
+agent = "ci-monitor"
+"#,
+        )
+        .unwrap();
+        let ctx = create_mock_context_with_repo_config(teams_root, Some(table), true);
+        let mut plugin = CiMonitorPlugin::new().with_registry(Box::new(RecordingRegistry::new()));
+
+        plugin.init(&ctx).await.expect("init should succeed");
+
+        let provider = plugin
+            .provider
+            .as_ref()
+            .expect("provider should be created");
+        assert_eq!(provider.provider_name(), "MockCiProvider");
+        let registry = plugin
+            .registry
+            .as_ref()
+            .expect("registry should remain stored after init");
+        assert_eq!(registry.provider_count(), 1);
+        assert_eq!(registry.list_provider_names(), vec!["custom".to_string()]);
     }
 
     #[tokio::test]
