@@ -2,6 +2,7 @@
 
 use agent_team_mail_core::config::Config;
 use agent_team_mail_core::context::SystemContext;
+use agent_team_mail_core::daemon_client::{BuildProfile, RuntimeKind, RuntimeOwnerMetadata};
 use agent_team_mail_daemon::daemon;
 use agent_team_mail_daemon::daemon::{
     SessionRegistry, StatusWriter, new_dedup_store, new_launch_sender, new_log_event_queue,
@@ -247,6 +248,16 @@ fn create_test_status_writer(temp_dir: &TempDir) -> Arc<StatusWriter> {
     Arc::new(StatusWriter::new(
         temp_dir.path().to_path_buf(),
         "test-version".to_string(),
+        RuntimeOwnerMetadata {
+            runtime_kind: RuntimeKind::Isolated,
+            build_profile: BuildProfile::Release,
+            executable_path: temp_dir
+                .path()
+                .join("atm-daemon")
+                .to_string_lossy()
+                .into_owned(),
+            home_scope: temp_dir.path().to_string_lossy().into_owned(),
+        },
     ))
 }
 

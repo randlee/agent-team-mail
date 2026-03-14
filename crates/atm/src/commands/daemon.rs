@@ -1,6 +1,7 @@
 //! Daemon management commands
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
+use agent_team_mail_core::daemon_client::RuntimeOwnerMetadata;
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
 use anyhow::{Context, Result};
@@ -732,6 +733,13 @@ fn execute_status(args: StatusArgs) -> Result<()> {
         println!("Version:     {}", status.version);
         println!("Uptime:      {}", format_duration(status.uptime_secs));
         println!("Last update: {}", status.timestamp);
+        println!(
+            "Runtime:     {} ({})",
+            status.owner.runtime_kind.as_str(),
+            status.owner.build_profile.as_str()
+        );
+        println!("Executable:  {}", status.owner.executable_path);
+        println!("ATM_HOME:    {}", status.owner.home_scope);
 
         if is_stale {
             println!();
@@ -872,6 +880,8 @@ struct DaemonStatus {
     pid: u32,
     version: String,
     uptime_secs: u64,
+    #[serde(default)]
+    owner: RuntimeOwnerMetadata,
     plugins: Vec<PluginStatus>,
     teams: Vec<String>,
     #[serde(default)]
