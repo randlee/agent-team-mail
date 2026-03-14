@@ -8,6 +8,8 @@ pub(crate) use super::github_schema::{
     GhPrLookupView, GhPrView, GhPullRequest, GhRunJob, GhRunListEntry, GhRunStep, GhRunView,
 };
 use super::helpers::upsert_gh_monitor_status_for_repo;
+use super::github_provider::GitHubActionsProvider;
+use super::provider::CiProvider;
 // These routing re-exports preserve the pre-split gh_monitor call surface for
 // downstream code until the final thin-socket cleanup removes the shim layer.
 #[allow(unused_imports)]
@@ -19,6 +21,7 @@ pub(crate) use super::routing::{
 };
 use super::types::{CiMonitorRequest, CiMonitorStatus, CiMonitorTargetKind, GhAlertTargets};
 use anyhow::Result;
+use agent_team_mail_core::gh_monitor_observability::{GhCliObserverContext, build_gh_cli_observer};
 use tracing::warn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,13 +36,15 @@ pub(crate) enum GhRunTerminalState {
 
 #[cfg(unix)]
 pub(crate) async fn wait_for_pr_run_start(
+    home: &std::path::Path,
+    team: &str,
     owner_repo: &str,
     pr_number: u64,
     timeout_secs: u64,
 ) -> Result<Option<u64>> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
-        if let Some(run_id) = try_find_pr_run_id(owner_repo, pr_number).await? {
+        if let Some(run_id) = try_find_pr_run_id(home, team, owner_repo, pr_number).await? {
             return Ok(Some(run_id));
         }
 
@@ -54,18 +59,32 @@ pub(crate) async fn wait_for_pr_run_start(
 }
 
 #[cfg(unix)]
-pub(crate) async fn try_find_pr_run_id(owner_repo: &str, pr_number: u64) -> Result<Option<u64>> {
-    let output = run_gh_command_for_repo(
-        owner_repo,
-        &[
-            "pr",
-            "view",
-            &pr_number.to_string(),
-            "--json",
-            "headRefName,headRefOid,createdAt",
-        ],
-    )
-    .await?;
+pub(crate) async fn try_find_pr_run_id(
+    home: &std::path::Path,
+    team: &str,
+    owner_repo: &str,
+    pr_number: u64,
+) -> Result<Option<u64>> {
+    let provider = provider_for_repo(home, team, owner_repo)?;
+    let pr_number_arg = pr_number.to_string();
+    let repo_scope = owner_repo.trim().to_string();
+    let output = provider
+        .run_gh(
+            "gh_pr_view",
+            &[
+                "-R",
+                repo_scope.as_str(),
+                "pr",
+                "view",
+                pr_number_arg.as_str(),
+                "--json",
+                "headRefName,headRefOid,createdAt",
+            ],
+            None,
+            None,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
     let pr_view = serde_json::from_str::<GhPrLookupView>(&output)?;
     let branch = pr_view
         .head_ref_name
@@ -90,20 +109,26 @@ pub(crate) async fn try_find_pr_run_id(owner_repo: &str, pr_number: u64) -> Resu
         return Ok(None);
     };
 
-    let output = run_gh_command_for_repo(
-        owner_repo,
-        &[
-            "run",
-            "list",
-            "--branch",
-            &branch,
-            "--limit",
-            "20",
-            "--json",
-            "databaseId,headSha,createdAt",
-        ],
-    )
-    .await?;
+    let output = provider
+        .run_gh(
+            "gh_run_list",
+            &[
+                "-R",
+                repo_scope.as_str(),
+                "run",
+                "list",
+                "--branch",
+                branch.as_str(),
+                "--limit",
+                "20",
+                "--json",
+                "databaseId,headSha,createdAt",
+            ],
+            Some(branch.as_str()),
+            None,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
     let runs = serde_json::from_str::<Vec<GhRunListEntry>>(&output)?;
     for run in runs {
         let Some(run_id) = run.database_id else {
@@ -156,20 +181,31 @@ pub(crate) fn run_passes_pr_recency_gate(
 
 #[cfg(unix)]
 pub(crate) async fn fetch_pr_merge_state(
+    home: &std::path::Path,
+    team: &str,
     owner_repo: &str,
     pr_number: u64,
 ) -> Result<Option<GhPrView>> {
-    let output = run_gh_command_for_repo(
-        owner_repo,
-        &[
-            "pr",
-            "view",
-            &pr_number.to_string(),
-            "--json",
-            "mergeStateStatus,url",
-        ],
-    )
-    .await?;
+    let provider = provider_for_repo(home, team, owner_repo)?;
+    let pr_number_arg = pr_number.to_string();
+    let repo_scope = owner_repo.trim().to_string();
+    let output = provider
+        .run_gh(
+            "gh_pr_view",
+            &[
+                "-R",
+                repo_scope.as_str(),
+                "pr",
+                "view",
+                pr_number_arg.as_str(),
+                "--json",
+                "mergeStateStatus,url",
+            ],
+            None,
+            None,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
     let pr = serde_json::from_str::<GhPrView>(&output)?;
     if pr
         .merge_state_status
@@ -190,24 +226,34 @@ pub(crate) fn is_pr_merge_state_dirty(merge_state_status: &str) -> bool {
 
 #[cfg(unix)]
 pub(crate) async fn try_find_workflow_run_id(
+    home: &std::path::Path,
+    team: &str,
     owner_repo: &str,
     workflow: &str,
     reference: &str,
 ) -> Result<Option<u64>> {
-    let output = run_gh_command_for_repo(
-        owner_repo,
-        &[
-            "run",
-            "list",
-            "--workflow",
-            workflow,
-            "--limit",
-            "20",
-            "--json",
-            "databaseId,headBranch,headSha",
-        ],
-    )
-    .await?;
+    let provider = provider_for_repo(home, team, owner_repo)?;
+    let repo_scope = owner_repo.trim().to_string();
+    let output = provider
+        .run_gh(
+            "gh_run_list",
+            &[
+                "-R",
+                repo_scope.as_str(),
+                "run",
+                "list",
+                "--workflow",
+                workflow,
+                "--limit",
+                "20",
+                "--json",
+                "databaseId,headBranch,headSha",
+            ],
+            Some(reference),
+            Some(reference),
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
     let runs = serde_json::from_str::<Vec<serde_json::Value>>(&output)?;
 
     for run in runs {
@@ -224,30 +270,25 @@ pub(crate) async fn try_find_workflow_run_id(
 }
 
 #[cfg(unix)]
-pub(crate) async fn run_gh_command(args: &[&str]) -> Result<String> {
-    let output = tokio::process::Command::new("gh")
-        .args(args)
-        .output()
-        .await?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("gh {} failed: {}", args.join(" "), stderr.trim());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-#[cfg(unix)]
-pub(crate) async fn run_gh_command_for_repo(owner_repo: &str, args: &[&str]) -> Result<String> {
+fn provider_for_repo(
+    home: &std::path::Path,
+    team: &str,
+    owner_repo: &str,
+) -> Result<GitHubActionsProvider> {
     let owner_repo = owner_repo.trim();
     if owner_repo.is_empty() {
         anyhow::bail!("missing owner/repo scope for gh command");
     }
-
-    let mut command_args: Vec<&str> = Vec::with_capacity(args.len() + 2);
-    command_args.push("-R");
-    command_args.push(owner_repo);
-    command_args.extend_from_slice(args);
-    run_gh_command(&command_args).await
+    let (owner, repo) = owner_repo
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("invalid owner/repo scope for gh command: {owner_repo}"))?;
+    let observer = build_gh_cli_observer(GhCliObserverContext {
+        home: home.to_path_buf(),
+        team: team.to_string(),
+        repo: owner_repo.to_string(),
+        runtime: "atm-daemon".to_string(),
+    });
+    Ok(GitHubActionsProvider::new(owner.to_string(), repo.to_string()).with_observer(observer))
 }
 
 #[cfg(unix)]
@@ -266,7 +307,7 @@ pub(crate) async fn monitor_gh_run(
     let mut first_poll = true;
 
     loop {
-        let run = fetch_run_view(owner_repo, run_id).await?;
+        let run = fetch_run_view(home, &status_seed.team, owner_repo, run_id).await?;
         let expected_repo = extract_repo_slug_from_url(&run.url);
         let (from_agent, targets) = resolve_ci_alert_routing(
             home,
@@ -346,7 +387,15 @@ pub(crate) async fn monitor_gh_run(
         if terminal != GhRunTerminalState::Success {
             let correlation_id = format!("ci-failure-{}-{}", run.database_id, uuid::Uuid::new_v4());
             let failure_payload =
-                build_failure_payload(&run, status_seed, gh_request, owner_repo, &correlation_id)
+                    build_failure_payload(
+                        home,
+                        &status_seed.team,
+                        &run,
+                        status_seed,
+                        gh_request,
+                        owner_repo,
+                        &correlation_id,
+                    )
                     .await;
             message.push_str("\nFailure details:\n");
             message.push_str(&failure_payload);
@@ -387,7 +436,7 @@ pub(crate) async fn monitor_gh_run(
         if matches!(gh_request.target_kind, CiMonitorTargetKind::Pr)
             && let Ok(pr_number) = status_seed.target.trim().parse::<u64>()
         {
-            match fetch_pr_merge_state(owner_repo, pr_number).await {
+            match fetch_pr_merge_state(home, &status_seed.team, owner_repo, pr_number).await {
                 Ok(Some(pr_view)) => {
                     if let Some(merge_state_status) = pr_view.merge_state_status.as_deref()
                         && is_pr_merge_state_dirty(merge_state_status)
@@ -418,18 +467,32 @@ pub(crate) async fn monitor_gh_run(
 }
 
 #[cfg(unix)]
-pub(crate) async fn fetch_run_view(owner_repo: &str, run_id: u64) -> Result<GhRunView> {
-    let output = run_gh_command_for_repo(
-        owner_repo,
-        &[
-            "run",
-            "view",
-            &run_id.to_string(),
-            "--json",
-            "databaseId,name,status,conclusion,headBranch,headSha,url,jobs,attempt,pullRequests",
-        ],
-    )
-    .await?;
+pub(crate) async fn fetch_run_view(
+    home: &std::path::Path,
+    team: &str,
+    owner_repo: &str,
+    run_id: u64,
+) -> Result<GhRunView> {
+    let provider = provider_for_repo(home, team, owner_repo)?;
+    let run_id_arg = run_id.to_string();
+    let repo_scope = owner_repo.trim().to_string();
+    let output = provider
+        .run_gh(
+            "gh_run_view",
+            &[
+                "-R",
+                repo_scope.as_str(),
+                "run",
+                "view",
+                run_id_arg.as_str(),
+                "--json",
+                "databaseId,name,status,conclusion,headBranch,headSha,url,jobs,attempt,pullRequests",
+            ],
+            None,
+            None,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
     Ok(serde_json::from_str::<GhRunView>(&output)?)
 }
 
@@ -572,6 +635,8 @@ pub(crate) fn format_job_runtime(job: &GhRunJob) -> String {
 
 #[cfg(unix)]
 pub(crate) async fn build_failure_payload(
+    home: &std::path::Path,
+    team: &str,
     run: &GhRunView,
     status_seed: &CiMonitorStatus,
     gh_request: &CiMonitorRequest,
@@ -614,7 +679,7 @@ pub(crate) async fn build_failure_payload(
         .map(|step| step.name.clone())
         .unwrap_or_else(|| "unknown".to_string());
     let failed_log_excerpt = if let Some(first_job) = failed_jobs.first() {
-        fetch_failed_log_excerpt(owner_repo, first_job.database_id)
+        fetch_failed_log_excerpt(home, team, owner_repo, first_job.database_id)
             .await
             .unwrap_or_else(|_| "(log excerpt unavailable)".to_string())
     } else {
@@ -663,12 +728,32 @@ pub(crate) async fn build_failure_payload(
 }
 
 #[cfg(unix)]
-pub(crate) async fn fetch_failed_log_excerpt(owner_repo: &str, job_id: u64) -> Result<String> {
-    let output = run_gh_command_for_repo(
-        owner_repo,
-        &["run", "view", "--job", &job_id.to_string(), "--log"],
-    )
-    .await?;
+pub(crate) async fn fetch_failed_log_excerpt(
+    home: &std::path::Path,
+    team: &str,
+    owner_repo: &str,
+    job_id: u64,
+) -> Result<String> {
+    let provider = provider_for_repo(home, team, owner_repo)?;
+    let job_id_arg = job_id.to_string();
+    let repo_scope = owner_repo.trim().to_string();
+    let output = provider
+        .run_gh(
+            "gh_job_log",
+            &[
+                "-R",
+                repo_scope.as_str(),
+                "run",
+                "view",
+                "--job",
+                job_id_arg.as_str(),
+                "--log",
+            ],
+            None,
+            None,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
     Ok(output
         .lines()
         .filter(|line| !line.trim().is_empty())

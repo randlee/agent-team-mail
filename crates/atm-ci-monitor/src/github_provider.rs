@@ -1,26 +1,46 @@
 //! GitHub Actions provider using the `gh` CLI.
 
-use crate::provider::CiProvider;
+use crate::provider::{CiProvider, GhCliCallMetadata, GhCliCallOutcome, GhCliObserverRef};
 use crate::types::{
     CiFilter, CiJob, CiProviderError, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep,
 };
 use serde::Deserialize;
 use std::process::Command;
+use std::time::Instant;
 
-#[derive(Debug)]
 pub struct GitHubActionsProvider {
     owner: String,
     repo: String,
+    observer: Option<GhCliObserverRef>,
 }
 
 impl GitHubActionsProvider {
     pub fn new(owner: String, repo: String) -> Self {
-        Self { owner, repo }
+        Self {
+            owner,
+            repo,
+            observer: None,
+        }
     }
 
-    async fn run_gh(&self, args: &[&str]) -> Result<String, CiProviderError> {
-        let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        tokio::task::spawn_blocking(move || {
+    pub fn with_observer(mut self, observer: GhCliObserverRef) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
+    async fn run_gh_with_metadata(
+        &self,
+        metadata: GhCliCallMetadata,
+    ) -> Result<String, CiProviderError> {
+        if let Some(observer) = &self.observer {
+            observer.before_gh_call(&metadata)?;
+        }
+
+        let started = Instant::now();
+        let observer = self.observer.clone();
+        let metadata_for_outcome = metadata.clone();
+        let args_owned: Vec<String> = metadata.args.clone();
+        let result = tokio::task::spawn_blocking(move || {
             let output = Command::new("gh").args(&args_owned).output().map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     CiProviderError::provider(
@@ -45,7 +65,27 @@ impl GitHubActionsProvider {
             Ok(stdout)
         })
         .await
-        .map_err(|e| CiProviderError::runtime(format!("Task join error: {e}")))?
+        .map_err(|e| CiProviderError::runtime(format!("Task join error: {e}")))?;
+
+        if let Some(observer) = observer {
+            let duration_ms = started.elapsed().as_millis() as u64;
+            match &result {
+                Ok(_) => observer.after_gh_call(&GhCliCallOutcome {
+                    metadata: metadata_for_outcome,
+                    duration_ms,
+                    success: true,
+                    error: None,
+                }),
+                Err(err) => observer.after_gh_call(&GhCliCallOutcome {
+                    metadata: metadata_for_outcome,
+                    duration_ms,
+                    success: false,
+                    error: Some(err.to_string()),
+                }),
+            }
+        }
+
+        result
     }
 
     fn repo_scope(&self) -> String {
@@ -137,6 +177,16 @@ impl GitHubActionsProvider {
     }
 }
 
+impl std::fmt::Debug for GitHubActionsProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitHubActionsProvider")
+            .field("owner", &self.owner)
+            .field("repo", &self.repo)
+            .field("observer", &self.observer.as_ref().map(|_| "<observer>"))
+            .finish()
+    }
+}
+
 impl CiProvider for GitHubActionsProvider {
     async fn list_runs(&self, filter: &CiFilter) -> Result<Vec<CiRun>, CiProviderError> {
         let mut args = vec![
@@ -178,7 +228,9 @@ impl CiProvider for GitHubActionsProvider {
         }
 
         let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let output = self.run_gh(&args_refs).await?;
+        let output = self
+            .run_gh("gh_run_list", &args_refs, filter.branch.as_deref(), None)
+            .await?;
 
         let gh_runs: Vec<GhRun> = serde_json::from_str(&output)
             .map_err(|e| CiProviderError::provider(format!("Failed to parse gh JSON: {e}")))?;
@@ -207,7 +259,7 @@ impl CiProvider for GitHubActionsProvider {
             "--json",
             "databaseId,name,status,conclusion,headBranch,headSha,url,createdAt,updatedAt,attempt,pullRequests,jobs",
         ];
-        let output = self.run_gh(&args).await?;
+        let output = self.run_gh("gh_run_view", &args, None, None).await?;
         let gh_run: GhRun = serde_json::from_str(&output)
             .map_err(|e| CiProviderError::provider(format!("Failed to parse gh JSON: {e}")))?;
         Ok(self.parse_run(&gh_run, true))
@@ -224,7 +276,7 @@ impl CiProvider for GitHubActionsProvider {
             &job_id_arg,
             "--log",
         ];
-        self.run_gh(&args).await
+        self.run_gh("gh_job_log", &args, None, None).await
     }
 
     async fn get_pull_request(
@@ -242,7 +294,7 @@ impl CiProvider for GitHubActionsProvider {
             "--json",
             "number,url,headRefName,headRefOid,createdAt,mergeStateStatus",
         ];
-        let output = self.run_gh(&args).await?;
+        let output = self.run_gh("gh_pr_view", &args, None, None).await?;
         let pr: GhPrView = serde_json::from_str(&output)
             .map_err(|e| CiProviderError::provider(format!("Failed to parse gh JSON: {e}")))?;
         Ok(Some(CiPullRequest {
@@ -257,6 +309,23 @@ impl CiProvider for GitHubActionsProvider {
 
     fn provider_name(&self) -> &str {
         "GitHub Actions"
+    }
+
+    async fn run_gh(
+        &self,
+        action: &str,
+        args: &[&str],
+        branch: Option<&str>,
+        reference: Option<&str>,
+    ) -> Result<String, CiProviderError> {
+        let metadata = GhCliCallMetadata {
+            repo_scope: self.repo_scope(),
+            action: action.to_string(),
+            args: args.iter().map(|arg| (*arg).to_string()).collect(),
+            branch: branch.map(str::to_string),
+            reference: reference.map(str::to_string),
+        };
+        self.run_gh_with_metadata(metadata).await
     }
 }
 

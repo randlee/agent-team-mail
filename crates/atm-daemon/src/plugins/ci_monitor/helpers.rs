@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use anyhow::Result;
+#[cfg(unix)]
+use agent_team_mail_core::gh_monitor_observability::read_gh_repo_state_record;
 
 #[cfg(unix)]
 use super::types::{
@@ -191,9 +193,15 @@ pub(crate) fn upsert_gh_monitor_status(home: &Path, status: CiMonitorStatus) -> 
 #[cfg(unix)]
 pub(crate) fn upsert_gh_monitor_status_for_repo(
     home: &Path,
-    status: CiMonitorStatus,
+    mut status: CiMonitorStatus,
     repo_scope: Option<&str>,
 ) -> Result<()> {
+    if let Some(repo_scope) = repo_scope
+        && let Ok(Some(repo_state)) = read_gh_repo_state_record(home, &status.team, repo_scope)
+    {
+        status.repo_state_updated_at = Some(repo_state.updated_at);
+    }
+
     let path = gh_monitor_state_path(home);
     let mut map: HashMap<String, GhMonitorStateRecord> = if path.exists() {
         let raw = std::fs::read_to_string(&path)?;

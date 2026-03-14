@@ -158,6 +158,19 @@ impl CiProvider for MockCiProvider {
     fn provider_name(&self) -> &str {
         "MockCiProvider"
     }
+
+    async fn run_gh(
+        &self,
+        _action: &str,
+        _args: &[&str],
+        _branch: Option<&str>,
+        _reference: Option<&str>,
+    ) -> Result<String, CiProviderError> {
+        if let Some(err) = &self.error {
+            return Err(CiProviderError::provider(err.clone()));
+        }
+        Ok(String::new())
+    }
 }
 
 pub fn create_test_run(

@@ -851,6 +851,12 @@ impl CiMonitorPlugin {
             in_flight: 0,
             updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             message: Some(message.to_string()),
+            repo_state_updated_at: None,
+            budget_limit_per_hour: None,
+            budget_used_in_window: None,
+            rate_limit_remaining: None,
+            rate_limit_limit: None,
+            poll_owner: None,
         };
 
         if let Some(existing) = file.records.iter_mut().find(|record| record.team == team) {
@@ -1046,6 +1052,8 @@ impl Plugin for CiMonitorPlugin {
                 // Pass provider_config for external providers
                 let provider_config = self.config.provider_config.as_ref();
                 let provider = match create_provider_from_registry(
+                    &atm_home,
+                    &self.config.team,
                     registry.as_ref(),
                     &self.config.provider,
                     self.config.owner.as_deref(),
@@ -1408,6 +1416,7 @@ impl Plugin for CiMonitorPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::ci_monitor::types::{CiMonitorStatus, CiMonitorTargetKind};
     use agent_team_mail_core::context::GitProvider as GitProviderType;
     use std::sync::Mutex;
 
@@ -1482,6 +1491,8 @@ mod tests {
         };
 
         let provider = create_provider_from_registry(
+            std::path::Path::new("/tmp/atm-home"),
+            "atm-dev",
             &registry,
             "github",
             Some("config-owner"),
@@ -1502,6 +1513,8 @@ mod tests {
         let registry = RecordingRegistry::new();
 
         let provider = create_provider_from_registry(
+            std::path::Path::new("/tmp/atm-home"),
+            "atm-dev",
             &registry,
             "github",
             Some("config-owner"),
@@ -2768,11 +2781,23 @@ poll_interval_secs = 10
         .unwrap();
         let ctx = create_mock_context_with_config(teams_root.clone(), Some(table));
 
-        let state_path = CiMonitorPlugin::gh_monitor_state_path(&ctx);
-        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &state_path,
-            r#"{"records":[{"team":"dev-team","configured":true,"enabled":true,"target_kind":"Workflow","target":"CI","state":"failure","run_id":42,"updated_at":"2026-03-14T00:00:00Z"}]}"#,
+        crate::plugins::ci_monitor::helpers::upsert_gh_monitor_status(
+            teams_root.as_path(),
+            CiMonitorStatus {
+                team: "dev-team".to_string(),
+                configured: true,
+                enabled: true,
+                config_source: None,
+                config_path: None,
+                target_kind: CiMonitorTargetKind::Workflow,
+                target: "CI".to_string(),
+                state: "failure".to_string(),
+                run_id: Some(42),
+                reference: None,
+                updated_at: "2026-03-14T00:00:00Z".to_string(),
+                message: None,
+                repo_state_updated_at: None,
+            },
         )
         .unwrap();
 
