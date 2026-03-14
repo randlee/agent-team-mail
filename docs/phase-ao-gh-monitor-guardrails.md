@@ -100,7 +100,11 @@ Rules:
   - `rate_limit_critical`
 
 Acceptance:
-- Requirements covered: `GH-CI-FR-22`, `GH-CI-FR-23`, `GH-CI-FR-24`, `GH-CI-FR-25`, `GH-CI-FR-26`, `GH-CI-FR-27`, `GH-CI-FR-28`, `GH-CI-FR-39`, `GH-CI-FR-41`, `GH-CI-FR-42`, `GH-CI-FR-43`, `GH-CI-FR-44`, `GH-CI-FR-45`
+- Requirements covered: `GH-CI-FR-10a`, `GH-CI-FR-10b`, `GH-CI-FR-10c`, `GH-CI-FR-22`, `GH-CI-FR-23`, `GH-CI-FR-24`, `GH-CI-FR-25`, `GH-CI-FR-26` (in_flight wiring prerequisite closed in AO.2; AO.3 completes full observability surface), `GH-CI-FR-27`, `GH-CI-FR-28`, `GH-CI-FR-39`, `GH-CI-FR-41`, `GH-CI-FR-42`, `GH-CI-FR-43`, `GH-CI-FR-44`, `GH-CI-FR-45`
+- all monitor subscriptions attach to the same `(team, repo)` shared poller (`GH-CI-FR-10a`)
+- primary poll surface is the repo-wide PR list view (`GH-CI-FR-10b`)
+- idle `(team, repo)` polling occurs at most once per 5 minutes (`GH-CI-FR-10c`)
+- active `(team, repo)` polling occurs at most once per 1 minute (`GH-CI-FR-10c`)
 - `atm gh status` shows freshness metadata (`updated_at`) for GH-derived data
 - `atm doctor` shows cached GH call counts and one live rate-limit audit sample
 - operators can identify which runtime owns active polling
@@ -111,8 +115,9 @@ Acceptance:
 - CLI/daemon config discovery parity and `atm gh init` config file selection are
   preserved under the AO.3 attributed `gh` path (`GH-CI-FR-43`,
   `GH-CI-FR-44`)
-- legacy direct `gh` helper paths are eliminated or rerouted through the
-  attributed provider `run_gh()` path (`GH-CI-FR-45`)
+- legacy direct `gh` helper paths (`run_gh_command`,
+  `run_gh_command_for_repo` in `gh_monitor.rs`) are eliminated or rerouted
+  through the attributed provider `run_gh()` path (`GH-CI-FR-45`)
 
 ## AO.4 Operator Shutdown and Lease Control
 
