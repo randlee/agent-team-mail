@@ -98,7 +98,8 @@ impl CiProviderRegistry {
         names
     }
 
-    /// Check if a provider is registered
+    /// Check if a provider is registered.
+    #[cfg(test)]
     pub fn has_provider(&self, name: &str) -> bool {
         self.factories.contains_key(name)
     }
@@ -108,7 +109,8 @@ impl CiProviderRegistry {
         self.factories.len()
     }
 
-    /// Check if the registry is empty
+    /// Check if the registry is empty.
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.factories.is_empty()
     }
@@ -144,7 +146,7 @@ impl CiProviderRegistryPort for CiProviderRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::ci_monitor::GitHubActionsProvider;
+    use crate::plugins::ci_monitor::github_provider::GitHubActionsProvider;
 
     fn create_test_factory(name: &str, description: &str) -> CiProviderFactory {
         CiProviderFactory {

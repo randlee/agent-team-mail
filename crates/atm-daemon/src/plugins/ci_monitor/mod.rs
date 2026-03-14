@@ -29,16 +29,16 @@ pub(crate) mod test_support;
 pub(crate) mod types;
 
 pub use config::{CiMonitorConfig, DedupStrategy, NotifyTarget};
-pub use github_provider::GitHubActionsProvider;
-pub use loader::CiProviderLoader;
 pub use plugin::CiMonitorPlugin;
 pub use provider::{CiProvider, ErasedCiProvider};
-pub use registry::{CiFactoryFn, CiProviderFactory, CiProviderRegistry, CiProviderRegistryPort};
+pub use registry::CiProviderFactory;
 pub use types::{
     CiFilter, CiJob, CiProviderError, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep,
 };
 
-// Production surface: config, provider, registry, plugin, and CI domain types only.
+// Production surface: config, provider traits, plugin entrypoint, factory metadata, and
+// CI domain types only. Concrete providers/loaders/registries stay internal so this module
+// matches the future crate-facing boundary more closely.
 // Test-only symbols live under `mock_support` so tests do not rely on the root production API.
 #[cfg(any(test, feature = "test-support"))]
 pub mod mock_support {
