@@ -435,7 +435,7 @@ Required payload fields:
 
 ## 9. Runtime Drift Alerts (Optional Enhancement)
 
-### GH-CI-FR-30 Historical runtime baseline (`SHOULD`)
+### GH-CI-FR-40 Historical runtime baseline (`SHOULD`)
 
 Plugin should maintain per-workflow/job timing baselines and alert when a run is
 significantly slower than historical norm (policy-configurable).
@@ -456,7 +456,7 @@ Persistence behavior:
 
 ## 10. PR Merge-Conflict Detection
 
-### GH-CI-FR-31 Pre-run DIRTY preflight
+### GH-CI-FR-41 Pre-run DIRTY preflight
 
 For `atm gh monitor pr <number>`:
 - daemon must query PR `mergeStateStatus` before CI start-window polling begins
@@ -467,7 +467,7 @@ For `atm gh monitor pr <number>`:
   - skip CI start-window polling
   - skip `ci_not_started` alert for that invocation
 
-### GH-CI-FR-32 Post-completion DIRTY re-check
+### GH-CI-FR-42 Post-completion DIRTY re-check
 
 After a monitored PR run reaches terminal state:
 - daemon must re-query PR `mergeStateStatus`
@@ -483,7 +483,7 @@ After a monitored PR run reaches terminal state:
 
 ## 11. Config Discovery and Initialization
 
-### GH-CI-FR-33 Config discovery parity (CLI and daemon)
+### GH-CI-FR-43 Config discovery parity (CLI and daemon)
 
 - CLI command paths (`atm gh`, `atm gh status`, `atm gh monitor ...`) and daemon
   plugin bootstrap must resolve `gh_monitor` configuration from the same
@@ -491,7 +491,7 @@ After a monitored PR run reaches terminal state:
 - Status surfaces must report `configured`, `enabled`, `config_source`, and
   `config_path` from that canonical resolution result.
 
-### GH-CI-FR-34 `atm gh init` config file selection
+### GH-CI-FR-44 `atm gh init` config file selection
 
 - `atm gh init` must write to the canonical plugin config location:
   - existing plugin config file when already present

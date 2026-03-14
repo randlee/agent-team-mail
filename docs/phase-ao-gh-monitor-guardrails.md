@@ -48,7 +48,7 @@ Rules:
   count instead of remaining hardcoded to `0`.
 
 Acceptance:
-- Requirements covered: `GH-CI-FR-37`, `GH-CI-FR-38`
+- Requirements covered: `GH-CI-FR-26`, `GH-CI-FR-37`, `GH-CI-FR-38`
 - ATM can create an isolated runtime root with runtime metadata
 - runtime metadata includes `created_at` and `expires_at`
 - expired + dead isolated runtimes are automatically reaped or flagged for
@@ -83,7 +83,7 @@ Rules:
   - branch/ref when known
   - daemon/runtime owner
   - action
-  - duration
+  - duration_ms
   - success/failure
 - Per-team API call counts must be maintained locally, with repo and branch/ref
   breakdown when known.

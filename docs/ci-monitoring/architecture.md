@@ -214,10 +214,14 @@ should attach local accounting metadata for:
 - team
 - repo
 - branch or target ref when known
+- runtime_kind
+- binary_path
+- poll_interval_secs when emitted from the shared poller
 - action/arguments
-- daemon/runtime owner
-- duration
-- success/failure
+- duration_ms
+- success
+- remaining, `limit`, and `reset_at` for rate-limit emissions
+- `budget_used`, `budget_limit`, and `budget_window` for rate-limit emissions
 
 The local accounting counter and attribution store should live in the
 future `agent-team-mail-ci-monitor` crate, created in AO.1 as a new workspace
