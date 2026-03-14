@@ -7,6 +7,15 @@ This note captures the current decision for the next short follow-on sprints.
 It is intentionally narrow: stop accidental shared-runtime launches first, then
 make GitHub query sources visible and stoppable.
 
+Deletion policy for this phase:
+- AO must prefer deleting duplicate runtime, monitor, and GitHub invocation
+  paths over preserving parallel implementations.
+- Once a canonical AO path exists, superseded helper paths and transitional
+  compatibility code must be removed unless they protect an active user-facing
+  workflow.
+- AO acceptance favors one canonical path per concern, not coexistence of old
+  and new paths.
+
 ## AO.1 Shared Runtime Admission Guard
 
 Goal: prevent accidental extra daemons from joining shared runtimes.
@@ -144,3 +153,26 @@ Acceptance:
   polling owner (`GH-CI-FR-21`)
 - hidden operator stop path exists for emergency shutdown
 - affected team lead receives notification identifying actor and reason
+
+## AO.5 Post-Integration Path and Contract Simplification
+
+Goal: remove transitional paths and tighten the final canonical contracts after
+AO.1-AO.4 have integrated.
+
+Integration branch: `integrate/phase-AO`
+
+Rules:
+- AO.5 is deletion-oriented and must not add new user-facing capability.
+- Temporary seams, duplicate helpers, and compatibility code kept during
+  AO.1-AO.4 should be reviewed for removal once the canonical AO path is live.
+- Contracts should be narrowed to the surviving canonical runtime, polling,
+  state, and operator-control surfaces.
+
+Acceptance:
+- superseded GH helper paths, state representations, and transitional runtime
+  branches introduced or preserved during AO are either deleted or explicitly
+  justified as still required
+- public/internal contracts are narrowed to the canonical AO path and no longer
+  expose transitional branches unnecessarily
+- tests covering deleted transitional behavior are removed or consolidated into
+  the canonical path tests

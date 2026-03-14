@@ -14,6 +14,14 @@ Status review:
   is already marked `#[serial]` on current code. Treat this as an audit item,
   not a guaranteed bug.
 
+Deletion policy for this phase:
+- AP should delete low-value duplicate tests and ad hoc test helpers rather than
+  stabilizing every historical path.
+- A flaky or hang-prone test must justify unique coverage; otherwise the default
+  action is consolidation or deletion.
+- When AP introduces a canonical timeout/cleanup helper, older parallel helpers
+  should be removed.
+
 ## AP.1 Environment and Process Safety
 
 Goal: remove the highest-risk sources of process leaks and shared-state
@@ -43,6 +51,8 @@ Acceptance:
 - Autostart readiness failures report actionable diagnostics instead of a bare
   timeout
 - Targeted suites complete without leaving child daemons behind
+- duplicate daemon/process test helpers that become unnecessary after the new
+  guards land are deleted
 
 Estimate:
 - about 1 sprint
@@ -75,6 +85,8 @@ Acceptance:
 - Watcher/config reconciliation tests prefer deterministic direct calls over
   repeated polling where possible
 - CI output makes the currently running risky integration test identifiable
+- duplicate timing tests that do not provide unique coverage are consolidated or
+  removed
 
 Estimate:
 - about 1 to 1.5 sprints
@@ -104,6 +116,8 @@ Acceptance:
   to share mutable global state
 - A final audit confirms no remaining blocking/high hang-prone patterns in the
   touched suites
+- redundant tests and helper paths identified during AP.1/AP.2 are removed so
+  the final harness is smaller than the pre-AP baseline
 
 Estimate:
 - about 0.5 sprint

@@ -1647,14 +1647,16 @@ operator-controllable.
 | AO.2 | Explicit isolated runtime creation + 10-minute TTL cleanup policy | `feature/pAO-s2-isolated-runtime` | PLANNED |
 | AO.3 | Shared repo-state cache, single `(team, repo)` shared poller, PR-list primary poll surface, bounded poll cadence, team budgets (`100/hour`), attributed `run_gh()` path, merge-conflict checks, and config/init parity | `feature/pAO-s3-gh-budget-cache` | PLANNED |
 | AO.4 | Single `(team, repo)` lease ownership + hidden human-authorized cross-team stop/disable path with operator-facing owner metadata | `feature/pAO-s4-operator-control` | PLANNED |
+| AO.5 | Post-integration deletion sprint: simplify runtime/poller paths and narrow final contracts | `feature/pAO-s5-contract-simplification` | PLANNED |
 
 ### Exit Criteria
 1. Shared `release` and `dev` runtimes reject invalid owners and duplicate daemon starts.
 2. Isolated runtimes are explicit, short-lived, and do not enable live GH polling by default.
 3. GitHub calls are budgeted per team, counted locally, and surfaced with freshness metadata in `atm gh status` and `atm doctor`; one shared `(team, repo)` poller uses the repo-wide PR list view as its primary poll surface, polling at most once per 5 minutes when idle and once per 1 minute when active (`GH-CI-FR-10a`, `GH-CI-FR-10b`, `GH-CI-FR-10c`); pre-run/post-completion merge-conflict checks plus config/init parity remain on the attributed `run_gh()` path.
 4. One active `gh_monitor` owner exists per `(team, repo)`, operator-facing status shows the active owner metadata, and operators can stop a runaway monitor with auditable cross-team controls.
+5. Transitional runtime, polling, and state paths preserved during AO are removed or narrowed so the post-AO implementation exposes only the canonical contracts.
 
-**Dependency graph**: AO.1 → AO.2 → AO.3 → AO.4
+**Dependency graph**: AO.1 → AO.2 → AO.3 → AO.4 → AO.5
 
 ---
 
@@ -1685,6 +1687,8 @@ parallel, but AP.1 should start before new daemon-heavy test coverage expands.
    safely or serialized explicitly.
 4. Cross-platform fixtures avoid hardcoded `/tmp`, and risky integration suites
    fail with bounded, attributable diagnostics instead of hanging silently.
+5. Duplicate low-value tests and ad hoc helper paths are removed where they do
+   not provide unique coverage, leaving a smaller canonical harness.
 
 **Dependency graph**: AP.1 → AP.2 → AP.3
 
