@@ -2553,10 +2553,9 @@ provider = "custom-missing"
             .find(|record| record.team == "dev-team")
             .expect("dev-team health record");
         assert_eq!(record.availability_state, "disabled_config_error");
-        assert!(record
-            .message
-            .as_deref()
-            .is_some_and(|message| message.contains("CI provider 'custom-missing' not registered")));
+        assert!(record.message.as_deref().is_some_and(|message| {
+            message.contains("CI provider 'custom-missing' not registered")
+        }));
     }
 
     #[tokio::test]
