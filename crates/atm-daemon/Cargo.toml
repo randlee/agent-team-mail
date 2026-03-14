@@ -15,6 +15,16 @@ categories = ["command-line-utilities", "development-tools"]
 name = "atm-daemon"
 path = "src/main.rs"
 
+[[test]]
+name = "ci_monitor_error_tests"
+path = "tests/ci_monitor_error_tests.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "ci_monitor_integration"
+path = "tests/ci_monitor_integration.rs"
+required-features = ["test-support"]
+
 [dependencies]
 agent-team-mail-core.workspace = true
 sc-observability.workspace = true
@@ -49,6 +59,7 @@ libc = "0.2"
 default = []
 ssh = ["ssh2"]
 ssh-tests = ["ssh"]
+test-support = []
 
 [dev-dependencies]
 tempfile = "3.13"

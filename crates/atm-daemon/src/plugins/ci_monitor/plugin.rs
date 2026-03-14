@@ -92,6 +92,10 @@ pub struct CiMonitorPlugin {
     /// filesystem timing tricks.
     #[cfg(test)]
     list_members_error: Option<String>,
+    /// Test-only: force synthetic member joined_at timestamp generation to fail so init-path
+    /// error handling can be exercised without depending on wall-clock behavior.
+    #[cfg(test)]
+    joined_at_error: Option<String>,
 }
 
 impl CiMonitorPlugin {
@@ -108,6 +112,8 @@ impl CiMonitorPlugin {
             runtime_history_path: None,
             #[cfg(test)]
             list_members_error: None,
+            #[cfg(test)]
+            joined_at_error: None,
         }
     }
 
@@ -144,6 +150,33 @@ impl CiMonitorPlugin {
     fn with_list_members_error(mut self, msg: impl Into<String>) -> Self {
         self.list_members_error = Some(msg.into());
         self
+    }
+
+    /// Inject a simulated synthetic-member joined_at failure for init-path coverage.
+    #[cfg(test)]
+    fn with_joined_at_error(mut self, msg: impl Into<String>) -> Self {
+        self.joined_at_error = Some(msg.into());
+        self
+    }
+
+    fn synthetic_member_joined_at_ms(&self) -> Result<u64, PluginError> {
+        #[cfg(test)]
+        if let Some(ref err_msg) = self.joined_at_error {
+            return Err(PluginError::Init {
+                message: format!("Failed to determine synthetic member join timestamp: {err_msg}"),
+                source: None,
+            });
+        }
+
+        let duration =
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| PluginError::Init {
+                    message: format!("Failed to determine synthetic member join timestamp: {e}"),
+                    source: None,
+                })?;
+
+        Ok(duration.as_millis() as u64)
     }
 
     /// Build the provider registry with built-in and external providers
@@ -1063,12 +1096,17 @@ impl Plugin for CiMonitorPlugin {
         }
 
         // Determine ATM config root from canonical home resolution.
-        let atm_home = agent_team_mail_core::home::get_home_dir()
-            .map_err(|e| PluginError::Init {
-                message: format!("Could not determine home directory: {e}"),
-                source: None,
-            })?
-            .join(".config/atm");
+        let atm_home = match agent_team_mail_core::home::get_home_dir() {
+            Ok(home_dir) => home_dir.join(".config/atm"),
+            Err(e) => {
+                let err = PluginError::Init {
+                    message: format!("Could not determine home directory: {e}"),
+                    source: None,
+                };
+                self.project_disabled_config_error(ctx, config_table, &err.to_string());
+                return Err(err);
+            }
+        };
 
         // Build the provider registry
         let registry = self.build_registry(&atm_home);
@@ -1083,21 +1121,31 @@ impl Plugin for CiMonitorPlugin {
             // Create the CI provider from the registry
             // Pass provider_config for external providers
             let provider_config = self.config.provider_config.as_ref();
-            self.provider = Some(self.create_provider_from_registry(
+            let provider = match self.create_provider_from_registry(
                 &registry,
                 repo.provider.as_ref(),
                 provider_config,
-            )?);
+            ) {
+                Ok(provider) => provider,
+                Err(err) => {
+                    self.project_disabled_config_error(ctx, config_table, &err.to_string());
+                    return Err(err);
+                }
+            };
+            self.provider = Some(provider);
         }
 
         // Store registry for potential runtime use
         self.registry = Some(registry);
 
         // Register synthetic member
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let now_ms = match self.synthetic_member_joined_at_ms() {
+            Ok(now_ms) => now_ms,
+            Err(err) => {
+                self.project_disabled_config_error(ctx, config_table, &err.to_string());
+                return Err(err);
+            }
+        };
 
         let member = AgentMember {
             agent_id: format!("{}@{}", self.config.agent, self.config.team),
@@ -2438,6 +2486,87 @@ repo = "config-owner/config-repo"
                 .as_deref()
                 .is_some_and(|message| message.contains("No repository information available"))
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_init_joined_at_failure_writes_disabled_init_health_record() {
+        use crate::plugins::ci_monitor::MockCiProvider;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let table: toml::Table = toml::from_str("team = \"dev-team\"").unwrap();
+        let ctx = create_mock_context_with_repo_config(teams_root.clone(), Some(table), true);
+        let mut plugin = CiMonitorPlugin::new()
+            .with_provider(Box::new(MockCiProvider::new()))
+            .with_joined_at_error("simulated time failure");
+
+        let err = plugin
+            .init(&ctx)
+            .await
+            .expect_err("init should fail when synthetic member joined_at cannot be determined");
+        assert!(
+            err.to_string()
+                .contains("Failed to determine synthetic member join timestamp"),
+            "unexpected init error: {err}"
+        );
+
+        let health_path =
+            agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(temp_dir.path());
+        let raw = std::fs::read_to_string(&health_path).expect("health record");
+        let health: GhMonitorHealthFile = serde_json::from_str(&raw).expect("health json");
+        let record = health
+            .records
+            .iter()
+            .find(|record| record.team == "dev-team")
+            .expect("dev-team health record");
+        assert_eq!(record.availability_state, "disabled_config_error");
+        assert!(record.message.as_deref().is_some_and(|message| {
+            message.contains("Failed to determine synthetic member join timestamp")
+        }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_init_provider_creation_failure_writes_disabled_init_health_record() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let table: toml::Table = toml::from_str(
+            r#"
+team = "dev-team"
+provider = "custom-missing"
+"#,
+        )
+        .unwrap();
+        let ctx = create_mock_context_with_repo_config(teams_root.clone(), Some(table), true);
+        let mut plugin = CiMonitorPlugin::new();
+
+        let err = plugin
+            .init(&ctx)
+            .await
+            .expect_err("init should fail when provider creation fails");
+        assert!(
+            err.to_string()
+                .contains("CI provider 'custom-missing' not registered"),
+            "unexpected init error: {err}"
+        );
+
+        let health_path =
+            agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(temp_dir.path());
+        let raw = std::fs::read_to_string(&health_path).expect("health record");
+        let health: GhMonitorHealthFile = serde_json::from_str(&raw).expect("health json");
+        let record = health
+            .records
+            .iter()
+            .find(|record| record.team == "dev-team")
+            .expect("dev-team health record");
+        assert_eq!(record.availability_state, "disabled_config_error");
+        assert!(record.message.as_deref().is_some_and(|message| {
+            message.contains("CI provider 'custom-missing' not registered")
+        }));
     }
 
     #[tokio::test]
