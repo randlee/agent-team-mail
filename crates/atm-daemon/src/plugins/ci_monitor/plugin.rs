@@ -2772,7 +2772,7 @@ poll_interval_secs = 10
         std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         std::fs::write(
             &state_path,
-            r#"{"records":[{"team":"dev-team","configured":true,"enabled":true,"target_kind":"Workflow","target":"CI","state":"failure","run_id":42,"updated_at":"2026-03-14T00:00:00Z"}]}"#,
+            r#"{"records":[{"team":"dev-team","configured":true,"enabled":true,"target_kind":"workflow","target":"CI","state":"failure","run_id":42,"updated_at":"2026-03-14T00:00:00Z"}]}"#,
         )
         .unwrap();
 

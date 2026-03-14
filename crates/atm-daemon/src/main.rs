@@ -53,6 +53,8 @@ async fn main() -> Result<()> {
     // Determine home directory early for lock/log path resolution.
     let home_dir =
         agent_team_mail_core::home::get_home_dir().context("Failed to determine home directory")?;
+    let runtime_owner = agent_team_mail_core::daemon_client::validate_runtime_admission_for_current_process(&home_dir)
+        .context("Shared runtime admission failed")?;
 
     // Enforce single-instance daemon ownership with an exclusive process lock.
     let daemon_lock_path = agent_team_mail_core::daemon_client::daemon_lock_path()?;
@@ -69,10 +71,24 @@ async fn main() -> Result<()> {
     })?;
     let daemon_lock = agent_team_mail_core::io::lock::acquire_lock(&daemon_lock_path, 0).map_err(
         |e| match e {
-            agent_team_mail_core::io::InboxError::LockTimeout { .. } => anyhow::anyhow!(
-                "atm-daemon already running (lock held at {}). Refusing second instance.",
-                daemon_lock_path.display()
-            ),
+            agent_team_mail_core::io::InboxError::LockTimeout { .. } => {
+                if let Some(existing) =
+                    agent_team_mail_core::daemon_client::read_daemon_lock_metadata(&home_dir)
+                {
+                    anyhow::anyhow!(
+                        "atm-daemon already running for this shared runtime (lock held at {}). Existing owner: pid={} version={} {}. Refusing second instance.",
+                        daemon_lock_path.display(),
+                        existing.pid,
+                        existing.version,
+                        agent_team_mail_core::daemon_client::format_runtime_owner_summary(&existing.owner)
+                    )
+                } else {
+                    anyhow::anyhow!(
+                        "atm-daemon already running (lock held at {}). Refusing second instance.",
+                        daemon_lock_path.display()
+                    )
+                }
+            }
             other => anyhow::anyhow!(
                 "Failed to acquire daemon lock at {}: {}",
                 daemon_lock_path.display(),
@@ -83,6 +99,7 @@ async fn main() -> Result<()> {
     agent_team_mail_core::daemon_client::write_daemon_lock_metadata(
         &home_dir,
         env!("CARGO_PKG_VERSION"),
+        &runtime_owner,
     )
     .context("Failed to write daemon lock metadata")?;
 
@@ -276,6 +293,7 @@ async fn main() -> Result<()> {
     let status_writer = Arc::new(StatusWriter::new(
         home_dir.clone(),
         env!("CARGO_PKG_VERSION").to_string(),
+        runtime_owner.clone(),
     ));
     info!(
         "Status writer initialized: {}",
