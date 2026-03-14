@@ -1,6 +1,6 @@
 use assert_cmd::cargo;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -44,7 +44,8 @@ impl DaemonProcessGuard {
         }
     }
 
-    pub fn adopt_registered_pid(pid: u32, daemon_bin: &PathBuf) -> Self {
+    #[allow(dead_code)]
+    pub fn adopt_registered_pid(pid: u32, daemon_bin: &Path) -> Self {
         assert!(pid > 1, "adopted daemon PID must be > 1, got {pid}");
         daemon_test_registry::register_test_daemon(pid, daemon_bin);
         Self { child: None, pid }
