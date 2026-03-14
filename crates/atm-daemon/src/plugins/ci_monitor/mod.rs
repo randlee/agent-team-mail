@@ -16,8 +16,6 @@ mod loader;
 #[cfg(any(test, feature = "test-support"))]
 mod mock_provider;
 mod plugin;
-#[cfg(unix)]
-pub(crate) mod polling;
 mod provider;
 mod registry;
 #[cfg(unix)]
