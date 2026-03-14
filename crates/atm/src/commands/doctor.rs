@@ -744,7 +744,7 @@ fn check_hook_audit(home_dir: &Path, current_dir: &Path) -> Vec<Finding> {
                 claude_scripts_dir
                     .join("atm-hook-relay.py")
                     .to_string_lossy()
-                    .to_string(),
+                    .replace('\\', "/"),
             ),
         ];
         match fs::read_to_string(&codex_config_path) {
