@@ -3,7 +3,7 @@
 use super::config::{CiMonitorConfig, DedupStrategy};
 use super::loader::CiProviderLoader;
 use super::provider::ErasedCiProvider;
-use super::registry::{CiProviderFactory, CiProviderRegistry, CiProviderRegistryPort};
+use super::registry::{CiProviderFactory, CiProviderRegistryPort};
 #[cfg(unix)]
 use super::service::{create_provider_from_registry, fetch_run_details, list_completed_runs};
 #[cfg(test)]
@@ -179,7 +179,7 @@ impl CiMonitorPlugin {
 
     /// Build the provider registry with built-in and external providers
     fn build_registry(&mut self, atm_home: &std::path::Path) -> Box<dyn CiProviderRegistryPort> {
-        let mut registry = CiProviderRegistry::new();
+        let mut registry = super::registry::CiProviderRegistry::new();
 
         // Register built-in GitHub Actions provider
         registry.register(CiProviderFactory {
@@ -1488,7 +1488,7 @@ mod tests {
 
     #[test]
     fn test_create_provider_from_registry_prefers_git_repo_over_config_repo() {
-        let registry = CiProviderRegistry::new();
+        let registry = RecordingRegistry::new();
         let git_provider = GitProviderType::GitHub {
             owner: "git-owner".to_string(),
             repo: "git-repo".to_string(),
@@ -1511,7 +1511,7 @@ mod tests {
 
     #[test]
     fn test_create_provider_from_registry_falls_back_to_config_repo_when_git_missing() {
-        let registry = CiProviderRegistry::new();
+        let registry = RecordingRegistry::new();
 
         let provider = create_provider_from_registry(
             &registry,
