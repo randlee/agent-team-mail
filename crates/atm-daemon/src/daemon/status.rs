@@ -3,6 +3,7 @@
 //! Writes daemon status to `${ATM_HOME}/.atm/daemon/status.json` for CLI consumption.
 //! Status includes daemon PID, uptime, plugin states, and last update timestamp.
 
+use agent_team_mail_core::daemon_client::RuntimeOwnerMetadata;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -19,6 +20,9 @@ pub struct DaemonStatus {
     pub version: String,
     /// Uptime in seconds since daemon start
     pub uptime_secs: u64,
+    /// Runtime owner metadata for shared-runtime admission and diagnostics.
+    #[serde(default)]
+    pub owner: RuntimeOwnerMetadata,
     /// Plugin statuses
     pub plugins: Vec<PluginStatus>,
     /// Active teams being monitored
@@ -100,6 +104,8 @@ pub struct StatusWriter {
     start_time: SystemTime,
     /// Daemon version
     version: String,
+    /// Runtime owner metadata
+    owner: RuntimeOwnerMetadata,
 }
 
 impl StatusWriter {
@@ -109,7 +115,7 @@ impl StatusWriter {
     ///
     /// * `home_dir` - ATM home directory (from `get_home_dir()`)
     /// * `version` - Daemon version string
-    pub fn new(home_dir: PathBuf, version: String) -> Self {
+    pub fn new(home_dir: PathBuf, version: String, owner: RuntimeOwnerMetadata) -> Self {
         let daemon_dir = home_dir.join(".atm/daemon");
         let status_path = daemon_dir.join("status.json");
 
@@ -117,6 +123,7 @@ impl StatusWriter {
             status_path,
             start_time: SystemTime::now(),
             version,
+            owner,
         }
     }
 
@@ -159,6 +166,7 @@ impl StatusWriter {
             pid: std::process::id(),
             version: self.version.clone(),
             uptime_secs,
+            owner: self.owner.clone(),
             plugins,
             teams,
             logging,
@@ -207,6 +215,7 @@ fn format_timestamp(time: SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_team_mail_core::daemon_client::{BuildProfile, RuntimeKind};
     use tempfile::TempDir;
 
     fn logging_health() -> LoggingHealth {
@@ -221,10 +230,23 @@ mod tests {
         }
     }
 
+    fn runtime_owner(home: &std::path::Path) -> RuntimeOwnerMetadata {
+        RuntimeOwnerMetadata {
+            runtime_kind: RuntimeKind::Isolated,
+            build_profile: BuildProfile::Release,
+            executable_path: home.join("atm-daemon").to_string_lossy().into_owned(),
+            home_scope: home.to_string_lossy().into_owned(),
+        }
+    }
+
     #[test]
     fn test_status_writer_creates_file() {
         let temp_dir = TempDir::new().unwrap();
-        let writer = StatusWriter::new(temp_dir.path().to_path_buf(), "0.8.0".to_string());
+        let writer = StatusWriter::new(
+            temp_dir.path().to_path_buf(),
+            "0.8.0".to_string(),
+            runtime_owner(temp_dir.path()),
+        );
 
         let plugins = vec![PluginStatus {
             name: "test_plugin".to_string(),
@@ -246,7 +268,11 @@ mod tests {
     #[test]
     fn test_status_writer_atomic_write() {
         let temp_dir = TempDir::new().unwrap();
-        let writer = StatusWriter::new(temp_dir.path().to_path_buf(), "0.8.0".to_string());
+        let writer = StatusWriter::new(
+            temp_dir.path().to_path_buf(),
+            "0.8.0".to_string(),
+            runtime_owner(temp_dir.path()),
+        );
 
         let plugins = vec![];
         let teams = vec![];
@@ -272,7 +298,11 @@ mod tests {
     #[test]
     fn test_status_writer_correct_json_structure() {
         let temp_dir = TempDir::new().unwrap();
-        let writer = StatusWriter::new(temp_dir.path().to_path_buf(), "0.8.0".to_string());
+        let writer = StatusWriter::new(
+            temp_dir.path().to_path_buf(),
+            "0.8.0".to_string(),
+            runtime_owner(temp_dir.path()),
+        );
 
         let plugins = vec![
             PluginStatus {
@@ -334,7 +364,11 @@ mod tests {
     #[test]
     fn test_status_uptime_increases() {
         let temp_dir = TempDir::new().unwrap();
-        let writer = StatusWriter::new(temp_dir.path().to_path_buf(), "0.8.0".to_string());
+        let writer = StatusWriter::new(
+            temp_dir.path().to_path_buf(),
+            "0.8.0".to_string(),
+            runtime_owner(temp_dir.path()),
+        );
 
         let plugins = vec![];
         let teams = vec![];

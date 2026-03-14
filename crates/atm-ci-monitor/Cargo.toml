@@ -1,0 +1,29 @@
+[package]
+name = "agent-team-mail-ci-monitor"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Reusable CI monitor core for agent-team-mail"
+keywords = ["ci", "github", "monitoring", "ai-agents"]
+categories = ["development-tools", "command-line-utilities"]
+
+[lib]
+name = "agent_team_mail_ci_monitor"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tokio = { version = "1", features = ["full"] }
+
+[features]
+default = []
+test-support = []
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
