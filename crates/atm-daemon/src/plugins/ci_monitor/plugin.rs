@@ -1496,7 +1496,8 @@ mod tests {
 
     #[test]
     fn test_dedup_key_per_commit() {
-        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus, create_test_run};
+        use crate::plugins::ci_monitor::mock_support::create_test_run;
+        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus};
         let plugin = CiMonitorPlugin::new(); // Default uses PerCommit
         let run = create_test_run(
             123456,
@@ -1511,7 +1512,8 @@ mod tests {
 
     #[test]
     fn test_dedup_key_per_run() {
-        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus, create_test_run};
+        use crate::plugins::ci_monitor::mock_support::create_test_run;
+        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus};
         let config = CiMonitorConfig {
             dedup_strategy: DedupStrategy::PerRun,
             ..Default::default()
@@ -1530,7 +1532,8 @@ mod tests {
 
     #[test]
     fn test_dedup_key_distinct_on_conclusion_change() {
-        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus, create_test_run};
+        use crate::plugins::ci_monitor::mock_support::create_test_run;
+        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus};
         let plugin = CiMonitorPlugin::new();
         let run1 = create_test_run(
             123,
@@ -1571,9 +1574,8 @@ mod tests {
 
     #[test]
     fn test_runtime_drift_alert_message_deterministic() {
-        use crate::plugins::ci_monitor::{
-            CiRunConclusion, CiRunStatus, create_test_job, create_test_run,
-        };
+        use crate::plugins::ci_monitor::mock_support::{create_test_job, create_test_run};
+        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus};
 
         let config = CiMonitorConfig {
             runtime_drift_enabled: true,
@@ -1629,7 +1631,8 @@ mod tests {
 
     #[test]
     fn test_runtime_drift_alert_respects_alert_cooldown() {
-        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus, create_test_run};
+        use crate::plugins::ci_monitor::mock_support::create_test_run;
+        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus};
 
         let config = CiMonitorConfig {
             runtime_drift_enabled: true,
@@ -1748,7 +1751,9 @@ mod tests {
     // E2E routing and filtering tests
     #[tokio::test]
     async fn test_e2e_branch_filter_and_routing() {
-        use crate::plugins::ci_monitor::{MockCiProvider, create_test_job, create_test_run};
+        use crate::plugins::ci_monitor::mock_support::{
+            MockCiProvider, create_test_job, create_test_run,
+        };
         use tempfile::TempDir;
 
         // Setup: Create temporary teams directory
@@ -1859,7 +1864,7 @@ notify_target = "team-lead"
 
     #[tokio::test]
     async fn test_e2e_branch_filter_excludes_non_matching() {
-        use crate::plugins::ci_monitor::{MockCiProvider, create_test_run};
+        use crate::plugins::ci_monitor::mock_support::{MockCiProvider, create_test_run};
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
@@ -1995,7 +2000,7 @@ notify_target = "team-lead"
 
     #[tokio::test]
     async fn test_notify_target_validation_warns_on_missing_agent() {
-        use crate::plugins::ci_monitor::MockCiProvider;
+        use crate::plugins::ci_monitor::mock_support::MockCiProvider;
         use agent_team_mail_core::schema::{AgentMember, TeamConfig};
         use tempfile::TempDir;
 
@@ -2062,7 +2067,7 @@ notify_target = "nonexistent-agent"
     #[tokio::test]
     #[serial_test::serial]
     async fn test_init_falls_back_to_config_repo_when_system_repo_missing() {
-        use crate::plugins::ci_monitor::MockCiProvider;
+        use crate::plugins::ci_monitor::mock_support::MockCiProvider;
         use agent_team_mail_core::schema::{AgentMember, TeamConfig};
         use tempfile::TempDir;
 
@@ -2164,7 +2169,7 @@ repo = "config-owner/config-repo"
     #[tokio::test]
     #[serial_test::serial]
     async fn test_init_adopts_existing_ci_monitor_member_without_error() {
-        use crate::plugins::ci_monitor::MockCiProvider;
+        use crate::plugins::ci_monitor::mock_support::MockCiProvider;
         use agent_team_mail_core::schema::{AgentMember, TeamConfig};
         use tempfile::TempDir;
 
@@ -2271,7 +2276,7 @@ repo = "config-owner/config-repo"
     #[tokio::test]
     #[serial_test::serial]
     async fn test_init_rejects_non_plugin_member_with_same_name() {
-        use crate::plugins::ci_monitor::MockCiProvider;
+        use crate::plugins::ci_monitor::mock_support::MockCiProvider;
         use agent_team_mail_core::schema::{AgentMember, TeamConfig};
         use tempfile::TempDir;
 
@@ -2392,7 +2397,7 @@ repo = "config-owner/config-repo"
     #[cfg(unix)]
     #[tokio::test]
     async fn test_init_without_git_or_config_repo_writes_disabled_init_health_record() {
-        use crate::plugins::ci_monitor::MockCiProvider;
+        use crate::plugins::ci_monitor::mock_support::MockCiProvider;
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
@@ -2431,7 +2436,7 @@ repo = "config-owner/config-repo"
 
     #[tokio::test]
     async fn test_notify_target_validation_passes_on_existing_agent() {
-        use crate::plugins::ci_monitor::MockCiProvider;
+        use crate::plugins::ci_monitor::mock_support::MockCiProvider;
         use agent_team_mail_core::schema::{AgentMember, TeamConfig};
         use tempfile::TempDir;
 
@@ -2521,9 +2526,8 @@ notify_target = "team-lead"
 
     #[tokio::test]
     async fn test_polling_notification_suppressed_when_command_path_already_terminal() {
-        use crate::plugins::ci_monitor::{
-            CiRunConclusion, CiRunStatus, MockCiProvider, create_test_run,
-        };
+        use crate::plugins::ci_monitor::mock_support::{MockCiProvider, create_test_run};
+        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus};
         use agent_team_mail_core::schema::{AgentMember, TeamConfig};
         use tempfile::TempDir;
 
@@ -2618,7 +2622,8 @@ poll_interval_secs = 10
 
     #[test]
     fn test_run_to_message_includes_multi_recipient_note() {
-        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus, create_test_run};
+        use crate::plugins::ci_monitor::mock_support::create_test_run;
+        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus};
 
         // Create plugin with multiple notify targets
         let toml_str = r#"
@@ -2651,7 +2656,7 @@ notify_target = ["lead", "qa-bot@qa-team"]
     #[tokio::test]
     #[serial_test::serial]
     async fn test_init_propagates_list_members_error_on_duplicate() {
-        use crate::plugins::ci_monitor::MockCiProvider;
+        use crate::plugins::ci_monitor::mock_support::MockCiProvider;
         use agent_team_mail_core::schema::{AgentMember, TeamConfig};
         use tempfile::TempDir;
 
@@ -2731,7 +2736,8 @@ agent = "ci-monitor"
 
     #[test]
     fn test_run_to_message_no_multi_recipient_note_for_single_target() {
-        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus, create_test_run};
+        use crate::plugins::ci_monitor::mock_support::create_test_run;
+        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus};
 
         // Create plugin with single notify target
         let toml_str = r#"

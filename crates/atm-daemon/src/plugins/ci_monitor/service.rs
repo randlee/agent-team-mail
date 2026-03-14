@@ -612,8 +612,9 @@ pub(crate) fn status_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::ci_monitor::{
-        CiRunConclusion, MockCall, MockCiProvider, create_test_job, create_test_run,
+    use crate::plugins::ci_monitor::CiRunConclusion;
+    use crate::plugins::ci_monitor::mock_support::{
+        MockCall, MockCiProvider, create_test_job, create_test_run,
     };
 
     #[tokio::test]

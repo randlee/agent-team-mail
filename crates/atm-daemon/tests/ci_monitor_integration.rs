@@ -5,9 +5,9 @@ use agent_team_mail_core::config::Config;
 use agent_team_mail_core::context::{GitProvider, Platform, RepoContext, SystemContext};
 use agent_team_mail_core::schema::InboxMessage;
 use agent_team_mail_daemon::plugin::{MailService, Plugin, PluginContext};
-use agent_team_mail_daemon::plugins::ci_monitor::{
-    CiMonitorPlugin, CiRunConclusion, CiRunStatus, MockCall, MockCiProvider, create_test_job,
-    create_test_run,
+use agent_team_mail_daemon::plugins::ci_monitor::{CiMonitorPlugin, CiRunConclusion, CiRunStatus};
+use agent_team_mail_daemon::plugins::ci_monitor::mock_support::{
+    MockCall, MockCiProvider, create_test_job, create_test_run,
 };
 use agent_team_mail_daemon::roster::RosterService;
 use std::path::Path;
