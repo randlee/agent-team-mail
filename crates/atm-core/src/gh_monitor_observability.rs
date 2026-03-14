@@ -12,7 +12,7 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::event_log::{emit_event_best_effort, EventFields};
+use crate::event_log::{EventFields, emit_event_best_effort};
 
 const GH_BUDGET_LIMIT_PER_HOUR: u64 = 100;
 const GH_WARNING_THRESHOLD: u64 = 50;
@@ -124,27 +124,34 @@ pub fn update_gh_repo_state_rate_limit(
 }
 
 fn record_call_outcome(ctx: &GhCliObserverContext, outcome: &GhCliCallOutcome) -> Result<()> {
-    let record = mutate_record(&ctx.home, &ctx.team, &ctx.repo, &ctx.runtime, |record, now| {
-        maybe_reset_budget_window(record, now);
-        record.budget_used_in_window += 1;
-        bump_branch_ref_count(
-            &mut record.branch_ref_counts,
-            outcome.metadata.branch.as_deref(),
-            outcome.metadata.reference.as_deref(),
-        );
-        record.last_call = Some(agent_team_mail_ci_monitor::GhObservedCall {
-            action: outcome.metadata.action.clone(),
-            branch: outcome.metadata.branch.clone(),
-            reference: outcome.metadata.reference.clone(),
-            duration_ms: outcome.duration_ms,
-            success: outcome.success,
-            error: outcome.error.clone(),
-            at: now.to_rfc3339(),
-        });
-        record.updated_at = now.to_rfc3339();
-        record.last_refresh_at = Some(now.to_rfc3339());
-        record.cache_expires_at = (now + Duration::seconds(GH_REPO_STATE_TTL_SECS)).to_rfc3339();
-    })?;
+    let record = mutate_record(
+        &ctx.home,
+        &ctx.team,
+        &ctx.repo,
+        &ctx.runtime,
+        |record, now| {
+            maybe_reset_budget_window(record, now);
+            record.budget_used_in_window += 1;
+            bump_branch_ref_count(
+                &mut record.branch_ref_counts,
+                outcome.metadata.branch.as_deref(),
+                outcome.metadata.reference.as_deref(),
+            );
+            record.last_call = Some(agent_team_mail_ci_monitor::GhObservedCall {
+                action: outcome.metadata.action.clone(),
+                branch: outcome.metadata.branch.clone(),
+                reference: outcome.metadata.reference.clone(),
+                duration_ms: outcome.duration_ms,
+                success: outcome.success,
+                error: outcome.error.clone(),
+                at: now.to_rfc3339(),
+            });
+            record.updated_at = now.to_rfc3339();
+            record.last_refresh_at = Some(now.to_rfc3339());
+            record.cache_expires_at =
+                (now + Duration::seconds(GH_REPO_STATE_TTL_SECS)).to_rfc3339();
+        },
+    )?;
 
     emit_call_event(ctx, outcome, &record);
 
@@ -178,8 +185,14 @@ fn emit_call_event(
 ) {
     let mut extra = serde_json::Map::new();
     extra.insert("repo".to_string(), json!(ctx.repo));
-    extra.insert("used_calls".to_string(), json!(record.budget_used_in_window));
-    extra.insert("budget_limit_per_hour".to_string(), json!(record.budget_limit_per_hour));
+    extra.insert(
+        "used_calls".to_string(),
+        json!(record.budget_used_in_window),
+    );
+    extra.insert(
+        "budget_limit_per_hour".to_string(),
+        json!(record.budget_limit_per_hour),
+    );
     extra.insert("duration_ms".to_string(), json!(outcome.duration_ms));
     if let Some(branch) = outcome.metadata.branch.as_deref() {
         extra.insert("branch".to_string(), json!(branch));
@@ -193,7 +206,14 @@ fn emit_call_event(
         action: "gh_api_call",
         team: Some(ctx.team.clone()),
         target: Some(ctx.repo.clone()),
-        result: Some(if outcome.success { "success" } else { "failure" }.to_string()),
+        result: Some(
+            if outcome.success {
+                "success"
+            } else {
+                "failure"
+            }
+            .to_string(),
+        ),
         error: outcome.error.clone(),
         runtime: Some(ctx.runtime.clone()),
         count: Some(record.budget_used_in_window),
@@ -211,8 +231,14 @@ fn emit_rate_limit_event(
 ) {
     let mut extra = serde_json::Map::new();
     extra.insert("repo".to_string(), json!(ctx.repo));
-    extra.insert("used_calls".to_string(), json!(record.budget_used_in_window));
-    extra.insert("budget_limit_per_hour".to_string(), json!(record.budget_limit_per_hour));
+    extra.insert(
+        "used_calls".to_string(),
+        json!(record.budget_used_in_window),
+    );
+    extra.insert(
+        "budget_limit_per_hour".to_string(),
+        json!(record.budget_limit_per_hour),
+    );
     if let Some(branch) = metadata.branch.as_deref() {
         extra.insert("branch".to_string(), json!(branch));
     }
@@ -265,7 +291,34 @@ where
     let mut record = by_key
         .remove(&key)
         .unwrap_or_else(|| default_repo_state_record(team, repo, runtime, home));
-    record.owner = Some(runtime_owner(runtime, home));
+    let current_owner = runtime_owner(runtime, home);
+    if let Some(existing_owner) = record.owner.as_ref()
+        && existing_owner.pid != current_owner.pid
+        && owner_pid_alive(existing_owner.pid)
+    {
+        emit_event_best_effort(EventFields {
+            level: "warn",
+            source: "atm",
+            action: "gh_monitor_lease_conflict",
+            team: Some(team.to_string()),
+            target: Some(repo.to_ascii_lowercase()),
+            runtime: Some(current_owner.runtime.clone()),
+            error: Some(format!(
+                "repo lease already owned by pid {} at {}",
+                existing_owner.pid, existing_owner.executable_path
+            )),
+            ..Default::default()
+        });
+        anyhow::bail!(
+            "gh_monitor lease conflict for team={} repo={}: active owner pid={} executable={} home={}",
+            team,
+            repo,
+            existing_owner.pid,
+            existing_owner.executable_path,
+            existing_owner.home_scope
+        );
+    }
+    record.owner = Some(current_owner);
     mutator(&mut record, now);
     if record.budget_used_in_window >= record.budget_limit_per_hour {
         record.blocked = true;
@@ -282,7 +335,12 @@ fn read_or_create_record(home: &Path, team: &str, repo: &str) -> Result<GhRepoSt
     mutate_record(home, team, repo, "atm", |_, _| {})
 }
 
-fn default_repo_state_record(team: &str, repo: &str, runtime: &str, home: &Path) -> GhRepoStateRecord {
+fn default_repo_state_record(
+    team: &str,
+    repo: &str,
+    runtime: &str,
+    home: &Path,
+) -> GhRepoStateRecord {
     let now = Utc::now();
     GhRepoStateRecord {
         team: team.to_string(),
@@ -307,6 +365,15 @@ fn default_repo_state_record(team: &str, repo: &str, runtime: &str, home: &Path)
 }
 
 fn runtime_owner(runtime: &str, home: &Path) -> GhRuntimeOwner {
+    if let Ok(owner) = crate::daemon_client::validate_runtime_admission_for_current_process(home) {
+        return GhRuntimeOwner {
+            runtime: owner.runtime_kind.as_str().to_string(),
+            executable_path: owner.executable_path,
+            home_scope: owner.home_scope,
+            pid: std::process::id(),
+        };
+    }
+
     GhRuntimeOwner {
         runtime: runtime.to_string(),
         executable_path: std::env::current_exe()
@@ -321,6 +388,17 @@ fn runtime_owner(runtime: &str, home: &Path) -> GhRuntimeOwner {
             .to_string(),
         pid: std::process::id(),
     }
+}
+
+#[cfg(unix)]
+fn owner_pid_alive(pid: u32) -> bool {
+    let rc = unsafe { libc::kill(pid as i32, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn owner_pid_alive(pid: u32) -> bool {
+    pid == std::process::id()
 }
 
 fn maybe_reset_budget_window(record: &mut GhRepoStateRecord, now: DateTime<Utc>) {
@@ -349,10 +427,9 @@ fn bump_branch_ref_count(
 ) {
     let branch = branch.map(str::trim).filter(|value| !value.is_empty());
     let reference = reference.map(str::trim).filter(|value| !value.is_empty());
-    if let Some(bucket) = counts
-        .iter_mut()
-        .find(|bucket| bucket.branch.as_deref() == branch && bucket.reference.as_deref() == reference)
-    {
+    if let Some(bucket) = counts.iter_mut().find(|bucket| {
+        bucket.branch.as_deref() == branch && bucket.reference.as_deref() == reference
+    }) {
         bucket.count += 1;
         return;
     }
@@ -382,6 +459,8 @@ fn parse_rfc3339(value: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::process::Command;
     use tempfile::TempDir;
 
     #[test]
@@ -394,9 +473,15 @@ mod tests {
             runtime: "atm-daemon".to_string(),
         };
         let observer = SharedGhCliObserver::new(ctx.clone());
-        mutate_record(temp.path(), "atm-dev", "owner/repo", "atm-daemon", |record, _| {
-            record.budget_used_in_window = record.budget_limit_per_hour;
-        })
+        mutate_record(
+            temp.path(),
+            "atm-dev",
+            "owner/repo",
+            "atm-daemon",
+            |record, _| {
+                record.budget_used_in_window = record.budget_limit_per_hour;
+            },
+        )
         .unwrap();
         let err = observer
             .before_gh_call(&GhCliCallMetadata {
@@ -444,5 +529,65 @@ mod tests {
             record.branch_ref_counts[0].branch.as_deref(),
             Some("develop")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_observer_rejects_live_foreign_owner() {
+        let temp = TempDir::new().unwrap();
+        let mut child = Command::new("sleep").arg("2").spawn().unwrap();
+        let now = Utc::now();
+        write_repo_state(
+            temp.path(),
+            &GhRepoStateFile {
+                records: vec![GhRepoStateRecord {
+                    team: "atm-dev".to_string(),
+                    repo: "owner/repo".to_string(),
+                    updated_at: now.to_rfc3339(),
+                    cache_expires_at: (now + Duration::seconds(GH_REPO_STATE_TTL_SECS))
+                        .to_rfc3339(),
+                    last_refresh_at: None,
+                    budget_limit_per_hour: GH_BUDGET_LIMIT_PER_HOUR,
+                    budget_used_in_window: 0,
+                    budget_window_started_at: now.to_rfc3339(),
+                    budget_warning_threshold: GH_WARNING_THRESHOLD,
+                    warning_emitted_at: None,
+                    blocked: false,
+                    in_flight: 0,
+                    idle_poll_interval_secs: GH_IDLE_POLL_INTERVAL_SECS,
+                    active_poll_interval_secs: GH_ACTIVE_POLL_INTERVAL_SECS,
+                    branch_ref_counts: Vec::new(),
+                    last_call: None,
+                    rate_limit: None,
+                    owner: Some(GhRuntimeOwner {
+                        runtime: "dev".to_string(),
+                        executable_path: "/tmp/foreign-atm-daemon".to_string(),
+                        home_scope: temp.path().to_string_lossy().to_string(),
+                        pid: child.id(),
+                    }),
+                }],
+            },
+        )
+        .unwrap();
+
+        let ctx = GhCliObserverContext {
+            home: temp.path().to_path_buf(),
+            team: "atm-dev".to_string(),
+            repo: "owner/repo".to_string(),
+            runtime: "atm-daemon".to_string(),
+        };
+        let observer = SharedGhCliObserver::new(ctx);
+        let err = observer
+            .before_gh_call(&GhCliCallMetadata {
+                repo_scope: "owner/repo".to_string(),
+                action: "gh_run_list".to_string(),
+                args: vec!["run".to_string(), "list".to_string()],
+                branch: Some("main".to_string()),
+                reference: None,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("lease conflict"));
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }

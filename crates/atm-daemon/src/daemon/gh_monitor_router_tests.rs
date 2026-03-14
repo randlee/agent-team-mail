@@ -15,6 +15,7 @@ use crate::plugins::ci_monitor::test_support::{
 use crate::plugins::ci_monitor::types::{
     CiMonitorRequest, CiMonitorStatus, CiMonitorTargetKind, GhAlertTargets, GhMonitorHealthUpdate,
 };
+use agent_team_mail_core::gh_monitor_observability::update_gh_repo_state_in_flight;
 use serial_test::serial;
 use tempfile::TempDir;
 
@@ -1029,6 +1030,55 @@ async fn test_gh_monitor_control_start_stop_restart_and_health() {
     let health = health_resp.payload.unwrap();
     assert_eq!(health["team"].as_str(), Some("atm-dev"));
     assert_eq!(health["lifecycle_state"].as_str(), Some("running"));
+}
+
+#[tokio::test]
+#[cfg(unix)]
+#[serial]
+async fn test_gh_monitor_control_cross_team_requires_user_authorized() {
+    let temp = TempDir::new().unwrap();
+    let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+    write_gh_monitor_config(temp.path(), "ops-team");
+
+    let stop_req = r#"{"version":1,"request_id":"r-gh-stop-cross-team","command":"gh-monitor-control","payload":{"team":"ops-team","action":"stop","actor":"team-lead","actor_team":"atm-dev","drain_timeout_secs":1}}"#;
+    let stop_resp = handle_gh_monitor_control_command(stop_req, temp.path()).await;
+    assert_eq!(stop_resp.status, "error");
+    let err = stop_resp.error.expect("cross-team stop should fail");
+    assert_eq!(err.code, "AUTHORIZATION_REQUIRED");
+}
+
+#[tokio::test]
+#[cfg(unix)]
+#[serial]
+async fn test_gh_monitor_health_includes_owner_metadata_fields() {
+    let temp = TempDir::new().unwrap();
+    let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+    write_gh_monitor_config(temp.path(), "atm-dev");
+    update_gh_repo_state_in_flight(temp.path(), "atm-dev", "o/r", 1, "atm-daemon").unwrap();
+
+    let health_req = r#"{"version":1,"request_id":"r-gh-health-owner","command":"gh-monitor-health","payload":{"team":"atm-dev"}}"#;
+    let health_resp = handle_gh_monitor_health_command(health_req, temp.path()).await;
+    assert_eq!(health_resp.status, "ok");
+    let health = health_resp.payload.unwrap();
+    assert_eq!(health["owner_runtime_kind"].as_str(), Some("isolated"));
+    assert_eq!(health["owner_repo"].as_str(), Some("o/r"));
+    assert_eq!(health["owner_poll_interval_secs"].as_u64(), Some(60));
+    assert_eq!(
+        health["owner_pid"].as_u64(),
+        Some(std::process::id() as u64)
+    );
+    assert!(
+        health["owner_binary_path"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("agent_team_mail_daemon"),
+        "expected owner_binary_path in health payload: {health:?}"
+    );
+    let canonical_home = std::fs::canonicalize(temp.path()).unwrap();
+    assert_eq!(
+        health["owner_atm_home"].as_str(),
+        Some(canonical_home.to_string_lossy().as_ref())
+    );
 }
 
 #[tokio::test]

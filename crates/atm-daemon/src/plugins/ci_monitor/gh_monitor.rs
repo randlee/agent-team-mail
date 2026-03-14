@@ -3,12 +3,12 @@
 pub(crate) use super::gh_alerts::emit_ci_monitor_message;
 // These schema re-exports keep the legacy gh_monitor tests/builders compiling
 // while AM.6 finishes moving the remaining provider helpers behind the routed surface.
+use super::github_provider::GitHubActionsProvider;
 #[allow(unused_imports)]
 pub(crate) use super::github_schema::{
     GhPrLookupView, GhPrView, GhPullRequest, GhRunJob, GhRunListEntry, GhRunStep, GhRunView,
 };
 use super::helpers::upsert_gh_monitor_status_for_repo;
-use super::github_provider::GitHubActionsProvider;
 use super::provider::CiProvider;
 // These routing re-exports preserve the pre-split gh_monitor call surface for
 // downstream code until the final thin-socket cleanup removes the shim layer.
@@ -20,8 +20,8 @@ pub(crate) use super::routing::{
     resolve_ci_alert_routing,
 };
 use super::types::{CiMonitorRequest, CiMonitorStatus, CiMonitorTargetKind, GhAlertTargets};
-use anyhow::Result;
 use agent_team_mail_core::gh_monitor_observability::{GhCliObserverContext, build_gh_cli_observer};
+use anyhow::Result;
 use tracing::warn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -386,17 +386,16 @@ pub(crate) async fn monitor_gh_run(
 
         if terminal != GhRunTerminalState::Success {
             let correlation_id = format!("ci-failure-{}-{}", run.database_id, uuid::Uuid::new_v4());
-            let failure_payload =
-                    build_failure_payload(
-                        home,
-                        &status_seed.team,
-                        &run,
-                        status_seed,
-                        gh_request,
-                        owner_repo,
-                        &correlation_id,
-                    )
-                    .await;
+            let failure_payload = build_failure_payload(
+                home,
+                &status_seed.team,
+                &run,
+                status_seed,
+                gh_request,
+                owner_repo,
+                &correlation_id,
+            )
+            .await;
             message.push_str("\nFailure details:\n");
             message.push_str(&failure_payload);
         }

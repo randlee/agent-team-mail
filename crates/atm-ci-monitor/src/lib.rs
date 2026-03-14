@@ -7,13 +7,16 @@ mod github_provider;
 #[cfg(any(test, feature = "test-support"))]
 mod mock_provider;
 mod provider;
-pub mod repo_state;
 mod registry;
+pub mod repo_state;
 pub mod service;
 mod types;
 
 pub use github_provider::GitHubActionsProvider;
-pub use provider::{CiProvider, ErasedCiProvider, GhCliCallMetadata, GhCliCallOutcome, GhCliObserver, GhCliObserverRef};
+pub use provider::{
+    CiProvider, ErasedCiProvider, GhCliCallMetadata, GhCliCallOutcome, GhCliObserver,
+    GhCliObserverRef,
+};
 pub use registry::{CiFactoryFn, CiProviderFactory, CiProviderRegistry};
 pub use types::{
     CiFilter, CiJob, CiProviderError, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep,

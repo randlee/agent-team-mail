@@ -4,9 +4,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
-use anyhow::Result;
+use agent_team_mail_ci_monitor::GhRepoStateRecord;
 #[cfg(unix)]
 use agent_team_mail_core::gh_monitor_observability::read_gh_repo_state_record;
+#[cfg(unix)]
+use anyhow::Result;
 #[cfg(all(test, unix))]
 use tracing::warn;
 
@@ -34,6 +36,46 @@ pub(crate) fn default_gh_monitor_health(team: &str) -> CiMonitorHealth {
         rate_limit_remaining: None,
         rate_limit_limit: None,
         poll_owner: None,
+        owner_runtime_kind: None,
+        owner_pid: None,
+        owner_binary_path: None,
+        owner_atm_home: None,
+        owner_repo: None,
+        owner_poll_interval_secs: None,
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn apply_repo_state_to_health(
+    current: &mut CiMonitorHealth,
+    repo_state: &GhRepoStateRecord,
+) {
+    current.repo_state_updated_at = Some(repo_state.updated_at.clone());
+    current.budget_limit_per_hour = Some(repo_state.budget_limit_per_hour);
+    current.budget_used_in_window = Some(repo_state.budget_used_in_window);
+    current.rate_limit_remaining = repo_state.rate_limit.as_ref().map(|rate| rate.remaining);
+    current.rate_limit_limit = repo_state.rate_limit.as_ref().map(|rate| rate.limit);
+    current.owner_repo = Some(repo_state.repo.clone());
+    current.owner_poll_interval_secs = Some(if repo_state.in_flight > 0 {
+        repo_state.active_poll_interval_secs
+    } else {
+        repo_state.idle_poll_interval_secs
+    });
+    if let Some(owner) = repo_state.owner.as_ref() {
+        current.poll_owner = Some(format!(
+            "{} pid={} runtime={} home={}",
+            owner.executable_path, owner.pid, owner.runtime, owner.home_scope
+        ));
+        current.owner_runtime_kind = Some(owner.runtime.clone());
+        current.owner_pid = Some(owner.pid);
+        current.owner_binary_path = Some(owner.executable_path.clone());
+        current.owner_atm_home = Some(owner.home_scope.clone());
+    } else {
+        current.poll_owner = None;
+        current.owner_runtime_kind = None;
+        current.owner_pid = None;
+        current.owner_binary_path = None;
+        current.owner_atm_home = None;
     }
 }
 
@@ -105,6 +147,12 @@ pub(crate) fn write_health_record(
         rate_limit_remaining: None,
         rate_limit_limit: None,
         poll_owner: None,
+        owner_runtime_kind: None,
+        owner_pid: None,
+        owner_binary_path: None,
+        owner_atm_home: None,
+        owner_repo: None,
+        owner_poll_interval_secs: None,
     };
 
     if let Err(e) = upsert_gh_monitor_health(home, updated_record) {
@@ -143,18 +191,7 @@ pub(crate) fn set_gh_monitor_health_state(
         if let Some(repo_scope) = config_state.owner_repo.as_deref()
             && let Ok(Some(repo_state)) = read_gh_repo_state_record(home, team, repo_scope)
         {
-            current.repo_state_updated_at = Some(repo_state.updated_at.clone());
-            current.budget_limit_per_hour = Some(repo_state.budget_limit_per_hour);
-            current.budget_used_in_window = Some(repo_state.budget_used_in_window);
-            current.rate_limit_remaining =
-                repo_state.rate_limit.as_ref().map(|rate| rate.remaining);
-            current.rate_limit_limit = repo_state.rate_limit.as_ref().map(|rate| rate.limit);
-            current.poll_owner = repo_state.owner.as_ref().map(|owner| {
-                format!(
-                    "{} pid={} runtime={} home={}",
-                    owner.executable_path, owner.pid, owner.runtime, owner.home_scope
-                )
-            });
+            apply_repo_state_to_health(&mut current, &repo_state);
         }
     }
     current.updated_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);

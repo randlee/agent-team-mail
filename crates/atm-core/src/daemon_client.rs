@@ -1177,6 +1177,14 @@ pub struct GhMonitorControlRequest {
     pub drain_timeout_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_team: Option<String>,
+    #[serde(default)]
+    pub user_authorized: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_reason: Option<String>,
 }
 
 /// Daemon response payload for `gh-monitor-control` / `gh-monitor-health`.
@@ -1209,6 +1217,18 @@ pub struct GhMonitorHealth {
     pub rate_limit_limit: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll_owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_runtime_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_binary_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_atm_home: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_poll_interval_secs: Option<u64>,
 }
 
 /// Daemon response payload for `gh-monitor`/`gh-status`.

@@ -864,6 +864,12 @@ impl CiMonitorPlugin {
             rate_limit_remaining: None,
             rate_limit_limit: None,
             poll_owner: None,
+            owner_runtime_kind: None,
+            owner_pid: None,
+            owner_binary_path: None,
+            owner_atm_home: None,
+            owner_repo: None,
+            owner_poll_interval_secs: None,
         };
 
         if let Some(existing) = file.records.iter_mut().find(|record| record.team == team) {

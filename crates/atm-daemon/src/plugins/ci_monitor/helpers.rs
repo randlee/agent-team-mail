@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
-use anyhow::Result;
-#[cfg(unix)]
 use agent_team_mail_core::gh_monitor_observability::read_gh_repo_state_record;
+#[cfg(unix)]
+use anyhow::Result;
 
 #[cfg(unix)]
 use super::types::{

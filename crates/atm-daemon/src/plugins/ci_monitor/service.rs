@@ -12,7 +12,7 @@ use super::gh_monitor::{
 };
 use super::github_provider::GitHubActionsProvider;
 #[cfg(unix)]
-use super::health::set_gh_monitor_health_state;
+use super::health::{apply_repo_state_to_health, set_gh_monitor_health_state};
 use super::helpers::{
     apply_config_state_to_status, count_in_flight_monitors, evaluate_gh_monitor_config,
     gh_monitor_key, load_gh_monitor_state_map,
@@ -27,7 +27,9 @@ use super::types::{
     GhMonitorConfigState, GhMonitorHealthUpdate, OwnedGhAlertTargets,
 };
 use agent_team_mail_core::context::GitProvider as GitProviderType;
-use agent_team_mail_core::gh_monitor_observability::{GhCliObserverContext, build_gh_cli_observer};
+use agent_team_mail_core::gh_monitor_observability::{
+    GhCliObserverContext, build_gh_cli_observer, read_gh_repo_state_record,
+};
 use tracing::warn;
 
 pub(crate) use agent_team_mail_ci_monitor::service::{
@@ -442,6 +444,36 @@ pub(crate) async fn control_request(
 
     let config_state =
         evaluate_gh_monitor_config(home, &control.team, control.config_cwd.as_deref());
+    let caller_team = control
+        .actor_team
+        .as_deref()
+        .unwrap_or(control.team.as_str());
+    let cross_team = caller_team.trim() != control.team.trim();
+    if cross_team && !control.user_authorized {
+        return Err(CiMonitorServiceError::new(
+            "AUTHORIZATION_REQUIRED",
+            "cross-team gh monitor control requires --user-authorized",
+        ));
+    }
+    if cross_team
+        && control
+            .operator_reason
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(str::is_empty)
+    {
+        return Err(CiMonitorServiceError::new(
+            "MISSING_PARAMETER",
+            "cross-team gh monitor control requires a non-empty --reason",
+        ));
+    }
+    let repo_scope = control
+        .repo
+        .as_deref()
+        .or(config_state.owner_repo.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
 
     let health = match control.action {
         CiMonitorLifecycleAction::Start => set_gh_monitor_health_state(
@@ -584,6 +616,12 @@ pub(crate) async fn control_request(
         }
     };
 
+    let mut health = health;
+    if let Some(repo_scope) = repo_scope.as_deref()
+        && let Ok(Some(repo_state)) = read_gh_repo_state_record(home, &control.team, repo_scope)
+    {
+        apply_repo_state_to_health(&mut health, &repo_state);
+    }
     Ok(health)
 }
 
@@ -615,22 +653,9 @@ pub(crate) fn health_request(
         health.message = Some(reason.to_string());
     }
     if let Some(repo_scope) = repo_scope.or(config_state.owner_repo.as_deref())
-        && let Ok(Some(repo_state)) =
-            agent_team_mail_core::gh_monitor_observability::read_gh_repo_state_record(
-                home, team, repo_scope,
-            )
+        && let Ok(Some(repo_state)) = read_gh_repo_state_record(home, team, repo_scope)
     {
-        health.repo_state_updated_at = Some(repo_state.updated_at.clone());
-        health.budget_limit_per_hour = Some(repo_state.budget_limit_per_hour);
-        health.budget_used_in_window = Some(repo_state.budget_used_in_window);
-        health.rate_limit_remaining = repo_state.rate_limit.as_ref().map(|rate| rate.remaining);
-        health.rate_limit_limit = repo_state.rate_limit.as_ref().map(|rate| rate.limit);
-        health.poll_owner = repo_state.owner.as_ref().map(|owner| {
-            format!(
-                "{} pid={} runtime={} home={}",
-                owner.executable_path, owner.pid, owner.runtime, owner.home_scope
-            )
-        });
+        apply_repo_state_to_health(&mut health, &repo_state);
     }
     Ok(health)
 }

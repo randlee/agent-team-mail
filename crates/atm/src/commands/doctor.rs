@@ -396,7 +396,11 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
 
 fn build_gh_rate_limit_audit(home_dir: &Path, team: &str) -> Result<Option<GhRateLimitAudit>> {
     let state = read_gh_repo_state(home_dir)?;
-    let team_records: Vec<_> = state.records.into_iter().filter(|record| record.team == team).collect();
+    let team_records: Vec<_> = state
+        .records
+        .into_iter()
+        .filter(|record| record.team == team)
+        .collect();
     if team_records.is_empty() {
         return Ok(None);
     }
@@ -411,12 +415,19 @@ fn build_gh_rate_limit_audit(home_dir: &Path, team: &str) -> Result<Option<GhRat
 
     let live: GhRateLimitResponse = serde_json::from_slice(&output.stdout)
         .context("failed to parse gh api rate_limit response")?;
-    let cached_used_in_window: u64 = team_records.iter().map(|record| record.budget_used_in_window).sum();
+    let cached_used_in_window: u64 = team_records
+        .iter()
+        .map(|record| record.budget_used_in_window)
+        .sum();
     let cached_rate_limit = team_records
         .iter()
         .filter_map(|record| record.rate_limit.as_ref())
         .max_by_key(|rate| rate.updated_at.clone());
-    let consumed_live = live.resources.core.limit.saturating_sub(live.resources.core.remaining);
+    let consumed_live = live
+        .resources
+        .core
+        .limit
+        .saturating_sub(live.resources.core.remaining);
     let live_reset_at = live
         .resources
         .core
