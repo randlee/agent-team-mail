@@ -15,8 +15,11 @@ use crate::plugins::ci_monitor::test_support::{
 use crate::plugins::ci_monitor::types::{
     CiMonitorRequest, CiMonitorStatus, CiMonitorTargetKind, GhAlertTargets, GhMonitorHealthUpdate,
 };
+use agent_team_mail_ci_monitor::repo_state::write_repo_state;
+use agent_team_mail_ci_monitor::{GhRepoStateFile, GhRepoStateRecord, GhRuntimeOwner};
 use agent_team_mail_core::gh_monitor_observability::update_gh_repo_state_in_flight;
 use serial_test::serial;
+use std::process::Command;
 use tempfile::TempDir;
 
 #[test]
@@ -729,7 +732,7 @@ fn test_classify_failure_infra_when_runner_failure_detected() {
             conclusion: Some("failure".to_string()),
             started_at: None,
             completed_at: None,
-            steps: vec![gh_monitor::GhRunStep {
+            steps: vec![crate::plugins::ci_monitor::github_schema::GhRunStep {
                 name: "Set up runner".to_string(),
                 status: Some("completed".to_string()),
                 conclusion: Some("failure".to_string()),
@@ -1050,6 +1053,43 @@ async fn test_gh_monitor_control_cross_team_requires_user_authorized() {
 #[tokio::test]
 #[cfg(unix)]
 #[serial]
+async fn test_gh_monitor_control_cross_team_stop_and_restart_notify_team_lead() {
+    let temp = TempDir::new().unwrap();
+    let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+    write_gh_monitor_config(temp.path(), "ops-team");
+    write_hook_auth_team_config(temp.path(), "ops-team", "team-lead", &["team-lead"]);
+    std::fs::create_dir_all(temp.path().join(".claude/teams/ops-team/inboxes")).unwrap();
+
+    let stop_req = r#"{"version":1,"request_id":"r-gh-stop-cross-team-notify","command":"gh-monitor-control","payload":{"team":"ops-team","action":"stop","actor":"team-lead","actor_team":"atm-dev","user_authorized":true,"operator_reason":"manual rollback","drain_timeout_secs":1}}"#;
+    let stop_resp = handle_gh_monitor_control_command(stop_req, temp.path()).await;
+    assert_eq!(stop_resp.status, "ok");
+
+    let restart_req = r#"{"version":1,"request_id":"r-gh-restart-cross-team-notify","command":"gh-monitor-control","payload":{"team":"ops-team","action":"restart","actor":"team-lead","actor_team":"atm-dev","user_authorized":true,"operator_reason":"resume service","drain_timeout_secs":1}}"#;
+    let restart_resp = handle_gh_monitor_control_command(restart_req, temp.path()).await;
+    assert_eq!(restart_resp.status, "ok");
+
+    let inbox = read_team_inbox_messages(temp.path(), "ops-team", "team-lead");
+    assert!(
+        inbox.iter().any(|msg| {
+            msg.text
+                .contains("your gh monitor was stopped by team-lead@atm-dev")
+                && msg.text.contains("manual rollback")
+        }),
+        "cross-team stop should notify affected team lead with actor and reason"
+    );
+    assert!(
+        inbox.iter().any(|msg| {
+            msg.text
+                .contains("your gh monitor was restarted by team-lead@atm-dev")
+                && msg.text.contains("resume service")
+        }),
+        "cross-team restart should notify affected team lead with actor and reason"
+    );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+#[serial]
 async fn test_gh_monitor_health_includes_owner_metadata_fields() {
     let temp = TempDir::new().unwrap();
     let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
@@ -1079,6 +1119,69 @@ async fn test_gh_monitor_health_includes_owner_metadata_fields() {
         health["owner_atm_home"].as_str(),
         Some(canonical_home.to_string_lossy().as_ref())
     );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+#[serial]
+async fn test_gh_monitor_health_surfaces_live_foreign_owner_conflict() {
+    let temp = TempDir::new().unwrap();
+    let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+    write_gh_monitor_config(temp.path(), "atm-dev");
+    let mut child = Command::new("sleep").arg("2").spawn().unwrap();
+    let now = chrono::Utc::now();
+    write_repo_state(
+        temp.path(),
+        &GhRepoStateFile {
+            records: vec![GhRepoStateRecord {
+                team: "atm-dev".to_string(),
+                repo: "o/r".to_string(),
+                updated_at: now.to_rfc3339(),
+                cache_expires_at: (now + chrono::Duration::seconds(300)).to_rfc3339(),
+                last_refresh_at: None,
+                budget_limit_per_hour: 100,
+                budget_used_in_window: 0,
+                budget_window_started_at: now.to_rfc3339(),
+                budget_warning_threshold: 50,
+                warning_emitted_at: None,
+                blocked: false,
+                in_flight: 0,
+                idle_poll_interval_secs: 300,
+                active_poll_interval_secs: 60,
+                branch_ref_counts: Vec::new(),
+                last_call: None,
+                rate_limit: None,
+                owner: Some(GhRuntimeOwner {
+                    runtime: "dev".to_string(),
+                    executable_path: "/tmp/foreign-atm-daemon".to_string(),
+                    home_scope: temp.path().to_string_lossy().to_string(),
+                    pid: child.id(),
+                }),
+            }],
+        },
+    )
+    .unwrap();
+
+    let health_req = r#"{"version":1,"request_id":"r-gh-health-conflict","command":"gh-monitor-health","payload":{"team":"atm-dev"}}"#;
+    let health_resp = handle_gh_monitor_health_command(health_req, temp.path()).await;
+    assert_eq!(health_resp.status, "ok");
+    let health = health_resp.payload.unwrap();
+    assert_eq!(health["team"].as_str(), Some("atm-dev"));
+    assert_eq!(health["availability_state"].as_str(), Some("degraded"));
+    assert_eq!(health["owner_pid"].as_u64(), Some(child.id() as u64));
+    assert_eq!(
+        health["owner_binary_path"].as_str(),
+        Some("/tmp/foreign-atm-daemon")
+    );
+    assert!(
+        health["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("lease conflict")
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[tokio::test]

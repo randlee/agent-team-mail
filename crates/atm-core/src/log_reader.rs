@@ -278,7 +278,7 @@ pub fn format_event_human(event: &LogEventV1) -> String {
 
     let level_upper = event.level.to_uppercase();
     // Pad level to 5 chars for alignment.
-    let level_padded = format!("{:<5}", level_upper);
+    let level_padded = format!("{level_upper:<5}");
 
     let colored_level = if use_color {
         let color = match event.level.to_lowercase().as_str() {
@@ -368,8 +368,7 @@ fn format_send_action(event: &LogEventV1) -> String {
         .unwrap_or_else(|| "-".to_string());
 
     let mut line = format!(
-        "send {}@{} [{}] -> {}@{} [{}]",
-        sender_agent, sender_team, sender_pid, recipient_agent, recipient_team, recipient_pid
+        "send {sender_agent}@{sender_team} [{sender_pid}] -> {recipient_agent}@{recipient_team} [{recipient_pid}]"
     );
 
     if let Some(preview) = field_string(event, "message_preview")

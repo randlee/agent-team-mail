@@ -8,6 +8,8 @@ use agent_team_mail_ci_monitor::GhRepoStateRecord;
 #[cfg(unix)]
 use agent_team_mail_core::gh_monitor_observability::read_gh_repo_state_record;
 #[cfg(unix)]
+use agent_team_mail_core::pid::is_pid_alive;
+#[cfg(unix)]
 use anyhow::Result;
 #[cfg(all(test, unix))]
 use tracing::warn;
@@ -35,6 +37,7 @@ pub(crate) fn default_gh_monitor_health(team: &str) -> CiMonitorHealth {
         budget_used_in_window: None,
         rate_limit_remaining: None,
         rate_limit_limit: None,
+        rate_limit_reset_at: None,
         poll_owner: None,
         owner_runtime_kind: None,
         owner_pid: None,
@@ -55,6 +58,10 @@ pub(crate) fn apply_repo_state_to_health(
     current.budget_used_in_window = Some(repo_state.budget_used_in_window);
     current.rate_limit_remaining = repo_state.rate_limit.as_ref().map(|rate| rate.remaining);
     current.rate_limit_limit = repo_state.rate_limit.as_ref().map(|rate| rate.limit);
+    current.rate_limit_reset_at = repo_state
+        .rate_limit
+        .as_ref()
+        .and_then(|rate| rate.reset_at.clone());
     current.owner_repo = Some(repo_state.repo.clone());
     current.owner_poll_interval_secs = Some(if repo_state.in_flight > 0 {
         repo_state.active_poll_interval_secs
@@ -77,6 +84,24 @@ pub(crate) fn apply_repo_state_to_health(
         current.owner_binary_path = None;
         current.owner_atm_home = None;
     }
+    if let Some(conflict_message) = repo_state_owner_conflict_message(repo_state)
+        && current.availability_state != "disabled_config_error"
+    {
+        current.availability_state = "degraded".to_string();
+        current.message = Some(conflict_message);
+    }
+}
+
+#[cfg(unix)]
+fn repo_state_owner_conflict_message(repo_state: &GhRepoStateRecord) -> Option<String> {
+    let owner = repo_state.owner.as_ref()?;
+    if owner.pid == std::process::id() || !is_pid_alive(owner.pid) {
+        return None;
+    }
+    Some(format!(
+        "gh_monitor lease conflict for team={} repo={}: active owner pid={} executable={} home={}",
+        repo_state.team, repo_state.repo, owner.pid, owner.executable_path, owner.home_scope
+    ))
 }
 
 #[cfg(unix)]
@@ -146,6 +171,7 @@ pub(crate) fn write_health_record(
         budget_used_in_window: None,
         rate_limit_remaining: None,
         rate_limit_limit: None,
+        rate_limit_reset_at: None,
         poll_owner: None,
         owner_runtime_kind: None,
         owner_pid: None,
