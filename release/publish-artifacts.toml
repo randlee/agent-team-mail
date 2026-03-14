@@ -7,7 +7,7 @@ cargo_toml = "crates/atm-core/Cargo.toml"
 required = true
 publish = true
 publish_order = 10
-preflight_check = "full"
+preflight_check = "locked"
 wait_after_publish_seconds = 60
 verify_install = false
 
