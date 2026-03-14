@@ -189,7 +189,7 @@ pub(crate) async fn monitor_request(
                 &gh_request.team,
                 GhMonitorHealthUpdate {
                     availability_state: Some("disabled_config_error"),
-                    in_flight: Some(0),
+                    in_flight: Some(count_in_flight_monitors(home, &gh_request.team)),
                     message: Some(reason),
                     config_state: Some(&config_state),
                     config_cwd: gh_request.config_cwd.as_deref(),
