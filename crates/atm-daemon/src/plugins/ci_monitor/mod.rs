@@ -13,6 +13,7 @@ pub(crate) mod health;
 #[cfg(unix)]
 pub(crate) mod helpers;
 mod loader;
+#[cfg(any(test, feature = "test-support"))]
 mod mock_provider;
 mod plugin;
 #[cfg(unix)]
@@ -37,8 +38,8 @@ pub use types::{CiFilter, CiJob, CiPullRequest, CiRun, CiRunConclusion, CiRunSta
 
 // Production surface: config, provider, registry, plugin, and CI domain types only.
 // Test-only symbols live under `mock_support` so tests do not rely on the root production API.
+#[cfg(any(test, feature = "test-support"))]
 pub mod mock_support {
-    #[allow(unused_imports)]
     pub use super::mock_provider::{
         MockCall, MockCiProvider, create_test_job, create_test_run, create_test_step,
     };
