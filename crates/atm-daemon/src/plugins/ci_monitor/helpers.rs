@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use anyhow::Result;
+use agent_team_mail_core::daemon_client::isolated_runtime_allows_live_github;
 
 #[cfg(unix)]
 use super::types::{
@@ -102,6 +103,21 @@ pub(crate) fn evaluate_gh_monitor_config(
             "gh_monitor configuration missing required field: repo (run `atm gh init`)".to_string(),
         );
         return state;
+    }
+
+    match isolated_runtime_allows_live_github(home) {
+        Ok(false) => {
+            state.enabled = false;
+            state.error =
+                Some("gh_monitor disabled in isolated runtime unless explicitly allowed".to_string());
+            return state;
+        }
+        Ok(true) => {}
+        Err(e) => {
+            state.enabled = false;
+            state.error = Some(format!("failed to resolve runtime GitHub policy: {e}"));
+            return state;
+        }
     }
 
     state
@@ -253,4 +269,45 @@ pub(crate) fn upsert_gh_monitor_status_for_repo(
     }
     std::fs::write(path, serde_json::to_string_pretty(&state)?)?;
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::evaluate_gh_monitor_config;
+
+    #[test]
+    fn test_evaluate_gh_monitor_config_disables_isolated_runtime_by_default() {
+        let runtime = agent_team_mail_core::daemon_client::create_isolated_runtime_root(
+            Some("ci-monitor"),
+            std::time::Duration::from_secs(600),
+            false,
+        )
+        .unwrap();
+
+        std::fs::write(
+            runtime.home.join(".atm.toml"),
+            r#"
+[core]
+default_team = "atm-dev"
+identity = "team-lead"
+
+[plugins.gh_monitor]
+enabled = true
+team = "atm-dev"
+repo = "randlee/agent-team-mail"
+"#,
+        )
+        .unwrap();
+
+        let state = evaluate_gh_monitor_config(&runtime.home, "atm-dev", None);
+        assert!(state.configured, "config should still be discovered");
+        assert!(!state.enabled, "isolated runtime must disable live polling");
+        assert!(
+            state
+                .error
+                .as_deref()
+                .is_some_and(|msg| msg.contains("isolated runtime")),
+            "isolated runtime rejection should be explicit"
+        );
+    }
 }

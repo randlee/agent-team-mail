@@ -848,7 +848,7 @@ impl CiMonitorPlugin {
             config_path: None,
             lifecycle_state: "running".to_string(),
             availability_state: availability_state.to_string(),
-            in_flight: 0,
+            in_flight: super::helpers::count_in_flight_monitors(home_dir, team),
             updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             message: Some(message.to_string()),
         };

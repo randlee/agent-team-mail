@@ -8,6 +8,8 @@ use anyhow::Result;
 #[cfg(all(test, unix))]
 use tracing::warn;
 
+#[cfg(all(test, unix))]
+use super::helpers::count_in_flight_monitors;
 #[cfg(unix)]
 use super::routing::notify_gh_monitor_health_transition as emit_gh_monitor_health_transition;
 #[cfg(unix)]
@@ -88,7 +90,7 @@ pub(crate) fn write_health_record(
         config_path: None,
         lifecycle_state: "running".to_string(),
         availability_state: availability_state.to_string(),
-        in_flight: 0,
+        in_flight: count_in_flight_monitors(home, team),
         updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         message: Some(message.to_string()),
     };
