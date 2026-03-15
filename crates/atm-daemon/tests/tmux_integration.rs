@@ -124,7 +124,9 @@ fn start_daemon(env: &DaemonEnv) -> DaemonGuard {
         .open(log_path)
         .unwrap();
     let log_err = log.try_clone().unwrap();
-    cmd.stdout(Stdio::from(log)).stderr(Stdio::from(log_err));
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err));
     let child = cmd.spawn().unwrap();
     DaemonGuard {
         child,
