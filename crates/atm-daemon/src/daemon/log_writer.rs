@@ -31,6 +31,8 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+use crate::daemon::consts::LOG_WARNING_RATE_LIMIT_SECS;
+
 // ── Queue ─────────────────────────────────────────────────────────────────────
 
 /// A bounded FIFO queue for [`LogEventV1`] events.
@@ -66,7 +68,7 @@ impl BoundedQueue {
             // Rate-limit warnings to once per 5 seconds.
             let should_warn = self
                 .last_warn_dropped
-                .map(|t| t.elapsed().as_secs() >= 5)
+                .map(|t| t.elapsed().as_secs() >= LOG_WARNING_RATE_LIMIT_SECS)
                 .unwrap_or(true);
             if should_warn {
                 warn!(

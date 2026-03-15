@@ -4,8 +4,12 @@ use crate::daemon::pid_backend_validation::{roster_process_id, validate_pid_back
 use crate::daemon::status::{LoggingHealth, PluginStatus, PluginStatusKind, StatusWriter};
 use crate::daemon::{
     InboxEvent, InboxEventKind, LogEventQueue, SharedDedupeStore, SharedPubSubStore,
-    SharedSessionRegistry, SharedStateStore, SharedStreamEventSender, graceful_shutdown,
-    spool_drain_loop, start_socket_server, watch_inboxes,
+    SharedSessionRegistry, SharedStateStore, SharedStreamEventSender,
+    consts::{
+        EVENT_CHANNEL_CAPACITY, GRACEFUL_SHUTDOWN_TIMEOUT_SECS, RECONCILE_INTERVAL_SECS,
+        SPOOL_DRAIN_INTERVAL_SECS, STATUS_WRITE_INTERVAL_SECS,
+    },
+    graceful_shutdown, spool_drain_loop, start_socket_server, watch_inboxes,
 };
 use crate::plugin::{Capability, FailedPluginInit, PluginContext, PluginRegistry};
 use crate::plugins::worker_adapter::AgentState;
@@ -229,7 +233,7 @@ pub async fn run(
     let spool_task = tokio::spawn(async move {
         if let Err(e) = spool_drain_loop(
             teams_root,
-            Duration::from_secs(10), // Drain every 10 seconds
+            Duration::from_secs(SPOOL_DRAIN_INTERVAL_SECS),
             spool_cancel,
         )
         .await
@@ -239,7 +243,7 @@ pub async fn run(
     });
 
     // Create event channel for watcher → dispatch communication
-    let (event_tx, mut event_rx) = mpsc::channel::<InboxEvent>(100);
+    let (event_tx, mut event_rx) = mpsc::channel::<InboxEvent>(EVENT_CHANNEL_CAPACITY);
 
     // Extract hostname registry from bridge config (if available)
     let hostname_registry = extract_hostname_registry(&ctx.config);
@@ -480,26 +484,61 @@ pub async fn run(
     info!("Cancellation signal received. Beginning shutdown...");
 
     // Wait for background tasks to complete (they should respect cancellation)
-    wait_for_shutdown_task("Spool", spool_task, Duration::from_secs(5)).await;
-    wait_for_shutdown_task("Watcher", watcher_task, Duration::from_secs(5)).await;
-    wait_for_shutdown_task("Dispatch", dispatch_task, Duration::from_secs(5)).await;
+    wait_for_shutdown_task(
+        "Spool",
+        spool_task,
+        Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS),
+    )
+    .await;
+    wait_for_shutdown_task(
+        "Watcher",
+        watcher_task,
+        Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS),
+    )
+    .await;
+    wait_for_shutdown_task(
+        "Dispatch",
+        dispatch_task,
+        Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS),
+    )
+    .await;
 
     if let Some(task) = retention_task {
-        wait_for_shutdown_task("Retention", task, Duration::from_secs(5)).await;
+        wait_for_shutdown_task(
+            "Retention",
+            task,
+            Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS),
+        )
+        .await;
     }
 
-    wait_for_shutdown_task("Status writer", status_task, Duration::from_secs(5)).await;
-    wait_for_shutdown_task("Reconcile", reconcile_task, Duration::from_secs(5)).await;
+    wait_for_shutdown_task(
+        "Status writer",
+        status_task,
+        Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS),
+    )
+    .await;
+    wait_for_shutdown_task(
+        "Reconcile",
+        reconcile_task,
+        Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS),
+    )
+    .await;
 
     // Graceful shutdown of all plugins
-    graceful_shutdown(plugins, Duration::from_secs(5))
+    graceful_shutdown(plugins, Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS))
         .await
         .context("Plugin shutdown encountered errors")?;
 
     // Wait for plugin tasks to complete
     for (plugin_name, task) in plugin_tasks {
         let label = format!("Plugin {plugin_name}");
-        wait_for_shutdown_task(&label, task, Duration::from_secs(5)).await;
+        wait_for_shutdown_task(
+            &label,
+            task,
+            Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS),
+        )
+        .await;
     }
 
     info!("Daemon event loop shutdown complete");
@@ -513,7 +552,7 @@ async fn reconcile_loop(
     cycle_state: SharedCycleState,
     cancel: CancellationToken,
 ) {
-    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    let mut interval = tokio::time::interval(Duration::from_secs(RECONCILE_INTERVAL_SECS));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
@@ -1310,7 +1349,7 @@ fn retention_work(
 
 /// Periodic status writer task
 ///
-/// Writes daemon status to status.json at regular intervals (every 30 seconds).
+/// Writes daemon status to status.json at regular intervals.
 /// Status includes plugin states, active teams, PID, and uptime.
 async fn status_writer_loop(
     status_writer: Arc<StatusWriter>,
@@ -1320,7 +1359,10 @@ async fn status_writer_loop(
     log_event_queue: LogEventQueue,
     cancel: CancellationToken,
 ) {
-    info!("Status writer loop started (interval: 30s)");
+    info!(
+        "Status writer loop started (interval: {}s)",
+        STATUS_WRITE_INTERVAL_SECS
+    );
 
     // Write initial status at startup
     let plugin_statuses = build_plugin_statuses(&plugins, &init_failed_plugins, &ctx).await;
@@ -1330,7 +1372,7 @@ async fn status_writer_loop(
         error!("Failed to write initial daemon status: {}", e);
     }
 
-    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    let mut interval = tokio::time::interval(Duration::from_secs(STATUS_WRITE_INTERVAL_SECS));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {

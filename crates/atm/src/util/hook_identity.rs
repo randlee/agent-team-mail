@@ -18,6 +18,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::util::settings::{get_home_dir, teams_root_dir_for};
+use agent_team_mail_core::consts::SESSION_FILE_TTL_SECS;
 
 /// Maximum age in seconds before a hook file is considered stale.
 const HOOK_FILE_TTL_SECS: f64 = 5.0;
@@ -134,9 +135,6 @@ pub struct SessionFileData {
     pub created_at: f64,
     pub updated_at: Option<f64>,
 }
-
-/// Maximum age in seconds before a session file is considered stale (24 hours).
-const SESSION_FILE_TTL_SECS: f64 = 86400.0;
 
 fn session_file_timestamp(data: &SessionFileData) -> Option<f64> {
     let timestamp = data.updated_at.unwrap_or(data.created_at);

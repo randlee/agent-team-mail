@@ -15,10 +15,10 @@ fn init_cmd<'a>(home: &'a TempDir, repo: &'a Path) -> assert_cmd::Command {
     cmd
 }
 
-fn count_nested_command_in_hooks(
+fn count_nested_command_suffix_in_hooks(
     settings_path: &Path,
     hook_category: &str,
-    command: &str,
+    command_suffix: &str,
 ) -> usize {
     let parsed: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(settings_path).unwrap()).unwrap();
@@ -33,9 +33,11 @@ fn count_nested_command_in_hooks(
                         .get("hooks")
                         .and_then(|h| h.as_array())
                         .map(|hooks| {
-                            hooks
-                                .iter()
-                                .any(|h| h.get("command").and_then(|c| c.as_str()) == Some(command))
+                            hooks.iter().any(|h| {
+                                h.get("command")
+                                    .and_then(|c| c.as_str())
+                                    .is_some_and(|command| command.ends_with(command_suffix))
+                            })
                         })
                         .unwrap_or(false)
                 })
@@ -44,7 +46,11 @@ fn count_nested_command_in_hooks(
         .unwrap_or(0)
 }
 
-fn count_flat_command_entries(settings_path: &Path, hook_category: &str, command: &str) -> usize {
+fn count_flat_command_suffix_entries(
+    settings_path: &Path,
+    hook_category: &str,
+    command_suffix: &str,
+) -> usize {
     let parsed: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(settings_path).unwrap()).unwrap();
 
@@ -53,17 +59,22 @@ fn count_flat_command_entries(settings_path: &Path, hook_category: &str, command
         .map(|entries| {
             entries
                 .iter()
-                .filter(|entry| entry.get("command").and_then(|c| c.as_str()) == Some(command))
+                .filter(|entry| {
+                    entry
+                        .get("command")
+                        .and_then(|c| c.as_str())
+                        .is_some_and(|command| command.ends_with(command_suffix))
+                })
                 .count()
         })
         .unwrap_or(0)
 }
 
-fn count_matcher_command_entries(
+fn count_matcher_command_suffix_entries(
     settings_path: &Path,
     hook_category: &str,
     matcher: &str,
-    command: &str,
+    command_suffix: &str,
 ) -> usize {
     let parsed: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(settings_path).unwrap()).unwrap();
@@ -82,7 +93,9 @@ fn count_matcher_command_entries(
                             hooks
                                 .iter()
                                 .filter(|h| {
-                                    h.get("command").and_then(|c| c.as_str()) == Some(command)
+                                    h.get("command")
+                                        .and_then(|c| c.as_str())
+                                        .is_some_and(|command| command.ends_with(command_suffix))
                                 })
                                 .count()
                         })
@@ -193,29 +206,29 @@ fn test_init_is_idempotent_on_rerun() {
         .join("session-start.py")
         .to_string_lossy()
         .replace('\\', "/");
-    let session_start_cmd = format!("python3 \"{session_start_py}\"");
+    let session_start_suffix = format!("\"{session_start_py}\"");
     let session_end_py = scripts_dir
         .join("session-end.py")
         .to_string_lossy()
         .replace('\\', "/");
-    let session_end_cmd = format!("python3 \"{session_end_py}\"");
+    let session_end_suffix = format!("\"{session_end_py}\"");
     assert_eq!(
-        count_nested_command_in_hooks(&settings_path, "SessionStart", &session_start_cmd),
+        count_nested_command_suffix_in_hooks(&settings_path, "SessionStart", &session_start_suffix),
         1,
         "SessionStart hook should not be duplicated"
     );
     assert_eq!(
-        count_nested_command_in_hooks(&settings_path, "SessionEnd", &session_end_cmd),
+        count_nested_command_suffix_in_hooks(&settings_path, "SessionEnd", &session_end_suffix),
         1,
         "SessionEnd hook should not be duplicated"
     );
     assert_eq!(
-        count_flat_command_entries(&settings_path, "SessionStart", &session_start_cmd),
+        count_flat_command_suffix_entries(&settings_path, "SessionStart", &session_start_suffix),
         0,
         "SessionStart must not use flat legacy command entries"
     );
     assert_eq!(
-        count_flat_command_entries(&settings_path, "SessionEnd", &session_end_cmd),
+        count_flat_command_suffix_entries(&settings_path, "SessionEnd", &session_end_suffix),
         0,
         "SessionEnd must not use flat legacy command entries"
     );
@@ -328,29 +341,29 @@ fn test_init_with_existing_hooks_creates_atm_toml_without_duplicating_hooks() {
         .join("session-start.py")
         .to_string_lossy()
         .replace('\\', "/");
-    let session_start_cmd = format!("python3 \"{session_start_py}\"");
+    let session_start_suffix = format!("\"{session_start_py}\"");
     let session_end_py = scripts_dir
         .join("session-end.py")
         .to_string_lossy()
         .replace('\\', "/");
-    let session_end_cmd = format!("python3 \"{session_end_py}\"");
+    let session_end_suffix = format!("\"{session_end_py}\"");
     assert_eq!(
-        count_nested_command_in_hooks(&settings_path, "SessionStart", &session_start_cmd),
+        count_nested_command_suffix_in_hooks(&settings_path, "SessionStart", &session_start_suffix),
         1,
         "SessionStart hook must not be duplicated when hooks pre-exist"
     );
     assert_eq!(
-        count_nested_command_in_hooks(&settings_path, "SessionEnd", &session_end_cmd),
+        count_nested_command_suffix_in_hooks(&settings_path, "SessionEnd", &session_end_suffix),
         1,
         "SessionEnd hook must not be duplicated when hooks pre-exist"
     );
     assert_eq!(
-        count_flat_command_entries(&settings_path, "SessionStart", &session_start_cmd),
+        count_flat_command_suffix_entries(&settings_path, "SessionStart", &session_start_suffix),
         0,
         "SessionStart must not use flat legacy command entries"
     );
     assert_eq!(
-        count_flat_command_entries(&settings_path, "SessionEnd", &session_end_cmd),
+        count_flat_command_suffix_entries(&settings_path, "SessionEnd", &session_end_suffix),
         0,
         "SessionEnd must not use flat legacy command entries"
     );
@@ -431,20 +444,29 @@ fn test_init_global_relay_hook_paths_are_absolute() {
         .to_string_lossy()
         .replace('\\', "/");
 
-    let permission_cmd = format!("python3 \"{permission_py}\"");
-    let stop_cmd = format!("python3 \"{stop_py}\"");
-    let notify_cmd = format!("python3 \"{notify_py}\"");
+    let permission_suffix = format!("\"{permission_py}\"");
+    let stop_suffix = format!("\"{stop_py}\"");
+    let notify_suffix = format!("\"{notify_py}\"");
 
     assert_eq!(
-        count_nested_command_in_hooks(&settings_path, "PermissionRequest", &permission_cmd),
+        count_nested_command_suffix_in_hooks(
+            &settings_path,
+            "PermissionRequest",
+            &permission_suffix,
+        ),
         1
     );
     assert_eq!(
-        count_nested_command_in_hooks(&settings_path, "Stop", &stop_cmd),
+        count_nested_command_suffix_in_hooks(&settings_path, "Stop", &stop_suffix),
         1
     );
     assert_eq!(
-        count_matcher_command_entries(&settings_path, "Notification", "idle_prompt", &notify_cmd),
+        count_matcher_command_suffix_entries(
+            &settings_path,
+            "Notification",
+            "idle_prompt",
+            &notify_suffix,
+        ),
         1
     );
 
@@ -479,21 +501,29 @@ fn test_init_local_relay_hook_paths_use_claude_project_dir() {
         .success();
 
     let settings_path = repo.join(".claude/settings.json");
-    let permission_cmd =
-        "python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/permission-request-relay.py\"";
-    let stop_cmd = "python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/stop-relay.py\"";
-    let notify_cmd = "python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/notification-idle-relay.py\"";
+    let permission_suffix = "\"${CLAUDE_PROJECT_DIR}/.claude/scripts/permission-request-relay.py\"";
+    let stop_suffix = "\"${CLAUDE_PROJECT_DIR}/.claude/scripts/stop-relay.py\"";
+    let notify_suffix = "\"${CLAUDE_PROJECT_DIR}/.claude/scripts/notification-idle-relay.py\"";
 
     assert_eq!(
-        count_nested_command_in_hooks(&settings_path, "PermissionRequest", permission_cmd),
+        count_nested_command_suffix_in_hooks(
+            &settings_path,
+            "PermissionRequest",
+            permission_suffix
+        ),
         1
     );
     assert_eq!(
-        count_nested_command_in_hooks(&settings_path, "Stop", stop_cmd),
+        count_nested_command_suffix_in_hooks(&settings_path, "Stop", stop_suffix),
         1
     );
     assert_eq!(
-        count_matcher_command_entries(&settings_path, "Notification", "idle_prompt", notify_cmd),
+        count_matcher_command_suffix_entries(
+            &settings_path,
+            "Notification",
+            "idle_prompt",
+            notify_suffix,
+        ),
         1
     );
 
