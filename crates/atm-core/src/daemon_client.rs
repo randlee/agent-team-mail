@@ -3614,7 +3614,9 @@ sleep 8
         let marker = home.join("started-ok");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while std::time::Instant::now() < deadline && !marker.exists() {
-            std::thread::sleep(std::time::Duration::from_millis(crate::consts::SHORT_SLEEP_MS));
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::consts::SHORT_SLEEP_MS,
+            ));
         }
         assert!(marker.exists(), "expected replacement daemon to start");
 
@@ -3790,7 +3792,9 @@ sleep 8
                 stale_exited = true;
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(crate::consts::SHORT_SLEEP_MS));
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::consts::SHORT_SLEEP_MS,
+            ));
         }
         let new_pid = wait_for_daemon_version(&home, env!("CARGO_PKG_VERSION"))
             .expect("replacement daemon missing");
