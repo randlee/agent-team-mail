@@ -2704,6 +2704,34 @@ fn pid_alive(pid: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct EnvGuard {
+        key: &'static str,
+        old: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let old = std::env::var(key).ok();
+            // SAFETY: test-scoped env mutation guarded by RAII restore in Drop.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, old }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: test-scoped env restore.
+            unsafe {
+                if let Some(old) = &self.old {
+                    std::env::set_var(self.key, old);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
 
     #[cfg(unix)]
     fn wait_for_daemon_runtime_ready(home: &std::path::Path) -> bool {
@@ -4293,17 +4321,14 @@ sleep 8
     #[test]
     #[serial]
     fn test_ensure_daemon_running_reads_atm_daemon_bin() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let _home_guard = EnvGuard::set("ATM_HOME", tmp.path().to_str().unwrap());
+        let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", "/nonexistent-bin-for-atm-test");
         // Skip if a live daemon is already running.
         if daemon_is_running() {
             return;
         }
-        unsafe {
-            std::env::set_var("ATM_DAEMON_BIN", "/nonexistent-bin-for-atm-test");
-        }
         let result = ensure_daemon_running();
-        unsafe {
-            std::env::remove_var("ATM_DAEMON_BIN");
-        }
         // On non-Unix the function is a no-op and always returns Ok(()).
         #[cfg(unix)]
         assert!(

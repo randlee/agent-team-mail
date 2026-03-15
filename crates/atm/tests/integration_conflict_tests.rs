@@ -248,6 +248,8 @@ fn send_signal(pid: i32, sig: i32) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_concurrent_sends_no_data_loss() {
+    // Still serialized: DaemonProcessGuard records spawned daemon PIDs in the
+    // shared test registry, which remains process-global in AP.3.
     // Root-cause note for #372: CI hangs were traced to harness lifecycle
     // nondeterminism (startup/teardown timing), not a confirmed production
     // data-loss defect in send/inbox persistence.
@@ -410,6 +412,8 @@ async fn test_concurrent_sends_no_data_loss() {
 #[test]
 #[serial]
 fn test_concurrent_cli_and_direct_write_no_loss() {
+    // Still serialized: RuntimeDaemonCleanupGuard sweeps the per-binary daemon
+    // registry on entry/drop and must not race with live daemon-backed tests.
     // Simulate CLI and Claude Code writing simultaneously
     use std::sync::{Arc, Barrier};
 
@@ -482,7 +486,6 @@ fn test_concurrent_cli_and_direct_write_no_loss() {
 // ============================================================================
 
 #[test]
-#[serial]
 fn test_lock_contention_queues_to_spool() {
     // When the lock can't be acquired, messages should be spooled
     // We simulate this by having one thread hold the lock while another sends
@@ -527,6 +530,8 @@ fn test_lock_contention_queues_to_spool() {
 #[test]
 #[serial]
 fn test_spool_drain_delivery_cycle() {
+    // Still serialized: this test mutates ATM_HOME process-wide and exercises
+    // the global spool path directly.
     // This test uses the library API directly since spool_drain is not yet
     // exposed via CLI command.
     use agent_team_mail_core::io::inbox::inbox_append;
@@ -603,7 +608,6 @@ fn test_spool_drain_delivery_cycle() {
 // ============================================================================
 
 #[test]
-#[serial]
 fn test_malformed_inbox_json_graceful_failure() {
     // Write corrupt JSON to inbox, then try to send - should fail gracefully
     let temp_dir = TempDir::new().unwrap();
@@ -627,7 +631,6 @@ fn test_malformed_inbox_json_graceful_failure() {
 }
 
 #[test]
-#[serial]
 fn test_empty_json_array_inbox_ok() {
     // Empty JSON array is valid - send should succeed
     let temp_dir = TempDir::new().unwrap();
@@ -654,7 +657,6 @@ fn test_empty_json_array_inbox_ok() {
 }
 
 #[test]
-#[serial]
 fn test_malformed_inbox_read_graceful() {
     // Read command on malformed inbox should handle error gracefully
     let temp_dir = TempDir::new().unwrap();
@@ -682,7 +684,6 @@ fn test_malformed_inbox_read_graceful() {
 // ============================================================================
 
 #[test]
-#[serial]
 fn test_large_inbox_10k_messages() {
     // Verify no degradation with 10K+ messages in inbox
     use std::time::Instant;
@@ -758,7 +759,6 @@ fn test_large_inbox_10k_messages() {
 // ============================================================================
 
 #[test]
-#[serial]
 fn test_send_to_nonexistent_inbox_creates_file() {
     // First send to an agent with no existing inbox file
     let temp_dir = TempDir::new().unwrap();
@@ -790,7 +790,6 @@ fn test_send_to_nonexistent_inbox_creates_file() {
 }
 
 #[test]
-#[serial]
 fn test_read_nonexistent_inbox_graceful() {
     // Reading an agent's inbox when no inbox file exists
     let temp_dir = TempDir::new().unwrap();
@@ -811,7 +810,6 @@ fn test_read_nonexistent_inbox_graceful() {
 }
 
 #[test]
-#[serial]
 fn test_empty_inbox_file_read() {
     // Empty file (not valid JSON) should fail gracefully
     let temp_dir = TempDir::new().unwrap();
@@ -836,7 +834,6 @@ fn test_empty_inbox_file_read() {
 }
 
 #[test]
-#[serial]
 fn test_status_with_missing_inboxes_dir() {
     // Status command when inboxes directory doesn't exist
     let temp_dir = TempDir::new().unwrap();
@@ -884,7 +881,6 @@ fn test_status_with_missing_inboxes_dir() {
 
 #[cfg(unix)]
 #[test]
-#[serial]
 fn test_permission_denied_lock_file_creation() {
     // Make lock file a directory so exclusive lock acquisition fails
 
@@ -919,6 +915,8 @@ fn test_permission_denied_lock_file_creation() {
 #[test]
 #[serial]
 fn test_permission_denied_inboxes_dir() {
+    // Still serialized: RuntimeDaemonCleanupGuard sweeps the per-binary daemon
+    // registry on entry/drop and must not race with live daemon-backed tests.
     // Make inboxes directory read-only, then try to send to new inbox
     use std::os::unix::fs::PermissionsExt;
 
@@ -957,6 +955,8 @@ fn test_permission_denied_inboxes_dir() {
 #[test]
 #[serial]
 fn test_no_duplicate_message_ids_under_concurrent_sends() {
+    // Still serialized: RuntimeDaemonCleanupGuard sweeps the per-binary daemon
+    // registry on entry/drop and must not race with live daemon-backed tests.
     // Verify that concurrent sends to same inbox produce unique message IDs
     use std::sync::{Arc, Barrier};
 
@@ -1017,7 +1017,6 @@ fn test_no_duplicate_message_ids_under_concurrent_sends() {
 // ============================================================================
 
 #[test]
-#[serial]
 fn test_unknown_fields_preserved_through_send() {
     // Inbox with unknown fields should preserve them after a new send
     let temp_dir = TempDir::new().unwrap();
@@ -1067,7 +1066,6 @@ fn test_unknown_fields_preserved_through_send() {
 // ============================================================================
 
 #[test]
-#[serial]
 fn test_inbox_command_with_no_messages_anywhere() {
     // Inbox command when all inboxes are empty or nonexistent
     let temp_dir = TempDir::new().unwrap();
@@ -1083,7 +1081,6 @@ fn test_inbox_command_with_no_messages_anywhere() {
 }
 
 #[test]
-#[serial]
 fn test_members_command_shows_correct_labels() {
     // Verify no-daemon context renders Unknown (liveness cannot be confirmed).
     let temp_dir = TempDir::new().unwrap();
@@ -1143,7 +1140,6 @@ fn test_members_command_shows_correct_labels() {
 }
 
 #[test]
-#[serial]
 fn test_status_command_shows_correct_labels() {
     // Verify no-daemon context renders Unknown (liveness cannot be confirmed).
     let temp_dir = TempDir::new().unwrap();
@@ -1203,7 +1199,6 @@ fn test_status_command_shows_correct_labels() {
 }
 
 #[test]
-#[serial]
 fn test_doctor_status_members_consistent_unknown_when_daemon_unreachable() {
     let temp_dir = TempDir::new().unwrap();
     let team_dir = temp_dir.path().join(".claude/teams/test-team");
@@ -1346,6 +1341,8 @@ fn test_doctor_status_members_consistent_unknown_when_daemon_unreachable() {
 #[test]
 #[serial]
 fn test_dead_pid_stale_lock_starts_daemon_cleanly() {
+    // Still serialized: restarted daemon PIDs are tracked in the shared test
+    // registry until AP replaces that global file with a per-test-safe owner.
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
     let dead_pid = 999_991_u32;
@@ -1405,6 +1402,9 @@ fn test_dead_pid_stale_lock_starts_daemon_cleanly() {
 #[test]
 #[serial]
 fn test_identity_mismatch_socket_is_detected_and_restarted() {
+    // Still serialized: ensure_daemon_running reads ATM_HOME / ATM_DAEMON_BIN
+    // / ATM_DAEMON_AUTOSTART from process-global env and the restarted PID is
+    // tracked in the shared daemon test registry.
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
 

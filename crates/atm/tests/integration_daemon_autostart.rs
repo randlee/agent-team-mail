@@ -1,7 +1,5 @@
 use assert_cmd::cargo;
 #[cfg(unix)]
-use serial_test::serial;
-#[cfg(unix)]
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -187,7 +185,6 @@ fn kill_pid_from_file(home: &Path) {
 
 #[test]
 #[cfg(unix)]
-#[serial]
 fn test_status_autostarts_daemon_when_absent() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
@@ -222,7 +219,6 @@ fn test_status_autostarts_daemon_when_absent() {
 
 #[test]
 #[cfg(unix)]
-#[serial]
 fn test_status_noops_when_daemon_already_healthy() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
@@ -262,7 +258,6 @@ fn test_status_noops_when_daemon_already_healthy() {
 
 #[test]
 #[cfg(unix)]
-#[serial]
 fn test_concurrent_multi_team_status_uses_single_daemon_instance() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
@@ -314,7 +309,6 @@ fn test_concurrent_multi_team_status_uses_single_daemon_instance() {
 
 #[test]
 #[cfg(unix)]
-#[serial]
 fn test_status_reports_actionable_error_when_autostart_binary_missing() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
@@ -345,7 +339,6 @@ fn test_status_reports_actionable_error_when_autostart_binary_missing() {
 
 #[test]
 #[cfg(unix)]
-#[serial]
 fn test_daemon_kill_autostarts_daemon_when_absent() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
@@ -377,7 +370,6 @@ fn test_daemon_kill_autostarts_daemon_when_absent() {
 
 #[test]
 #[cfg(unix)]
-#[serial]
 fn test_cleanup_agent_autostarts_daemon_when_absent() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
@@ -409,7 +401,6 @@ fn test_cleanup_agent_autostarts_daemon_when_absent() {
 
 #[test]
 #[cfg(unix)]
-#[serial]
 fn test_doctor_no_daemon_not_running_after_status_autostart() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();

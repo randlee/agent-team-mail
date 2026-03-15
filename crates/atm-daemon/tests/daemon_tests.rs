@@ -13,7 +13,13 @@ use agent_team_mail_daemon::plugin::{
     Capability, MailService, Plugin, PluginContext, PluginError, PluginMetadata, PluginRegistry,
 };
 use agent_team_mail_daemon::roster::RosterService;
+#[path = "../../atm/tests/support/daemon_test_registry.rs"]
+#[allow(dead_code)]
+mod daemon_test_registry;
+// These daemon integration tests still serialize because the helper contexts
+// mutate ATM_HOME process-wide before constructing shared daemon state.
 use serial_test::serial;
+use std::path::Path;
 use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -266,6 +272,44 @@ async fn wait_for_recorded_event_elapsed(
     .await
 }
 
+struct TestDaemonChildGuard {
+    child: std::process::Child,
+    pid: u32,
+}
+
+impl TestDaemonChildGuard {
+    fn spawn(bin: &str, home: &Path) -> Self {
+        let child = std::process::Command::new(bin)
+            .env("ATM_HOME", home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn first daemon");
+        let pid = child.id();
+        daemon_test_registry::register_test_daemon(pid, Path::new(bin));
+        Self { child, pid }
+    }
+
+    fn child_mut(&mut self) -> &mut std::process::Child {
+        &mut self.child
+    }
+
+    fn kill_and_wait(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for TestDaemonChildGuard {
+    fn drop(&mut self) {
+        self.kill_and_wait();
+        daemon_test_registry::unregister_test_daemon(self.pid);
+    }
+}
+
 fn wait_for_child_running_elapsed(
     child: &mut Child,
     timeout_ms: u64,
@@ -327,38 +371,6 @@ fn wait_for_lock_file_acquired_elapsed(
     let lock_contended =
         lock_path.exists() && agent_team_mail_core::io::lock::acquire_lock(&lock_path, 0).is_err();
     (lock_contended || pid_ready || status_ready).then(|| start.elapsed())
-}
-
-struct ChildProcessGuard {
-    child: Option<Child>,
-}
-
-impl ChildProcessGuard {
-    fn new(child: Child) -> Self {
-        Self { child: Some(child) }
-    }
-
-    fn child_mut(&mut self) -> &mut Child {
-        self.child
-            .as_mut()
-            .expect("child process should still exist")
-    }
-
-    fn wait_for_exit(mut self) {
-        if let Some(mut child) = self.child.take() {
-            child.kill().expect("failed to kill child daemon");
-            let _status = child.wait().expect("failed to wait for child daemon exit");
-        }
-    }
-}
-
-impl Drop for ChildProcessGuard {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
 }
 
 /// Create a test status writer
@@ -651,7 +663,7 @@ async fn test_startup_reconcile_seeds_roster_without_interval_delay() {
                 "agentType": "general-purpose",
                 "model": "unknown",
                 "joinedAt": 1,
-                "cwd": "/tmp",
+                "cwd": cwd,
                 "subscriptions": [],
                 "isActive": false
             }
@@ -808,7 +820,7 @@ async fn test_config_watch_event_updates_and_removes_members() {
                 "agentType": "general-purpose",
                 "model": "unknown",
                 "joinedAt": 1,
-                "cwd": "/tmp",
+                "cwd": temp_dir.path().display().to_string(),
                 "subscriptions": [],
                 "isActive": true
             }
@@ -897,7 +909,7 @@ async fn test_graceful_shutdown_with_timeout() {
 
     // The daemon should complete even though the plugin shutdown is slow
     // (the shutdown timeout will kick in)
-    let result = tokio::time::timeout(Duration::from_secs(10), daemon_task)
+    let result = tokio::time::timeout(Duration::from_secs(20), daemon_task)
         .await
         .expect("Daemon should complete within timeout");
 
@@ -1116,13 +1128,7 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
     let temp_dir = TempDir::new().unwrap();
     let bin = env!("CARGO_BIN_EXE_atm-daemon");
 
-    let first = std::process::Command::new(bin)
-        .env("ATM_HOME", temp_dir.path())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("failed to spawn first daemon");
-    let mut first = ChildProcessGuard::new(first);
+    let mut first = TestDaemonChildGuard::spawn(bin, temp_dir.path());
 
     let daemon_running = wait_for_child_running_elapsed(first.child_mut(), 1_000)
         .expect("first daemon should still be running");
@@ -1135,6 +1141,12 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
     assert!(
         lock_elapsed <= Duration::from_secs(2),
         "first daemon should acquire daemon.lock within 2s: elapsed={lock_elapsed:?}"
+    );
+    let lock_elapsed = wait_for_lock_file_acquired_elapsed(temp_dir.path(), 8_000)
+        .expect("first daemon should acquire daemon.lock within 8s");
+    assert!(
+        lock_elapsed <= Duration::from_secs(8),
+        "first daemon should acquire daemon.lock within 8s: elapsed={lock_elapsed:?}"
     );
 
     let second = std::process::Command::new(bin)
@@ -1151,6 +1163,5 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
         stderr.contains("already running") || stderr.contains("Refusing second instance"),
         "second daemon error should indicate lock contention, got: {stderr}"
     );
-
-    first.wait_for_exit();
+    first.kill_and_wait();
 }

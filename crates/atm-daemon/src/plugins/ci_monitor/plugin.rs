@@ -2729,6 +2729,7 @@ notify_target = "team-lead"
         assert!(result.is_ok());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     #[cfg(unix)]
     async fn test_polling_notification_suppressed_when_command_path_already_terminal() {

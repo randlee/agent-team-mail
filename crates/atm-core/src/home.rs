@@ -180,6 +180,8 @@ pub fn sessions_dir_for(home: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // get_home_dir resolves ATM_HOME from process-wide env, so these tests must
+    // remain serialized until the API stops reading global state directly.
     use serial_test::serial;
     use std::env;
 
