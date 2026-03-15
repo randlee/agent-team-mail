@@ -3358,6 +3358,8 @@ sleep 2
         );
     }
 
+    // Regression test for GH #761: write_runtime_metadata must not call
+    // read_runtime_metadata and discard the result. Verify overwrite persists replacement.
     #[test]
     fn test_write_runtime_metadata_overwrites_existing_contents() {
         let home = tempfile::tempdir().unwrap();

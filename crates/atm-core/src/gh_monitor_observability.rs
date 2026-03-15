@@ -781,7 +781,7 @@ mod tests {
                     }),
                     owner: Some(GhRuntimeOwner {
                         runtime: "dev".to_string(),
-                        executable_path: "/tmp/fake-daemon".to_string(),
+                        executable_path: "fake-daemon-binary".to_string(),
                         home_scope: temp.path().to_string_lossy().to_string(),
                         pid: 12345,
                     }),
@@ -802,6 +802,10 @@ mod tests {
             record.owner.as_ref().map(|owner| owner.pid),
             Some(12345),
             "ttl eviction must preserve owner visibility"
+        );
+        assert!(
+            record.warning_emitted_at.is_some(),
+            "ttl eviction must preserve warning_emitted_at"
         );
         assert_eq!(record.last_refresh_at, None);
         assert_eq!(record.in_flight, 0);
