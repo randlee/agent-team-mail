@@ -337,7 +337,7 @@ impl CiMonitorConfig {
         }
 
         // Parse notify_target (can be single string or array of strings)
-        let notify_target = match table.get("notify_target") {
+        let mut notify_target = match table.get("notify_target") {
             Some(toml::Value::String(s)) => vec![NotifyTarget::parse(s)?],
             Some(toml::Value::Array(arr)) => {
                 let mut targets = Vec::new();
@@ -350,6 +350,12 @@ impl CiMonitorConfig {
             }
             _ => Vec::new(),
         };
+        if notify_target.is_empty() && !team.trim().is_empty() {
+            notify_target.push(NotifyTarget {
+                agent: "team-lead".to_string(),
+                team: Some(team.clone()),
+            });
+        }
 
         // Extract provider_config for external providers
         let provider_config = table.clone();
@@ -843,7 +849,9 @@ team = "dev-team"
         let table: toml::Table = toml::from_str(toml_str).unwrap();
         let config = CiMonitorConfig::from_toml(&table).unwrap();
 
-        assert!(config.notify_target.is_empty());
+        assert_eq!(config.notify_target.len(), 1);
+        assert_eq!(config.notify_target[0].agent, "team-lead");
+        assert_eq!(config.notify_target[0].team.as_deref(), Some("dev-team"));
     }
 
     #[test]
