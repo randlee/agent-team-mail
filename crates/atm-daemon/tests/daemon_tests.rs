@@ -13,12 +13,12 @@ use agent_team_mail_daemon::plugin::{
     Capability, MailService, Plugin, PluginContext, PluginError, PluginMetadata, PluginRegistry,
 };
 use agent_team_mail_daemon::roster::RosterService;
-#[path = "../../atm/tests/support/daemon_test_registry.rs"]
-#[allow(dead_code)]
-mod daemon_test_registry;
 #[path = "../../atm/tests/support/daemon_process_guard.rs"]
 #[allow(dead_code)]
 mod daemon_process_guard;
+#[path = "../../atm/tests/support/daemon_test_registry.rs"]
+#[allow(dead_code)]
+mod daemon_test_registry;
 #[path = "../../atm/tests/support/env_guard.rs"]
 #[allow(dead_code)]
 mod env_guard;
@@ -278,7 +278,6 @@ async fn wait_for_recorded_event_elapsed(
     })
     .await
 }
-
 
 fn wait_for_child_running_elapsed(
     child: &mut Child,

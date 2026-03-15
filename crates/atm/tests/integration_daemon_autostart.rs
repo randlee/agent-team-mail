@@ -191,7 +191,6 @@ fn spawn_count(home: &Path) -> usize {
         .count()
 }
 
-
 #[test]
 #[cfg(unix)]
 fn test_status_autostarts_daemon_when_absent() {
@@ -237,8 +236,11 @@ fn test_status_noops_when_daemon_already_healthy() {
     write_team_config(home, team);
     let script = write_fake_daemon_script(home);
     let daemon = Command::new(&script).env("ATM_HOME", home).spawn().unwrap();
-    let _daemon_guard =
-        daemon_process_guard::DaemonProcessGuard::from_child(daemon, std::path::Path::new(&script), home);
+    let _daemon_guard = daemon_process_guard::DaemonProcessGuard::from_child(
+        daemon,
+        std::path::Path::new(&script),
+        home,
+    );
     wait_for_daemon_socket(home);
     assert_eq!(spawn_count(home), 1);
 
@@ -277,8 +279,11 @@ fn test_concurrent_multi_team_status_uses_single_daemon_instance() {
     }
     let script = write_fake_daemon_script(home);
     let daemon = Command::new(&script).env("ATM_HOME", home).spawn().unwrap();
-    let _daemon_guard =
-        daemon_process_guard::DaemonProcessGuard::from_child(daemon, std::path::Path::new(&script), home);
+    let _daemon_guard = daemon_process_guard::DaemonProcessGuard::from_child(
+        daemon,
+        std::path::Path::new(&script),
+        home,
+    );
     wait_for_daemon_socket(home);
     assert_eq!(spawn_count(home), 1);
 
