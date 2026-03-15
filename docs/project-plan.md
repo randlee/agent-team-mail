@@ -1612,11 +1612,11 @@ the extracted crate boundary, and landing the multi-repo `atm gh` contract.
 | AN.1 | CI core boundary cleanup | `feature/pAN-s1-ci-core-boundary` | COMPLETE |
 | AN.2 | Service split from daemon wire types | `feature/pAN-s2-service-split` | COMPLETE |
 | AN.3 | Trait injection for provider/registry seams | `feature/pAN-s3-trait-injection` | COMPLETE |
-| AN.4 | Narrow production `mod.rs` surface | `feature/pAN-s4-mod-narrowing` | IN-PROGRESS |
-| AN.5 | Transport adapter boundary in `gh_monitor_router` | `feature/pAN-s5-plugin-init-split` | IN-PROGRESS |
-| AN.6 | Extract `agent-team-mail-ci-monitor` crate | `feature/pAN-s6-crate-extraction` | IN-PROGRESS |
-| AN.7 | Multi-repo `atm gh` routing and repo inference | `feature/pAN-s7-multi-repo-gh` | IN-PROGRESS |
-| AN.8 | Phase AO guardrail planning and requirements closure | `feature/pAN-s8-gh-monitor-guardrails` | IN-PROGRESS |
+| AN.4 | Narrow production `mod.rs` surface | `feature/pAN-s4-mod-narrowing` | COMPLETE ([#737](https://github.com/randlee/agent-team-mail/pull/737)) |
+| AN.5 | Transport adapter boundary in `gh_monitor_router` | `feature/pAN-s5-plugin-init-split` | COMPLETE ([#738](https://github.com/randlee/agent-team-mail/pull/738)) |
+| AN.6 | Extract `agent-team-mail-ci-monitor` crate | `feature/pAN-s6-crate-extraction` | COMPLETE ([#739](https://github.com/randlee/agent-team-mail/pull/739)) |
+| AN.7 | Multi-repo `atm gh` routing and repo inference | `feature/pAN-s7-multi-repo-gh` | COMPLETE ([#740](https://github.com/randlee/agent-team-mail/pull/740)) |
+| AN.8 | Phase AO guardrail planning and requirements closure | `feature/pAN-s8-gh-monitor-guardrails` | COMPLETE ([#745](https://github.com/randlee/agent-team-mail/pull/745)) |
 
 ### Exit Criteria
 1. Reusable CI monitor logic is isolated behind crate-friendly boundaries.
