@@ -10,7 +10,7 @@ use super::service::{create_provider_from_registry, fetch_run_details, list_comp
 use super::types::{CiFilter, CiRunStatus};
 use super::types::{CiJob, CiRunConclusion};
 #[cfg(unix)]
-use super::types::{CiMonitorHealth, GhMonitorHealthFile};
+use super::types::{CiMonitorHealth, GhMonitorHealthFile, GhMonitorStateFile};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use crate::roster::RosterError;
 use agent_team_mail_core::context::RepoContext;
@@ -35,20 +35,6 @@ struct RuntimeHistory {
     job_samples: HashMap<String, Vec<u64>>,
     processed_run_ids: Vec<u64>,
     drift_last_alert_epoch_secs: HashMap<String, i64>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
-struct GhMonitorStateRecord {
-    team: String,
-    state: String,
-    run_id: Option<u64>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
-struct GhMonitorStateFile {
-    records: Vec<GhMonitorStateRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -791,6 +777,7 @@ impl CiMonitorPlugin {
         )
     }
 
+    #[cfg(unix)]
     fn was_terminal_notified_by_command_path(&self, ctx: &PluginContext, run_id: u64) -> bool {
         let path = Self::gh_monitor_state_path(ctx);
         let raw = match std::fs::read_to_string(&path) {
@@ -809,9 +796,9 @@ impl CiMonitorPlugin {
             }
         };
         state_file.records.iter().any(|record| {
-            record.team == self.config.team
-                && record.run_id == Some(run_id)
-                && Self::is_terminal_monitor_state(&record.state)
+            record.status.team == self.config.team
+                && record.status.run_id == Some(run_id)
+                && Self::is_terminal_monitor_state(&record.status.state)
         })
     }
 
@@ -2713,9 +2700,13 @@ notify_target = "team-lead"
         assert!(result.is_ok());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_polling_notification_suppressed_when_command_path_already_terminal() {
         use crate::plugins::ci_monitor::mock_support::{MockCiProvider, create_test_run};
+        use crate::plugins::ci_monitor::types::{
+            CiMonitorStatus, CiMonitorTargetKind, GhMonitorStateFile, GhMonitorStateRecord,
+        };
         use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus};
         use agent_team_mail_core::schema::{AgentMember, TeamConfig};
         use tempfile::TempDir;
@@ -2784,11 +2775,26 @@ poll_interval_secs = 10
 
         let state_path = CiMonitorPlugin::gh_monitor_state_path(&ctx);
         std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &state_path,
-            r#"{"records":[{"team":"dev-team","state":"failure","run_id":42}]}"#,
-        )
-        .unwrap();
+        let state = GhMonitorStateFile {
+            records: vec![GhMonitorStateRecord {
+                status: CiMonitorStatus {
+                    team: "dev-team".to_string(),
+                    configured: true,
+                    enabled: true,
+                    config_source: Some("workspace".to_string()),
+                    config_path: None,
+                    target_kind: CiMonitorTargetKind::Pr,
+                    target: "main".to_string(),
+                    state: "failure".to_string(),
+                    run_id: Some(42),
+                    reference: Some("main".to_string()),
+                    updated_at: "2026-03-14T00:00:00Z".to_string(),
+                    message: None,
+                },
+                repo_scope: None,
+            }],
+        };
+        std::fs::write(&state_path, serde_json::to_string(&state).unwrap()).unwrap();
 
         let mut plugin = CiMonitorPlugin::new().with_provider(Box::new(provider));
         plugin.init(&ctx).await.unwrap();

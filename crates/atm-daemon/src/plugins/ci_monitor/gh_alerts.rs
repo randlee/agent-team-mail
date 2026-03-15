@@ -282,16 +282,19 @@ pub(crate) fn resolve_ci_alert_routing(
         .filter(|caller| !caller.is_empty())
     {
         build_explicit_targets(parsed.team.as_str(), caller_agent, alert_targets.cc)
-    } else if parsed.notify_target.is_empty() {
-        fallback_config_identity(home, &current_dir)
-            .map(|identity| build_explicit_targets(parsed.team.as_str(), identity.as_str(), &[]))
-            .unwrap_or_else(|| vec![("team-lead".to_string(), parsed.team.clone())])
     } else {
         parsed
             .notify_target
             .into_iter()
-            .map(|t| (t.agent, parsed.team.clone()))
+            .map(|t| (t.agent, t.team.unwrap_or_else(|| parsed.team.clone())))
             .collect()
+    };
+    let targets = if targets.is_empty() {
+        fallback_config_identity(home, &current_dir)
+            .map(|identity| build_explicit_targets(parsed.team.as_str(), identity.as_str(), &[]))
+            .unwrap_or_else(|| vec![("team-lead".to_string(), parsed.team.clone())])
+    } else {
+        targets
     };
     (from_agent, targets)
 }
