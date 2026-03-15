@@ -2729,10 +2729,13 @@ notify_target = "team-lead"
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
     #[cfg(unix)]
+    #[tokio::test]
     async fn test_polling_notification_suppressed_when_command_path_already_terminal() {
         use crate::plugins::ci_monitor::mock_support::{MockCiProvider, create_test_run};
+        use crate::plugins::ci_monitor::types::{
+            CiMonitorStatus, CiMonitorTargetKind, GhMonitorStateFile, GhMonitorStateRecord,
+        };
         use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus};
         use agent_team_mail_core::schema::{AgentMember, TeamConfig};
         use tempfile::TempDir;
