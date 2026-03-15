@@ -634,13 +634,24 @@ fn bump_branch_ref_count(
     counts.sort_by(|a, b| a.branch.cmp(&b.branch).then(a.reference.cmp(&b.reference)));
 }
 
-fn purge_stale_records(records: &mut Vec<GhRepoStateRecord>) {
+fn purge_stale_records(records: &mut [GhRepoStateRecord]) {
     let now = Utc::now();
-    records.retain(|record| {
-        parse_rfc3339(&record.cache_expires_at)
-            .map(|expires_at| expires_at > now)
-            .unwrap_or(true)
-    });
+    for record in records.iter_mut() {
+        let is_stale = parse_rfc3339(&record.cache_expires_at)
+            .map(|expires_at| expires_at <= now)
+            .unwrap_or(false);
+        if is_stale {
+            evict_stale_cache_snapshot(record, now);
+        }
+    }
+}
+
+fn evict_stale_cache_snapshot(record: &mut GhRepoStateRecord, now: DateTime<Utc>) {
+    record.cache_expires_at = now.to_rfc3339();
+    record.last_refresh_at = None;
+    record.in_flight = 0;
+    record.last_call = None;
+    record.rate_limit = None;
 }
 
 fn parse_rfc3339(value: &str) -> Option<DateTime<Utc>> {
@@ -722,6 +733,80 @@ mod tests {
             record.branch_ref_counts[0].branch.as_deref(),
             Some("develop")
         );
+    }
+
+    #[test]
+    fn test_ttl_eviction_preserves_budget_state_and_owner() {
+        let temp = TempDir::new().unwrap();
+        let now = Utc::now();
+        let stale = now - Duration::seconds(GH_REPO_STATE_TTL_SECS + 5);
+        write_repo_state(
+            temp.path(),
+            &GhRepoStateFile {
+                records: vec![GhRepoStateRecord {
+                    team: "atm-dev".to_string(),
+                    repo: "owner/repo".to_string(),
+                    updated_at: stale.to_rfc3339(),
+                    cache_expires_at: stale.to_rfc3339(),
+                    last_refresh_at: Some(stale.to_rfc3339()),
+                    budget_limit_per_hour: GH_BUDGET_LIMIT_PER_HOUR,
+                    budget_used_in_window: 73,
+                    budget_window_started_at: (now - Duration::minutes(20)).to_rfc3339(),
+                    budget_warning_threshold: GH_WARNING_THRESHOLD,
+                    warning_emitted_at: Some((now - Duration::minutes(10)).to_rfc3339()),
+                    blocked: true,
+                    in_flight: 2,
+                    idle_poll_interval_secs: GH_IDLE_POLL_INTERVAL_SECS,
+                    active_poll_interval_secs: GH_ACTIVE_POLL_INTERVAL_SECS,
+                    branch_ref_counts: vec![GhBranchRefCount {
+                        branch: Some("main".to_string()),
+                        reference: Some("refs/heads/main".to_string()),
+                        count: 73,
+                    }],
+                    last_call: Some(agent_team_mail_ci_monitor::GhObservedCall {
+                        action: "gh_pr_list".to_string(),
+                        branch: Some("main".to_string()),
+                        reference: Some("refs/heads/main".to_string()),
+                        duration_ms: 11,
+                        success: true,
+                        error: None,
+                        at: stale.to_rfc3339(),
+                    }),
+                    rate_limit: Some(GhRateLimitSnapshot {
+                        remaining: 12,
+                        limit: 5000,
+                        updated_at: stale.to_rfc3339(),
+                        reset_at: Some((now + Duration::minutes(30)).to_rfc3339()),
+                        source: "cache".to_string(),
+                    }),
+                    owner: Some(GhRuntimeOwner {
+                        runtime: "dev".to_string(),
+                        executable_path: "/tmp/fake-daemon".to_string(),
+                        home_scope: temp.path().to_string_lossy().to_string(),
+                        pid: 12345,
+                    }),
+                }],
+            },
+        )
+        .unwrap();
+
+        let record = read_gh_repo_state_record(temp.path(), "atm-dev", "owner/repo")
+            .unwrap()
+            .expect("repo state");
+
+        assert_eq!(record.budget_used_in_window, 73);
+        assert_eq!(record.budget_limit_per_hour, GH_BUDGET_LIMIT_PER_HOUR);
+        assert_eq!(record.branch_ref_counts.len(), 1);
+        assert!(record.blocked);
+        assert_eq!(
+            record.owner.as_ref().map(|owner| owner.pid),
+            Some(12345),
+            "ttl eviction must preserve owner visibility"
+        );
+        assert_eq!(record.last_refresh_at, None);
+        assert_eq!(record.in_flight, 0);
+        assert!(record.last_call.is_none());
+        assert!(record.rate_limit.is_none());
     }
 
     #[cfg(unix)]
