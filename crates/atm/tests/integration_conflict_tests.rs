@@ -46,10 +46,6 @@ fn set_home_env_path(cmd: &mut assert_cmd::Command, home: &std::path::Path) {
 
 #[cfg(unix)]
 /// Guards cleanup of a daemon registered via PID file, not a direct `Child` handle.
-///
-/// Drop uses `reap_child_pid_best_effort` after signaling the PID. That may observe
-/// `ECHILD`, which is expected and harmless when the daemon PID was discovered from
-/// runtime files rather than spawned directly by this test process.
 struct RuntimeDaemonCleanupGuard {
     home: PathBuf,
     daemon_guard: Option<DaemonProcessGuard>,
@@ -206,20 +202,6 @@ fn write_lock_metadata(temp_dir: &TempDir, pid: u32, home_scope: String, executa
 }
 
 #[cfg(unix)]
-fn cleanup_pid(pid: u32) {
-    send_signal(pid as i32, 15);
-    for _ in 0..20 {
-        if !pid_alive(pid as i32) {
-            reap_child_pid_best_effort(pid as i32);
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    send_signal(pid as i32, 9);
-    reap_child_pid_best_effort(pid as i32);
-}
-
-#[cfg(unix)]
 fn pid_alive(pid: i32) -> bool {
     unsafe extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;
@@ -238,41 +220,6 @@ fn wait_for_pid_exit(pid: i32, timeout: Duration) {
         std::thread::sleep(Duration::from_millis(25));
     }
     panic!("pid {pid} stayed alive beyond {timeout:?}");
-}
-
-#[cfg(unix)]
-fn send_signal(pid: i32, sig: i32) {
-    unsafe extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
-    // SAFETY: best-effort test cleanup path.
-    let _ = unsafe { kill(pid, sig) };
-}
-
-#[cfg(unix)]
-/// Best-effort reap for test cleanup.
-///
-/// Some AQ/AP cleanup guards record PIDs discovered from runtime files rather than
-/// direct `Child` handles. In those cases `waitpid` may observe `ECHILD` because the
-/// PID is not our child process; that is expected and harmless, and we rely on the
-/// surrounding `kill(pid, 0)` liveness checks to confirm the process is gone.
-fn reap_child_pid_best_effort(pid: i32) {
-    unsafe extern "C" {
-        fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
-    }
-    const WNOHANG: i32 = 1;
-    for _ in 0..20 {
-        let mut status = 0;
-        // SAFETY: best-effort reap for test child processes; WNOHANG avoids blocking.
-        let waited = unsafe { waitpid(pid, &mut status, WNOHANG) };
-        if waited == pid || !pid_alive(pid) {
-            break;
-        }
-        if waited == -1 {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
 }
 
 // ============================================================================

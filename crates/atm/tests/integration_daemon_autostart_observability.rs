@@ -10,113 +10,20 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-struct EnvGuard {
-    key: &'static str,
-    old: Option<String>,
-}
+#[path = "support/daemon_process_guard.rs"]
+#[allow(dead_code)]
+mod daemon_process_guard;
+#[path = "support/daemon_test_registry.rs"]
+#[allow(dead_code)]
+mod daemon_test_registry;
+#[path = "support/env_guard.rs"]
+#[allow(dead_code)]
+mod env_guard;
 
-impl EnvGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let old = std::env::var(key).ok();
-        // SAFETY: test-scoped env mutation guarded by RAII restore in Drop.
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, old }
-    }
-}
+use daemon_process_guard::DaemonProcessGuard;
+use env_guard::EnvGuard;
 
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        // SAFETY: test-scoped env restore.
-        unsafe {
-            if let Some(old) = &self.old {
-                std::env::set_var(self.key, old);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
-}
-
-struct AutostartPidGuard {
-    pid: u32,
-}
-
-impl AutostartPidGuard {
-    fn adopt_from_pid_file(pid_path: &Path, timeout: Duration) -> Option<Self> {
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            if let Ok(raw) = fs::read_to_string(pid_path)
-                && let Ok(pid) = raw.trim().parse::<u32>()
-                && pid > 1
-                && pid_alive(pid as i32)
-            {
-                return Some(Self { pid });
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        None
-    }
-
-    fn pid(&self) -> u32 {
-        self.pid
-    }
-}
-
-impl Drop for AutostartPidGuard {
-    fn drop(&mut self) {
-        cleanup_pid(self.pid);
-    }
-}
-
-fn cleanup_pid(pid: u32) {
-    send_signal(pid as i32, 15);
-    let deadline = Instant::now() + Duration::from_secs(1);
-    while Instant::now() < deadline {
-        if !pid_alive(pid as i32) {
-            reap_child_pid_best_effort(pid as i32);
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    send_signal(pid as i32, 9);
-    reap_child_pid_best_effort(pid as i32);
-}
-
-fn pid_alive(pid: i32) -> bool {
-    unsafe extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
-    // SAFETY: signal 0 checks process existence without sending a signal.
-    unsafe { kill(pid, 0) == 0 }
-}
-
-fn send_signal(pid: i32, sig: i32) {
-    unsafe extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
-    // SAFETY: best-effort test cleanup path.
-    let _ = unsafe { kill(pid, sig) };
-}
-
-fn reap_child_pid_best_effort(pid: i32) {
-    unsafe extern "C" {
-        fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
-    }
-    const WNOHANG: i32 = 1;
-    for _ in 0..20 {
-        let mut status = 0;
-        // SAFETY: best-effort reap for test child processes; WNOHANG avoids blocking.
-        let waited = unsafe { waitpid(pid, &mut status, WNOHANG) };
-        if waited == pid || !pid_alive(pid) || waited == -1 {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-}
-
-fn read_spool_events(spool: &std::path::Path) -> Vec<LogEventV1> {
+fn read_spool_events(spool: &Path) -> Vec<LogEventV1> {
     if !spool.exists() {
         return Vec::new();
     }
@@ -147,9 +54,19 @@ fn read_spool_events(spool: &std::path::Path) -> Vec<LogEventV1> {
     events
 }
 
+fn pid_alive(pid: i32) -> bool {
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    // SAFETY: signal 0 checks process existence without sending a signal.
+    unsafe { kill(pid, 0) == 0 }
+}
+
 #[test]
 #[serial]
 fn autostart_failure_logs_structured_event_with_stderr_tail_context() {
+    daemon_test_registry::sweep_stale_test_daemons();
+
     let tmp = TempDir::new().expect("tempdir");
     let home = tmp.path().to_path_buf();
 
@@ -166,8 +83,8 @@ fn autostart_failure_logs_structured_event_with_stderr_tail_context() {
     perms.set_mode(0o755);
     fs::set_permissions(&script_path, perms).expect("chmod script");
 
-    let _home_guard = EnvGuard::set("ATM_HOME", &home.to_string_lossy());
-    let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", &script_path.to_string_lossy());
+    let _home_guard = EnvGuard::set("ATM_HOME", &home);
+    let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", &script_path);
     let _autostart_guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "1");
 
     let missing_socket = home.join(".atm/daemon/atm-daemon.sock");
@@ -182,9 +99,13 @@ fn autostart_failure_logs_structured_event_with_stderr_tail_context() {
     .unwrap_or_else(|_| init_stderr_only());
 
     let err = ensure_daemon_running().expect_err("autostart should fail for test script");
-    let leaked_pid_guard =
-        AutostartPidGuard::adopt_from_pid_file(&leaked_pid_path, Duration::from_secs(1))
-            .expect("autostart failure test should adopt leaked background child");
+    let leaked_pid_guard = DaemonProcessGuard::adopt_from_pid_file(
+        &leaked_pid_path,
+        &script_path,
+        &home,
+        Duration::from_secs(2),
+    )
+    .expect("autostart failure test should adopt leaked background child");
     let leaked_pid = leaked_pid_guard.pid();
     let msg = err.to_string();
     assert!(
