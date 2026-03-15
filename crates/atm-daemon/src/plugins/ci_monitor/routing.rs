@@ -28,45 +28,6 @@ pub(crate) fn resolve_ci_alert_routing(
 }
 
 #[cfg(unix)]
-pub(crate) fn notify_ci_not_started(
-    home: &std::path::Path,
-    status: &CiMonitorStatus,
-    config_cwd: Option<&str>,
-    repo_scope: Option<&str>,
-    alert_targets: GhAlertTargets<'_>,
-) {
-    super::gh_alerts::emit_ci_not_started_alert(
-        home,
-        status,
-        config_cwd,
-        repo_scope,
-        alert_targets,
-    );
-}
-
-#[cfg(unix)]
-pub(crate) fn notify_merge_conflict(
-    home: &std::path::Path,
-    status: &CiMonitorStatus,
-    pr_url: Option<&str>,
-    merge_state_status: &str,
-    run_conclusion: Option<&str>,
-    config_cwd: Option<&str>,
-    alert_targets: GhAlertTargets<'_>,
-) {
-    super::gh_alerts::emit_merge_conflict_alert(
-        home,
-        status,
-        pr_url,
-        merge_state_status,
-        run_conclusion,
-        config_cwd,
-        alert_targets,
-    );
-}
-
-#[cfg(unix)]
-#[allow(dead_code)]
 pub(crate) fn notify_gh_monitor_health_transition(
     home: &std::path::Path,
     team: &str,
@@ -134,6 +95,44 @@ pub(crate) fn notify_gh_monitor_health_transition(
             );
         }
     }
+}
+
+#[cfg(unix)]
+pub(crate) fn notify_ci_not_started(
+    home: &std::path::Path,
+    status: &CiMonitorStatus,
+    config_cwd: Option<&str>,
+    repo_scope: Option<&str>,
+    alert_targets: GhAlertTargets<'_>,
+) {
+    super::gh_alerts::emit_ci_not_started_alert(
+        home,
+        status,
+        config_cwd,
+        repo_scope,
+        alert_targets,
+    );
+}
+
+#[cfg(unix)]
+pub(crate) fn notify_merge_conflict(
+    home: &std::path::Path,
+    status: &CiMonitorStatus,
+    pr_url: Option<&str>,
+    merge_state_status: &str,
+    run_conclusion: Option<&str>,
+    config_cwd: Option<&str>,
+    alert_targets: GhAlertTargets<'_>,
+) {
+    super::gh_alerts::emit_merge_conflict_alert(
+        home,
+        status,
+        pr_url,
+        merge_state_status,
+        run_conclusion,
+        config_cwd,
+        alert_targets,
+    );
 }
 
 #[cfg(all(test, unix))]
