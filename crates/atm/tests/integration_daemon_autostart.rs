@@ -6,11 +6,19 @@ use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
-use std::process::Command;
+use std::process::{Child, Command};
 #[cfg(unix)]
 use std::time::{Duration, Instant};
 #[cfg(unix)]
 use tempfile::TempDir;
+#[cfg(unix)]
+#[path = "support/daemon_process_guard.rs"]
+#[allow(dead_code)]
+mod daemon_process_guard;
+#[cfg(unix)]
+#[path = "support/daemon_test_registry.rs"]
+#[allow(dead_code)]
+mod daemon_test_registry;
 
 #[cfg(unix)]
 fn write_team_config(home: &Path, team: &str) {
@@ -163,6 +171,17 @@ fn wait_for_daemon_socket(home: &Path) {
 }
 
 #[cfg(unix)]
+fn daemon_pid_path(home: &Path) -> PathBuf {
+    home.join(".atm/daemon/atm-daemon.pid")
+}
+
+#[cfg(unix)]
+fn read_daemon_pid(temp_dir: &TempDir) -> Option<u32> {
+    let raw = fs::read_to_string(daemon_pid_path(temp_dir.path())).ok()?;
+    raw.trim().parse::<u32>().ok()
+}
+
+#[cfg(unix)]
 fn spawn_count(home: &Path) -> usize {
     fs::read_dir(home.join("spawn-markers"))
         .ok()
@@ -173,13 +192,24 @@ fn spawn_count(home: &Path) -> usize {
 }
 
 #[cfg(unix)]
-fn kill_pid_from_file(home: &Path) {
-    let pid_path = home.join(".atm/daemon/atm-daemon.pid");
-    if let Ok(content) = fs::read_to_string(pid_path)
-        && let Ok(pid) = content.trim().parse::<i32>()
-    {
-        // SAFETY: test teardown sends SIGTERM to a process that this test launched.
-        let _ = unsafe { libc::kill(pid, libc::SIGTERM) };
+struct FakeDaemonChildGuard {
+    child: Child,
+}
+
+#[cfg(unix)]
+impl FakeDaemonChildGuard {
+    fn new(child: Child) -> Self {
+        Self { child }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for FakeDaemonChildGuard {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
     }
 }
 
@@ -208,13 +238,15 @@ fn test_status_autostarts_daemon_when_absent() {
         "status command should succeed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    wait_for_daemon_socket(home);
+    let daemon_pid = read_daemon_pid(&temp).expect("status autostart should write daemon pid");
+    let _daemon_guard =
+        daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(daemon_pid, &script);
     assert_eq!(
         spawn_count(home),
         1,
         "daemon should auto-start exactly once when absent"
     );
-
-    kill_pid_from_file(home);
 }
 
 #[test]
@@ -225,7 +257,8 @@ fn test_status_noops_when_daemon_already_healthy() {
     let team = "team-b";
     write_team_config(home, team);
     let script = write_fake_daemon_script(home);
-    let mut daemon = Command::new(&script).env("ATM_HOME", home).spawn().unwrap();
+    let daemon = Command::new(&script).env("ATM_HOME", home).spawn().unwrap();
+    let _daemon_guard = FakeDaemonChildGuard::new(daemon);
     wait_for_daemon_socket(home);
     assert_eq!(spawn_count(home), 1);
 
@@ -251,9 +284,6 @@ fn test_status_noops_when_daemon_already_healthy() {
         1,
         "healthy daemon should not be re-spawned"
     );
-
-    let _ = daemon.kill();
-    let _ = daemon.wait();
 }
 
 #[test]
@@ -266,7 +296,8 @@ fn test_concurrent_multi_team_status_uses_single_daemon_instance() {
         write_team_config(home, team);
     }
     let script = write_fake_daemon_script(home);
-    let mut daemon = Command::new(&script).env("ATM_HOME", home).spawn().unwrap();
+    let daemon = Command::new(&script).env("ATM_HOME", home).spawn().unwrap();
+    let _daemon_guard = FakeDaemonChildGuard::new(daemon);
     wait_for_daemon_socket(home);
     assert_eq!(spawn_count(home), 1);
 
@@ -303,8 +334,6 @@ fn test_concurrent_multi_team_status_uses_single_daemon_instance() {
         1,
         "concurrent daemon-backed commands across teams must share one daemon"
     );
-    let _ = daemon.kill();
-    let _ = daemon.wait();
 }
 
 #[test]
@@ -364,8 +393,12 @@ fn test_daemon_kill_autostarts_daemon_when_absent() {
         "daemon --kill should succeed with autostart: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    wait_for_daemon_socket(home);
+    let daemon_pid =
+        read_daemon_pid(&temp).expect("daemon --kill autostart should write daemon pid");
+    let _daemon_guard =
+        daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(daemon_pid, &script);
     assert_eq!(spawn_count(home), 1, "daemon should autostart for --kill");
-    kill_pid_from_file(home);
 }
 
 #[test]
@@ -395,8 +428,12 @@ fn test_cleanup_agent_autostarts_daemon_when_absent() {
         "cleanup --agent should succeed with autostart: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    wait_for_daemon_socket(home);
+    let daemon_pid =
+        read_daemon_pid(&temp).expect("cleanup --agent autostart should write daemon pid");
+    let _daemon_guard =
+        daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(daemon_pid, &script);
     assert_eq!(spawn_count(home), 1, "daemon should autostart for cleanup");
-    kill_pid_from_file(home);
 }
 
 #[test]
@@ -421,6 +458,10 @@ fn test_doctor_no_daemon_not_running_after_status_autostart() {
         .assert()
         .success();
     wait_for_daemon_socket(home);
+    let daemon_pid =
+        read_daemon_pid(&temp).expect("status autostart should write daemon pid for doctor");
+    let _daemon_guard =
+        daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(daemon_pid, &script);
     assert_eq!(
         spawn_count(home),
         1,
@@ -456,8 +497,6 @@ fn test_doctor_no_daemon_not_running_after_status_autostart() {
         !has_daemon_not_running,
         "doctor must not report DAEMON_NOT_RUNNING after status autostart"
     );
-
-    kill_pid_from_file(home);
 }
 
 #[test]

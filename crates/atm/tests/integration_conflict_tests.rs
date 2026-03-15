@@ -186,11 +186,13 @@ fn cleanup_pid(pid: u32) {
     send_signal(pid as i32, 15);
     for _ in 0..20 {
         if !pid_alive(pid as i32) {
+            reap_child_pid_best_effort(pid as i32);
             return;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
     send_signal(pid as i32, 9);
+    reap_child_pid_best_effort(pid as i32);
 }
 
 #[cfg(unix)]
@@ -209,6 +211,26 @@ fn send_signal(pid: i32, sig: i32) {
     }
     // SAFETY: best-effort test cleanup path.
     let _ = unsafe { kill(pid, sig) };
+}
+
+#[cfg(unix)]
+fn reap_child_pid_best_effort(pid: i32) {
+    unsafe extern "C" {
+        fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+    }
+    const WNOHANG: i32 = 1;
+    for _ in 0..20 {
+        let mut status = 0;
+        // SAFETY: best-effort reap for test child processes; WNOHANG avoids blocking.
+        let waited = unsafe { waitpid(pid, &mut status, WNOHANG) };
+        if waited == pid || !pid_alive(pid) {
+            break;
+        }
+        if waited == -1 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 // ============================================================================
