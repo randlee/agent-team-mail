@@ -182,7 +182,7 @@ async fn test_ci_failure_delivers_inbox_message() {
     .await;
     assert!(
         observed_delivery <= Duration::from_secs(2),
-        "CI failure delivery should stay bounded"
+        "CI failure delivery should stay bounded: elapsed={observed_delivery:?}"
     );
     cancel.cancel();
     let _ = timeout(Duration::from_secs(2), run_task)
@@ -407,7 +407,7 @@ async fn test_status_transition_notification() {
     .await;
     assert!(
         first_poll_elapsed <= Duration::from_secs(2),
-        "in-progress poll should start promptly"
+        "in-progress poll should start promptly: elapsed={first_poll_elapsed:?}"
     );
     cancel1.cancel();
     let _ = timeout(Duration::from_secs(2), run_task1)
@@ -445,7 +445,7 @@ async fn test_status_transition_notification() {
     .await;
     assert!(
         failure_elapsed <= Duration::from_secs(2),
-        "failure transition notification should stay bounded"
+        "failure transition notification should stay bounded: elapsed={failure_elapsed:?}"
     );
     cancel2.cancel();
     let _ = timeout(Duration::from_secs(2), run_task2)
@@ -703,7 +703,7 @@ async fn test_multiple_failures() {
     .await;
     assert!(
         delivery_elapsed <= Duration::from_secs(2),
-        "multiple-failure notifications should stay bounded"
+        "multiple-failure notifications should stay bounded: elapsed={delivery_elapsed:?}"
     );
     cancel.cancel();
     let _ = timeout(Duration::from_secs(2), run_task)
@@ -804,7 +804,7 @@ async fn test_branch_filtering() {
     .await;
     assert!(
         filter_elapsed <= Duration::from_secs(2),
-        "branch filtering should produce bounded notifications"
+        "branch filtering should produce bounded notifications: elapsed={filter_elapsed:?}"
     );
     cancel.cancel();
     let _ = timeout(Duration::from_secs(2), run_task)
@@ -916,7 +916,7 @@ async fn test_conclusion_filtering() {
     .await;
     assert!(
         filter_elapsed <= Duration::from_secs(2),
-        "conclusion filtering should produce bounded notifications"
+        "conclusion filtering should produce bounded notifications: elapsed={filter_elapsed:?}"
     );
     cancel.cancel();
     let _ = timeout(Duration::from_secs(2), run_task)

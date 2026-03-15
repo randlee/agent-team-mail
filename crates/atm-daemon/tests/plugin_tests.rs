@@ -108,10 +108,15 @@ impl Plugin for EchoPlugin {
 // ============================================================================
 
 fn create_test_context(teams_root: std::path::PathBuf) -> PluginContext {
+    let claude_root = teams_root
+        .parent()
+        .unwrap_or(teams_root.as_path())
+        .join(".claude");
+    std::fs::create_dir_all(&claude_root).unwrap();
     let system = Arc::new(SystemContext::new(
         "test-host".to_string(),
         agent_team_mail_core::context::Platform::Linux,
-        std::env::temp_dir().join(".claude"),
+        claude_root,
         "2.1.39".to_string(),
         "test-team".to_string(),
     ));

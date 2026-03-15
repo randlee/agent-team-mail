@@ -289,6 +289,46 @@ fn wait_for_child_running_elapsed(
         .then(|| start.elapsed())
 }
 
+fn wait_for_lock_file_acquired_elapsed(
+    home: &std::path::Path,
+    timeout_ms: u64,
+) -> Option<std::time::Duration> {
+    let lock_path = home.join(".atm/daemon/daemon.lock");
+    let pid_path = home.join(".atm/daemon/atm-daemon.pid");
+    let status_path = home.join(".atm/daemon/status.json");
+    let start = std::time::Instant::now();
+    let deadline = start + Duration::from_millis(timeout_ms);
+    while std::time::Instant::now() < deadline {
+        let pid_ready = std::fs::read_to_string(&pid_path)
+            .ok()
+            .and_then(|content| content.trim().parse::<u32>().ok())
+            .is_some();
+        let status_ready = std::fs::read_to_string(&status_path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+            .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
+            .is_some();
+        let lock_contended = lock_path.exists()
+            && agent_team_mail_core::io::lock::acquire_lock(&lock_path, 0).is_err();
+        if lock_contended || pid_ready || status_ready {
+            return Some(start.elapsed());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let pid_ready = std::fs::read_to_string(&pid_path)
+        .ok()
+        .and_then(|content| content.trim().parse::<u32>().ok())
+        .is_some();
+    let status_ready = std::fs::read_to_string(&status_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
+        .is_some();
+    let lock_contended =
+        lock_path.exists() && agent_team_mail_core::io::lock::acquire_lock(&lock_path, 0).is_err();
+    (lock_contended || pid_ready || status_ready).then(|| start.elapsed())
+}
+
 struct ChildProcessGuard {
     child: Option<Child>,
 }
@@ -1088,7 +1128,13 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
         .expect("first daemon should still be running");
     assert!(
         daemon_running <= Duration::from_secs(1),
-        "first daemon should still be running"
+        "first daemon should still be running: elapsed={daemon_running:?}"
+    );
+    let lock_elapsed = wait_for_lock_file_acquired_elapsed(temp_dir.path(), 2_000)
+        .expect("first daemon should acquire daemon.lock");
+    assert!(
+        lock_elapsed <= Duration::from_secs(2),
+        "first daemon should acquire daemon.lock within 2s: elapsed={lock_elapsed:?}"
     );
 
     let second = std::process::Command::new(bin)

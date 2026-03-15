@@ -191,7 +191,7 @@ async fn test_issue_created_delivers_inbox_message() {
     .await;
     assert!(
         observed_delivery <= Duration::from_secs(2),
-        "issue delivery should stay bounded"
+        "issue delivery should stay bounded: elapsed={observed_delivery:?}"
     );
     cancel.cancel();
     let _ = timeout(Duration::from_secs(2), run_task)
@@ -368,7 +368,7 @@ async fn test_issue_filter_applies_labels() {
     .await;
     assert!(
         filter_elapsed <= Duration::from_secs(2),
-        "issue label filtering should stay bounded"
+        "issue label filtering should stay bounded: elapsed={filter_elapsed:?}"
     );
     cancel.cancel();
     let _ = timeout(Duration::from_secs(2), run_task)
@@ -457,7 +457,7 @@ async fn test_issue_updates_deliver_multiple_messages() {
     .await;
     assert!(
         first_delivery <= Duration::from_secs(2),
-        "first issue update poll should stay bounded"
+        "first issue update poll should stay bounded: elapsed={first_delivery:?}"
     );
     cancel1.cancel();
     let _ = timeout(Duration::from_secs(2), run_task1)
@@ -487,7 +487,7 @@ async fn test_issue_updates_deliver_multiple_messages() {
     .await;
     assert!(
         second_delivery <= Duration::from_secs(2),
-        "second issue update poll should stay bounded"
+        "second issue update poll should stay bounded: elapsed={second_delivery:?}"
     );
     cancel2.cancel();
     let _ = timeout(Duration::from_secs(2), run_task2)

@@ -13,6 +13,7 @@ use super::daemon_test_registry;
 pub struct DaemonProcessGuard {
     child: Child,
     pid: u32,
+    daemon_dir: PathBuf,
 }
 
 impl DaemonProcessGuard {
@@ -24,6 +25,7 @@ impl DaemonProcessGuard {
             daemon_bin.display()
         );
         daemon_test_registry::sweep_stale_test_daemons();
+        let daemon_dir = home.path().join(".atm").join("daemon");
         let mut cmd = Command::new(&daemon_bin);
         cmd.env("ATM_HOME", home.path())
             .env("ATM_DAEMON_AUTOSTART", "0")
@@ -31,6 +33,7 @@ impl DaemonProcessGuard {
             .env_remove("CLAUDE_SESSION_ID")
             .arg("--team")
             .arg(team)
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
@@ -38,7 +41,11 @@ impl DaemonProcessGuard {
         let pid = child.id();
         assert!(pid > 1, "spawned daemon PID must be > 1, got {pid}");
         daemon_test_registry::register_test_daemon(pid, &daemon_bin);
-        Self { child, pid }
+        Self {
+            child,
+            pid,
+            daemon_dir,
+        }
     }
 
     #[allow(dead_code)]
@@ -50,6 +57,7 @@ impl DaemonProcessGuard {
         let daemon_dir = home.path().join(".atm").join("daemon");
         let pid_path = daemon_dir.join("atm-daemon.pid");
         let status_path = daemon_dir.join("status.json");
+        let socket_path = daemon_dir.join("atm-daemon.sock");
         #[cfg(windows)]
         let timeout_secs = 30;
         #[cfg(not(windows))]
@@ -77,6 +85,9 @@ impl DaemonProcessGuard {
             {
                 return;
             }
+            if socket_path.exists() {
+                return;
+            }
             std::thread::sleep(Duration::from_millis(25));
         }
         panic!(
@@ -92,6 +103,15 @@ impl Drop for DaemonProcessGuard {
         if self.child.try_wait().ok().flatten().is_none() {
             let _ = self.child.kill();
             let _ = self.child.wait();
+        }
+        let lock_path = self.daemon_dir.join("daemon.lock");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if let Ok(lock) = agent_team_mail_core::io::lock::acquire_lock(&lock_path, 0) {
+                drop(lock);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
         }
         daemon_test_registry::unregister_test_daemon(self.pid);
     }

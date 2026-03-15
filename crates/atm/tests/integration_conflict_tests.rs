@@ -16,6 +16,35 @@ mod daemon_process_guard;
 mod daemon_test_registry;
 use daemon_process_guard::DaemonProcessGuard;
 
+struct EnvGuard {
+    key: &'static str,
+    old: Option<String>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let old = std::env::var(key).ok();
+        // SAFETY: test-scoped env mutation guarded by RAII restore in Drop.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, old }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: test-scoped env restore.
+        unsafe {
+            if let Some(old) = &self.old {
+                std::env::set_var(self.key, old);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+}
+
 /// Helper to set home directory for cross-platform test compatibility.
 /// Uses `ATM_HOME` which is checked first by `get_home_dir()`, avoiding
 /// platform-specific differences in how `dirs::home_dir()` resolves.
@@ -507,10 +536,7 @@ fn test_spool_drain_delivery_cycle() {
     let temp_dir = TempDir::new().unwrap();
     // Use ATM_HOME to redirect spool dir — works cross-platform (dirs::config_dir()
     // ignores HOME/USERPROFILE on Windows)
-    let prev_atm_home = std::env::var("ATM_HOME").ok();
-    unsafe {
-        std::env::set_var("ATM_HOME", temp_dir.path());
-    }
+    let _atm_home_guard = EnvGuard::set("ATM_HOME", temp_dir.path().to_str().unwrap());
     let teams_dir = temp_dir.path().join("teams");
     let team_dir = teams_dir.join("test-team");
     let inboxes_dir = team_dir.join("inboxes");
@@ -563,14 +589,6 @@ fn test_spool_drain_delivery_cycle() {
         messages.iter().any(|m| m["text"] == "Spooled message"),
         "Delivered message should be in inbox"
     );
-
-    // Restore environment
-    unsafe {
-        match prev_atm_home {
-            Some(val) => std::env::set_var("ATM_HOME", val),
-            None => std::env::remove_var("ATM_HOME"),
-        }
-    }
 }
 
 // ============================================================================
@@ -1398,29 +1416,11 @@ fn test_identity_mismatch_socket_is_detected_and_restarted() {
         daemon_binary_path().to_string_lossy().to_string(),
     );
 
-    let old_home = std::env::var("ATM_HOME").ok();
-    let old_daemon_bin = std::env::var("ATM_DAEMON_BIN").ok();
-    let old_autostart = std::env::var("ATM_DAEMON_AUTOSTART").ok();
-    unsafe {
-        std::env::set_var("ATM_HOME", temp_dir.path());
-        std::env::set_var("ATM_DAEMON_BIN", daemon_binary_path());
-        std::env::set_var("ATM_DAEMON_AUTOSTART", "1");
-    }
+    let _home_guard = EnvGuard::set("ATM_HOME", temp_dir.path().to_str().unwrap());
+    let daemon_bin = daemon_binary_path();
+    let _daemon_bin_guard = EnvGuard::set("ATM_DAEMON_BIN", daemon_bin.to_str().unwrap());
+    let _autostart_guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "1");
     let ensure_result = agent_team_mail_core::daemon_client::ensure_daemon_running();
-    unsafe {
-        match old_home {
-            Some(v) => std::env::set_var("ATM_HOME", v),
-            None => std::env::remove_var("ATM_HOME"),
-        }
-        match old_daemon_bin {
-            Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
-            None => std::env::remove_var("ATM_DAEMON_BIN"),
-        }
-        match old_autostart {
-            Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
-            None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
-        }
-    }
     ensure_result.expect("ensure_daemon_running should restart on identity mismatch");
 
     let new_pid = wait_for_daemon_pid_change(&temp_dir, old_pid, Duration::from_secs(8));

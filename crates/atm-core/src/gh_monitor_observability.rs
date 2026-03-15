@@ -24,6 +24,8 @@ const GH_WARNING_THRESHOLD: u64 = 50;
 const GH_REPO_STATE_TTL_SECS: i64 = 300;
 const GH_ACTIVE_POLL_INTERVAL_SECS: u64 = 60;
 const GH_IDLE_POLL_INTERVAL_SECS: u64 = 300;
+#[cfg(test)]
+const FAKE_FOREIGN_DAEMON_BINARY: &str = "fake-daemon-binary";
 
 #[derive(Debug, Clone)]
 pub struct GhCliObserverContext {
@@ -752,7 +754,7 @@ mod tests {
                     rate_limit: None,
                     owner: Some(GhRuntimeOwner {
                         runtime: "dev".to_string(),
-                        executable_path: "/tmp/foreign-atm-daemon".to_string(),
+                        executable_path: FAKE_FOREIGN_DAEMON_BINARY.to_string(),
                         home_scope: temp.path().to_string_lossy().to_string(),
                         pid: child.id(),
                     }),
@@ -779,14 +781,14 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("lease conflict"));
         assert!(err.to_string().contains(&format!("pid={}", child.id())));
-        assert!(err.to_string().contains("/tmp/foreign-atm-daemon"));
+        assert!(err.to_string().contains(FAKE_FOREIGN_DAEMON_BINARY));
         let fields = build_lease_conflict_event_fields(
             "atm-dev",
             "owner/repo",
             "atm-daemon",
             &GhRuntimeOwner {
                 runtime: "dev".to_string(),
-                executable_path: "/tmp/foreign-atm-daemon".to_string(),
+                executable_path: FAKE_FOREIGN_DAEMON_BINARY.to_string(),
                 home_scope: temp.path().to_string_lossy().to_string(),
                 pid: child.id(),
             },

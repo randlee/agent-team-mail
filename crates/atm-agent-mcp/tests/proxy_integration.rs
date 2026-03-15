@@ -6,7 +6,7 @@
 
 use serde_json::{Value, json};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
 
 /// Find the path to the `echo-mcp-server` test binary.
@@ -112,6 +112,22 @@ async fn read_all_responses(
         }
     }
     results
+}
+
+async fn wait_for_condition(
+    timeout: Duration,
+    poll_interval: Duration,
+    mut condition: impl FnMut() -> bool,
+) -> Duration {
+    let start = Instant::now();
+    let deadline = start + timeout;
+    while Instant::now() < deadline {
+        if condition() {
+            return start.elapsed();
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+    start.elapsed()
 }
 
 /// Read messages from the proxy, collecting all of them, until a response
@@ -225,8 +241,14 @@ async fn test_notifications_initialized_passes_through() {
     });
     send_newline(&mut writer, &notif).await;
 
-    // Small delay to let proxy process
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let elapsed = wait_for_condition(Duration::from_secs(1), Duration::from_millis(10), || {
+        !handle.is_finished()
+    })
+    .await;
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "proxy notification pass-through check did not stay healthy within 1s: elapsed={elapsed:?}"
+    );
 
     drop(writer);
     let _ = handle.await;
@@ -482,26 +504,34 @@ async fn test_child_crash_returns_error() {
     });
     send_newline(&mut writer, &crash_req).await;
 
-    // Wait for child to die
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs(2);
+    let mut probe_id = 3u64;
+    let mut error_resp = None;
+    while Instant::now() < deadline {
+        let codex_req2 = json!({
+            "jsonrpc": "2.0",
+            "id": probe_id,
+            "method": "tools/call",
+            "params": {"name": "codex", "arguments": {"prompt": "after crash"}}
+        });
+        send_newline(&mut writer, &codex_req2).await;
 
-    // Next request should return dead child error
-    let codex_req2 = json!({
-        "jsonrpc": "2.0",
-        "id": 3,
-        "method": "tools/call",
-        "params": {"name": "codex", "arguments": {"prompt": "after crash"}}
-    });
-    send_newline(&mut writer, &codex_req2).await;
-
-    let responses = read_all_responses(&mut reader, Duration::from_secs(5)).await;
-    let error_resp = responses.iter().find(|r| {
-        r.get("id") == Some(&json!(3))
-            && r.pointer("/error/code").and_then(|v| v.as_i64()) == Some(-32005)
-    });
+        let responses = read_all_responses(&mut reader, Duration::from_millis(250)).await;
+        if let Some(found) = responses.iter().find(|r| {
+            r.get("id") == Some(&json!(probe_id))
+                && r.pointer("/error/code").and_then(|v| v.as_i64()) == Some(-32005)
+        }) {
+            error_resp = Some(found.clone());
+            break;
+        }
+        probe_id += 1;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let elapsed = start.elapsed();
     assert!(
-        error_resp.is_some(),
-        "expected -32005 CHILD_PROCESS_DEAD error, got: {responses:?}"
+        error_resp.is_some() && elapsed < Duration::from_secs(2),
+        "expected -32005 CHILD_PROCESS_DEAD error within 2s: elapsed={elapsed:?}"
     );
 
     drop(writer);
