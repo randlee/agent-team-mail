@@ -27,6 +27,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 // ---------------------------------------------------------------------------
 // Embedded hook script bodies (compile-time)
@@ -63,49 +64,49 @@ const ATM_HOOK_RELAY_PY: &str = include_str!("../../scripts/atm-hook-relay.py");
 /// Return the SessionStart hook command string for local or global install.
 pub(crate) fn session_start_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "session-start.py");
-    format!("python3 \"{script}\"")
+    format!("{} \"{script}\"", hook_python_cmd())
 }
 
 /// Return the SessionEnd hook command string for local or global install.
 pub(crate) fn session_end_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "session-end.py");
-    format!("python3 \"{script}\"")
+    format!("{} \"{script}\"", hook_python_cmd())
 }
 
 /// Return the PermissionRequest hook command string for local or global install.
 pub(crate) fn permission_request_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "permission-request-relay.py");
-    format!("python3 \"{script}\"")
+    format!("{} \"{script}\"", hook_python_cmd())
 }
 
 /// Return the Stop hook command string for local or global install.
 pub(crate) fn stop_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "stop-relay.py");
-    format!("python3 \"{script}\"")
+    format!("{} \"{script}\"", hook_python_cmd())
 }
 
 /// Return the Notification(idle_prompt) hook command string for local/global install.
 pub(crate) fn notification_idle_prompt_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "notification-idle-relay.py");
-    format!("python3 \"{script}\"")
+    format!("{} \"{script}\"", hook_python_cmd())
 }
 
 /// Return the PreToolUse(Bash) hook command string for local or global install.
 pub(crate) fn pre_tool_use_bash_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "atm-identity-write.py");
-    format!("python3 \"{script}\"")
+    format!("{} \"{script}\"", hook_python_cmd())
 }
 
 /// Return the PreToolUse(Task) hook command string for local or global install.
 pub(crate) fn pre_tool_use_task_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "gate-agent-spawns.py");
-    format!("python3 \"{script}\"")
+    format!("{} \"{script}\"", hook_python_cmd())
 }
 
 /// Return the PostToolUse(Bash) hook command string for local or global install.
 pub(crate) fn post_tool_use_bash_cmd(global_scripts_dir: Option<&Path>) -> String {
     let script = hook_script_path(global_scripts_dir, "atm-identity-cleanup.py");
-    format!("python3 \"{script}\"")
+    format!("{} \"{script}\"", hook_python_cmd())
 }
 
 /// Return a hook script path expression:
@@ -116,6 +117,40 @@ pub(crate) fn hook_script_path(global_scripts_dir: Option<&Path>, script_name: &
         Some(dir) => normalize_for_bash_quoted_path(&dir.join(script_name)),
         None => format!("${{CLAUDE_PROJECT_DIR}}/.claude/scripts/{script_name}"),
     }
+}
+
+/// Resolve the Python interpreter path to embed into hook commands.
+///
+/// Claude executes hooks in a minimal shell environment where `python3` may not
+/// be on `PATH` (for example, teammate sessions launched from tmux panes). We
+/// therefore prefer an absolute interpreter path captured at install time.
+fn hook_python_cmd() -> String {
+    if let Some(value) = std::env::var_os("ATM_HOOK_PYTHON") {
+        return normalize_for_bash_quoted_path(Path::new(&value));
+    }
+
+    if let Ok(output) = Command::new("python3")
+        .args(["-c", "import sys; print(sys.executable)"])
+        .output()
+        && output.status.success()
+    {
+        let resolved = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !resolved.is_empty() {
+            return normalize_for_bash_quoted_path(Path::new(&resolved));
+        }
+    }
+
+    for candidate in [
+        "/opt/homebrew/bin/python3",
+        "/usr/local/bin/python3",
+        "/usr/bin/python3",
+    ] {
+        if Path::new(candidate).exists() {
+            return normalize_for_bash_quoted_path(Path::new(candidate));
+        }
+    }
+
+    "python3".to_string()
 }
 
 /// Normalize a filesystem path for inclusion inside a double-quoted command

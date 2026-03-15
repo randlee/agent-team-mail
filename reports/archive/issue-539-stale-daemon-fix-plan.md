@@ -1,81 +1,142 @@
-# Issue #539 Fix Plan: Stale Daemon Shutdown and Recovery
+# Issue #539 Fix Plan: Stale Daemon Process Accumulation
 
-Date: 2026-03-11  
-Status: revised after partial delivery  
-Related Issues: #539, #669
+Date: 2026-03-10
+Status: planned
+Issue: https://github.com/randlee/agent-team-mail/issues/539
 
-## 1. Problem Statement
+## Root Causes
 
-Daemon restart reliability work under issue `#539` was originally described as a
-single Layer 2 shutdown-hardening bucket. QA correctly called out that the
-implementation delivered in `#669` only covers part of that scope.
+1. **Test ATM_HOME isolation** — each test uses `ATM_HOME=/tmp/<random>`, so its `daemon.lock`
+   is invisible to the production daemon. Crashed tests leave orphan processes with no discoverer.
+2. **Drop-only cleanup** — `SocketServerHandle::drop()` and `FileLock::drop()` are the only
+   cleanup paths. SIGKILL / OOM bypass them entirely.
+3. **No global PID registry** — daemon only knows its own `ATM_HOME`-scoped PID file. No
+   system-wide registry for `atm daemon status` or `atm doctor` to scan.
+4. **Stale version survives config changes** — `ensure_daemon_running_unix()` checks mismatch
+   only when a CLI command fires. Silent between sessions.
 
-We now split Layer 2 into delivered vs deferred items so the ADR matches the
-actual code in `develop`.
+## Relevant Code
 
-## 2. Layer 2 Scope Split
+- `crates/atm-daemon/src/main.rs:70` — lock acquisition via `fs2::FileExt::try_lock_exclusive()`
+- `crates/atm-core/src/io/lock.rs:10-20` — `FileLock` struct (Drop-based release)
+- `crates/atm-daemon/src/daemon/socket.rs:315-316` — PID file write
+- `crates/atm-daemon/src/daemon/socket.rs:148-159` — `SocketServerHandle` (Drop-based cleanup)
+- `crates/atm-daemon/src/main.rs:312-339` — SIGTERM/SIGINT signal handler
+- `crates/atm-core/src/daemon_client.rs:402-430` — `write_daemon_lock_metadata()`
+- `crates/atm-core/src/daemon_client.rs:1664-1685` — stale cleanup at autostart time
+- `crates/atm-core/src/daemon_client.rs:1718-1820` — `detect_daemon_identity_mismatch()`
 
-### 2.1 Delivered in `#669`
+## Solution Architecture: 4-Layer Defense
 
-Delivered behavior:
-- daemon shutdown waits for internal background tasks with a bounded timeout
-- timed-out tasks are explicitly aborted after the cooperative wait expires
-- plugin `run()` tasks now use the same bounded wait-and-abort behavior during
-  daemon shutdown
+### Layer 1 — Startup Orphan Sweep
 
-Delivered rationale:
-- SIGTERM shutdown was previously allowed to log timeouts and continue without
-  aborting stuck tasks
-- that left hung tasks alive during teardown and contributed to restart flake
+**Files**: `crates/atm-core/src/daemon_client.rs`, `crates/atm-daemon/src/main.rs`
 
-Delivered verification:
-- `event_loop::tests::test_wait_for_shutdown_task_aborts_timed_out_task`
-- `event_loop::tests::test_wait_for_shutdown_task_allows_completed_task`
+New functions in `daemon_client.rs`:
+- `scan_atm_daemon_processes() -> Vec<(u32, String)>` — platform-conditional:
+  - Unix: `pgrep -u $(whoami) -f atm-daemon`
+  - Windows: `tasklist /FI "IMAGENAME eq atm-daemon.exe" /FO CSV /NH`
+- `is_pid_atm_daemon(pid) -> bool` — verify process name before kill (prevents PID reuse kills)
+- `kill_orphan_daemons_for_home(home: &Path)` — kill scanned PIDs sharing same ATM_HOME (not self)
 
-### 2.2 Deferred from original Layer 2
-
-Deferred items:
-- watchdog thread/process that escalates when the main shutdown path wedges
-- explicit double-signal exit flow for repeated termination requests
-
-Deferred status:
-- not implemented by `#669`
-- remain tracked as follow-up work under issue `#539`
-
-Reason for deferral:
-- the immediate blocker was unbounded task lifetime after SIGTERM
-- abort-on-timeout is the smallest change that restores bounded stop-path
-  behavior without mixing in a second supervisor design
-
-## 3. Updated Layer 2 Data Flow
-
-```
-SIGTERM received
-  -> cancel shared CancellationToken
-  -> wait for daemon background tasks (bounded)
-     -> abort timed-out daemon tasks
-  -> graceful_shutdown(plugins, timeout per plugin)
-  -> wait for plugin run() tasks (bounded)
-     -> abort timed-out plugin run() tasks
-  -> final status/log flush best effort
-  -> process exit
+Call in `main.rs` after `write_daemon_lock_metadata()`, before logging init:
+```rust
+agent_team_mail_core::daemon_client::kill_orphan_daemons_for_home(&home_dir);
 ```
 
-The `plugin run()` task wait occurs after `graceful_shutdown(...)` because the
-plugin first gets a cooperative shutdown callback and then its long-running
-task is given a bounded window to observe cancellation and exit.
+Best-effort: errors logged at `warn`, never propagated as startup failures.
 
-## 4. Open Items
+### Layer 2 — SIGTERM Handling Hardening
 
-Still open after `#669`:
-- design watchdog ownership and escalation rules
-- define repeated-signal behavior (`SIGTERM`/second signal/forced exit)
-- decide whether plugin shutdown should become parallel instead of sequential
+**File**: `crates/atm-daemon/src/main.rs` (replace lines 312-339)
 
-## 5. Consequences
+Changes:
+1. **Watchdog thread**: after `cancel_token.cancel()`, spawn a `std::thread` that sleeps 30s
+   then calls `std::process::exit(1)`. Ensures hard exit if graceful shutdown deadlocks.
+2. **Double-signal exit**: second SIGTERM or SIGINT within 5s triggers `std::process::exit(1)`
+   immediately.
 
-- The ADR now matches the code that actually shipped.
-- Reviewers can distinguish the delivered bounded-abort work from the deferred
-  watchdog/escalation work.
-- Future shutdown-hardening PRs can target the remaining Layer 2 items without
-  reopening already-delivered task-abort behavior.
+### Layer 3 — CLI + Doctor Enrichment
+
+**Files**: `crates/atm/src/commands/daemon.rs`, `crates/atm/src/commands/doctor.rs`
+
+- `atm daemon status --sweep`: scan all user-owned atm-daemon PIDs, show table
+  (PID / ATM_HOME / VERSION / STATUS), prompt to kill orphans (`--force` skips prompt)
+- `atm doctor` new finding: `STALE_DAEMON_PROCESSES` (WARN severity) when orphans detected
+- New public function: `scan_all_user_daemon_pids()` in `daemon_client.rs`
+
+### Layer 4 — Test Daemon Isolation Hardening
+
+**File**: `crates/atm-core/src/daemon_client.rs`
+
+Global TMPDIR registry: `$TMPDIR/atm-daemon-test-pids.jsonl`
+- Each line: `{"pid": N, "atm_home": "/tmp/xxx", "started_at": "..."}`
+- `register_test_daemon_pid(pid: u32, atm_home: &Path)` — append to registry (no lock needed for JSONL append)
+- `cleanup_stale_test_daemons()` — read registry, check liveness (`kill -0`), kill orphans, rewrite with alive-only entries
+- Called at daemon startup (best-effort) and via `atm daemon status --sweep`
+
+## Data Flow
+
+### Production Startup
+```
+atm-daemon main()
+  |-> acquire_lock(daemon.lock)
+  |-> write_daemon_lock_metadata()        # PID, exe, home_scope, version
+  |-> kill_orphan_daemons_for_home()      # Scan + kill orphans with same ATM_HOME
+  |-> cleanup_stale_test_daemons()        # Scan TMPDIR registry
+  |-> init logging, config, plugins
+  |-> start_socket_server()               # Write PID file, bind socket
+  |-> run event loop
+  |-> [SIGTERM] -> cancel() + 30s watchdog + double-signal exit
+  |-> graceful_shutdown()
+  |-> SocketServerHandle::drop()          # Remove socket + PID files
+  |-> FileLock::drop()                    # Release flock
+```
+
+### Crash Recovery
+```
+[daemon crashes / SIGKILL / OOM]
+  |-> flock released by OS
+  |-> PID file + socket + lock metadata remain on disk
+
+[next CLI or daemon startup]
+  |-> acquire_lock() succeeds
+  |-> kill_orphan_daemons_for_home() — old PID in PID file: check liveness, SIGTERM + SIGKILL if alive
+  |-> normal startup continues
+```
+
+## Sprint Breakdown
+
+- **fix-539a**: Core liveness validation + startup sweep (Layer 1) — highest value
+- **fix-539b**: SIGTERM hardening (Layer 2)
+- **fix-539c**: CLI + Doctor enrichment (Layer 3)
+- **fix-539d**: Test daemon isolation (Layer 4)
+
+## Cross-Platform Notes
+
+| Concern | Unix (macOS/Linux) | Windows |
+|---------|-------------------|---------|
+| Process scan | `pgrep -u $(whoami) -f atm-daemon` | `tasklist /FI "IMAGENAME eq atm-daemon.exe"` |
+| Kill | `kill(pid, SIGTERM)` + `kill(pid, SIGKILL)` | `taskkill /PID {pid} /F` |
+| PID liveness | `kill(pid, 0)` | `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` |
+| SIGTERM handler | `tokio::signal::unix::signal(Terminate)` | N/A (Ctrl+C only) |
+| Process env read | `/proc/{pid}/environ` (Linux), `ps eww` (macOS) | `wmic process get processid,commandline` |
+| Test registry | `$TMPDIR/atm-daemon-test-pids.jsonl` | `%TEMP%\atm-daemon-test-pids.jsonl` |
+
+## Risk Assessment
+
+| Risk | Impact | Likelihood | Mitigation |
+|------|--------|-----------|------------|
+| PID reuse kills wrong process | High | Low | Verify process name contains "atm-daemon" before any kill |
+| `pgrep` unavailable in container | Low | Medium | Graceful fallback, log warning, skip sweep |
+| TMPDIR registry grows unbounded | Low | Low | Cleanup on every daemon start |
+| Watchdog exits before graceful shutdown | Medium | Very Low | 30s timeout is generous |
+| Breaking ATM_HOME test isolation | High | Low | Test daemon registration is additive only |
+| Windows CI failures | Medium | Medium | All new code gated behind `#[cfg(unix)]`/`#[cfg(windows)]` |
+
+## Constraints
+
+- ATM_HOME isolation for tests MUST be preserved — no change to that pattern
+- All sweep operations are best-effort — errors logged at `warn`, never block startup
+- PID validation required before any kill signal (prevent PID reuse false positives)
+- `fs2` flock-based singleton lock remains the primary guard — orphan sweep is secondary defense

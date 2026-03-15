@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -30,6 +32,41 @@ def _repo_root() -> Path:
     if override:
         return Path(override).expanduser().resolve()
     return Path(__file__).resolve().parent.parent
+
+
+def _load_repo_env(repo_root: Path) -> None:
+    env_file = repo_root / ".env"
+    if not env_file.exists():
+        return
+
+    pattern = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+    for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        match = pattern.match(line)
+        if not match:
+            continue
+        key, value = match.groups()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        expanded = os.path.expandvars(value)
+        os.environ[key] = expanded
+
+
+def _pane_shell_prefix(repo_root: Path) -> str:
+    env_file = repo_root / ".env"
+    parts = [f"cd {shlex.quote(str(repo_root))}"]
+    if env_file.exists():
+        parts.extend(
+            [
+                "set -a",
+                f"source {shlex.quote(str(env_file))}",
+                "set +a",
+                "hash -r",
+            ]
+        )
+    return "; ".join(parts)
 
 
 def _read_default_team(atm_toml: Path) -> str:
@@ -57,6 +94,7 @@ def main() -> int:
     mode = os.environ.get("LAUNCH_MODE", "session").strip() or "session"
 
     repo_root = _repo_root()
+    _load_repo_env(repo_root)
     atm_toml = repo_root / ".atm.toml"
     if not atm_toml.exists():
         return 0
@@ -70,6 +108,7 @@ def main() -> int:
     team = os.environ.get("ATM_TEAM", "").strip() or default_team
     agent_name = args.agent_name
     worker_cmd = args.command
+    shell_prefix = _pane_shell_prefix(repo_root)
 
     if shutil.which("tmux") is None:
         print("Error: tmux is not installed or not in PATH", file=sys.stderr)
@@ -92,6 +131,9 @@ def main() -> int:
     if os.environ.get("ATM_HOME", "").strip():
         env_prefix.append(f"ATM_HOME={os.environ['ATM_HOME'].strip()}")
     env_str = " ".join(env_prefix)
+    pane_cmd = (
+        f"zsh -lc {shlex.quote(f'{shell_prefix}; export {env_str}; {worker_cmd}')}"
+    )
 
     if mode == "pane":
         if not os.environ.get("TMUX"):
@@ -106,7 +148,7 @@ def main() -> int:
                 "-P",
                 "-F",
                 "#{pane_id}",
-                f"env {env_str} {worker_cmd}; echo ''; echo 'Worker exited. Press Enter to close.'; read",
+                f"{pane_cmd}; echo ''; echo 'Worker exited. Press Enter to close.'; read",
             ],
             capture=True,
         ).stdout.strip()
@@ -148,7 +190,7 @@ def main() -> int:
             "-d",
             "-s",
             agent_name,
-            f"env {env_str} {worker_cmd}; echo ''; echo 'Worker exited. Press Enter to close.'; read",
+            f"{pane_cmd}; echo ''; echo 'Worker exited. Press Enter to close.'; read",
         ]
     )
     pane_info = _run(

@@ -25,6 +25,8 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use tracing::warn;
 
+use agent_team_mail_core::spawn::read_agent_frontmatter;
+
 use crate::commands::runtime_adapter::{RuntimeKind, SpawnSpec, adapter_for_runtime};
 use crate::util::settings::{claude_root_dir_for, get_home_dir, teams_root_dir_for};
 use crate::util::state::{SeenState, get_last_seen, load_seen_state};
@@ -526,12 +528,13 @@ fn spawn_member(args: SpawnArgs) -> Result<()> {
         home_dir: &home_dir,
     })?;
 
+    let frontmatter = read_agent_frontmatter(&home_dir, &args.agent);
     let spec = SpawnSpec {
         team: team_name.clone(),
         agent: args.agent.clone(),
-        color: args.color.clone(),
+        color: args.color.clone().or(frontmatter.color),
         cwd: launch_dir.clone(),
-        model: args.model.clone(),
+        model: args.model.clone().or(frontmatter.model),
         sandbox: args.sandbox,
         approval_mode: args.approval_mode.clone(),
         resume: args.resume.is_some() || args.continue_flag,
