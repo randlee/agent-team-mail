@@ -576,11 +576,17 @@ fn test_spool_drain_delivery_cycle() {
     // Step 4: Drain the spool - message should be delivered
     // Note: spool_drain uses system-global spool dir, so other tests may have
     // queued messages. We verify our message was delivered rather than exact count.
+    let drain_start = Instant::now();
     let status = agent_team_mail_core::io::spool::spool_drain(&teams_dir).unwrap();
+    let drain_elapsed = drain_start.elapsed();
     assert!(
         status.delivered >= 1,
         "At least our spooled message should be delivered, got: {}",
         status.delivered
+    );
+    assert!(
+        drain_elapsed < Duration::from_secs(5),
+        "spool drain took too long: {drain_elapsed:?}"
     );
 
     // Step 5: Verify message is in inbox

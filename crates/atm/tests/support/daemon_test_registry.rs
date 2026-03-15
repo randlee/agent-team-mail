@@ -1,6 +1,5 @@
 #![cfg(test)]
 
-use agent_team_mail_core::io::lock::acquire_lock;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -11,11 +10,33 @@ struct RegistryEntry {
 }
 
 fn registry_path() -> std::path::PathBuf {
-    std::env::temp_dir().join("atm-test-daemon-registry.json")
+    let binary_name = std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "unknown-test-binary".to_string());
+    std::env::temp_dir().join(format!("atm-test-daemon-registry-{binary_name}.json"))
 }
 
 fn registry_lock_path() -> std::path::PathBuf {
-    std::env::temp_dir().join("atm-test-daemon-registry.lock")
+    registry_path().with_extension("lock")
+}
+
+fn with_registry_entries<T>(f: impl FnOnce(&mut Vec<RegistryEntry>) -> T) -> T {
+    let lock_path = registry_lock_path();
+    if let Some(parent) = lock_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let lock = agent_team_mail_core::io::lock::acquire_lock(&lock_path, 2_000)
+        .expect("acquire daemon test registry lock");
+    let mut entries = load_entries();
+    let result = f(&mut entries);
+    save_entries(&entries);
+    drop(lock);
+    result
 }
 
 fn load_entries() -> Vec<RegistryEntry> {
@@ -82,66 +103,63 @@ fn command_matches(entry: &RegistryEntry, cmd: &str) -> bool {
 ///
 /// This only targets PIDs previously registered by this test fixture.
 pub fn sweep_stale_test_daemons() {
-    let _lock = acquire_lock(&registry_lock_path(), 5).expect("lock daemon test registry");
-    let mut entries = load_entries();
-    if entries.is_empty() {
-        return;
-    }
-
-    #[cfg(unix)]
-    {
-        let mut retained = Vec::new();
-        for entry in entries.drain(..) {
-            let pid = entry.pid as i32;
-            if !pid_alive(pid) {
-                continue;
-            }
-            let Some(cmd) = pid_command(pid) else {
-                retained.push(entry);
-                continue;
-            };
-            if !command_matches(&entry, &cmd) {
-                retained.push(entry);
-                continue;
-            }
-
-            send_signal(pid, 15);
-            for _ in 0..20 {
-                if !pid_alive(pid) {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            if pid_alive(pid) {
-                send_signal(pid, 9);
-            }
-            if pid_alive(pid) {
-                retained.push(entry);
-            }
+    with_registry_entries(|entries| {
+        if entries.is_empty() {
+            return;
         }
-        save_entries(&retained);
-    }
 
-    #[cfg(not(unix))]
-    {
-        // On non-Unix, daemon process tests are not expected to run.
-        let _ = entries;
-    }
+        #[cfg(unix)]
+        {
+            let mut retained = Vec::new();
+            for entry in entries.drain(..) {
+                let pid = entry.pid as i32;
+                if !pid_alive(pid) {
+                    continue;
+                }
+                let Some(cmd) = pid_command(pid) else {
+                    retained.push(entry);
+                    continue;
+                };
+                if !command_matches(&entry, &cmd) {
+                    retained.push(entry);
+                    continue;
+                }
+
+                send_signal(pid, 15);
+                for _ in 0..20 {
+                    if !pid_alive(pid) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                if pid_alive(pid) {
+                    send_signal(pid, 9);
+                }
+                if pid_alive(pid) {
+                    retained.push(entry);
+                }
+            }
+            *entries = retained;
+        }
+
+        #[cfg(not(unix))]
+        {
+            // On non-Unix, daemon process tests are not expected to run.
+        }
+    });
 }
 
 pub fn register_test_daemon(pid: u32, daemon_bin: &Path) {
-    let _lock = acquire_lock(&registry_lock_path(), 5).expect("lock daemon test registry");
-    let mut entries = load_entries();
-    entries.push(RegistryEntry {
-        pid,
-        daemon_bin: daemon_bin.to_string_lossy().to_string(),
+    with_registry_entries(|entries| {
+        entries.push(RegistryEntry {
+            pid,
+            daemon_bin: daemon_bin.to_string_lossy().to_string(),
+        });
     });
-    save_entries(&entries);
 }
 
 pub fn unregister_test_daemon(pid: u32) {
-    let _lock = acquire_lock(&registry_lock_path(), 5).expect("lock daemon test registry");
-    let mut entries = load_entries();
-    entries.retain(|entry| entry.pid != pid);
-    save_entries(&entries);
+    with_registry_entries(|entries| {
+        entries.retain(|entry| entry.pid != pid);
+    });
 }

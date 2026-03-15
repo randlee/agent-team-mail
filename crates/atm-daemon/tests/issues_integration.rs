@@ -93,6 +93,24 @@ fn read_inbox(teams_root: &Path, team: &str, agent: &str) -> Vec<InboxMessage> {
     serde_json::from_slice(&content).unwrap()
 }
 
+async fn wait_for_condition(
+    timeout_ms: u64,
+    mut pred: impl FnMut() -> bool,
+) -> std::time::Duration {
+    let start = std::time::Instant::now();
+    let deadline = start + Duration::from_millis(timeout_ms);
+    loop {
+        if pred() {
+            return start.elapsed();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "condition not met within {timeout_ms}ms"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// Helper to create a test issue
 fn create_test_issue(number: u64, title: &str, labels: Vec<&str>) -> Issue {
     Issue {
@@ -165,15 +183,21 @@ async fn test_issue_created_delivers_inbox_message() {
 
     // Run plugin briefly (one poll cycle)
     let cancel = CancellationToken::new();
-    let cancel_clone = cancel.clone();
-
-    tokio::spawn(async move {
-        // Cancel after 1.5 seconds (enough for one poll)
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        cancel_clone.cancel();
-    });
-
-    let _ = plugin.run(cancel).await;
+    let run_cancel = cancel.clone();
+    let run_task = tokio::spawn(async move { plugin.run(run_cancel).await });
+    let observed_delivery = wait_for_condition(2_000, || {
+        !read_inbox(ctx.mail.teams_root(), "test-team", "issues-bot").is_empty()
+    })
+    .await;
+    assert!(
+        observed_delivery <= Duration::from_secs(2),
+        "issue delivery should stay bounded: elapsed={observed_delivery:?}"
+    );
+    cancel.cancel();
+    let _ = timeout(Duration::from_secs(2), run_task)
+        .await
+        .expect("issue plugin run should exit after cancellation")
+        .unwrap();
 
     // Verify inbox message was delivered
     let messages = read_inbox(ctx.mail.teams_root(), "test-team", "issues-bot");
@@ -336,14 +360,21 @@ async fn test_issue_filter_applies_labels() {
 
     // Run briefly
     let cancel = CancellationToken::new();
-    let cancel_clone = cancel.clone();
-
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        cancel_clone.cancel();
-    });
-
-    let _ = plugin.run(cancel).await;
+    let run_cancel = cancel.clone();
+    let run_task = tokio::spawn(async move { plugin.run(run_cancel).await });
+    let filter_elapsed = wait_for_condition(2_000, || {
+        read_inbox(ctx.mail.teams_root(), "test-team", "issues-bot").len() == 2
+    })
+    .await;
+    assert!(
+        filter_elapsed <= Duration::from_secs(2),
+        "issue label filtering should stay bounded: elapsed={filter_elapsed:?}"
+    );
+    cancel.cancel();
+    let _ = timeout(Duration::from_secs(2), run_task)
+        .await
+        .expect("issues filter plugin run should exit after cancellation")
+        .unwrap();
 
     // Verify list_issues was called with bug label filter
     let calls = provider_clone.get_calls();
@@ -418,12 +449,21 @@ async fn test_issue_updates_deliver_multiple_messages() {
     plugin1.init(&ctx).await.unwrap();
 
     let cancel1 = CancellationToken::new();
-    let cancel1_clone = cancel1.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(1200)).await;
-        cancel1_clone.cancel();
-    });
-    let _ = plugin1.run(cancel1).await;
+    let run_cancel1 = cancel1.clone();
+    let run_task1 = tokio::spawn(async move { plugin1.run(run_cancel1).await });
+    let first_delivery = wait_for_condition(2_000, || {
+        read_inbox(ctx.mail.teams_root(), "test-team", "issues-bot").len() == 1
+    })
+    .await;
+    assert!(
+        first_delivery <= Duration::from_secs(2),
+        "first issue update poll should stay bounded: elapsed={first_delivery:?}"
+    );
+    cancel1.cancel();
+    let _ = timeout(Duration::from_secs(2), run_task1)
+        .await
+        .expect("first issue update run should exit after cancellation")
+        .unwrap();
 
     // Remove synthetic member before re-init to avoid duplicate member error
     ctx.roster
@@ -439,12 +479,21 @@ async fn test_issue_updates_deliver_multiple_messages() {
     plugin2.init(&ctx).await.unwrap();
 
     let cancel2 = CancellationToken::new();
-    let cancel2_clone = cancel2.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(1200)).await;
-        cancel2_clone.cancel();
-    });
-    let _ = plugin2.run(cancel2).await;
+    let run_cancel2 = cancel2.clone();
+    let run_task2 = tokio::spawn(async move { plugin2.run(run_cancel2).await });
+    let second_delivery = wait_for_condition(2_000, || {
+        read_inbox(ctx.mail.teams_root(), "test-team", "issues-bot").len() == 2
+    })
+    .await;
+    assert!(
+        second_delivery <= Duration::from_secs(2),
+        "second issue update poll should stay bounded: elapsed={second_delivery:?}"
+    );
+    cancel2.cancel();
+    let _ = timeout(Duration::from_secs(2), run_task2)
+        .await
+        .expect("second issue update run should exit after cancellation")
+        .unwrap();
 
     // Verify two messages for the same issue were delivered
     let messages = read_inbox(ctx.mail.teams_root(), "test-team", "issues-bot");
@@ -574,17 +623,15 @@ async fn test_full_lifecycle_init_run_shutdown() {
     // Run briefly with cancellation
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
-
-    let run_task = tokio::spawn(async move {
-        // Cancel after 100ms
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    let cancel_task = tokio::spawn(async move {
+        tokio::task::yield_now().await;
         cancel_clone.cancel();
     });
-
-    let run_result = plugin.run(cancel).await;
+    let run_result = timeout(Duration::from_secs(1), plugin.run(cancel))
+        .await
+        .expect("issues plugin run should stop after cancellation");
     assert!(run_result.is_ok());
-
-    run_task.await.unwrap();
+    cancel_task.await.unwrap();
 
     // Shutdown
     let shutdown_result = plugin.shutdown().await;

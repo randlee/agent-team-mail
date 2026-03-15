@@ -13,6 +13,7 @@
 use agent_team_mail_core::logging_event::{LogEventV1, new_log_event};
 use agent_team_mail_daemon::daemon::spool_merge::merge_spool_on_startup;
 use std::fs;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -39,6 +40,37 @@ fn read_canonical_events(log_path: &std::path::Path) -> Vec<LogEventV1> {
         .filter(|l| !l.trim().is_empty())
         .map(|l| serde_json::from_str::<LogEventV1>(l).expect("valid LogEventV1 JSON"))
         .collect()
+}
+
+fn wait_for_spool_files(
+    spool_dir: &std::path::Path,
+    min_count: usize,
+    timeout: Duration,
+) -> Duration {
+    let start = Instant::now();
+    let deadline = start + timeout;
+    while Instant::now() < deadline {
+        let count = if spool_dir.exists() {
+            fs::read_dir(spool_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .and_then(|x| x.to_str())
+                        .map(|x| x == "jsonl")
+                        .unwrap_or(false)
+                })
+                .count()
+        } else {
+            0
+        };
+        if count >= min_count {
+            return start.elapsed();
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    start.elapsed()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -276,8 +308,11 @@ fn test_emit_event_reaches_spool_when_daemon_unavailable() {
         },
     );
 
-    // Give the background forwarder thread a moment to process the event.
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let elapsed = wait_for_spool_files(&spool_dir, 1, Duration::from_secs(1));
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "forwarder did not spool within 1s: elapsed={elapsed:?}"
+    );
 
     // Check that at least one spool file was created.
     let spool_files: Vec<_> = if spool_dir.exists() {
