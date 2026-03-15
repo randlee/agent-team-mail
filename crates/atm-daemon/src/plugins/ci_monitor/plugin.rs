@@ -1430,8 +1430,6 @@ impl Plugin for CiMonitorPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
-    use crate::plugins::ci_monitor::types::{CiMonitorStatus, CiMonitorTargetKind};
     use agent_team_mail_core::context::GitProvider as GitProviderType;
     use std::sync::Mutex;
 
