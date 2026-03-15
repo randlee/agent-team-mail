@@ -505,29 +505,31 @@ async fn test_child_crash_returns_error() {
     send_newline(&mut writer, &crash_req).await;
 
     let start = Instant::now();
-    let deadline = start + Duration::from_secs(2);
-    let mut probe_id = 3u64;
-    let mut error_resp = None;
-    while Instant::now() < deadline {
-        let codex_req2 = json!({
-            "jsonrpc": "2.0",
-            "id": probe_id,
-            "method": "tools/call",
-            "params": {"name": "codex", "arguments": {"prompt": "after crash"}}
-        });
-        send_newline(&mut writer, &codex_req2).await;
+    let error_resp = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut probe_id = 3u64;
+        loop {
+            let codex_req2 = json!({
+                "jsonrpc": "2.0",
+                "id": probe_id,
+                "method": "tools/call",
+                "params": {"name": "codex", "arguments": {"prompt": "after crash"}}
+            });
+            send_newline(&mut writer, &codex_req2).await;
 
-        let responses = read_all_responses(&mut reader, Duration::from_millis(250)).await;
-        if let Some(found) = responses.iter().find(|r| {
-            r.get("id") == Some(&json!(probe_id))
-                && r.pointer("/error/code").and_then(|v| v.as_i64()) == Some(-32005)
-        }) {
-            error_resp = Some(found.clone());
-            break;
+            let responses = read_all_responses(&mut reader, Duration::from_millis(250)).await;
+            if let Some(found) = responses.iter().find(|r| {
+                r.get("id") == Some(&json!(probe_id))
+                    && r.pointer("/error/code").and_then(|v| v.as_i64()) == Some(-32005)
+            }) {
+                return Some(found.clone());
+            }
+            probe_id += 1;
+            tokio::task::yield_now().await;
         }
-        probe_id += 1;
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    })
+    .await
+    .ok()
+    .flatten();
     let elapsed = start.elapsed();
     assert!(
         error_resp.is_some() && elapsed < Duration::from_secs(2),
@@ -569,34 +571,33 @@ async fn test_child_crash_includes_exit_code() {
     // exit code, which confirms exit_status is populated.  Bound the polling
     // loop with a 10-second deadline so the test fails fast on genuine bugs
     // rather than hanging indefinitely.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    let mut probe_id: u64 = 100;
-    loop {
-        if tokio::time::Instant::now() >= deadline {
-            panic!("timed out waiting for proxy to detect child crash (exit code 42)");
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut probe_id: u64 = 100;
+        loop {
+            // Send a probe request.
+            let probe = json!({
+                "jsonrpc": "2.0",
+                "id": probe_id,
+                "method": "tools/call",
+                "params": {"name": "codex", "arguments": {"prompt": "probe"}}
+            });
+            send_newline(&mut writer, &probe).await;
 
-        // Send a probe request.
-        let probe = json!({
-            "jsonrpc": "2.0",
-            "id": probe_id,
-            "method": "tools/call",
-            "params": {"name": "codex", "arguments": {"prompt": "probe"}}
-        });
-        send_newline(&mut writer, &probe).await;
-
-        // Collect all responses that arrive within a short window.
-        let got = read_all_responses(&mut reader, Duration::from_millis(200)).await;
-        let found = got.iter().find(|r| {
-            r.get("id") == Some(&json!(probe_id))
-                && r.pointer("/error/data/exit_code").and_then(|v| v.as_i64()) == Some(42)
-        });
-        if found.is_some() {
-            break;
+            // Collect all responses that arrive within a short window.
+            let got = read_all_responses(&mut reader, Duration::from_millis(200)).await;
+            let found = got.iter().find(|r| {
+                r.get("id") == Some(&json!(probe_id))
+                    && r.pointer("/error/data/exit_code").and_then(|v| v.as_i64()) == Some(42)
+            });
+            if found.is_some() {
+                break;
+            }
+            probe_id += 1;
+            tokio::task::yield_now().await;
         }
-        probe_id += 1;
-    }
+    })
+    .await
+    .expect("timed out waiting for proxy to detect child crash (exit code 42)");
 
     // Send another request
     let req = json!({
