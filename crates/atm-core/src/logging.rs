@@ -20,7 +20,7 @@
 
 use std::sync::OnceLock;
 
-use crate::consts::{DAEMON_QUERY_TIMEOUT_MS, LOG_EVENT_CHANNEL_CAPACITY};
+use crate::consts::{LOG_EVENT_CHANNEL_CAPACITY, LOG_FORWARD_TIMEOUT_MS};
 
 static INIT: OnceLock<()> = OnceLock::new();
 
@@ -303,7 +303,7 @@ fn try_forward_to_socket(
         Err(_) => return false,
     };
 
-    let timeout = Duration::from_millis(DAEMON_QUERY_TIMEOUT_MS);
+    let timeout = Duration::from_millis(LOG_FORWARD_TIMEOUT_MS);
     let _ = stream.set_write_timeout(Some(timeout));
     let _ = stream.set_read_timeout(Some(timeout));
 
