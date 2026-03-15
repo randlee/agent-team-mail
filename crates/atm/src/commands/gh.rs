@@ -205,6 +205,7 @@ struct GhPluginState {
     enabled: bool,
     config_source: Option<String>,
     config_path: Option<String>,
+    repo: Option<String>,
     message: Option<String>,
 }
 
@@ -243,6 +244,18 @@ struct GhNamespaceStatus {
     updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo_state_updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    budget_limit_per_hour: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    budget_used_in_window: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rate_limit_remaining: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rate_limit_limit: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    poll_owner: Option<String>,
     actions: Vec<&'static str>,
 }
 
@@ -398,10 +411,16 @@ pub fn execute(args: GhArgs) -> Result<()> {
     let team = args.team.as_deref().unwrap_or(&config.core.default_team);
 
     let plugin_state = evaluate_plugin_state(&config, team, &current_dir, &home_dir);
+    let namespace_repo_scope = resolve_daemon_repo_scope(args.repo.as_deref(), &current_dir).ok();
 
     match args.command {
         None => {
-            let health = resolve_namespace_health(team, &current_dir, &plugin_state)?;
+            let health = resolve_namespace_health(
+                team,
+                &current_dir,
+                namespace_repo_scope.as_deref(),
+                &plugin_state,
+            )?;
             print_namespace_status(&health, args.json)
         }
         Some(GhCommand::Init(init_args)) => execute_init(
@@ -415,7 +434,12 @@ pub fn execute(args: GhArgs) -> Result<()> {
         Some(GhCommand::Status(status_args)) => {
             validate_status_args(&status_args)?;
             if status_args.target_kind.is_none() {
-                let health = resolve_namespace_health(team, &current_dir, &plugin_state)?;
+                let health = resolve_namespace_health(
+                    team,
+                    &current_dir,
+                    namespace_repo_scope.as_deref(),
+                    &plugin_state,
+                )?;
                 return print_namespace_status(&health, args.json);
             }
 
@@ -468,7 +492,12 @@ pub fn execute(args: GhArgs) -> Result<()> {
         }
         Some(GhCommand::Monitor(monitor)) => {
             if let MonitorTarget::Status(_status) = &monitor.target {
-                let health = resolve_namespace_health(team, &current_dir, &plugin_state)?;
+                let health = resolve_namespace_health(
+                    team,
+                    &current_dir,
+                    namespace_repo_scope.as_deref(),
+                    &plugin_state,
+                )?;
                 return print_namespace_status(&health, args.json);
             }
 
@@ -1456,6 +1485,7 @@ fn evaluate_plugin_state(
         config_path: location
             .as_ref()
             .map(|loc| loc.path.to_string_lossy().to_string()),
+        repo: None,
         message: None,
     };
 
@@ -1504,12 +1534,14 @@ fn evaluate_plugin_state(
         return state;
     }
 
+    state.repo = Some(cfg_repo.to_string());
     state
 }
 
 fn resolve_namespace_health(
     team: &str,
     current_dir: &Path,
+    repo_scope: Option<&str>,
     plugin_state: &GhPluginState,
 ) -> Result<GhMonitorHealth> {
     if !plugin_state.is_usable() {
@@ -1529,14 +1561,25 @@ fn resolve_namespace_health(
                     .clone()
                     .unwrap_or_else(|| "gh_monitor plugin is not configured".to_string()),
             ),
+            repo_state_updated_at: None,
+            budget_limit_per_hour: None,
+            budget_used_in_window: None,
+            rate_limit_remaining: None,
+            rate_limit_limit: None,
+            poll_owner: None,
         });
     }
+
+    let effective_repo = repo_scope
+        .map(str::to_string)
+        .or_else(|| plugin_state.repo.clone());
 
     let daemon_error = match agent_team_mail_core::daemon_client::ensure_daemon_running() {
         Ok(()) => {
             if let Some(mut health) = gh_monitor_health_with_context(
                 team,
                 Some(current_dir.to_string_lossy().to_string()),
+                effective_repo.clone(),
             )? {
                 if health.availability_state == "disabled_config_error" {
                     if let Some(reason) = plugin_state.message.as_deref() {
@@ -1578,6 +1621,12 @@ fn resolve_namespace_health(
         in_flight: 0,
         updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         message: plugin_state.message.clone().or(daemon_error),
+        repo_state_updated_at: None,
+        budget_limit_per_hour: None,
+        budget_used_in_window: None,
+        rate_limit_remaining: None,
+        rate_limit_limit: None,
+        poll_owner: None,
     })
 }
 
@@ -1652,6 +1701,9 @@ fn print_target_status(status: &GhMonitorStatus, json: bool) -> Result<()> {
     if let Some(message) = status.message.as_deref() {
         println!("Message:     {message}");
     }
+    if let Some(repo_state_updated_at) = status.repo_state_updated_at.as_deref() {
+        println!("Repo State:  {repo_state_updated_at}");
+    }
     println!("Updated At:  {}", status.updated_at);
     Ok(())
 }
@@ -1679,6 +1731,19 @@ fn print_namespace_status(health: &GhMonitorHealth, json: bool) -> Result<()> {
     if let Some(message) = status.message.as_deref() {
         println!("Message:           {message}");
     }
+    if let Some(repo_state_updated_at) = status.repo_state_updated_at.as_deref() {
+        println!("Repo State:        {repo_state_updated_at}");
+    }
+    if let (Some(used), Some(limit)) = (status.budget_used_in_window, status.budget_limit_per_hour)
+    {
+        println!("Budget:            {used}/{limit} calls per hour");
+    }
+    if let (Some(remaining), Some(limit)) = (status.rate_limit_remaining, status.rate_limit_limit) {
+        println!("Rate Limit:        {remaining}/{limit} remaining");
+    }
+    if let Some(owner) = status.poll_owner.as_deref() {
+        println!("Poll Owner:        {owner}");
+    }
     println!("Updated At:        {}", status.updated_at);
     println!();
     println!("Available actions:");
@@ -1701,6 +1766,12 @@ fn namespace_status_view(health: &GhMonitorHealth) -> GhNamespaceStatus {
         in_flight: health.in_flight,
         updated_at: health.updated_at.clone(),
         message: health.message.clone(),
+        repo_state_updated_at: health.repo_state_updated_at.clone(),
+        budget_limit_per_hour: health.budget_limit_per_hour,
+        budget_used_in_window: health.budget_used_in_window,
+        rate_limit_remaining: health.rate_limit_remaining,
+        rate_limit_limit: health.rate_limit_limit,
+        poll_owner: health.poll_owner.clone(),
         actions: namespace_actions(health.enabled && health.configured),
     }
 }

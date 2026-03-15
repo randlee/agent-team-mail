@@ -289,6 +289,7 @@ exit 1
         reference: None,
         updated_at: chrono::Utc::now().to_rfc3339(),
         message: None,
+        repo_state_updated_at: None,
     };
     let gh_request = CiMonitorRequest {
         team: "atm-dev".to_string(),
@@ -364,6 +365,7 @@ exit 1
         reference: None,
         updated_at: chrono::Utc::now().to_rfc3339(),
         message: None,
+        repo_state_updated_at: None,
     };
     let gh_request = CiMonitorRequest {
         team: "atm-dev".to_string(),
@@ -443,6 +445,7 @@ exit 1
         reference: None,
         updated_at: chrono::Utc::now().to_rfc3339(),
         message: None,
+        repo_state_updated_at: None,
     };
     let gh_request = CiMonitorRequest {
         team: "atm-dev".to_string(),
@@ -473,7 +476,7 @@ exit 1
     );
 
     let state_map = load_gh_monitor_state_map(temp.path()).expect("state map");
-    let key = gh_monitor_key("atm-dev", CiMonitorTargetKind::Pr, "123", None, None);
+    let key = gh_monitor_key("atm-dev", CiMonitorTargetKind::Pr, "123", None, Some("o/r"));
     let terminal = state_map.get(&key).expect("status entry");
     assert_eq!(terminal.state, "failure");
 }
@@ -536,6 +539,7 @@ fn test_derive_pr_url_prefers_pr_target_fallback() {
         reference: None,
         updated_at: "2026-03-06T00:00:00Z".to_string(),
         message: None,
+        repo_state_updated_at: None,
     };
     let request = CiMonitorRequest {
         team: "atm-dev".to_string(),
@@ -569,7 +573,7 @@ echo "unexpected gh args: $*" >&2
 exit 1
 "#,
     );
-    let run_id = gh_monitor::wait_for_pr_run_start("o/r", 123, 1)
+    let run_id = gh_monitor::wait_for_pr_run_start(temp.path(), "atm-dev", "o/r", 123, 1)
         .await
         .unwrap();
     assert_eq!(run_id, Some(222222));
@@ -578,7 +582,7 @@ exit 1
 #[tokio::test]
 #[cfg(unix)]
 #[serial]
-async fn test_run_gh_command_for_repo_injects_repo_scope_flag() {
+async fn test_fetch_run_view_injects_repo_scope_flag() {
     use std::os::unix::fs::PermissionsExt;
 
     let temp = TempDir::new().unwrap();
@@ -586,8 +590,8 @@ async fn test_run_gh_command_for_repo_injects_repo_scope_flag() {
     std::fs::write(
         &script_path,
         r#"#!/bin/sh
-if [ "$1" = "-R" ] && [ "$2" = "o/r" ] && [ "$3" = "run" ] && [ "$4" = "list" ]; then
-  echo "ok"
+if [ "$1" = "-R" ] && [ "$2" = "o/r" ] && [ "$3" = "run" ] && [ "$4" = "view" ] && [ "$5" = "42" ]; then
+  echo '{"databaseId":42,"name":"CI","status":"completed","conclusion":"success","headBranch":"main","headSha":"abc123","url":"https://github.com/o/r/actions/runs/42","jobs":[],"attempt":1,"pullRequests":[]}'
   exit 0
 fi
 echo "missing -R scope: $*" >&2
@@ -607,10 +611,10 @@ exit 1
     };
     let _path_guard = EnvGuard::set("PATH", &new_path);
 
-    let output = gh_monitor::run_gh_command_for_repo("o/r", &["run", "list"])
+    let output = gh_monitor::fetch_run_view(temp.path(), "atm-dev", "o/r", 42)
         .await
         .unwrap();
-    assert_eq!(output, "ok");
+    assert_eq!(output.database_id, 42);
 }
 
 #[tokio::test]
@@ -636,6 +640,7 @@ async fn test_handle_gh_monitor_command_rejects_config_team_mismatch() {
 #[tokio::test]
 #[cfg(unix)]
 async fn test_build_failure_payload_contains_required_fields() {
+    let temp = TempDir::new().unwrap();
     let run = gh_monitor::GhRunView {
         database_id: 42,
         name: "ci".to_string(),
@@ -661,6 +666,7 @@ async fn test_build_failure_payload_contains_required_fields() {
         reference: None,
         updated_at: "2026-03-06T00:00:00Z".to_string(),
         message: None,
+        repo_state_updated_at: None,
     };
     let request = CiMonitorRequest {
         team: "atm-dev".to_string(),
@@ -670,8 +676,16 @@ async fn test_build_failure_payload_contains_required_fields() {
         start_timeout_secs: Some(120),
         config_cwd: None,
     };
-    let payload =
-        gh_monitor::build_failure_payload(&run, &status_seed, &request, "o/r", "corr-1").await;
+    let payload = gh_monitor::build_failure_payload(
+        temp.path(),
+        "atm-dev",
+        &run,
+        &status_seed,
+        &request,
+        "o/r",
+        "corr-1",
+    )
+    .await;
     for required in [
         "run_url:",
         "failed_job_urls:",
@@ -838,6 +852,7 @@ async fn test_gh_status_distinguishes_repo_scopes_for_same_target() {
         reference: None,
         updated_at: chrono::Utc::now().to_rfc3339(),
         message: Some("repo a".to_string()),
+        repo_state_updated_at: None,
     };
     let status_b = CiMonitorStatus {
         message: Some("repo b".to_string()),
@@ -885,6 +900,7 @@ async fn test_gh_status_uses_global_config_source_when_repo_missing() {
         reference: None,
         updated_at: "2026-03-06T00:00:00Z".to_string(),
         message: None,
+        repo_state_updated_at: None,
     };
     upsert_gh_monitor_status(temp.path(), status_seed).unwrap();
 
@@ -953,6 +969,7 @@ async fn test_gh_status_workflow_reference_disambiguates_parallel_runs() {
         reference: Some("develop".to_string()),
         updated_at: "2026-03-06T00:00:10Z".to_string(),
         message: None,
+        repo_state_updated_at: None,
     };
     let status_b = CiMonitorStatus {
         team: "atm-dev".to_string(),
@@ -967,6 +984,7 @@ async fn test_gh_status_workflow_reference_disambiguates_parallel_runs() {
         reference: Some("release/v1".to_string()),
         updated_at: "2026-03-06T00:00:11Z".to_string(),
         message: None,
+        repo_state_updated_at: None,
     };
     upsert_gh_monitor_status(temp.path(), status_a).unwrap();
     upsert_gh_monitor_status(temp.path(), status_b).unwrap();

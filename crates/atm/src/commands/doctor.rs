@@ -13,6 +13,10 @@ use agent_team_mail_core::daemon_client::{
     query_list_agents_for_team, query_session_for_team, query_team_member_states,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::gh_monitor_observability::{
+    GhCliObserverContext, RateLimitUpdate, read_gh_repo_state, run_attributed_gh_command,
+    update_gh_repo_state_rate_limit,
+};
 use agent_team_mail_core::log_reader::{LogFilter, LogReader};
 use agent_team_mail_core::schema::TeamConfig;
 use chrono::{DateTime, Duration, Utc};
@@ -126,6 +130,8 @@ struct DoctorReport {
     recommendations: Vec<Recommendation>,
     log_window: LogWindow,
     env_overrides: EnvOverrides,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gh_rate_limit_audit: Option<GhRateLimitAudit>,
     #[serde(default)]
     logging_health: LoggingHealthContract,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -149,6 +155,39 @@ struct MemberSnapshot {
 struct DoctorState {
     // RFC3339 timestamp of last doctor invocation per team.
     last_call_by_team: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GhRateLimitAudit {
+    live_remaining: u64,
+    live_limit: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live_reset_at: Option<String>,
+    cached_used_in_window: u64,
+    repos_observed: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cached_rate_limit_remaining: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cached_rate_limit_limit: Option<u64>,
+    delta_consumed_vs_cached: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhRateLimitResponse {
+    resources: GhRateLimitResources,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhRateLimitResources {
+    core: GhCoreRateLimit,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhCoreRateLimit {
+    limit: u64,
+    remaining: u64,
+    #[serde(default)]
+    reset: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -194,7 +233,8 @@ pub fn execute(args: DoctorArgs) -> Result<()> {
             .ok()
             .flatten();
 
-    let report = build_report(&home_dir, &team, &args)?;
+    let mut report = build_report(&home_dir, &team, &args)?;
+    report.gh_rate_limit_audit = build_gh_rate_limit_audit(&home_dir, &team).ok().flatten();
 
     emit_event_best_effort(EventFields {
         level: "info",
@@ -349,10 +389,86 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
                 .max(0) as u64,
         },
         env_overrides: active_env_overrides(),
+        gh_rate_limit_audit: None,
         logging_health,
         members: member_snapshot.clone(),
         member_snapshot,
     })
+}
+
+fn build_gh_rate_limit_audit(home_dir: &Path, team: &str) -> Result<Option<GhRateLimitAudit>> {
+    let state = read_gh_repo_state(home_dir)?;
+    let team_records: Vec<_> = state
+        .records
+        .into_iter()
+        .filter(|record| record.team == team)
+        .collect();
+    if team_records.is_empty() {
+        return Ok(None);
+    }
+
+    let repo_scope = &team_records[0].repo;
+    if !repo_scope.contains('/') {
+        anyhow::bail!("invalid owner/repo scope in gh repo-state: {repo_scope}");
+    }
+    let observer_ctx = GhCliObserverContext {
+        home: home_dir.to_path_buf(),
+        team: team.to_string(),
+        repo: repo_scope.to_string(),
+        runtime: "atm".to_string(),
+    };
+    let output = run_attributed_gh_command(
+        &observer_ctx,
+        "gh_api_rate_limit",
+        &["api", "rate_limit"],
+        None,
+        None,
+    )
+    .context("gh api rate_limit failed via attributed provider path")?;
+
+    let live: GhRateLimitResponse =
+        serde_json::from_str(&output).context("failed to parse gh api rate_limit response")?;
+    let live_reset_at = live
+        .resources
+        .core
+        .reset
+        .and_then(|epoch| DateTime::<Utc>::from_timestamp(epoch, 0))
+        .map(|ts| ts.to_rfc3339());
+    let _ = update_gh_repo_state_rate_limit(
+        home_dir,
+        team,
+        repo_scope,
+        RateLimitUpdate {
+            runtime: "atm".to_string(),
+            remaining: live.resources.core.remaining,
+            limit: live.resources.core.limit,
+            reset_at: live_reset_at.clone(),
+            source: "atm_doctor",
+        },
+    );
+    let cached_used_in_window: u64 = team_records
+        .iter()
+        .map(|record| record.budget_used_in_window)
+        .sum();
+    let cached_rate_limit = team_records
+        .iter()
+        .filter_map(|record| record.rate_limit.as_ref())
+        .max_by_key(|rate| rate.updated_at.clone());
+    let consumed_live = live
+        .resources
+        .core
+        .limit
+        .saturating_sub(live.resources.core.remaining);
+    Ok(Some(GhRateLimitAudit {
+        live_remaining: live.resources.core.remaining,
+        live_limit: live.resources.core.limit,
+        live_reset_at,
+        cached_used_in_window,
+        repos_observed: team_records.len(),
+        cached_rate_limit_remaining: cached_rate_limit.map(|rate| rate.remaining),
+        cached_rate_limit_limit: cached_rate_limit.map(|rate| rate.limit),
+        delta_consumed_vs_cached: consumed_live as i64 - cached_used_in_window as i64,
+    }))
 }
 
 fn build_member_snapshot(
@@ -1656,6 +1772,32 @@ fn render_human(report: &DoctorReport) -> String {
         out.push('\n');
     }
 
+    if let Some(audit) = &report.gh_rate_limit_audit {
+        out.push_str("GitHub rate audit:\n");
+        out.push_str(&format!(
+            "  live_remaining: {}/{}\n",
+            audit.live_remaining, audit.live_limit
+        ));
+        out.push_str(&format!(
+            "  cached_used_in_window: {}\n",
+            audit.cached_used_in_window
+        ));
+        out.push_str(&format!("  repos_observed: {}\n", audit.repos_observed));
+        if let (Some(remaining), Some(limit)) = (
+            audit.cached_rate_limit_remaining,
+            audit.cached_rate_limit_limit,
+        ) {
+            out.push_str(&format!("  cached_rate_limit: {remaining}/{limit}\n"));
+        }
+        if let Some(reset_at) = &audit.live_reset_at {
+            out.push_str(&format!("  live_reset_at: {reset_at}\n"));
+        }
+        out.push_str(&format!(
+            "  delta_consumed_vs_cached: {}\n\n",
+            audit.delta_consumed_vs_cached
+        ));
+    }
+
     if !report.member_snapshot.is_empty() {
         out.push_str("Members:\n");
         out.push_str(&format!(
@@ -2792,6 +2934,7 @@ mod tests {
                 elapsed_secs: 60,
             },
             env_overrides: EnvOverrides::default(),
+            gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
             members: vec![MemberSnapshot {
                 name: "team-lead".to_string(),
@@ -2895,6 +3038,7 @@ mod tests {
                     value: "arch-ctm".to_string(),
                 }),
             },
+            gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
             members: vec![MemberSnapshot {
                 name: "arch-ctm".to_string(),
@@ -3023,6 +3167,7 @@ mod tests {
                     value: "arch-ctm".to_string(),
                 }),
             },
+            gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
             members: vec![],
             member_snapshot: vec![],
@@ -3060,6 +3205,7 @@ mod tests {
                 elapsed_secs: 60,
             },
             env_overrides: EnvOverrides::default(),
+            gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
             members: vec![MemberSnapshot {
                 name: "arch-ctm".to_string(),
@@ -3119,6 +3265,7 @@ mod tests {
                 elapsed_secs: 60,
             },
             env_overrides: EnvOverrides::default(),
+            gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
             members: vec![
                 MemberSnapshot {

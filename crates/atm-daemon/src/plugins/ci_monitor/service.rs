@@ -7,15 +7,15 @@
 
 #[cfg(unix)]
 use super::gh_monitor::{
-    fetch_pr_merge_state, is_pr_merge_state_dirty, monitor_gh_run, try_find_workflow_run_id,
-    wait_for_pr_run_start,
+    RunPollProgress, fetch_pr_merge_state, is_pr_merge_state_dirty, poll_monitored_run_once,
+    try_find_pr_run_id, try_find_workflow_run_id, wait_for_pr_run_start,
 };
 use super::github_provider::GitHubActionsProvider;
 #[cfg(unix)]
 use super::health::set_gh_monitor_health_state;
 use super::helpers::{
     apply_config_state_to_status, count_in_flight_monitors, evaluate_gh_monitor_config,
-    gh_monitor_key, load_gh_monitor_state_map,
+    gh_monitor_key, load_gh_monitor_state_map, load_gh_monitor_state_records,
 };
 use super::provider::ErasedCiProvider;
 use super::registry::CiProviderRegistryPort;
@@ -24,16 +24,264 @@ use super::routing::{notify_ci_not_started, notify_merge_conflict};
 use super::types::{
     CiMonitorControlRequest, CiMonitorHealth, CiMonitorLifecycleAction, CiMonitorRequest,
     CiMonitorStatus, CiMonitorStatusRequest, CiMonitorTargetKind, GhAlertTargets,
-    GhMonitorConfigState, GhMonitorHealthUpdate, OwnedGhAlertTargets,
+    GhMonitorConfigState, GhMonitorHealthUpdate,
 };
 use agent_team_mail_core::context::GitProvider as GitProviderType;
+use agent_team_mail_core::gh_monitor_observability::{
+    GhCliObserverContext, build_gh_cli_observer, update_gh_repo_state_in_flight,
+};
+#[cfg(unix)]
+use std::collections::HashMap;
+#[cfg(unix)]
+use std::sync::{Mutex, OnceLock};
+#[cfg(unix)]
+use tokio::task::JoinHandle;
 use tracing::warn;
 
 pub(crate) use agent_team_mail_ci_monitor::service::{
     CiMonitorServiceError, CiMonitorServiceResult, fetch_run_details, list_completed_runs,
 };
 
+#[cfg(unix)]
+fn shared_pollers() -> &'static Mutex<HashMap<String, JoinHandle<()>>> {
+    static SHARED_POLLERS: OnceLock<Mutex<HashMap<String, JoinHandle<()>>>> = OnceLock::new();
+    SHARED_POLLERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(unix)]
+fn shared_poller_key(team: &str, repo: &str) -> String {
+    format!("{}|{}", team.trim(), repo.trim().to_ascii_lowercase())
+}
+
+#[cfg(unix)]
+fn status_is_terminal(state: &str) -> bool {
+    matches!(
+        state.trim().to_ascii_lowercase().as_str(),
+        "success" | "failure" | "timed_out" | "cancelled" | "action_required" | "unknown"
+    )
+}
+
+#[cfg(unix)]
+fn status_has_active_subscription(status: &CiMonitorStatus) -> bool {
+    !status_is_terminal(&status.state) && status.state != "ci_not_started"
+}
+
+#[cfg(unix)]
+async fn refresh_shared_repo_state(
+    home: &std::path::Path,
+    team: &str,
+    owner_repo: &str,
+) -> anyhow::Result<()> {
+    let (owner, repo) = owner_repo
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("invalid owner/repo scope for gh command: {owner_repo}"))?;
+    let observer = build_gh_cli_observer(GhCliObserverContext {
+        home: home.to_path_buf(),
+        team: team.to_string(),
+        repo: owner_repo.to_string(),
+        runtime: "atm-daemon".to_string(),
+    });
+    let provider =
+        GitHubActionsProvider::new(owner.to_string(), repo.to_string()).with_observer(observer);
+    let repo_scope = owner_repo.trim().to_string();
+    let _ = provider
+        .run_gh(
+            "gh_pr_list",
+            &[
+                "-R",
+                repo_scope.as_str(),
+                "pr",
+                "list",
+                "--state",
+                "open",
+                "--limit",
+                "100",
+                "--json",
+                "number,title,url,isDraft,reviewDecision,mergeStateStatus,statusCheckRollup",
+            ],
+            None,
+            None,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn poll_status_once(
+    home: &std::path::Path,
+    owner_repo: &str,
+    repo_scope: Option<&str>,
+    record: &super::types::GhMonitorStateRecord,
+) -> anyhow::Result<()> {
+    let mut status = record.status.clone();
+    match status.target_kind {
+        CiMonitorTargetKind::Run => {
+            if let Some(run_id) = status.run_id {
+                let request = CiMonitorRequest {
+                    team: status.team.clone(),
+                    target_kind: status.target_kind,
+                    target: status.target.clone(),
+                    reference: status.reference.clone(),
+                    start_timeout_secs: None,
+                    config_cwd: None,
+                };
+                let mut progress = RunPollProgress::default();
+                let _ = poll_monitored_run_once(
+                    home,
+                    &status,
+                    &request,
+                    owner_repo,
+                    run_id,
+                    GhAlertTargets::default(),
+                    &mut progress,
+                )
+                .await?;
+            }
+        }
+        CiMonitorTargetKind::Pr => {
+            if status.run_id.is_none()
+                && let Ok(pr_number) = status.target.trim().parse::<u64>()
+                && let Some(run_id) =
+                    try_find_pr_run_id(home, &status.team, owner_repo, pr_number).await?
+            {
+                status.run_id = Some(run_id);
+                status.state = "monitoring".to_string();
+                status.updated_at = chrono::Utc::now().to_rfc3339();
+                super::helpers::upsert_gh_monitor_status_for_repo(
+                    home,
+                    status.clone(),
+                    repo_scope,
+                )?;
+            }
+            if let Some(run_id) = status.run_id {
+                let request = CiMonitorRequest {
+                    team: status.team.clone(),
+                    target_kind: status.target_kind,
+                    target: status.target.clone(),
+                    reference: status.reference.clone(),
+                    start_timeout_secs: None,
+                    config_cwd: None,
+                };
+                let mut progress = RunPollProgress::default();
+                let _ = poll_monitored_run_once(
+                    home,
+                    &status,
+                    &request,
+                    owner_repo,
+                    run_id,
+                    GhAlertTargets::default(),
+                    &mut progress,
+                )
+                .await?;
+            }
+        }
+        CiMonitorTargetKind::Workflow => {
+            if status.run_id.is_none()
+                && let Some(reference) = status.reference.as_deref()
+                && let Some(run_id) = try_find_workflow_run_id(
+                    home,
+                    &status.team,
+                    owner_repo,
+                    &status.target,
+                    reference,
+                )
+                .await?
+            {
+                status.run_id = Some(run_id);
+                status.state = "monitoring".to_string();
+                status.updated_at = chrono::Utc::now().to_rfc3339();
+                super::helpers::upsert_gh_monitor_status_for_repo(
+                    home,
+                    status.clone(),
+                    repo_scope,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn run_shared_repo_poller(home: std::path::PathBuf, team: String, owner_repo: String) {
+    let repo_scope = Some(owner_repo.as_str());
+    loop {
+        let records = match load_gh_monitor_state_records(&home) {
+            Ok(records) => records,
+            Err(err) => {
+                warn!(team = %team, repo = %owner_repo, "failed to load gh monitor state: {err}");
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                continue;
+            }
+        };
+        let scoped_records: Vec<_> = records
+            .into_iter()
+            .filter(|record| {
+                record.status.team == team
+                    && record
+                        .repo_scope
+                        .as_deref()
+                        .map(|value| value.eq_ignore_ascii_case(&owner_repo))
+                        .unwrap_or(false)
+            })
+            .collect();
+        let active_records: Vec<_> = scoped_records
+            .iter()
+            .filter(|record| status_has_active_subscription(&record.status))
+            .cloned()
+            .collect();
+
+        let in_flight = active_records.len() as u64;
+        let _ = update_gh_repo_state_in_flight(&home, &team, &owner_repo, in_flight, "atm-daemon");
+        if let Err(err) = refresh_shared_repo_state(&home, &team, &owner_repo).await {
+            warn!(team = %team, repo = %owner_repo, "shared repo-state refresh failed: {err}");
+        }
+
+        for record in &active_records {
+            if let Err(err) = poll_status_once(&home, &owner_repo, repo_scope, record).await {
+                warn!(
+                    team = %record.status.team,
+                    target = %record.status.target,
+                    repo = %owner_repo,
+                    "shared gh monitor poll failed: {err}"
+                );
+            }
+        }
+
+        let _ = update_gh_repo_state_in_flight(&home, &team, &owner_repo, 0, "atm-daemon");
+        let sleep_secs = if active_records.is_empty() { 300 } else { 60 };
+        tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
+    }
+}
+
+#[cfg(unix)]
+fn ensure_shared_repo_poller(home: &std::path::Path, team: &str, owner_repo: &str) {
+    let key = shared_poller_key(team, owner_repo);
+    let mut pollers = shared_pollers().lock().expect("shared poller mutex");
+    if pollers
+        .get(&key)
+        .is_some_and(|handle| !handle.is_finished())
+    {
+        return;
+    }
+    pollers.remove(&key);
+    let home = home.to_path_buf();
+    let team = team.to_string();
+    let owner_repo = owner_repo.to_string();
+    let key_for_task = key.clone();
+    let handle = tokio::spawn(async move {
+        run_shared_repo_poller(home, team, owner_repo).await;
+        if let Ok(mut pollers) = shared_pollers().lock() {
+            pollers.remove(&key_for_task);
+        }
+    });
+    pollers.insert(key, handle);
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn create_provider_from_registry(
+    home: &std::path::Path,
+    team: &str,
     registry: &dyn CiProviderRegistryPort,
     provider_name: &str,
     configured_owner: Option<&str>,
@@ -81,7 +329,15 @@ pub(crate) fn create_provider_from_registry(
     };
 
     if provider_name == "github" {
-        return Ok(Box::new(GitHubActionsProvider::new(owner, repo)));
+        let observer = build_gh_cli_observer(GhCliObserverContext {
+            home: home.to_path_buf(),
+            team: team.to_string(),
+            repo: format!("{owner}/{repo}"),
+            runtime: "atm-daemon".to_string(),
+        });
+        return Ok(Box::new(
+            GitHubActionsProvider::new(owner, repo).with_observer(observer),
+        ));
     }
 
     registry
@@ -219,6 +475,7 @@ pub(crate) async fn monitor_request(
         reference: gh_request.reference.clone(),
         updated_at: now,
         message: None,
+        repo_state_updated_at: None,
     };
 
     let mut transient_failure: Option<String> = None;
@@ -228,7 +485,15 @@ pub(crate) async fn monitor_request(
         }
         CiMonitorTargetKind::Workflow => {
             if let Some(reference) = gh_request.reference.as_deref() {
-                match try_find_workflow_run_id(owner_repo, &gh_request.target, reference).await {
+                match try_find_workflow_run_id(
+                    home,
+                    &gh_request.team,
+                    owner_repo,
+                    &gh_request.target,
+                    reference,
+                )
+                .await
+                {
                     Ok(Some(run_id)) => status.run_id = Some(run_id),
                     Ok(None) => {}
                     Err(e) => {
@@ -251,7 +516,7 @@ pub(crate) async fn monitor_request(
                 }
             };
             let mut preflight_blocked = false;
-            match fetch_pr_merge_state(owner_repo, pr_number).await {
+            match fetch_pr_merge_state(home, &gh_request.team, owner_repo, pr_number).await {
                 Ok(Some(pr_view)) => {
                     if let Some(merge_state_status) = pr_view.merge_state_status.as_deref()
                         && is_pr_merge_state_dirty(merge_state_status)
@@ -289,7 +554,15 @@ pub(crate) async fn monitor_request(
                     status.message =
                         Some("No workflow run observed before start-timeout (0s).".to_string());
                 } else {
-                    match wait_for_pr_run_start(owner_repo, pr_number, timeout_secs).await {
+                    match wait_for_pr_run_start(
+                        home,
+                        &gh_request.team,
+                        owner_repo,
+                        pr_number,
+                        timeout_secs,
+                    )
+                    .await
+                    {
                         Ok(Some(run_id)) => {
                             status.run_id = Some(run_id);
                         }
@@ -337,36 +610,8 @@ pub(crate) async fn monitor_request(
             repo_scope,
             GhAlertTargets { caller_agent, cc },
         );
-    } else if let Some(run_id) = status.run_id {
-        let home = home.to_path_buf();
-        let status_seed = status.clone();
-        let gh_request = gh_request.clone();
-        let owner_repo = owner_repo.to_string();
-        let repo_scope = repo_scope.map(str::to_string);
-        let alert_targets = OwnedGhAlertTargets {
-            caller_agent: caller_agent.map(str::to_string),
-            cc: cc.to_vec(),
-        };
-        tokio::spawn(async move {
-            if let Err(e) = monitor_gh_run(
-                home.as_path(),
-                &status_seed,
-                &gh_request,
-                &owner_repo,
-                run_id,
-                repo_scope.as_deref(),
-                alert_targets.borrowed(),
-            )
-            .await
-            {
-                warn!(
-                    team = %status_seed.team,
-                    target = %status_seed.target,
-                    run_id = run_id,
-                    "gh monitor background task failed: {e}"
-                );
-            }
-        });
+    } else {
+        ensure_shared_repo_poller(home, &gh_request.team, owner_repo);
     }
 
     if let Some(reason) = transient_failure {
@@ -564,6 +809,7 @@ pub(crate) fn health_request(
     home: &std::path::Path,
     team: &str,
     config_cwd: Option<&str>,
+    repo_scope: Option<&str>,
 ) -> CiMonitorServiceResult<CiMonitorHealth> {
     if team.trim().is_empty() {
         return Err(CiMonitorServiceError::new(
@@ -584,6 +830,24 @@ pub(crate) fn health_request(
     if let Some(reason) = config_state.error.as_deref() {
         health.availability_state = "disabled_config_error".to_string();
         health.message = Some(reason.to_string());
+    }
+    if let Some(repo_scope) = repo_scope.or(config_state.owner_repo.as_deref())
+        && let Ok(Some(repo_state)) =
+            agent_team_mail_core::gh_monitor_observability::read_gh_repo_state_record(
+                home, team, repo_scope,
+            )
+    {
+        health.repo_state_updated_at = Some(repo_state.updated_at.clone());
+        health.budget_limit_per_hour = Some(repo_state.budget_limit_per_hour);
+        health.budget_used_in_window = Some(repo_state.budget_used_in_window);
+        health.rate_limit_remaining = repo_state.rate_limit.as_ref().map(|rate| rate.remaining);
+        health.rate_limit_limit = repo_state.rate_limit.as_ref().map(|rate| rate.limit);
+        health.poll_owner = repo_state.owner.as_ref().map(|owner| {
+            format!(
+                "{} pid={} runtime={} home={}",
+                owner.executable_path, owner.pid, owner.runtime, owner.home_scope
+            )
+        });
     }
     Ok(health)
 }

@@ -46,6 +46,7 @@ dependencies = [
 name = "agent-team-mail-core"
 version = "0.44.9"
 dependencies = [
+ "agent-team-mail-ci-monitor",
  "anyhow",
  "blake3",
  "chrono",

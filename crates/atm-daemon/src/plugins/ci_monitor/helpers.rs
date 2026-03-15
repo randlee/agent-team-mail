@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use agent_team_mail_core::daemon_client::isolated_runtime_allows_live_github;
 #[cfg(unix)]
+use agent_team_mail_core::gh_monitor_observability::read_gh_repo_state_record;
+#[cfg(unix)]
 use anyhow::Result;
 
 #[cfg(unix)]
@@ -19,7 +21,10 @@ pub(crate) fn count_in_flight_monitors(home: &Path, team: &str) -> u64 {
         .ok()
         .map(|map| {
             map.values()
-                .filter(|status| status.team == team && status.state == "tracking")
+                .filter(|status| {
+                    status.team == team
+                        && matches!(status.state.as_str(), "tracking" | "monitoring")
+                })
                 .count() as u64
         })
         .unwrap_or(0)
@@ -180,27 +185,33 @@ pub(crate) fn gh_monitor_key(
 
 #[cfg(unix)]
 pub(crate) fn load_gh_monitor_state_map(home: &Path) -> Result<HashMap<String, CiMonitorStatus>> {
-    let path = gh_monitor_state_path(home);
-    if !path.exists() {
-        return Ok(HashMap::new());
-    }
-    let raw = std::fs::read_to_string(&path)?;
-    let state = serde_json::from_str::<GhMonitorStateFile>(&raw)?;
-    let mut map = HashMap::new();
-    for record in state.records {
-        let key = gh_monitor_key(
-            &record.status.team,
-            record.status.target_kind,
-            &record.status.target,
-            record.status.reference.as_deref(),
-            record.repo_scope.as_deref(),
-        );
-        map.insert(key, record.status);
-    }
-    Ok(map)
+    Ok(load_gh_monitor_state_records(home)?
+        .into_iter()
+        .map(|record| {
+            let key = gh_monitor_key(
+                &record.status.team,
+                record.status.target_kind,
+                &record.status.target,
+                record.status.reference.as_deref(),
+                record.repo_scope.as_deref(),
+            );
+            (key, record.status)
+        })
+        .collect())
 }
 
 #[cfg(unix)]
+pub(crate) fn load_gh_monitor_state_records(home: &Path) -> Result<Vec<GhMonitorStateRecord>> {
+    let path = gh_monitor_state_path(home);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    let state = serde_json::from_str::<GhMonitorStateFile>(&raw)?;
+    Ok(state.records)
+}
+
+#[cfg(all(test, unix))]
 pub(crate) fn upsert_gh_monitor_status(home: &Path, status: CiMonitorStatus) -> Result<()> {
     upsert_gh_monitor_status_for_repo(home, status, None)
 }
@@ -208,9 +219,15 @@ pub(crate) fn upsert_gh_monitor_status(home: &Path, status: CiMonitorStatus) -> 
 #[cfg(unix)]
 pub(crate) fn upsert_gh_monitor_status_for_repo(
     home: &Path,
-    status: CiMonitorStatus,
+    mut status: CiMonitorStatus,
     repo_scope: Option<&str>,
 ) -> Result<()> {
+    if let Some(repo_scope) = repo_scope
+        && let Ok(Some(repo_state)) = read_gh_repo_state_record(home, &status.team, repo_scope)
+    {
+        status.repo_state_updated_at = Some(repo_state.updated_at);
+    }
+
     let path = gh_monitor_state_path(home);
     let mut map: HashMap<String, GhMonitorStateRecord> = if path.exists() {
         let raw = std::fs::read_to_string(&path)?;

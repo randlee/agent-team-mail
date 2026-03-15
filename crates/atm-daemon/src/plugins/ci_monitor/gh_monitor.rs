@@ -3,11 +3,13 @@
 pub(crate) use super::gh_alerts::emit_ci_monitor_message;
 // These schema re-exports keep the legacy gh_monitor tests/builders compiling
 // while AM.6 finishes moving the remaining provider helpers behind the routed surface.
+use super::github_provider::GitHubActionsProvider;
 #[allow(unused_imports)]
 pub(crate) use super::github_schema::{
     GhPrLookupView, GhPrView, GhPullRequest, GhRunJob, GhRunListEntry, GhRunStep, GhRunView,
 };
 use super::helpers::upsert_gh_monitor_status_for_repo;
+use super::provider::CiProvider;
 // These routing re-exports preserve the pre-split gh_monitor call surface for
 // downstream code until the final thin-socket cleanup removes the shim layer.
 #[allow(unused_imports)]
@@ -18,6 +20,7 @@ pub(crate) use super::routing::{
     resolve_ci_alert_routing,
 };
 use super::types::{CiMonitorRequest, CiMonitorStatus, CiMonitorTargetKind, GhAlertTargets};
+use agent_team_mail_core::gh_monitor_observability::{GhCliObserverContext, build_gh_cli_observer};
 use anyhow::Result;
 use tracing::warn;
 
@@ -32,14 +35,24 @@ pub(crate) enum GhRunTerminalState {
 }
 
 #[cfg(unix)]
+#[derive(Default)]
+pub(crate) struct RunPollProgress {
+    seen_completed: std::collections::HashSet<u64>,
+    pending_completed: Vec<GhRunJob>,
+    last_progress_emit: Option<std::time::Instant>,
+}
+
+#[cfg(unix)]
 pub(crate) async fn wait_for_pr_run_start(
+    home: &std::path::Path,
+    team: &str,
     owner_repo: &str,
     pr_number: u64,
     timeout_secs: u64,
 ) -> Result<Option<u64>> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
-        if let Some(run_id) = try_find_pr_run_id(owner_repo, pr_number).await? {
+        if let Some(run_id) = try_find_pr_run_id(home, team, owner_repo, pr_number).await? {
             return Ok(Some(run_id));
         }
 
@@ -54,18 +67,32 @@ pub(crate) async fn wait_for_pr_run_start(
 }
 
 #[cfg(unix)]
-pub(crate) async fn try_find_pr_run_id(owner_repo: &str, pr_number: u64) -> Result<Option<u64>> {
-    let output = run_gh_command_for_repo(
-        owner_repo,
-        &[
-            "pr",
-            "view",
-            &pr_number.to_string(),
-            "--json",
-            "headRefName,headRefOid,createdAt",
-        ],
-    )
-    .await?;
+pub(crate) async fn try_find_pr_run_id(
+    home: &std::path::Path,
+    team: &str,
+    owner_repo: &str,
+    pr_number: u64,
+) -> Result<Option<u64>> {
+    let provider = provider_for_repo(home, team, owner_repo)?;
+    let pr_number_arg = pr_number.to_string();
+    let repo_scope = owner_repo.trim().to_string();
+    let output = provider
+        .run_gh(
+            "gh_pr_view",
+            &[
+                "-R",
+                repo_scope.as_str(),
+                "pr",
+                "view",
+                pr_number_arg.as_str(),
+                "--json",
+                "headRefName,headRefOid,createdAt",
+            ],
+            None,
+            None,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
     let pr_view = serde_json::from_str::<GhPrLookupView>(&output)?;
     let branch = pr_view
         .head_ref_name
@@ -90,20 +117,26 @@ pub(crate) async fn try_find_pr_run_id(owner_repo: &str, pr_number: u64) -> Resu
         return Ok(None);
     };
 
-    let output = run_gh_command_for_repo(
-        owner_repo,
-        &[
-            "run",
-            "list",
-            "--branch",
-            &branch,
-            "--limit",
-            "20",
-            "--json",
-            "databaseId,headSha,createdAt",
-        ],
-    )
-    .await?;
+    let output = provider
+        .run_gh(
+            "gh_run_list",
+            &[
+                "-R",
+                repo_scope.as_str(),
+                "run",
+                "list",
+                "--branch",
+                branch.as_str(),
+                "--limit",
+                "20",
+                "--json",
+                "databaseId,headSha,createdAt",
+            ],
+            Some(branch.as_str()),
+            None,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
     let runs = serde_json::from_str::<Vec<GhRunListEntry>>(&output)?;
     for run in runs {
         let Some(run_id) = run.database_id else {
@@ -156,20 +189,31 @@ pub(crate) fn run_passes_pr_recency_gate(
 
 #[cfg(unix)]
 pub(crate) async fn fetch_pr_merge_state(
+    home: &std::path::Path,
+    team: &str,
     owner_repo: &str,
     pr_number: u64,
 ) -> Result<Option<GhPrView>> {
-    let output = run_gh_command_for_repo(
-        owner_repo,
-        &[
-            "pr",
-            "view",
-            &pr_number.to_string(),
-            "--json",
-            "mergeStateStatus,url",
-        ],
-    )
-    .await?;
+    let provider = provider_for_repo(home, team, owner_repo)?;
+    let pr_number_arg = pr_number.to_string();
+    let repo_scope = owner_repo.trim().to_string();
+    let output = provider
+        .run_gh(
+            "gh_pr_view",
+            &[
+                "-R",
+                repo_scope.as_str(),
+                "pr",
+                "view",
+                pr_number_arg.as_str(),
+                "--json",
+                "mergeStateStatus,url",
+            ],
+            None,
+            None,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
     let pr = serde_json::from_str::<GhPrView>(&output)?;
     if pr
         .merge_state_status
@@ -190,24 +234,34 @@ pub(crate) fn is_pr_merge_state_dirty(merge_state_status: &str) -> bool {
 
 #[cfg(unix)]
 pub(crate) async fn try_find_workflow_run_id(
+    home: &std::path::Path,
+    team: &str,
     owner_repo: &str,
     workflow: &str,
     reference: &str,
 ) -> Result<Option<u64>> {
-    let output = run_gh_command_for_repo(
-        owner_repo,
-        &[
-            "run",
-            "list",
-            "--workflow",
-            workflow,
-            "--limit",
-            "20",
-            "--json",
-            "databaseId,headBranch,headSha",
-        ],
-    )
-    .await?;
+    let provider = provider_for_repo(home, team, owner_repo)?;
+    let repo_scope = owner_repo.trim().to_string();
+    let output = provider
+        .run_gh(
+            "gh_run_list",
+            &[
+                "-R",
+                repo_scope.as_str(),
+                "run",
+                "list",
+                "--workflow",
+                workflow,
+                "--limit",
+                "20",
+                "--json",
+                "databaseId,headBranch,headSha",
+            ],
+            Some(reference),
+            Some(reference),
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
     let runs = serde_json::from_str::<Vec<serde_json::Value>>(&output)?;
 
     for run in runs {
@@ -224,212 +278,252 @@ pub(crate) async fn try_find_workflow_run_id(
 }
 
 #[cfg(unix)]
-pub(crate) async fn run_gh_command(args: &[&str]) -> Result<String> {
-    let output = tokio::process::Command::new("gh")
-        .args(args)
-        .output()
-        .await?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("gh {} failed: {}", args.join(" "), stderr.trim());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-#[cfg(unix)]
-pub(crate) async fn run_gh_command_for_repo(owner_repo: &str, args: &[&str]) -> Result<String> {
+fn provider_for_repo(
+    home: &std::path::Path,
+    team: &str,
+    owner_repo: &str,
+) -> Result<GitHubActionsProvider> {
     let owner_repo = owner_repo.trim();
     if owner_repo.is_empty() {
         anyhow::bail!("missing owner/repo scope for gh command");
     }
-
-    let mut command_args: Vec<&str> = Vec::with_capacity(args.len() + 2);
-    command_args.push("-R");
-    command_args.push(owner_repo);
-    command_args.extend_from_slice(args);
-    run_gh_command(&command_args).await
+    let (owner, repo) = owner_repo
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("invalid owner/repo scope for gh command: {owner_repo}"))?;
+    let observer = build_gh_cli_observer(GhCliObserverContext {
+        home: home.to_path_buf(),
+        team: team.to_string(),
+        repo: owner_repo.to_string(),
+        runtime: "atm-daemon".to_string(),
+    });
+    Ok(GitHubActionsProvider::new(owner.to_string(), repo.to_string()).with_observer(observer))
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 pub(crate) async fn monitor_gh_run(
     home: &std::path::Path,
     status_seed: &CiMonitorStatus,
     gh_request: &CiMonitorRequest,
     owner_repo: &str,
     run_id: u64,
-    repo_scope: Option<&str>,
+    _repo_scope: Option<&str>,
     alert_targets: GhAlertTargets<'_>,
 ) -> Result<()> {
-    let mut seen_completed: std::collections::HashSet<u64> = std::collections::HashSet::new();
-    let mut pending_completed: Vec<GhRunJob> = Vec::new();
-    let mut last_progress_emit: Option<std::time::Instant> = None;
     let mut first_poll = true;
-
+    let mut progress = RunPollProgress::default();
     loop {
-        let run = fetch_run_view(owner_repo, run_id).await?;
-        let expected_repo = extract_repo_slug_from_url(&run.url);
-        let (from_agent, targets) = resolve_ci_alert_routing(
+        let terminal = poll_monitored_run_once(
             home,
-            &status_seed.team,
-            gh_request.config_cwd.as_deref(),
-            expected_repo.as_deref().or(repo_scope),
+            status_seed,
+            gh_request,
+            owner_repo,
+            run_id,
             alert_targets,
-        );
-        let completed_jobs: Vec<GhRunJob> = run
-            .jobs
-            .iter()
-            .filter(|job| is_job_completed(job))
-            .cloned()
-            .collect();
-        for job in completed_jobs {
-            if seen_completed.insert(job.database_id) {
-                pending_completed.push(job);
-            }
+            &mut progress,
+        )
+        .await?;
+        if terminal {
+            return Ok(());
         }
 
-        let terminal = classify_terminal_state(&run);
-        if terminal.is_none() {
-            let now = std::time::Instant::now();
-            if should_emit_progress(last_progress_emit, now) && !pending_completed.is_empty() {
-                let message = format_progress_message(&run, &pending_completed);
-                let summary = format!(
-                    "ci progress: run {} ({}/{})",
-                    run.database_id,
-                    count_completed_jobs(&run),
-                    run.jobs.len()
-                );
-                emit_ci_monitor_message(
-                    home,
-                    &from_agent,
-                    &targets,
-                    &summary,
-                    &message,
-                    Some(format!(
-                        "ci-progress-{}-{}",
-                        run.database_id,
-                        uuid::Uuid::new_v4()
-                    )),
-                );
-                pending_completed.clear();
-                last_progress_emit = Some(now);
-            }
-
-            let mut state = status_seed.clone();
-            state.run_id = Some(run.database_id);
-            state.state = "monitoring".to_string();
-            state.updated_at = chrono::Utc::now().to_rfc3339();
-            state.message = Some(format!(
-                "Run {} still in progress ({}/{})",
-                run.database_id,
-                count_completed_jobs(&run),
-                run.jobs.len()
-            ));
-            upsert_gh_monitor_status_for_repo(home, state, repo_scope)?;
-
-            let sleep_secs = if first_poll { 5 } else { 15 };
-            first_poll = false;
-            tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
-            continue;
-        }
-
-        let terminal = terminal.unwrap_or(GhRunTerminalState::Other);
-        let summary_table = format_summary_table(&run);
-        let mut message = format!(
-            "CI monitor terminal update\nRun: {}\nWorkflow: {}\nState: {}\nURL: {}\n\n{}\n",
-            run.database_id,
-            run.name,
-            terminal_state_label(terminal),
-            run.url,
-            summary_table
-        );
-
-        if terminal != GhRunTerminalState::Success {
-            let correlation_id = format!("ci-failure-{}-{}", run.database_id, uuid::Uuid::new_v4());
-            let failure_payload =
-                build_failure_payload(&run, status_seed, gh_request, owner_repo, &correlation_id)
-                    .await;
-            message.push_str("\nFailure details:\n");
-            message.push_str(&failure_payload);
-        }
-
-        let summary = format!(
-            "ci terminal: run {} {}",
-            run.database_id,
-            terminal_state_label(terminal)
-        );
-        emit_ci_monitor_message(
-            home,
-            &from_agent,
-            &targets,
-            &summary,
-            &message,
-            Some(format!(
-                "ci-terminal-{}-{}",
-                run.database_id,
-                uuid::Uuid::new_v4()
-            )),
-        );
-
-        let mut state = status_seed.clone();
-        state.run_id = Some(run.database_id);
-        state.state = terminal_state_label(terminal)
-            .to_lowercase()
-            .replace(' ', "_");
-        state.updated_at = chrono::Utc::now().to_rfc3339();
-        state.message = Some(format!(
-            "Terminal: {} ({}/{})",
-            terminal_state_label(terminal),
-            count_completed_jobs(&run),
-            run.jobs.len()
-        ));
-        upsert_gh_monitor_status_for_repo(home, state, repo_scope)?;
-
-        if matches!(gh_request.target_kind, CiMonitorTargetKind::Pr)
-            && let Ok(pr_number) = status_seed.target.trim().parse::<u64>()
-        {
-            match fetch_pr_merge_state(owner_repo, pr_number).await {
-                Ok(Some(pr_view)) => {
-                    if let Some(merge_state_status) = pr_view.merge_state_status.as_deref()
-                        && is_pr_merge_state_dirty(merge_state_status)
-                    {
-                        emit_merge_conflict_alert(
-                            home,
-                            status_seed,
-                            pr_view.url.as_deref(),
-                            merge_state_status,
-                            run.conclusion.as_deref(),
-                            gh_request.config_cwd.as_deref(),
-                            alert_targets,
-                        );
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    warn!(
-                        team = %status_seed.team,
-                        pr = %status_seed.target,
-                        "gh-monitor post-terminal mergeStateStatus lookup failed: {e}"
-                    );
-                }
-            }
-        }
-        return Ok(());
+        let sleep_secs = if first_poll { 5 } else { 15 };
+        first_poll = false;
+        tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
     }
 }
 
 #[cfg(unix)]
-pub(crate) async fn fetch_run_view(owner_repo: &str, run_id: u64) -> Result<GhRunView> {
-    let output = run_gh_command_for_repo(
-        owner_repo,
-        &[
-            "run",
-            "view",
-            &run_id.to_string(),
-            "--json",
-            "databaseId,name,status,conclusion,headBranch,headSha,url,jobs,attempt,pullRequests",
-        ],
-    )
-    .await?;
+pub(crate) async fn poll_monitored_run_once(
+    home: &std::path::Path,
+    status_seed: &CiMonitorStatus,
+    gh_request: &CiMonitorRequest,
+    owner_repo: &str,
+    run_id: u64,
+    alert_targets: GhAlertTargets<'_>,
+    progress: &mut RunPollProgress,
+) -> Result<bool> {
+    let run = fetch_run_view(home, &status_seed.team, owner_repo, run_id).await?;
+    let expected_repo = extract_repo_slug_from_url(&run.url);
+    let (from_agent, targets) = resolve_ci_alert_routing(
+        home,
+        &status_seed.team,
+        gh_request.config_cwd.as_deref(),
+        expected_repo.as_deref().or(Some(owner_repo)),
+        alert_targets,
+    );
+    let completed_jobs: Vec<GhRunJob> = run
+        .jobs
+        .iter()
+        .filter(|job| is_job_completed(job))
+        .cloned()
+        .collect();
+    for job in completed_jobs {
+        if progress.seen_completed.insert(job.database_id) {
+            progress.pending_completed.push(job);
+        }
+    }
+
+    let terminal = classify_terminal_state(&run);
+    if terminal.is_none() {
+        let now = std::time::Instant::now();
+        if should_emit_progress(progress.last_progress_emit, now)
+            && !progress.pending_completed.is_empty()
+        {
+            let message = format_progress_message(&run, &progress.pending_completed);
+            let summary = format!(
+                "ci progress: run {} ({}/{})",
+                run.database_id,
+                count_completed_jobs(&run),
+                run.jobs.len()
+            );
+            emit_ci_monitor_message(
+                home,
+                &from_agent,
+                &targets,
+                &summary,
+                &message,
+                Some(format!(
+                    "ci-progress-{}-{}",
+                    run.database_id,
+                    uuid::Uuid::new_v4()
+                )),
+            );
+            progress.pending_completed.clear();
+            progress.last_progress_emit = Some(now);
+        }
+
+        let mut state = status_seed.clone();
+        state.run_id = Some(run.database_id);
+        state.state = "monitoring".to_string();
+        state.updated_at = chrono::Utc::now().to_rfc3339();
+        state.message = Some(format!(
+            "Run {} still in progress ({}/{})",
+            run.database_id,
+            count_completed_jobs(&run),
+            run.jobs.len()
+        ));
+        upsert_gh_monitor_status_for_repo(home, state, Some(owner_repo))?;
+        return Ok(false);
+    }
+
+    let terminal = terminal.unwrap_or(GhRunTerminalState::Other);
+    let summary_table = format_summary_table(&run);
+    let mut message = format!(
+        "CI monitor terminal update\nRun: {}\nWorkflow: {}\nState: {}\nURL: {}\n\n{}\n",
+        run.database_id,
+        run.name,
+        terminal_state_label(terminal),
+        run.url,
+        summary_table
+    );
+
+    if terminal != GhRunTerminalState::Success {
+        let correlation_id = format!("ci-failure-{}-{}", run.database_id, uuid::Uuid::new_v4());
+        let failure_payload = build_failure_payload(
+            home,
+            &status_seed.team,
+            &run,
+            status_seed,
+            gh_request,
+            owner_repo,
+            &correlation_id,
+        )
+        .await;
+        message.push_str("\nFailure details:\n");
+        message.push_str(&failure_payload);
+    }
+
+    let summary = format!(
+        "ci terminal: run {} {}",
+        run.database_id,
+        terminal_state_label(terminal)
+    );
+    emit_ci_monitor_message(
+        home,
+        &from_agent,
+        &targets,
+        &summary,
+        &message,
+        Some(format!(
+            "ci-terminal-{}-{}",
+            run.database_id,
+            uuid::Uuid::new_v4()
+        )),
+    );
+
+    let mut state = status_seed.clone();
+    state.run_id = Some(run.database_id);
+    state.state = terminal_state_label(terminal)
+        .to_lowercase()
+        .replace(' ', "_");
+    state.updated_at = chrono::Utc::now().to_rfc3339();
+    state.message = Some(format!(
+        "Terminal: {} ({}/{})",
+        terminal_state_label(terminal),
+        count_completed_jobs(&run),
+        run.jobs.len()
+    ));
+    upsert_gh_monitor_status_for_repo(home, state, Some(owner_repo))?;
+
+    if matches!(gh_request.target_kind, CiMonitorTargetKind::Pr)
+        && let Ok(pr_number) = status_seed.target.trim().parse::<u64>()
+    {
+        match fetch_pr_merge_state(home, &status_seed.team, owner_repo, pr_number).await {
+            Ok(Some(pr_view)) => {
+                if let Some(merge_state_status) = pr_view.merge_state_status.as_deref()
+                    && is_pr_merge_state_dirty(merge_state_status)
+                {
+                    emit_merge_conflict_alert(
+                        home,
+                        status_seed,
+                        pr_view.url.as_deref(),
+                        merge_state_status,
+                        run.conclusion.as_deref(),
+                        gh_request.config_cwd.as_deref(),
+                        alert_targets,
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(
+                    team = %status_seed.team,
+                    pr = %status_seed.target,
+                    "gh-monitor post-terminal mergeStateStatus lookup failed: {e}"
+                );
+            }
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(unix)]
+pub(crate) async fn fetch_run_view(
+    home: &std::path::Path,
+    team: &str,
+    owner_repo: &str,
+    run_id: u64,
+) -> Result<GhRunView> {
+    let provider = provider_for_repo(home, team, owner_repo)?;
+    let run_id_arg = run_id.to_string();
+    let repo_scope = owner_repo.trim().to_string();
+    let output = provider
+        .run_gh(
+            "gh_run_view",
+            &[
+                "-R",
+                repo_scope.as_str(),
+                "run",
+                "view",
+                run_id_arg.as_str(),
+                "--json",
+                "databaseId,name,status,conclusion,headBranch,headSha,url,jobs,attempt,pullRequests",
+            ],
+            None,
+            None,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
     Ok(serde_json::from_str::<GhRunView>(&output)?)
 }
 
@@ -572,6 +666,8 @@ pub(crate) fn format_job_runtime(job: &GhRunJob) -> String {
 
 #[cfg(unix)]
 pub(crate) async fn build_failure_payload(
+    home: &std::path::Path,
+    team: &str,
     run: &GhRunView,
     status_seed: &CiMonitorStatus,
     gh_request: &CiMonitorRequest,
@@ -614,7 +710,7 @@ pub(crate) async fn build_failure_payload(
         .map(|step| step.name.clone())
         .unwrap_or_else(|| "unknown".to_string());
     let failed_log_excerpt = if let Some(first_job) = failed_jobs.first() {
-        fetch_failed_log_excerpt(owner_repo, first_job.database_id)
+        fetch_failed_log_excerpt(home, team, owner_repo, first_job.database_id)
             .await
             .unwrap_or_else(|_| "(log excerpt unavailable)".to_string())
     } else {
@@ -663,12 +759,32 @@ pub(crate) async fn build_failure_payload(
 }
 
 #[cfg(unix)]
-pub(crate) async fn fetch_failed_log_excerpt(owner_repo: &str, job_id: u64) -> Result<String> {
-    let output = run_gh_command_for_repo(
-        owner_repo,
-        &["run", "view", "--job", &job_id.to_string(), "--log"],
-    )
-    .await?;
+pub(crate) async fn fetch_failed_log_excerpt(
+    home: &std::path::Path,
+    team: &str,
+    owner_repo: &str,
+    job_id: u64,
+) -> Result<String> {
+    let provider = provider_for_repo(home, team, owner_repo)?;
+    let job_id_arg = job_id.to_string();
+    let repo_scope = owner_repo.trim().to_string();
+    let output = provider
+        .run_gh(
+            "gh_job_log",
+            &[
+                "-R",
+                repo_scope.as_str(),
+                "run",
+                "view",
+                "--job",
+                job_id_arg.as_str(),
+                "--log",
+            ],
+            None,
+            None,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
     Ok(output
         .lines()
         .filter(|line| !line.trim().is_empty())

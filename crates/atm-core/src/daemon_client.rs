@@ -1420,6 +1420,18 @@ pub struct GhMonitorHealth {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_state_updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_limit_per_hour: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_used_in_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_remaining: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_limit: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_owner: Option<String>,
 }
 
 /// Daemon response payload for `gh-monitor`/`gh-status`.
@@ -1444,6 +1456,8 @@ pub struct GhMonitorStatus {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_state_updated_at: Option<String>,
 }
 
 /// Query the daemon for the session record of a named agent.
@@ -1782,13 +1796,14 @@ pub fn gh_monitor_control(
 /// Query daemon-routed GitHub monitor plugin health
 /// (`command: "gh-monitor-health"`).
 pub fn gh_monitor_health(team: &str) -> anyhow::Result<Option<GhMonitorHealth>> {
-    gh_monitor_health_with_context(team, None)
+    gh_monitor_health_with_context(team, None, None)
 }
 
 /// Query daemon-routed GitHub monitor plugin health with explicit config cwd.
 pub fn gh_monitor_health_with_context(
     team: &str,
     config_cwd: Option<String>,
+    repo: Option<String>,
 ) -> anyhow::Result<Option<GhMonitorHealth>> {
     let socket_request = SocketRequest {
         version: PROTOCOL_VERSION,
@@ -1797,6 +1812,7 @@ pub fn gh_monitor_health_with_context(
         payload: serde_json::json!({
             "team": team,
             "config_cwd": config_cwd,
+            "repo": repo,
         }),
     };
 
