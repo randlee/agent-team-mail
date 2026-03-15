@@ -46,6 +46,9 @@ temp/
 # Local nested worktrees used during orchestration
 .claude/worktrees/
 
+# Runtime lock files (session-scoped, not repo content)
+.claude/scheduled_tasks.lock
+
 # Tool config directories (not project files)
 .sc/
 .serena/
