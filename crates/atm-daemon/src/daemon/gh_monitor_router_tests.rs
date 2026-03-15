@@ -15,7 +15,11 @@ use crate::plugins::ci_monitor::test_support::{
 use crate::plugins::ci_monitor::types::{
     CiMonitorRequest, CiMonitorStatus, CiMonitorTargetKind, GhAlertTargets, GhMonitorHealthUpdate,
 };
+use agent_team_mail_ci_monitor::repo_state::write_repo_state;
+use agent_team_mail_ci_monitor::{GhRepoStateFile, GhRepoStateRecord, GhRuntimeOwner};
+use agent_team_mail_core::gh_monitor_observability::update_gh_repo_state_in_flight;
 use serial_test::serial;
+use std::process::Command;
 use tempfile::TempDir;
 
 #[test]
@@ -289,6 +293,7 @@ exit 1
         reference: None,
         updated_at: chrono::Utc::now().to_rfc3339(),
         message: None,
+        repo_state_updated_at: None,
     };
     let gh_request = CiMonitorRequest {
         team: "atm-dev".to_string(),
@@ -364,6 +369,7 @@ exit 1
         reference: None,
         updated_at: chrono::Utc::now().to_rfc3339(),
         message: None,
+        repo_state_updated_at: None,
     };
     let gh_request = CiMonitorRequest {
         team: "atm-dev".to_string(),
@@ -443,6 +449,7 @@ exit 1
         reference: None,
         updated_at: chrono::Utc::now().to_rfc3339(),
         message: None,
+        repo_state_updated_at: None,
     };
     let gh_request = CiMonitorRequest {
         team: "atm-dev".to_string(),
@@ -473,7 +480,7 @@ exit 1
     );
 
     let state_map = load_gh_monitor_state_map(temp.path()).expect("state map");
-    let key = gh_monitor_key("atm-dev", CiMonitorTargetKind::Pr, "123", None, None);
+    let key = gh_monitor_key("atm-dev", CiMonitorTargetKind::Pr, "123", None, Some("o/r"));
     let terminal = state_map.get(&key).expect("status entry");
     assert_eq!(terminal.state, "failure");
 }
@@ -536,6 +543,7 @@ fn test_derive_pr_url_prefers_pr_target_fallback() {
         reference: None,
         updated_at: "2026-03-06T00:00:00Z".to_string(),
         message: None,
+        repo_state_updated_at: None,
     };
     let request = CiMonitorRequest {
         team: "atm-dev".to_string(),
@@ -569,7 +577,7 @@ echo "unexpected gh args: $*" >&2
 exit 1
 "#,
     );
-    let run_id = gh_monitor::wait_for_pr_run_start("o/r", 123, 1)
+    let run_id = gh_monitor::wait_for_pr_run_start(temp.path(), "atm-dev", "o/r", 123, 1)
         .await
         .unwrap();
     assert_eq!(run_id, Some(222222));
@@ -578,7 +586,7 @@ exit 1
 #[tokio::test]
 #[cfg(unix)]
 #[serial]
-async fn test_run_gh_command_for_repo_injects_repo_scope_flag() {
+async fn test_fetch_run_view_injects_repo_scope_flag() {
     use std::os::unix::fs::PermissionsExt;
 
     let temp = TempDir::new().unwrap();
@@ -586,8 +594,8 @@ async fn test_run_gh_command_for_repo_injects_repo_scope_flag() {
     std::fs::write(
         &script_path,
         r#"#!/bin/sh
-if [ "$1" = "-R" ] && [ "$2" = "o/r" ] && [ "$3" = "run" ] && [ "$4" = "list" ]; then
-  echo "ok"
+if [ "$1" = "-R" ] && [ "$2" = "o/r" ] && [ "$3" = "run" ] && [ "$4" = "view" ] && [ "$5" = "42" ]; then
+  echo '{"databaseId":42,"name":"CI","status":"completed","conclusion":"success","headBranch":"main","headSha":"abc123","url":"https://github.com/o/r/actions/runs/42","jobs":[],"attempt":1,"pullRequests":[]}'
   exit 0
 fi
 echo "missing -R scope: $*" >&2
@@ -607,10 +615,10 @@ exit 1
     };
     let _path_guard = EnvGuard::set("PATH", &new_path);
 
-    let output = gh_monitor::run_gh_command_for_repo("o/r", &["run", "list"])
+    let output = gh_monitor::fetch_run_view(temp.path(), "atm-dev", "o/r", 42)
         .await
         .unwrap();
-    assert_eq!(output, "ok");
+    assert_eq!(output.database_id, 42);
 }
 
 #[tokio::test]
@@ -636,6 +644,7 @@ async fn test_handle_gh_monitor_command_rejects_config_team_mismatch() {
 #[tokio::test]
 #[cfg(unix)]
 async fn test_build_failure_payload_contains_required_fields() {
+    let temp = TempDir::new().unwrap();
     let run = gh_monitor::GhRunView {
         database_id: 42,
         name: "ci".to_string(),
@@ -661,6 +670,7 @@ async fn test_build_failure_payload_contains_required_fields() {
         reference: None,
         updated_at: "2026-03-06T00:00:00Z".to_string(),
         message: None,
+        repo_state_updated_at: None,
     };
     let request = CiMonitorRequest {
         team: "atm-dev".to_string(),
@@ -670,8 +680,16 @@ async fn test_build_failure_payload_contains_required_fields() {
         start_timeout_secs: Some(120),
         config_cwd: None,
     };
-    let payload =
-        gh_monitor::build_failure_payload(&run, &status_seed, &request, "o/r", "corr-1").await;
+    let payload = gh_monitor::build_failure_payload(
+        temp.path(),
+        "atm-dev",
+        &run,
+        &status_seed,
+        &request,
+        "o/r",
+        "corr-1",
+    )
+    .await;
     for required in [
         "run_url:",
         "failed_job_urls:",
@@ -714,7 +732,7 @@ fn test_classify_failure_infra_when_runner_failure_detected() {
             conclusion: Some("failure".to_string()),
             started_at: None,
             completed_at: None,
-            steps: vec![gh_monitor::GhRunStep {
+            steps: vec![crate::plugins::ci_monitor::github_schema::GhRunStep {
                 name: "Set up runner".to_string(),
                 status: Some("completed".to_string()),
                 conclusion: Some("failure".to_string()),
@@ -838,6 +856,7 @@ async fn test_gh_status_distinguishes_repo_scopes_for_same_target() {
         reference: None,
         updated_at: chrono::Utc::now().to_rfc3339(),
         message: Some("repo a".to_string()),
+        repo_state_updated_at: None,
     };
     let status_b = CiMonitorStatus {
         message: Some("repo b".to_string()),
@@ -885,6 +904,7 @@ async fn test_gh_status_uses_global_config_source_when_repo_missing() {
         reference: None,
         updated_at: "2026-03-06T00:00:00Z".to_string(),
         message: None,
+        repo_state_updated_at: None,
     };
     upsert_gh_monitor_status(temp.path(), status_seed).unwrap();
 
@@ -953,6 +973,7 @@ async fn test_gh_status_workflow_reference_disambiguates_parallel_runs() {
         reference: Some("develop".to_string()),
         updated_at: "2026-03-06T00:00:10Z".to_string(),
         message: None,
+        repo_state_updated_at: None,
     };
     let status_b = CiMonitorStatus {
         team: "atm-dev".to_string(),
@@ -967,6 +988,7 @@ async fn test_gh_status_workflow_reference_disambiguates_parallel_runs() {
         reference: Some("release/v1".to_string()),
         updated_at: "2026-03-06T00:00:11Z".to_string(),
         message: None,
+        repo_state_updated_at: None,
     };
     upsert_gh_monitor_status(temp.path(), status_a).unwrap();
     upsert_gh_monitor_status(temp.path(), status_b).unwrap();
@@ -1011,6 +1033,161 @@ async fn test_gh_monitor_control_start_stop_restart_and_health() {
     let health = health_resp.payload.unwrap();
     assert_eq!(health["team"].as_str(), Some("atm-dev"));
     assert_eq!(health["lifecycle_state"].as_str(), Some("running"));
+}
+
+#[tokio::test]
+#[cfg(unix)]
+#[serial]
+async fn test_gh_monitor_control_cross_team_requires_user_authorized() {
+    let temp = TempDir::new().unwrap();
+    let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+    write_gh_monitor_config(temp.path(), "ops-team");
+
+    let start_req = r#"{"version":1,"request_id":"r-gh-start-cross-team","command":"gh-monitor-control","payload":{"team":"ops-team","action":"start","actor":"team-lead","actor_team":"atm-dev"}}"#;
+    let start_resp = handle_gh_monitor_control_command(start_req, temp.path()).await;
+    assert_eq!(start_resp.status, "error");
+    let start_err = start_resp.error.expect("cross-team start should fail");
+    assert_eq!(start_err.code, "AUTHORIZATION_REQUIRED");
+
+    let stop_req = r#"{"version":1,"request_id":"r-gh-stop-cross-team","command":"gh-monitor-control","payload":{"team":"ops-team","action":"stop","actor":"team-lead","actor_team":"atm-dev","drain_timeout_secs":1}}"#;
+    let stop_resp = handle_gh_monitor_control_command(stop_req, temp.path()).await;
+    assert_eq!(stop_resp.status, "error");
+    let err = stop_resp.error.expect("cross-team stop should fail");
+    assert_eq!(err.code, "AUTHORIZATION_REQUIRED");
+}
+
+#[tokio::test]
+#[cfg(unix)]
+#[serial]
+async fn test_gh_monitor_control_cross_team_stop_and_restart_notify_team_lead() {
+    let temp = TempDir::new().unwrap();
+    let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+    write_gh_monitor_config(temp.path(), "ops-team");
+    write_hook_auth_team_config(temp.path(), "ops-team", "team-lead", &["team-lead"]);
+    std::fs::create_dir_all(temp.path().join(".claude/teams/ops-team/inboxes")).unwrap();
+
+    let stop_req = r#"{"version":1,"request_id":"r-gh-stop-cross-team-notify","command":"gh-monitor-control","payload":{"team":"ops-team","action":"stop","actor":"team-lead","actor_team":"atm-dev","user_authorized":true,"operator_reason":"manual rollback","drain_timeout_secs":1}}"#;
+    let stop_resp = handle_gh_monitor_control_command(stop_req, temp.path()).await;
+    assert_eq!(stop_resp.status, "ok");
+
+    let restart_req = r#"{"version":1,"request_id":"r-gh-restart-cross-team-notify","command":"gh-monitor-control","payload":{"team":"ops-team","action":"restart","actor":"team-lead","actor_team":"atm-dev","user_authorized":true,"operator_reason":"resume service","drain_timeout_secs":1}}"#;
+    let restart_resp = handle_gh_monitor_control_command(restart_req, temp.path()).await;
+    assert_eq!(restart_resp.status, "ok");
+
+    let inbox = read_team_inbox_messages(temp.path(), "ops-team", "team-lead");
+    assert!(
+        inbox.iter().any(|msg| {
+            msg.text
+                .contains("your gh monitor was stopped by team-lead@atm-dev")
+                && msg.text.contains("manual rollback")
+        }),
+        "cross-team stop should notify affected team lead with actor and reason"
+    );
+    assert!(
+        inbox.iter().any(|msg| {
+            msg.text
+                .contains("your gh monitor was restarted by team-lead@atm-dev")
+                && msg.text.contains("resume service")
+        }),
+        "cross-team restart should notify affected team lead with actor and reason"
+    );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+#[serial]
+async fn test_gh_monitor_health_includes_owner_metadata_fields() {
+    let temp = TempDir::new().unwrap();
+    let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+    write_gh_monitor_config(temp.path(), "atm-dev");
+    update_gh_repo_state_in_flight(temp.path(), "atm-dev", "o/r", 1, "atm-daemon").unwrap();
+
+    let health_req = r#"{"version":1,"request_id":"r-gh-health-owner","command":"gh-monitor-health","payload":{"team":"atm-dev"}}"#;
+    let health_resp = handle_gh_monitor_health_command(health_req, temp.path()).await;
+    assert_eq!(health_resp.status, "ok");
+    let health = health_resp.payload.unwrap();
+    assert_eq!(health["owner_runtime_kind"].as_str(), Some("isolated"));
+    assert_eq!(health["owner_repo"].as_str(), Some("o/r"));
+    assert_eq!(health["owner_poll_interval_secs"].as_u64(), Some(60));
+    assert_eq!(
+        health["owner_pid"].as_u64(),
+        Some(std::process::id() as u64)
+    );
+    assert!(
+        health["owner_binary_path"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("agent_team_mail_daemon"),
+        "expected owner_binary_path in health payload: {health:?}"
+    );
+    let canonical_home = std::fs::canonicalize(temp.path()).unwrap();
+    assert_eq!(
+        health["owner_atm_home"].as_str(),
+        Some(canonical_home.to_string_lossy().as_ref())
+    );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+#[serial]
+async fn test_gh_monitor_health_surfaces_live_foreign_owner_conflict() {
+    let temp = TempDir::new().unwrap();
+    let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+    write_gh_monitor_config(temp.path(), "atm-dev");
+    let mut child = Command::new("sleep").arg("2").spawn().unwrap();
+    let now = chrono::Utc::now();
+    write_repo_state(
+        temp.path(),
+        &GhRepoStateFile {
+            records: vec![GhRepoStateRecord {
+                team: "atm-dev".to_string(),
+                repo: "o/r".to_string(),
+                updated_at: now.to_rfc3339(),
+                cache_expires_at: (now + chrono::Duration::seconds(300)).to_rfc3339(),
+                last_refresh_at: None,
+                budget_limit_per_hour: 100,
+                budget_used_in_window: 0,
+                budget_window_started_at: now.to_rfc3339(),
+                budget_warning_threshold: 50,
+                warning_emitted_at: None,
+                blocked: false,
+                in_flight: 0,
+                idle_poll_interval_secs: 300,
+                active_poll_interval_secs: 60,
+                branch_ref_counts: Vec::new(),
+                last_call: None,
+                rate_limit: None,
+                owner: Some(GhRuntimeOwner {
+                    runtime: "dev".to_string(),
+                    executable_path: "/tmp/foreign-atm-daemon".to_string(),
+                    home_scope: temp.path().to_string_lossy().to_string(),
+                    pid: child.id(),
+                }),
+            }],
+        },
+    )
+    .unwrap();
+
+    let health_req = r#"{"version":1,"request_id":"r-gh-health-conflict","command":"gh-monitor-health","payload":{"team":"atm-dev"}}"#;
+    let health_resp = handle_gh_monitor_health_command(health_req, temp.path()).await;
+    assert_eq!(health_resp.status, "ok");
+    let health = health_resp.payload.unwrap();
+    assert_eq!(health["team"].as_str(), Some("atm-dev"));
+    assert_eq!(health["availability_state"].as_str(), Some("degraded"));
+    assert_eq!(health["owner_pid"].as_u64(), Some(child.id() as u64));
+    assert_eq!(
+        health["owner_binary_path"].as_str(),
+        Some("/tmp/foreign-atm-daemon")
+    );
+    assert!(
+        health["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("lease conflict")
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[tokio::test]

@@ -8,8 +8,6 @@ use agent_team_mail_core::schema::InboxMessage;
 use tracing::warn;
 
 #[cfg(unix)]
-pub(crate) use super::gh_alerts::repo_scope_matches;
-#[cfg(unix)]
 use super::types::{CiMonitorStatus, GhAlertTargets};
 
 #[cfg(unix)]
@@ -263,6 +261,7 @@ notify_target = "team-lead"
             reference: None,
             updated_at: chrono::Utc::now().to_rfc3339(),
             message: Some("preflight dirty".to_string()),
+            repo_state_updated_at: None,
         };
 
         notify_merge_conflict(

@@ -1,11 +1,25 @@
 # Phase AO Guardrails Sprint Notes
 
-> **Status**: Draft planning note
+> **Status**: Active planning note
 > **Scope**: daemon runtime guardrails and `gh_monitor` observability follow-up
 
 This note captures the current decision for the next short follow-on sprints.
 It is intentionally narrow: stop accidental shared-runtime launches first, then
 make GitHub query sources visible and stoppable.
+
+Deletion policy for this phase:
+- AO must prefer deleting duplicate runtime, monitor, and GitHub invocation
+  paths over preserving parallel implementations.
+- Once a canonical AO path exists, superseded helper paths and transitional
+  compatibility code must be removed unless they protect an active user-facing
+  workflow.
+- AO acceptance favors one canonical path per concern, not coexistence of old
+  and new paths.
+- The named deletion targets are the legacy `run_gh_command` /
+  `run_gh_command_for_repo` helper paths and equivalent duplicate runtime or
+  state helpers. All other named paths inside the `CiProvider` trait
+  implementation are normative and must not be deleted. When in doubt, consult
+  the AO.5 must-not-delete list before removing a path.
 
 ## AO.1 Shared Runtime Admission Guard
 
@@ -30,6 +44,8 @@ Acceptance:
 - repo/worktree binaries cannot start against shared `release` or `dev`
 - second daemon for shared `release` or `dev` fails loudly
 - daemon status records runtime owner metadata sufficient to explain refusal
+- `GH-CI-FR-36` sub-requirements for explicit isolated runtime creation, path
+  isolation, TTL metadata, and default no-live-polling remain deferred to AO.2
 
 ## AO.2 Isolated Runtime Creation and TTL
 
@@ -144,3 +160,34 @@ Acceptance:
   polling owner (`GH-CI-FR-21`)
 - hidden operator stop path exists for emergency shutdown
 - affected team lead receives notification identifying actor and reason
+
+## AO.5 Post-Integration Path and Contract Simplification
+
+Goal: remove transitional paths and tighten the final canonical contracts after
+AO.1-AO.4 have integrated.
+
+Integration branch: `integrate/phase-AO`
+
+Rules:
+- AO.5 is deletion-oriented and must not add new user-facing capability.
+- Temporary seams, duplicate helpers, and compatibility code kept during
+  AO.1-AO.4 should be reviewed for removal once the canonical AO path is live.
+- Contracts should be narrowed to the surviving canonical runtime, polling,
+  state, and operator-control surfaces.
+- The following contract surfaces must survive AO.5 intact:
+  - `CiProvider` trait boundary in
+    `crates/atm-daemon/src/plugins/ci_monitor/provider.rs`
+  - attributed `run_gh()` path in `GitHubActionsProvider`
+  - shared `(team, repo)` poller contract (`GH-CI-FR-10a`,
+    `GH-CI-FR-10b`, `GH-CI-FR-10c`)
+  - `GhMonitorHealthRecord` schema fields (`GH-CI-FR-21`, `GH-CI-FR-26`)
+  - any test that is the sole coverage for a GH-CI-FR normative requirement
+
+Acceptance:
+- superseded GH helper paths, state representations, and transitional runtime
+  branches introduced or preserved during AO are either deleted or explicitly
+  justified as still required
+- public/internal contracts are narrowed to the canonical AO path and no longer
+  expose transitional branches unnecessarily
+- tests covering deleted transitional behavior are removed or consolidated into
+  the canonical path tests

@@ -770,6 +770,7 @@ impl CiMonitorPlugin {
             .join("gh-monitor-state.json")
     }
 
+    #[cfg(unix)]
     fn is_terminal_monitor_state(state: &str) -> bool {
         matches!(
             state.to_ascii_lowercase().as_str(),
@@ -800,6 +801,11 @@ impl CiMonitorPlugin {
                 && record.status.run_id == Some(run_id)
                 && Self::is_terminal_monitor_state(&record.status.state)
         })
+    }
+
+    #[cfg(not(unix))]
+    fn was_terminal_notified_by_command_path(&self, _ctx: &PluginContext, _run_id: u64) -> bool {
+        false
     }
 
     fn team_for_config_error(
@@ -849,9 +855,22 @@ impl CiMonitorPlugin {
             config_path: None,
             lifecycle_state: "running".to_string(),
             availability_state: availability_state.to_string(),
-            in_flight: 0,
+            in_flight: super::helpers::count_in_flight_monitors(home_dir, team),
             updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             message: Some(message.to_string()),
+            repo_state_updated_at: None,
+            budget_limit_per_hour: None,
+            budget_used_in_window: None,
+            rate_limit_remaining: None,
+            rate_limit_limit: None,
+            rate_limit_reset_at: None,
+            poll_owner: None,
+            owner_runtime_kind: None,
+            owner_pid: None,
+            owner_binary_path: None,
+            owner_atm_home: None,
+            owner_repo: None,
+            owner_poll_interval_secs: None,
         };
 
         if let Some(existing) = file.records.iter_mut().find(|record| record.team == team) {
@@ -1047,6 +1066,8 @@ impl Plugin for CiMonitorPlugin {
                 // Pass provider_config for external providers
                 let provider_config = self.config.provider_config.as_ref();
                 let provider = match create_provider_from_registry(
+                    &atm_home,
+                    &self.config.team,
                     registry.as_ref(),
                     &self.config.provider,
                     self.config.owner.as_deref(),
@@ -1476,6 +1497,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_create_provider_from_registry_prefers_git_repo_over_config_repo() {
+        let temp = tempfile::tempdir().unwrap();
         let registry = RecordingRegistry::new();
         let git_provider = GitProviderType::GitHub {
             owner: "git-owner".to_string(),
@@ -1483,6 +1505,8 @@ mod tests {
         };
 
         let provider = create_provider_from_registry(
+            temp.path(),
+            "atm-dev",
             &registry,
             "github",
             Some("config-owner"),
@@ -1500,9 +1524,12 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_create_provider_from_registry_falls_back_to_config_repo_when_git_missing() {
+        let temp = tempfile::tempdir().unwrap();
         let registry = RecordingRegistry::new();
 
         let provider = create_provider_from_registry(
+            temp.path(),
+            "atm-dev",
             &registry,
             "github",
             Some("config-owner"),
@@ -2704,9 +2731,7 @@ notify_target = "team-lead"
     #[tokio::test]
     async fn test_polling_notification_suppressed_when_command_path_already_terminal() {
         use crate::plugins::ci_monitor::mock_support::{MockCiProvider, create_test_run};
-        use crate::plugins::ci_monitor::types::{
-            CiMonitorStatus, CiMonitorTargetKind, GhMonitorStateFile, GhMonitorStateRecord,
-        };
+        use crate::plugins::ci_monitor::types::{CiMonitorStatus, CiMonitorTargetKind};
         use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus};
         use agent_team_mail_core::schema::{AgentMember, TeamConfig};
         use tempfile::TempDir;
@@ -2773,28 +2798,25 @@ poll_interval_secs = 10
         .unwrap();
         let ctx = create_mock_context_with_config(teams_root.clone(), Some(table));
 
-        let state_path = CiMonitorPlugin::gh_monitor_state_path(&ctx);
-        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
-        let state = GhMonitorStateFile {
-            records: vec![GhMonitorStateRecord {
-                status: CiMonitorStatus {
-                    team: "dev-team".to_string(),
-                    configured: true,
-                    enabled: true,
-                    config_source: Some("workspace".to_string()),
-                    config_path: None,
-                    target_kind: CiMonitorTargetKind::Pr,
-                    target: "main".to_string(),
-                    state: "failure".to_string(),
-                    run_id: Some(42),
-                    reference: Some("main".to_string()),
-                    updated_at: "2026-03-14T00:00:00Z".to_string(),
-                    message: None,
-                },
-                repo_scope: None,
-            }],
-        };
-        std::fs::write(&state_path, serde_json::to_string(&state).unwrap()).unwrap();
+        crate::plugins::ci_monitor::helpers::upsert_gh_monitor_status(
+            teams_root.as_path(),
+            CiMonitorStatus {
+                team: "dev-team".to_string(),
+                configured: true,
+                enabled: true,
+                config_source: None,
+                config_path: None,
+                target_kind: CiMonitorTargetKind::Workflow,
+                target: "CI".to_string(),
+                state: "failure".to_string(),
+                run_id: Some(42),
+                reference: None,
+                updated_at: "2026-03-14T00:00:00Z".to_string(),
+                message: None,
+                repo_state_updated_at: None,
+            },
+        )
+        .unwrap();
 
         let mut plugin = CiMonitorPlugin::new().with_provider(Box::new(provider));
         plugin.init(&ctx).await.unwrap();

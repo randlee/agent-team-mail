@@ -456,6 +456,7 @@ notify_target = "team-lead"
             reference: None,
             updated_at: chrono::Utc::now().to_rfc3339(),
             message: Some("preflight dirty".to_string()),
+            repo_state_updated_at: None,
         };
 
         emit_merge_conflict_alert(

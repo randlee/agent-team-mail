@@ -89,9 +89,19 @@ pub struct CiMonitorControlRequest {
     pub team: String,
     pub action: CiMonitorLifecycleAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drain_timeout_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_team: Option<String>,
+    #[serde(default)]
+    pub user_authorized: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_reason: Option<String>,
 }
 
 #[cfg(unix)]
@@ -112,6 +122,32 @@ pub struct CiMonitorHealth {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_state_updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_limit_per_hour: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_used_in_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_remaining: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_limit: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_reset_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_runtime_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_binary_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_atm_home: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_poll_interval_secs: Option<u64>,
 }
 
 #[cfg(unix)]
@@ -136,6 +172,85 @@ pub struct CiMonitorStatus {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_state_updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GhRepoStateFile {
+    #[serde(default)]
+    pub records: Vec<GhRepoStateRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GhRepoStateRecord {
+    pub team: String,
+    pub repo: String,
+    pub updated_at: String,
+    pub cache_expires_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_refresh_at: Option<String>,
+    pub budget_limit_per_hour: u64,
+    pub budget_used_in_window: u64,
+    pub budget_window_started_at: String,
+    pub budget_warning_threshold: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning_emitted_at: Option<String>,
+    #[serde(default)]
+    pub blocked: bool,
+    #[serde(default)]
+    pub in_flight: u64,
+    pub idle_poll_interval_secs: u64,
+    pub active_poll_interval_secs: u64,
+    #[serde(default)]
+    pub branch_ref_counts: Vec<GhBranchRefCount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_call: Option<GhObservedCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<GhRateLimitSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<GhRuntimeOwner>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GhBranchRefCount {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GhObservedCall {
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    pub duration_ms: u64,
+    pub success: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GhRateLimitSnapshot {
+    pub remaining: u64,
+    pub limit: u64,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<String>,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GhRuntimeOwner {
+    pub runtime: String,
+    pub executable_path: String,
+    pub home_scope: String,
+    pub pid: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

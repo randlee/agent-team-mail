@@ -1643,18 +1643,56 @@ operator-controllable.
 ### Planned Sprint Map
 | Sprint | Focus | Primary Branch | Status |
 |---|---|---|---|
-| AO.1 | Shared runtime admission guard (`release`/`dev` only, hard-stop invalid shared launches) | `feature/pAO-s1-runtime-admission` | PLANNED |
-| AO.2 | Explicit isolated runtime creation + 10-minute TTL cleanup policy | `feature/pAO-s2-isolated-runtime` | PLANNED |
-| AO.3 | Shared repo-state cache, single `(team, repo)` shared poller, PR-list primary poll surface, bounded poll cadence, team budgets (`100/hour`), attributed `run_gh()` path, merge-conflict checks, and config/init parity | `feature/pAO-s3-gh-budget-cache` | PLANNED |
-| AO.4 | Single `(team, repo)` lease ownership + hidden human-authorized cross-team stop/disable path with operator-facing owner metadata | `feature/pAO-s4-operator-control` | PLANNED |
+| AO.1 | Shared runtime admission guard (`release`/`dev` only, hard-stop invalid shared launches) | `feature/pAO-s1-runtime-admission` | COMPLETE |
+| AO.2 | Explicit isolated runtime creation + 10-minute TTL cleanup policy | `feature/pAO-s2-isolated-runtime-ttl` | ACTIVE |
+| AO.3 | Shared repo-state cache, single `(team, repo)` shared poller, PR-list primary poll surface, bounded poll cadence, team budgets (`100/hour`), attributed `run_gh()` path, merge-conflict checks, and config/init parity | `feature/pAO-s3-repo-state-budget-observability` | ACTIVE |
+| AO.4 | Single `(team, repo)` lease ownership + hidden human-authorized cross-team stop/disable path with operator-facing owner metadata | `feature/pAO-s4-operator-control` | ACTIVE |
+| AO.5 | Post-integration deletion sprint: simplify runtime/poller paths and narrow final contracts | `feature/pAO-s5-path-contract-simplification` | ACTIVE |
 
 ### Exit Criteria
 1. Shared `release` and `dev` runtimes reject invalid owners and duplicate daemon starts.
 2. Isolated runtimes are explicit, short-lived, and do not enable live GH polling by default.
-3. GitHub calls are budgeted per team, counted locally, and surfaced with freshness metadata in `atm gh status` and `atm doctor`; one shared `(team, repo)` poller uses the repo-wide PR list view as its primary poll surface, polling at most once per 5 minutes when idle and once per 1 minute when active; pre-run/post-completion merge-conflict checks plus config/init parity remain on the attributed `run_gh()` path.
+3. GitHub calls are budgeted per team, counted locally, and surfaced with freshness metadata in `atm gh status` and `atm doctor`; one shared `(team, repo)` poller uses the repo-wide PR list view as its primary poll surface, polling at most once per 5 minutes when idle and once per 1 minute when active (`GH-CI-FR-10a`, `GH-CI-FR-10b`, `GH-CI-FR-10c`); pre-run/post-completion merge-conflict checks plus config/init parity remain on the attributed `run_gh()` path.
 4. One active `gh_monitor` owner exists per `(team, repo)`, operator-facing status shows the active owner metadata, and operators can stop a runaway monitor with auditable cross-team controls.
+5. Transitional runtime, polling, and state paths preserved during AO are removed or narrowed so the post-AO implementation exposes only the canonical contracts.
 
-**Dependency graph**: AO.1 → AO.2 → AO.3 → AO.4
+**Execution note**: AO.3, AO.4, and AO.5 were authorized to execute in parallel with merge-forwards between sprint branches as fixes landed. Phase exit still requires the combined AO surface plus AO.5 simplification criteria.
+
+**Dependency graph**: AO.1 → AO.2 → {AO.3, AO.4, AO.5 with merge-forward discipline}
+
+---
+
+## 17.24 Phase AP: Test Stability and Harness Hardening
+
+**Goal**: eliminate hang-prone, flaky, and operationally unsafe test patterns
+that can block CI without clearly identifying the failing test or resource.
+
+**Prerequisites**: Phase AN merged to `develop`; Phase AO may proceed in
+parallel, but AP.1 should start before new daemon-heavy test coverage expands.
+**Integration branch**: `integrate/phase-AP`
+
+**Planning doc**: `docs/phase-ap-test-hardening.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Branch | Status |
+|---|---|---|---|
+| AP.1 | Environment/process safety: scoped `ATM_HOME`, subprocess RAII, autostart diagnostics | `feature/pAP-s1-process-safety` | PLANNED |
+| AP.2 | Deterministic timing: replace wall-clock sleeps, bound loop/watcher waits, improve test attribution | `feature/pAP-s2-deterministic-timing` | PLANNED |
+| AP.3 | Pathing/serialization cleanup and final audit | `feature/pAP-s3-test-hygiene-audit` | PLANNED |
+
+### Exit Criteria
+1. Blocking/high-priority tests no longer rely on raw wall-clock sleeps as their
+   sole synchronization mechanism.
+2. Test helpers and integration tests do not leak daemon/subprocess children on
+   panic.
+3. Shared mutable environment state (`ATM_HOME`, shared runtime paths) is scoped
+   safely or serialized explicitly.
+4. Cross-platform fixtures avoid hardcoded `/tmp`, and risky integration suites
+   fail with bounded, attributable diagnostics instead of hanging silently.
+5. Duplicate low-value tests and ad hoc helper paths are removed where they do
+   not provide unique coverage, leaving a smaller canonical harness.
+
+**Dependency graph**: AP.1 → AP.2 → AP.3
 
 ---
 
