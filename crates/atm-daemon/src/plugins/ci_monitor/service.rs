@@ -1,10 +1,16 @@
-//! CI monitor service orchestration.
+//! Transport-free CI monitor service orchestration.
+//!
+//! This module forms the core CI monitor boundary. It must not depend on daemon
+//! socket/router request or response types; daemon transport adapters are responsible
+//! for translating wire payloads into these CI monitor request/status types before
+//! calling into the service layer.
 
 #[cfg(unix)]
 use super::gh_monitor::{
     fetch_pr_merge_state, is_pr_merge_state_dirty, monitor_gh_run, try_find_workflow_run_id,
     wait_for_pr_run_start,
 };
+use super::github_provider::GitHubActionsProvider;
 #[cfg(unix)]
 use super::health::set_gh_monitor_health_state;
 use super::helpers::{
@@ -12,49 +18,80 @@ use super::helpers::{
     gh_monitor_key, load_gh_monitor_state_map,
 };
 use super::provider::ErasedCiProvider;
+use super::registry::CiProviderRegistryPort;
 #[cfg(unix)]
 use super::routing::{notify_ci_not_started, notify_merge_conflict};
-use super::types::{CiFilter, CiRun, CiRunStatus, GhMonitorConfigState, GhMonitorHealthUpdate};
-use agent_team_mail_core::daemon_client::{
-    GhMonitorControlRequest, GhMonitorHealth, GhMonitorLifecycleAction, GhMonitorRequest,
-    GhMonitorStatus, GhMonitorTargetKind, GhStatusRequest,
+use super::types::{
+    CiMonitorControlRequest, CiMonitorHealth, CiMonitorLifecycleAction, CiMonitorRequest,
+    CiMonitorStatus, CiMonitorStatusRequest, CiMonitorTargetKind, GhAlertTargets,
+    GhMonitorConfigState, GhMonitorHealthUpdate, OwnedGhAlertTargets,
 };
+use agent_team_mail_core::context::GitProvider as GitProviderType;
 use tracing::warn;
 
-const CI_MONITOR_INTERNAL_ERROR: &str = "INTERNAL_ERROR";
+pub(crate) use agent_team_mail_ci_monitor::service::{
+    CiMonitorServiceError, CiMonitorServiceResult, fetch_run_details, list_completed_runs,
+};
 
-#[derive(Debug, Clone)]
-pub(crate) struct CiMonitorServiceError {
-    pub(crate) code: &'static str,
-    pub(crate) message: String,
-}
-
-impl CiMonitorServiceError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
+pub(crate) fn create_provider_from_registry(
+    registry: &dyn CiProviderRegistryPort,
+    provider_name: &str,
+    configured_owner: Option<&str>,
+    configured_repo: Option<&str>,
+    git_provider: Option<&GitProviderType>,
+    config_table: Option<&toml::Table>,
+) -> CiMonitorServiceResult<Box<dyn ErasedCiProvider>> {
+    let (owner, repo) = if let Some(git_provider) = git_provider {
+        match git_provider {
+            GitProviderType::GitHub { owner, repo } => (owner.clone(), repo.clone()),
+            GitProviderType::AzureDevOps { org, project, repo } => {
+                return Err(CiMonitorServiceError::new(
+                    "PROVIDER_ERROR",
+                    format!(
+                        "Azure DevOps not yet supported (org: {org}, project: {project}, repo: {repo})"
+                    ),
+                ));
+            }
+            GitProviderType::GitLab { namespace, repo } => {
+                return Err(CiMonitorServiceError::new(
+                    "PROVIDER_ERROR",
+                    format!("GitLab not yet supported (namespace: {namespace}, repo: {repo})"),
+                ));
+            }
+            GitProviderType::Bitbucket { workspace, repo } => {
+                return Err(CiMonitorServiceError::new(
+                    "PROVIDER_ERROR",
+                    format!("Bitbucket not yet supported (workspace: {workspace}, repo: {repo})"),
+                ));
+            }
+            GitProviderType::Unknown { host } => {
+                return Err(CiMonitorServiceError::new(
+                    "PROVIDER_ERROR",
+                    format!("No CI provider for unknown git host: {host}"),
+                ));
+            }
         }
+    } else if let (Some(owner), Some(repo)) = (configured_owner, configured_repo) {
+        (owner.to_string(), repo.to_string())
+    } else {
+        return Err(CiMonitorServiceError::new(
+            "PROVIDER_ERROR",
+            "No repository information available",
+        ));
+    };
+
+    if provider_name == "github" {
+        return Ok(Box::new(GitHubActionsProvider::new(owner, repo)));
     }
 
-    fn internal(message: impl Into<String>) -> Self {
-        Self::new(CI_MONITOR_INTERNAL_ERROR, message)
-    }
+    registry
+        .create_provider(provider_name, config_table)
+        .map_err(|e| CiMonitorServiceError::new("PROVIDER_ERROR", e.to_string()))
 }
-
-impl std::fmt::Display for CiMonitorServiceError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.code, self.message)
-    }
-}
-
-impl std::error::Error for CiMonitorServiceError {}
-
-pub(crate) type CiMonitorServiceResult<T> = std::result::Result<T, CiMonitorServiceError>;
 
 #[cfg(unix)]
 fn validate_monitor_request(
-    gh_request: &GhMonitorRequest,
+    gh_request: &CiMonitorRequest,
     config_state: &GhMonitorConfigState,
 ) -> std::result::Result<(), (&'static str, String, Option<String>)> {
     if let Some(reason) = config_state.error.clone() {
@@ -89,7 +126,7 @@ fn validate_monitor_request(
         return Err(("CONFIG_ERROR", message.clone(), Some(message)));
     }
 
-    if matches!(gh_request.target_kind, GhMonitorTargetKind::Workflow)
+    if matches!(gh_request.target_kind, CiMonitorTargetKind::Workflow)
         && gh_request
             .reference
             .as_deref()
@@ -107,36 +144,14 @@ fn validate_monitor_request(
     Ok(())
 }
 
-pub(crate) async fn list_completed_runs(
-    provider: &dyn ErasedCiProvider,
-) -> CiMonitorServiceResult<Vec<CiRun>> {
-    let filter = CiFilter {
-        status: Some(CiRunStatus::Completed),
-        per_page: Some(20),
-        ..Default::default()
-    };
-
-    provider
-        .list_runs(&filter)
-        .await
-        .map_err(|e| CiMonitorServiceError::internal(format!("Failed to list runs: {e}")))
-}
-
-pub(crate) async fn fetch_run_details(
-    provider: &dyn ErasedCiProvider,
-    run_id: u64,
-) -> CiMonitorServiceResult<CiRun> {
-    provider
-        .get_run(run_id)
-        .await
-        .map_err(|e| CiMonitorServiceError::internal(format!("Failed to fetch run details: {e}")))
-}
-
 #[cfg(unix)]
 pub(crate) async fn monitor_request(
     home: &std::path::Path,
-    gh_request: &GhMonitorRequest,
-) -> CiMonitorServiceResult<GhMonitorStatus> {
+    gh_request: &CiMonitorRequest,
+    repo_scope: Option<&str>,
+    caller_agent: Option<&str>,
+    cc: &[String],
+) -> CiMonitorServiceResult<CiMonitorStatus> {
     if gh_request.team.trim().is_empty() {
         return Err(CiMonitorServiceError::new(
             "MISSING_PARAMETER",
@@ -185,10 +200,13 @@ pub(crate) async fn monitor_request(
         return Err(CiMonitorServiceError::new(code, message));
     }
 
-    let owner_repo = config_state.owner_repo.as_deref().unwrap_or_default();
+    let owner_repo = repo_scope
+        .filter(|value| !value.trim().is_empty())
+        .or(config_state.owner_repo.as_deref())
+        .unwrap_or_default();
 
     let now = chrono::Utc::now().to_rfc3339();
-    let mut status = GhMonitorStatus {
+    let mut status = CiMonitorStatus {
         team: gh_request.team.clone(),
         configured: config_state.configured,
         enabled: config_state.enabled,
@@ -205,10 +223,10 @@ pub(crate) async fn monitor_request(
 
     let mut transient_failure: Option<String> = None;
     match gh_request.target_kind {
-        GhMonitorTargetKind::Run => {
+        CiMonitorTargetKind::Run => {
             status.run_id = gh_request.target.parse::<u64>().ok();
         }
-        GhMonitorTargetKind::Workflow => {
+        CiMonitorTargetKind::Workflow => {
             if let Some(reference) = gh_request.reference.as_deref() {
                 match try_find_workflow_run_id(owner_repo, &gh_request.target, reference).await {
                     Ok(Some(run_id)) => status.run_id = Some(run_id),
@@ -222,7 +240,7 @@ pub(crate) async fn monitor_request(
                 }
             }
         }
-        GhMonitorTargetKind::Pr => {
+        CiMonitorTargetKind::Pr => {
             let pr_number = match gh_request.target.parse::<u64>() {
                 Ok(value) if value > 0 => value,
                 _ => {
@@ -249,6 +267,7 @@ pub(crate) async fn monitor_request(
                             merge_state_status,
                             None,
                             gh_request.config_cwd.as_deref(),
+                            GhAlertTargets { caller_agent, cc },
                         );
                         preflight_blocked = true;
                     }
@@ -293,28 +312,41 @@ pub(crate) async fn monitor_request(
         }
     }
 
-    super::helpers::upsert_gh_monitor_status(home, status.clone()).map_err(|e| {
-        let _ = set_gh_monitor_health_state(
-            home,
-            &gh_request.team,
-            GhMonitorHealthUpdate {
-                availability_state: Some("degraded"),
-                message: Some(format!("failed to persist monitor status: {e}")),
-                config_state: Some(&config_state),
-                config_cwd: gh_request.config_cwd.as_deref(),
-                ..Default::default()
-            },
-        );
-        CiMonitorServiceError::internal(format!("Failed to persist gh monitor state: {e}"))
-    })?;
+    super::helpers::upsert_gh_monitor_status_for_repo(home, status.clone(), repo_scope).map_err(
+        |e| {
+            let _ = set_gh_monitor_health_state(
+                home,
+                &gh_request.team,
+                GhMonitorHealthUpdate {
+                    availability_state: Some("degraded"),
+                    message: Some(format!("failed to persist monitor status: {e}")),
+                    config_state: Some(&config_state),
+                    config_cwd: gh_request.config_cwd.as_deref(),
+                    ..Default::default()
+                },
+            );
+            CiMonitorServiceError::internal(format!("Failed to persist gh monitor state: {e}"))
+        },
+    )?;
 
     if status.state == "ci_not_started" {
-        notify_ci_not_started(home, &status, gh_request.config_cwd.as_deref());
+        notify_ci_not_started(
+            home,
+            &status,
+            gh_request.config_cwd.as_deref(),
+            repo_scope,
+            GhAlertTargets { caller_agent, cc },
+        );
     } else if let Some(run_id) = status.run_id {
         let home = home.to_path_buf();
         let status_seed = status.clone();
         let gh_request = gh_request.clone();
         let owner_repo = owner_repo.to_string();
+        let repo_scope = repo_scope.map(str::to_string);
+        let alert_targets = OwnedGhAlertTargets {
+            caller_agent: caller_agent.map(str::to_string),
+            cc: cc.to_vec(),
+        };
         tokio::spawn(async move {
             if let Err(e) = monitor_gh_run(
                 home.as_path(),
@@ -322,6 +354,8 @@ pub(crate) async fn monitor_request(
                 &gh_request,
                 &owner_repo,
                 run_id,
+                repo_scope.as_deref(),
+                alert_targets.borrowed(),
             )
             .await
             {
@@ -369,8 +403,8 @@ pub(crate) async fn monitor_request(
 #[cfg(unix)]
 pub(crate) async fn control_request(
     home: &std::path::Path,
-    control: &GhMonitorControlRequest,
-) -> CiMonitorServiceResult<GhMonitorHealth> {
+    control: &CiMonitorControlRequest,
+) -> CiMonitorServiceResult<CiMonitorHealth> {
     if control.team.trim().is_empty() {
         return Err(CiMonitorServiceError::new(
             "MISSING_PARAMETER",
@@ -382,7 +416,7 @@ pub(crate) async fn control_request(
         evaluate_gh_monitor_config(home, &control.team, control.config_cwd.as_deref());
 
     let health = match control.action {
-        GhMonitorLifecycleAction::Start => set_gh_monitor_health_state(
+        CiMonitorLifecycleAction::Start => set_gh_monitor_health_state(
             home,
             &control.team,
             GhMonitorHealthUpdate {
@@ -399,7 +433,7 @@ pub(crate) async fn control_request(
                 "failed to update monitor lifecycle state: {e}"
             ))
         })?,
-        GhMonitorLifecycleAction::Stop => {
+        CiMonitorLifecycleAction::Stop => {
             let drain_timeout_secs = control.drain_timeout_secs.unwrap_or(30);
             let _ = set_gh_monitor_health_state(
                 home,
@@ -449,7 +483,7 @@ pub(crate) async fn control_request(
                 CiMonitorServiceError::internal(format!("failed to stop monitor lifecycle: {e}"))
             })?
         }
-        GhMonitorLifecycleAction::Restart => {
+        CiMonitorLifecycleAction::Restart => {
             let drain_timeout_secs = control.drain_timeout_secs.unwrap_or(30);
             let _ = set_gh_monitor_health_state(
                 home,
@@ -530,7 +564,7 @@ pub(crate) fn health_request(
     home: &std::path::Path,
     team: &str,
     config_cwd: Option<&str>,
-) -> CiMonitorServiceResult<GhMonitorHealth> {
+) -> CiMonitorServiceResult<CiMonitorHealth> {
     if team.trim().is_empty() {
         return Err(CiMonitorServiceError::new(
             "MISSING_PARAMETER",
@@ -557,8 +591,9 @@ pub(crate) fn health_request(
 #[cfg(unix)]
 pub(crate) fn status_request(
     home: &std::path::Path,
-    gh_request: &GhStatusRequest,
-) -> CiMonitorServiceResult<GhMonitorStatus> {
+    gh_request: &CiMonitorStatusRequest,
+    repo_scope: Option<&str>,
+) -> CiMonitorServiceResult<CiMonitorStatus> {
     let config_state =
         evaluate_gh_monitor_config(home, &gh_request.team, gh_request.config_cwd.as_deref());
     if let Some(reason) = config_state.error.as_deref() {
@@ -577,18 +612,19 @@ pub(crate) fn status_request(
         gh_request.target_kind,
         &gh_request.target,
         gh_request.reference.as_deref(),
+        repo_scope,
     );
     if let Some(mut status) = state.get(&key).cloned() {
         apply_config_state_to_status(&mut status, &config_state);
         return Ok(status);
     }
 
-    if matches!(gh_request.target_kind, GhMonitorTargetKind::Workflow) {
-        let mut candidates: Vec<&GhMonitorStatus> = state
+    if matches!(gh_request.target_kind, CiMonitorTargetKind::Workflow) {
+        let mut candidates: Vec<&CiMonitorStatus> = state
             .values()
             .filter(|record| {
                 record.team == gh_request.team
-                    && record.target_kind == GhMonitorTargetKind::Workflow
+                    && record.target_kind == CiMonitorTargetKind::Workflow
                     && record.target == gh_request.target
                     && gh_request
                         .reference
@@ -607,64 +643,4 @@ pub(crate) fn status_request(
         "MONITOR_NOT_FOUND",
         "No gh monitor state found for requested target",
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::plugins::ci_monitor::{
-        CiRunConclusion, MockCall, MockCiProvider, create_test_job, create_test_run,
-    };
-
-    #[tokio::test]
-    async fn test_list_completed_runs_uses_completed_filter() {
-        let run = create_test_run(
-            7,
-            "CI",
-            "main",
-            CiRunStatus::Completed,
-            Some(CiRunConclusion::Success),
-        );
-        let provider = MockCiProvider::with_runs(vec![run.clone()]);
-
-        let runs = list_completed_runs(&provider).await.unwrap();
-
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].id, run.id);
-        assert_eq!(runs[0].name, run.name);
-        assert_eq!(
-            provider.get_calls(),
-            vec![MockCall::ListRuns(CiFilter {
-                status: Some(CiRunStatus::Completed),
-                per_page: Some(20),
-                ..Default::default()
-            })]
-        );
-    }
-
-    #[tokio::test]
-    async fn test_fetch_run_details_uses_provider_boundary() {
-        let run = create_test_run(
-            42,
-            "CI",
-            "develop",
-            CiRunStatus::Completed,
-            Some(CiRunConclusion::Failure),
-        );
-        let provider = MockCiProvider::with_runs_and_jobs(
-            vec![run],
-            vec![create_test_job(
-                9001,
-                "unit",
-                CiRunStatus::Completed,
-                Some(CiRunConclusion::Failure),
-            )],
-        );
-
-        let full_run = fetch_run_details(&provider, 42).await.unwrap();
-
-        assert_eq!(full_run.id, 42);
-        assert_eq!(full_run.jobs.as_ref().map(Vec::len), Some(1));
-        assert_eq!(provider.get_calls(), vec![MockCall::GetRun(42)]);
-    }
 }

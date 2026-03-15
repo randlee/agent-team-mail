@@ -4,12 +4,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
-use agent_team_mail_core::daemon_client::{GhMonitorStatus, GhMonitorTargetKind};
-#[cfg(unix)]
 use anyhow::Result;
 
 #[cfg(unix)]
-use super::types::{GhMonitorConfigState, GhMonitorStateFile};
+use super::types::{
+    CiMonitorStatus, CiMonitorTargetKind, GhMonitorConfigState, GhMonitorStateFile,
+    GhMonitorStateRecord,
+};
 
 #[cfg(unix)]
 pub(crate) fn count_in_flight_monitors(home: &Path, team: &str) -> u64 {
@@ -108,7 +109,7 @@ pub(crate) fn evaluate_gh_monitor_config(
 
 #[cfg(unix)]
 pub(crate) fn apply_config_state_to_status(
-    status: &mut GhMonitorStatus,
+    status: &mut CiMonitorStatus,
     config_state: &GhMonitorConfigState,
 ) {
     status.configured = config_state.configured;
@@ -138,27 +139,30 @@ fn gh_monitor_state_path(home: &Path) -> PathBuf {
 #[cfg(unix)]
 pub(crate) fn gh_monitor_key(
     team: &str,
-    target_kind: GhMonitorTargetKind,
+    target_kind: CiMonitorTargetKind,
     target: &str,
     reference: Option<&str>,
+    repo_scope: Option<&str>,
 ) -> String {
     let kind = match target_kind {
-        GhMonitorTargetKind::Pr => "pr",
-        GhMonitorTargetKind::Workflow => "workflow",
-        GhMonitorTargetKind::Run => "run",
+        CiMonitorTargetKind::Pr => "pr",
+        CiMonitorTargetKind::Workflow => "workflow",
+        CiMonitorTargetKind::Run => "run",
     };
     let reference = reference.unwrap_or_default();
+    let repo_scope = repo_scope.unwrap_or_default();
     format!(
-        "{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}",
         team.trim(),
         kind,
         target.trim(),
-        reference.trim()
+        reference.trim(),
+        repo_scope.trim().to_lowercase()
     )
 }
 
 #[cfg(unix)]
-pub(crate) fn load_gh_monitor_state_map(home: &Path) -> Result<HashMap<String, GhMonitorStatus>> {
+pub(crate) fn load_gh_monitor_state_map(home: &Path) -> Result<HashMap<String, CiMonitorStatus>> {
     let path = gh_monitor_state_path(home);
     if !path.exists() {
         return Ok(HashMap::new());
@@ -168,34 +172,82 @@ pub(crate) fn load_gh_monitor_state_map(home: &Path) -> Result<HashMap<String, G
     let mut map = HashMap::new();
     for record in state.records {
         let key = gh_monitor_key(
-            &record.team,
-            record.target_kind,
-            &record.target,
-            record.reference.as_deref(),
+            &record.status.team,
+            record.status.target_kind,
+            &record.status.target,
+            record.status.reference.as_deref(),
+            record.repo_scope.as_deref(),
         );
-        map.insert(key, record);
+        map.insert(key, record.status);
     }
     Ok(map)
 }
 
 #[cfg(unix)]
-pub(crate) fn upsert_gh_monitor_status(home: &Path, status: GhMonitorStatus) -> Result<()> {
-    let mut map = load_gh_monitor_state_map(home)?;
+pub(crate) fn upsert_gh_monitor_status(home: &Path, status: CiMonitorStatus) -> Result<()> {
+    upsert_gh_monitor_status_for_repo(home, status, None)
+}
+
+#[cfg(unix)]
+pub(crate) fn upsert_gh_monitor_status_for_repo(
+    home: &Path,
+    status: CiMonitorStatus,
+    repo_scope: Option<&str>,
+) -> Result<()> {
+    let path = gh_monitor_state_path(home);
+    let mut map: HashMap<String, GhMonitorStateRecord> = if path.exists() {
+        let raw = std::fs::read_to_string(&path)?;
+        let state = serde_json::from_str::<GhMonitorStateFile>(&raw)?;
+        state
+            .records
+            .into_iter()
+            .map(|record| {
+                let key = gh_monitor_key(
+                    &record.status.team,
+                    record.status.target_kind,
+                    &record.status.target,
+                    record.status.reference.as_deref(),
+                    record.repo_scope.as_deref(),
+                );
+                (key, record)
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
     let key = gh_monitor_key(
         &status.team,
         status.target_kind,
         &status.target,
         status.reference.as_deref(),
+        repo_scope,
     );
-    map.insert(key, status);
-    let mut records: Vec<GhMonitorStatus> = map.into_values().collect();
+    map.insert(
+        key,
+        GhMonitorStateRecord {
+            repo_scope: repo_scope.map(|value| value.trim().to_lowercase()),
+            status,
+        },
+    );
+    let mut records: Vec<GhMonitorStateRecord> = map.into_values().collect();
     records.sort_by(|a, b| {
-        let ak = gh_monitor_key(&a.team, a.target_kind, &a.target, a.reference.as_deref());
-        let bk = gh_monitor_key(&b.team, b.target_kind, &b.target, b.reference.as_deref());
+        let ak = gh_monitor_key(
+            &a.status.team,
+            a.status.target_kind,
+            &a.status.target,
+            a.status.reference.as_deref(),
+            a.repo_scope.as_deref(),
+        );
+        let bk = gh_monitor_key(
+            &b.status.team,
+            b.status.target_kind,
+            &b.status.target,
+            b.status.reference.as_deref(),
+            b.repo_scope.as_deref(),
+        );
         ak.cmp(&bk)
     });
     let state = GhMonitorStateFile { records };
-    let path = gh_monitor_state_path(home);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

@@ -12,9 +12,11 @@ use super::gh_cli::{
 };
 use super::helpers::upsert_gh_monitor_status;
 use super::provider::ErasedCiProvider;
-use super::types::{CiJob, CiRun, CiRunStatus, CiStep};
+use super::types::{
+    CiJob, CiMonitorRequest, CiMonitorStatus, CiMonitorTargetKind, CiRun, CiRunStatus, CiStep,
+    GhAlertTargets,
+};
 use crate::plugin::PluginError;
-use agent_team_mail_core::daemon_client::{GhMonitorRequest, GhMonitorStatus, GhMonitorTargetKind};
 use tracing::warn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,8 +32,8 @@ pub(crate) enum GhRunTerminalState {
 pub(crate) async fn monitor_run(
     provider: &dyn ErasedCiProvider,
     home: &std::path::Path,
-    status_seed: &GhMonitorStatus,
-    gh_request: &GhMonitorRequest,
+    status_seed: &CiMonitorStatus,
+    gh_request: &CiMonitorRequest,
     expected_repo_slug: Option<&str>,
     run_id: u64,
 ) -> Result<(), PluginError> {
@@ -50,6 +52,7 @@ pub(crate) async fn monitor_run(
             &status_seed.team,
             gh_request.config_cwd.as_deref(),
             expected_repo.as_deref(),
+            GhAlertTargets::default(),
         );
 
         let completed_jobs: Vec<CiJob> = run
@@ -153,7 +156,7 @@ pub(crate) async fn monitor_run(
         ));
         upsert_gh_monitor_status(home, state).map_err(to_provider_error)?;
 
-        if matches!(gh_request.target_kind, GhMonitorTargetKind::Pr)
+        if matches!(gh_request.target_kind, CiMonitorTargetKind::Pr)
             && let Ok(pr_number) = status_seed.target.trim().parse::<u64>()
         {
             match fetch_pull_request(provider, pr_number).await {
@@ -168,6 +171,7 @@ pub(crate) async fn monitor_run(
                             merge_state_status,
                             run.conclusion.map(ci_conclusion_label),
                             gh_request.config_cwd.as_deref(),
+                            GhAlertTargets::default(),
                         );
                     }
                 }
@@ -195,8 +199,8 @@ fn to_provider_error(e: impl std::fmt::Display) -> PluginError {
 pub(crate) async fn build_failure_payload(
     provider: &dyn ErasedCiProvider,
     run: &CiRun,
-    status_seed: &GhMonitorStatus,
-    gh_request: &GhMonitorRequest,
+    status_seed: &CiMonitorStatus,
+    gh_request: &CiMonitorRequest,
     correlation_id: &str,
 ) -> String {
     let failed_jobs: Vec<&CiJob> = run
@@ -465,8 +469,8 @@ pub(crate) fn extract_repo_slug_from_url(url: &str) -> Option<String> {
 
 pub(crate) fn derive_pr_url(
     run: &CiRun,
-    status_seed: &GhMonitorStatus,
-    gh_request: &GhMonitorRequest,
+    status_seed: &CiMonitorStatus,
+    gh_request: &CiMonitorRequest,
 ) -> Option<String> {
     if let Some(url) = run
         .pull_requests
@@ -477,7 +481,7 @@ pub(crate) fn derive_pr_url(
     {
         return Some(url);
     }
-    if matches!(gh_request.target_kind, GhMonitorTargetKind::Pr)
+    if matches!(gh_request.target_kind, CiMonitorTargetKind::Pr)
         && let Some(repo_base) = derive_repo_base_from_run_url(&run.url)
     {
         return Some(format!("{repo_base}/pull/{}", status_seed.target.trim()));

@@ -1,15 +1,25 @@
 #![allow(dead_code)]
 
 use super::provider::ErasedCiProvider;
-use super::types::{CiFilter, CiPullRequest, CiRun};
+use super::types::{CiFilter, CiProviderError, CiPullRequest, CiRun};
 use crate::plugin::PluginError;
+
+fn provider_error_to_plugin_error(err: CiProviderError) -> PluginError {
+    PluginError::Provider {
+        message: err.to_string(),
+        source: None,
+    }
+}
 
 #[cfg(unix)]
 pub(crate) async fn fetch_run(
     provider: &dyn ErasedCiProvider,
     run_id: u64,
 ) -> Result<CiRun, PluginError> {
-    provider.get_run(run_id).await
+    provider
+        .get_run(run_id)
+        .await
+        .map_err(provider_error_to_plugin_error)
 }
 
 #[cfg(unix)]
@@ -17,7 +27,10 @@ pub(crate) async fn fetch_pull_request(
     provider: &dyn ErasedCiProvider,
     pr_number: u64,
 ) -> Result<Option<CiPullRequest>, PluginError> {
-    provider.get_pull_request(pr_number).await
+    provider
+        .get_pull_request(pr_number)
+        .await
+        .map_err(provider_error_to_plugin_error)
 }
 
 #[cfg(unix)]
@@ -44,7 +57,8 @@ pub(crate) async fn try_find_pr_run_id(
             per_page: Some(20),
             ..Default::default()
         })
-        .await?;
+        .await
+        .map_err(provider_error_to_plugin_error)?;
 
     for run in runs {
         if let Some(expected_head_sha) = pr_view
@@ -80,7 +94,8 @@ pub(crate) async fn try_find_workflow_run_id(
             per_page: Some(20),
             ..Default::default()
         })
-        .await?;
+        .await
+        .map_err(provider_error_to_plugin_error)?;
 
     Ok(runs.into_iter().find_map(|run| {
         let matches_workflow = run.name.is_empty() || run.name == workflow;
@@ -98,7 +113,10 @@ pub(crate) async fn fetch_failed_log_excerpt(
     provider: &dyn ErasedCiProvider,
     job_id: u64,
 ) -> Result<String, PluginError> {
-    let output = provider.get_job_log(job_id).await?;
+    let output = provider
+        .get_job_log(job_id)
+        .await
+        .map_err(provider_error_to_plugin_error)?;
     Ok(output
         .lines()
         .filter(|line| !line.trim().is_empty())

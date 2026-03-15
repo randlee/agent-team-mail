@@ -34,6 +34,17 @@ wait_after_publish_seconds = 60
 verify_install = true
 
 [[crates]]
+artifact = "agent-team-mail-ci-monitor"
+package = "agent-team-mail-ci-monitor"
+cargo_toml = "crates/atm-ci-monitor/Cargo.toml"
+required = true
+publish = true
+publish_order = 25
+preflight_check = "locked"
+wait_after_publish_seconds = 60
+verify_install = false
+
+[[crates]]
 artifact = "agent-team-mail-daemon"
 package = "agent-team-mail-daemon"
 cargo_toml = "crates/atm-daemon/Cargo.toml"

@@ -13,6 +13,7 @@ pub(crate) mod health;
 #[cfg(unix)]
 pub(crate) mod helpers;
 mod loader;
+#[cfg(any(test, feature = "test-support"))]
 mod mock_provider;
 mod plugin;
 #[cfg(unix)]
@@ -28,12 +29,20 @@ pub(crate) mod test_support;
 pub(crate) mod types;
 
 pub use config::{CiMonitorConfig, DedupStrategy, NotifyTarget};
-pub use github_provider::GitHubActionsProvider;
-pub use loader::CiProviderLoader;
-pub use mock_provider::{
-    MockCall, MockCiProvider, create_test_job, create_test_run, create_test_step,
-};
 pub use plugin::CiMonitorPlugin;
 pub use provider::{CiProvider, ErasedCiProvider};
-pub use registry::{CiFactoryFn, CiProviderFactory, CiProviderRegistry};
-pub use types::{CiFilter, CiJob, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep};
+pub use registry::{CiProviderFactory, CiProviderRegistry};
+pub use types::{
+    CiFilter, CiJob, CiProviderError, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep,
+};
+
+// Production surface: config, provider traits, plugin entrypoint, factory metadata, and
+// CI domain types only. Concrete providers/loaders/registries stay internal so this module
+// matches the future crate-facing boundary more closely.
+// Test-only symbols live under `mock_support` so tests do not rely on the root production API.
+#[cfg(any(test, feature = "test-support"))]
+pub mod mock_support {
+    pub use super::mock_provider::{
+        MockCall, MockCiProvider, create_test_job, create_test_run, create_test_step,
+    };
+}

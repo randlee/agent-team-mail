@@ -7,7 +7,7 @@ pub(crate) use super::gh_alerts::emit_ci_monitor_message;
 pub(crate) use super::github_schema::{
     GhPrLookupView, GhPrView, GhPullRequest, GhRunJob, GhRunListEntry, GhRunStep, GhRunView,
 };
-use super::helpers::upsert_gh_monitor_status;
+use super::helpers::upsert_gh_monitor_status_for_repo;
 // These routing re-exports preserve the pre-split gh_monitor call surface for
 // downstream code until the final thin-socket cleanup removes the shim layer.
 #[allow(unused_imports)]
@@ -17,7 +17,7 @@ pub(crate) use super::routing::{
     notify_merge_conflict as emit_merge_conflict_alert, repo_scope_matches,
     resolve_ci_alert_routing,
 };
-use agent_team_mail_core::daemon_client::{GhMonitorRequest, GhMonitorStatus, GhMonitorTargetKind};
+use super::types::{CiMonitorRequest, CiMonitorStatus, CiMonitorTargetKind, GhAlertTargets};
 use anyhow::Result;
 use tracing::warn;
 
@@ -253,10 +253,12 @@ pub(crate) async fn run_gh_command_for_repo(owner_repo: &str, args: &[&str]) -> 
 #[cfg(unix)]
 pub(crate) async fn monitor_gh_run(
     home: &std::path::Path,
-    status_seed: &GhMonitorStatus,
-    gh_request: &GhMonitorRequest,
+    status_seed: &CiMonitorStatus,
+    gh_request: &CiMonitorRequest,
     owner_repo: &str,
     run_id: u64,
+    repo_scope: Option<&str>,
+    alert_targets: GhAlertTargets<'_>,
 ) -> Result<()> {
     let mut seen_completed: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut pending_completed: Vec<GhRunJob> = Vec::new();
@@ -270,7 +272,8 @@ pub(crate) async fn monitor_gh_run(
             home,
             &status_seed.team,
             gh_request.config_cwd.as_deref(),
-            expected_repo.as_deref(),
+            expected_repo.as_deref().or(repo_scope),
+            alert_targets,
         );
         let completed_jobs: Vec<GhRunJob> = run
             .jobs
@@ -321,7 +324,7 @@ pub(crate) async fn monitor_gh_run(
                 count_completed_jobs(&run),
                 run.jobs.len()
             ));
-            upsert_gh_monitor_status(home, state)?;
+            upsert_gh_monitor_status_for_repo(home, state, repo_scope)?;
 
             let sleep_secs = if first_poll { 5 } else { 15 };
             first_poll = false;
@@ -379,9 +382,9 @@ pub(crate) async fn monitor_gh_run(
             count_completed_jobs(&run),
             run.jobs.len()
         ));
-        upsert_gh_monitor_status(home, state)?;
+        upsert_gh_monitor_status_for_repo(home, state, repo_scope)?;
 
-        if matches!(gh_request.target_kind, GhMonitorTargetKind::Pr)
+        if matches!(gh_request.target_kind, CiMonitorTargetKind::Pr)
             && let Ok(pr_number) = status_seed.target.trim().parse::<u64>()
         {
             match fetch_pr_merge_state(owner_repo, pr_number).await {
@@ -396,6 +399,7 @@ pub(crate) async fn monitor_gh_run(
                             merge_state_status,
                             run.conclusion.as_deref(),
                             gh_request.config_cwd.as_deref(),
+                            alert_targets,
                         );
                     }
                 }
@@ -569,8 +573,8 @@ pub(crate) fn format_job_runtime(job: &GhRunJob) -> String {
 #[cfg(unix)]
 pub(crate) async fn build_failure_payload(
     run: &GhRunView,
-    status_seed: &GhMonitorStatus,
-    gh_request: &GhMonitorRequest,
+    status_seed: &CiMonitorStatus,
+    gh_request: &CiMonitorRequest,
     owner_repo: &str,
     correlation_id: &str,
 ) -> String {
@@ -759,13 +763,13 @@ pub(crate) fn extract_repo_slug_from_url(url: &str) -> Option<String> {
 #[cfg(unix)]
 pub(crate) fn derive_pr_url(
     run: &GhRunView,
-    status_seed: &GhMonitorStatus,
-    gh_request: &GhMonitorRequest,
+    status_seed: &CiMonitorStatus,
+    gh_request: &CiMonitorRequest,
 ) -> Option<String> {
     if let Some(url) = run.pull_requests.iter().find_map(|pr| pr.url.clone()) {
         return Some(url);
     }
-    if matches!(gh_request.target_kind, GhMonitorTargetKind::Pr)
+    if matches!(gh_request.target_kind, CiMonitorTargetKind::Pr)
         && let Some(repo_base) = derive_repo_base_from_run_url(&run.url)
     {
         return Some(format!("{}/pull/{}", repo_base, status_seed.target.trim()));
