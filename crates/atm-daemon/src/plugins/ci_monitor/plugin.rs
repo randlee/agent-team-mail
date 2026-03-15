@@ -863,6 +863,7 @@ impl CiMonitorPlugin {
             budget_used_in_window: None,
             rate_limit_remaining: None,
             rate_limit_limit: None,
+            rate_limit_reset_at: None,
             poll_owner: None,
             owner_runtime_kind: None,
             owner_pid: None,

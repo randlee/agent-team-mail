@@ -3,11 +3,10 @@
 mod config;
 #[cfg(unix)]
 pub(crate) mod gh_alerts;
-pub(crate) mod gh_cli;
 #[cfg(unix)]
 pub(crate) mod gh_monitor;
 mod github_provider;
-mod github_schema;
+pub(crate) mod github_schema;
 #[cfg(unix)]
 pub(crate) mod health;
 #[cfg(unix)]
@@ -29,7 +28,7 @@ pub(crate) mod types;
 pub use config::{CiMonitorConfig, DedupStrategy, NotifyTarget};
 pub use plugin::CiMonitorPlugin;
 pub use provider::{CiProvider, ErasedCiProvider};
-pub use registry::{CiProviderFactory, CiProviderRegistry};
+pub use registry::CiProviderFactory;
 pub use types::{
     CiFilter, CiJob, CiProviderError, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep,
 };

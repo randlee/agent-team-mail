@@ -10,6 +10,9 @@ use agent_team_mail_core::daemon_client::{
     gh_monitor_health_with_context, gh_status,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::gh_monitor_observability::{
+    GhCliObserverContext, run_attributed_gh_command,
+};
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
 use agent_team_mail_core::team_config_store::TeamConfigStore;
@@ -743,24 +746,23 @@ fn execute_pr_list(
     let request_limit = limit.clamp(1, 200);
     let gh_json_fields =
         "number,title,url,isDraft,reviewDecision,mergeStateStatus,statusCheckRollup";
-
-    let output = Command::new("gh")
-        .args(["-R", &repo, "pr", "list", "--state", "open"])
-        .args(["--limit", &request_limit.to_string()])
-        .args(["--json", gh_json_fields])
-        .output()
+    let limit_arg = request_limit.to_string();
+    let args = vec![
+        "-R".to_string(),
+        repo.clone(),
+        "pr".to_string(),
+        "list".to_string(),
+        "--state".to_string(),
+        "open".to_string(),
+        "--limit".to_string(),
+        limit_arg,
+        "--json".to_string(),
+        gh_json_fields.to_string(),
+    ];
+    let output = run_repo_scoped_gh_command(team, home_dir, &repo, "gh_pr_list", &args, None)
         .with_context(|| format!("failed to invoke `gh pr list` for repository {repo}"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "failed to query open PRs for {} via gh CLI: {}",
-            repo,
-            stderr.trim()
-        );
-    }
-
-    let rows: Vec<GhPrListRow> = serde_json::from_slice(&output.stdout)
+    let rows: Vec<GhPrListRow> = serde_json::from_str(&output)
         .with_context(|| "failed to parse `gh pr list` JSON output")?;
 
     let mut items: Vec<GhMonitorListItem> = rows
@@ -809,24 +811,27 @@ fn execute_pr_report(
 
     let repo = resolve_monitor_repo_scope(config, current_dir, home_dir, team)?;
     let gh_json_fields = "number,title,url,isDraft,reviewDecision,mergeStateStatus,mergeable,statusCheckRollup,reviews";
+    let pr_number_arg = pr_number.to_string();
+    let args = vec![
+        "-R".to_string(),
+        repo.clone(),
+        "pr".to_string(),
+        "view".to_string(),
+        pr_number_arg.clone(),
+        "--json".to_string(),
+        gh_json_fields.to_string(),
+    ];
+    let output = run_repo_scoped_gh_command(
+        team,
+        home_dir,
+        &repo,
+        "gh_pr_view",
+        &args,
+        Some(pr_number_arg.as_str()),
+    )
+    .with_context(|| format!("failed to invoke `gh pr view` for repository {repo}"))?;
 
-    let output = Command::new("gh")
-        .args(["-R", &repo, "pr", "view", &pr_number.to_string()])
-        .args(["--json", gh_json_fields])
-        .output()
-        .with_context(|| format!("failed to invoke `gh pr view` for repository {repo}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "failed to query PR #{} for {} via gh CLI: {}",
-            pr_number,
-            repo,
-            stderr.trim()
-        );
-    }
-
-    let row: GhPrReportRow = serde_json::from_slice(&output.stdout)
+    let row: GhPrReportRow = serde_json::from_str(&output)
         .with_context(|| "failed to parse `gh pr view` JSON output")?;
     let checks = extract_check_reports(&row.status_check_rollup);
     let reviews = extract_review_reports(&row.reviews);
@@ -834,6 +839,8 @@ fn execute_pr_report(
     let review_decision =
         normalize_report_review_decision(row.review_decision.as_deref(), &reviews);
     let (mergeable, merge_state_status) = resolve_merge_snapshot_with_retry(
+        team,
+        home_dir,
         &repo,
         pr_number,
         row.mergeable.clone(),
@@ -884,6 +891,8 @@ fn execute_pr_report(
 }
 
 fn resolve_merge_snapshot_with_retry(
+    team: &str,
+    home_dir: &Path,
     repo: &str,
     pr_number: u64,
     initial_mergeable: Option<String>,
@@ -898,7 +907,7 @@ fn resolve_merge_snapshot_with_retry(
 
     for _ in 0..GH_MONITOR_MERGE_RETRY_ATTEMPTS {
         thread::sleep(Duration::from_millis(GH_MONITOR_MERGE_RETRY_DELAY_MS));
-        let Ok(snapshot) = query_merge_snapshot(repo, pr_number) else {
+        let Ok(snapshot) = query_merge_snapshot(team, home_dir, repo, pr_number) else {
             break;
         };
 
@@ -923,24 +932,51 @@ fn should_retry_mergeability(mergeable: Option<&str>, merge_state_status: Option
         )
 }
 
-fn query_merge_snapshot(repo: &str, pr_number: u64) -> Result<GhPrMergeProbe> {
-    let output = Command::new("gh")
-        .args(["-R", repo, "pr", "view", &pr_number.to_string()])
-        .args(["--json", "mergeStateStatus,mergeable"])
-        .output()
-        .with_context(|| format!("failed to invoke `gh pr view` merge probe for {repo}"))?;
+fn query_merge_snapshot(
+    team: &str,
+    home_dir: &Path,
+    repo: &str,
+    pr_number: u64,
+) -> Result<GhPrMergeProbe> {
+    let pr_number_arg = pr_number.to_string();
+    let args = vec![
+        "-R".to_string(),
+        repo.to_string(),
+        "pr".to_string(),
+        "view".to_string(),
+        pr_number_arg.clone(),
+        "--json".to_string(),
+        "mergeStateStatus,mergeable".to_string(),
+    ];
+    let output = run_repo_scoped_gh_command(
+        team,
+        home_dir,
+        repo,
+        "gh_pr_view_merge_probe",
+        &args,
+        Some(pr_number_arg.as_str()),
+    )
+    .with_context(|| format!("failed to invoke `gh pr view` merge probe for {repo}"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "failed to query merge probe for PR #{} via gh CLI: {}",
-            pr_number,
-            stderr.trim()
-        );
-    }
+    serde_json::from_str(&output).with_context(|| "failed to parse merge probe JSON output")
+}
 
-    serde_json::from_slice(&output.stdout)
-        .with_context(|| "failed to parse merge probe JSON output")
+fn run_repo_scoped_gh_command(
+    team: &str,
+    home_dir: &Path,
+    repo: &str,
+    action: &str,
+    args: &[String],
+    reference: Option<&str>,
+) -> Result<String> {
+    let observer_ctx = GhCliObserverContext {
+        home: home_dir.to_path_buf(),
+        team: team.to_string(),
+        repo: repo.to_string(),
+        runtime: "atm".to_string(),
+    };
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_attributed_gh_command(&observer_ctx, action, &arg_refs, None, reference)
 }
 
 fn execute_pr_init_report(

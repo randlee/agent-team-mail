@@ -1643,11 +1643,11 @@ operator-controllable.
 ### Planned Sprint Map
 | Sprint | Focus | Primary Branch | Status |
 |---|---|---|---|
-| AO.1 | Shared runtime admission guard (`release`/`dev` only, hard-stop invalid shared launches) | `feature/pAO-s1-runtime-admission` | PLANNED |
+| AO.1 | Shared runtime admission guard (`release`/`dev` only, hard-stop invalid shared launches) | `feature/pAO-s1-runtime-admission` | COMPLETE |
 | AO.2 | Explicit isolated runtime creation + 10-minute TTL cleanup policy | `feature/pAO-s2-isolated-runtime-ttl` | ACTIVE |
-| AO.3 | Shared repo-state cache, single `(team, repo)` shared poller, PR-list primary poll surface, bounded poll cadence, team budgets (`100/hour`), attributed `run_gh()` path, merge-conflict checks, and config/init parity | `feature/pAO-s3-repo-state-budget-observability` | PLANNED |
-| AO.4 | Single `(team, repo)` lease ownership + hidden human-authorized cross-team stop/disable path with operator-facing owner metadata | `feature/pAO-s4-operator-control` | PLANNED |
-| AO.5 | Post-integration deletion sprint: simplify runtime/poller paths and narrow final contracts | `feature/pAO-s5-contract-simplification` | PLANNED |
+| AO.3 | Shared repo-state cache, single `(team, repo)` shared poller, PR-list primary poll surface, bounded poll cadence, team budgets (`100/hour`), attributed `run_gh()` path, merge-conflict checks, and config/init parity | `feature/pAO-s3-repo-state-budget-observability` | ACTIVE |
+| AO.4 | Single `(team, repo)` lease ownership + hidden human-authorized cross-team stop/disable path with operator-facing owner metadata | `feature/pAO-s4-operator-control` | ACTIVE |
+| AO.5 | Post-integration deletion sprint: simplify runtime/poller paths and narrow final contracts | `feature/pAO-s5-path-contract-simplification` | ACTIVE |
 
 ### Exit Criteria
 1. Shared `release` and `dev` runtimes reject invalid owners and duplicate daemon starts.
@@ -1656,7 +1656,9 @@ operator-controllable.
 4. One active `gh_monitor` owner exists per `(team, repo)`, operator-facing status shows the active owner metadata, and operators can stop a runaway monitor with auditable cross-team controls.
 5. Transitional runtime, polling, and state paths preserved during AO are removed or narrowed so the post-AO implementation exposes only the canonical contracts.
 
-**Dependency graph**: AO.1 → AO.2 → AO.3 → AO.4 → AO.5
+**Execution note**: AO.3, AO.4, and AO.5 were authorized to execute in parallel with merge-forwards between sprint branches as fixes landed. Phase exit still requires the combined AO surface plus AO.5 simplification criteria.
+
+**Dependency graph**: AO.1 → AO.2 → {AO.3, AO.4, AO.5 with merge-forward discipline}
 
 ---
 
