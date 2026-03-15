@@ -184,7 +184,7 @@ fn autostart_failure_logs_structured_event_with_stderr_tail_context() {
     let err = ensure_daemon_running().expect_err("autostart should fail for test script");
     let leaked_pid_guard =
         AutostartPidGuard::adopt_from_pid_file(&leaked_pid_path, Duration::from_secs(1))
-        .expect("autostart failure test should adopt leaked background child");
+            .expect("autostart failure test should adopt leaked background child");
     let leaked_pid = leaked_pid_guard.pid();
     let msg = err.to_string();
     assert!(

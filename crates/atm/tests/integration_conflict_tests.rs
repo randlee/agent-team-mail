@@ -60,7 +60,11 @@ impl RuntimeDaemonCleanupGuard {
         }
     }
 
-    fn adopt_running_pid(&mut self, daemon_bin: &std::path::Path, timeout: Duration) -> Option<u32> {
+    fn adopt_running_pid(
+        &mut self,
+        daemon_bin: &std::path::Path,
+        timeout: Duration,
+    ) -> Option<u32> {
         if let Some(existing) = self.daemon_guard.as_ref() {
             return Some(existing.pid());
         }
@@ -74,9 +78,7 @@ impl RuntimeDaemonCleanupGuard {
                 && pid_alive(pid as i32)
             {
                 self.daemon_guard = Some(DaemonProcessGuard::adopt_registered_pid(
-                    pid,
-                    daemon_bin,
-                    &self.home,
+                    pid, daemon_bin, &self.home,
                 ));
                 return Some(pid);
             }
