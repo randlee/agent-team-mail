@@ -2,7 +2,7 @@
 
 **Version**: 0.7
 **Date**: 2026-03-10
-**Status**: Phase AJ planning in progress. Phase AK queued.
+**Status**: Phase AM refactor in progress. Phase AK queued.
 
 ---
 
@@ -174,8 +174,10 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AG | sc-composer Full Implementation + CLI | Deliver `sc-composer` library + `sc-compose` CLI and integrate with `atm teams spawn` via direct library APIs | COMPLETE |
 | AH | Observability Unification + AG Deferred Closure | Unified JSONL logging pipeline via `sc-observability` crate and baseline observability contracts (OTel/scmux/schook deferred) | COMPLETE |
 | AI | GH Monitor Dashboard + Detailed PR Reporting | `atm gh pr list`, `atm gh pr report`, `--template` rendering, `init-report`; CI rollup neutral/skipped fix | IN-PROGRESS |
+| AM | CI Monitor Subsystem Refactor | Extract CI-monitor subsystem boundaries out of `socket.rs`, split provider-neutral logic from GitHub-specific adapter logic, and stabilize routing/health/test support on `integrate/phase-AM` | IN-PROGRESS |
 | AJ | Session-ID SSoT Normalization | Canonical `session_id` naming, shared caller resolver, runtime session resolution closure, doctor/session consistency | PLANNED |
 | AK | Mandatory OTel Rollout | Non-optional OTel across in-scope tools with canonical correlation and health/reporting contracts | PLANNED |
+| AM | CI Monitor Refactor | Extract CI monitoring from `socket.rs` into subsystem/service/provider/routing/health boundaries on `integrate/phase-AM` | IN-PROGRESS |
 
 ---
 
@@ -1567,6 +1569,35 @@ local structured logging always-on and fail-open.
 
 ---
 
+## 17.21 Phase AM: CI Monitor Subsystem Refactor
+
+**Goal**: Refactor CI monitoring into a dedicated daemon subsystem so
+`socket.rs` remains transport glue while provider-neutral orchestration,
+GitHub-specific adapter logic, routing, and health handling live under
+`plugins/ci_monitor`.
+**Prerequisites**: Phase AI baseline complete.
+
+**Integration branch**: `integrate/phase-AM`
+**Planning doc**: `docs/phase-am-planning.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Branch | Status |
+|---|---|---|---|
+| AM.1 | Extract CI domain types, helpers, and shared test support | `feature/pAM-s1-extract-ci-types` | MERGED |
+| AM.2 | Introduce CI monitor service layer and thin socket dispatch | `feature/pAM-s2-ci-monitor-service` | IN-PROGRESS |
+| AM.3 | Split provider-neutral logic from GitHub adapter | `feature/pAM-s3-provider-split` | IN-PROGRESS |
+| AM.4 | Extract routing and notification policy | `feature/pAM-s4-routing-split` | IN-PROGRESS |
+| AM.5 | Extract health and availability state handling | `feature/pAM-s5-health-state` | IN-PROGRESS |
+| AM.6 | Thin `socket.rs` and reorganize subsystem tests | `feature/pAM-s6-thin-socket` | IN-PROGRESS |
+
+### Exit Criteria
+1. `socket.rs` dispatches CI-monitor requests instead of owning CI-monitor policy.
+2. CI-monitor business logic lives under `crates/atm-daemon/src/plugins/ci_monitor/`.
+3. GitHub-specific logic is isolated behind one clear adapter boundary.
+4. Subsystem tests are organized around CI-monitor modules instead of socket-only entrypoints.
+
+---
+
 ## 17.11 Phase Z: Daemon SSoT + Observability Hardening
 
 **Goal**: Close daemon single-source-of-truth gaps for member/session state and make
@@ -1791,7 +1822,7 @@ daemon-safe lifecycle behavior, actionable `atm gh` command UX, and complete
 progress/failure observability.
 
 **Requirements references**:
-- `docs/plugins/ci-monitor/requirements.md`
+- `docs/ci-monitoring/requirements.md`
 - `docs/requirements.md` §4.11 and §5.8–§5.10
 
 **Integration branch**: `integrate/phase-AB` (planned)
@@ -1842,7 +1873,7 @@ progress/failure observability.
 1. `atm gh monitor pr <n>` reports `ci_not_started` when timeout expires with no run.
 2. Workflow and run monitor commands resolve and track expected run targets.
 3. `atm gh` and `atm gh status` (no target) provide actionable non-error plugin status output.
-4. Coverage maps to `GH-CI-TR-2` in `docs/plugins/ci-monitor/requirements.md`.
+4. Coverage maps to `GH-CI-TR-2` in `docs/ci-monitoring/requirements.md`.
 
 ### AB.3 — Progress + Final Reporting Payloads
 **Deliverables**
@@ -1854,7 +1885,7 @@ progress/failure observability.
 1. Progress is rate-limited under active monitoring.
 2. Terminal completion/failure message is immediate and complete.
 3. Failure notifications include required URLs and identifying metadata.
-4. Coverage maps to `GH-CI-TR-3` in `docs/plugins/ci-monitor/requirements.md`.
+4. Coverage maps to `GH-CI-TR-3` in `docs/ci-monitoring/requirements.md`.
 
 ### AB.4 — Availability State + Connectivity Recovery Signals
 **Deliverables**
@@ -1868,8 +1899,8 @@ progress/failure observability.
 2. Invalid configuration does not run polling and status is visible in
    `atm status` / `atm doctor`.
 3. Transient failures do not crash daemon.
-4. Coverage maps to `GH-CI-TR-1` in `docs/plugins/ci-monitor/requirements.md`.
-5. Coverage maps to `GH-CI-TR-4` in `docs/plugins/ci-monitor/requirements.md`.
+4. Coverage maps to `GH-CI-TR-1` in `docs/ci-monitoring/requirements.md`.
+5. Coverage maps to `GH-CI-TR-4` in `docs/ci-monitoring/requirements.md`.
 
 ### AB.5 — Runtime Drift Baselines (Optional Enhancement)
 **Deliverables**
@@ -1880,7 +1911,7 @@ progress/failure observability.
 **Acceptance Criteria**
 1. Drift alert can be reproduced in deterministic integration tests.
 2. Baseline calculations are stable across restarts.
-3. Coverage maps to `GH-CI-TR-5` in `docs/plugins/ci-monitor/requirements.md`.
+3. Coverage maps to `GH-CI-TR-5` in `docs/ci-monitoring/requirements.md`.
 
 ### AB.6 — PR Merge-Conflict + CI Gap Detection
 **Deliverables**
@@ -1890,7 +1921,7 @@ progress/failure observability.
 **Acceptance Criteria**
 1. Post-completion merge-conflict alert emitted when PR becomes DIRTY during a CI run.
 2. Pre-run merge-conflict alert emitted when PR is DIRTY before any run starts (distinct message from `ci_not_started`).
-3. Coverage maps to GH-CI-TR-2 and GH-CI-TR-4 in `docs/plugins/ci-monitor/requirements.md`.
+3. Coverage maps to GH-CI-TR-2 and GH-CI-TR-4 in `docs/ci-monitoring/requirements.md`.
 
 ### AB.7 — Architecture Review Findings Hardening
 **Deliverables**

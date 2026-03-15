@@ -14,6 +14,9 @@ This primary requirements document registers secondary source-of-truth documents
 - Observability architecture: `docs/observability/architecture.md`
 - sc-composer requirements: `docs/sc-composer/requirements.md`
 - sc-composer architecture: `docs/sc-composer/architecture.md`
+- CI monitoring requirements: `docs/ci-monitoring/requirements.md`
+- CI monitoring architecture: `docs/ci-monitoring/architecture.md`
+- CI monitoring ADR index: `docs/ci-monitoring/adr.md`
 
 All logging/OpenTelemetry requirements for ATM and companion tools are defined
 in the observability documents above. This file references that contract and
@@ -2530,7 +2533,7 @@ plugin. It provides explicit CI monitoring operations and status visibility for
 operators and teammates.
 
 Detailed GitHub CI monitor requirements are defined in:
-- `docs/plugins/ci-monitor/requirements.md`
+- `docs/ci-monitoring/requirements.md`
 
 Core command contract:
 - `atm gh init` validates prerequisites (`gh` CLI presence/auth where required),
@@ -2590,7 +2593,7 @@ Core behavior contract:
 - Failure notifications must include at minimum run URL, failed job URL(s)
   when available, and PR URL for PR-monitoring mode.
 - Full required failure payload fields are defined in
-  `docs/plugins/ci-monitor/requirements.md` GH-CI-FR-12.
+  `docs/ci-monitoring/requirements.md` GH-CI-FR-12.
 
 Connectivity and availability contract:
 - Invalid plugin configuration disables monitoring (`disabled_config_error`)
@@ -2888,8 +2891,8 @@ All plugins are **provider-agnostic** where applicable. They read `ctx.system.re
 **Providers**: GitHub Actions, Azure Pipelines, GitLab CI, etc.
 
 **Reference**:
-- `docs/plugins/ci-monitor/requirements.md`
-- `docs/ci-monitor-integration.md`
+- `docs/ci-monitoring/requirements.md`
+- `docs/ci-monitoring/architecture.md`
 
 **Naming model**:
 - `ci_monitor` = shared monitor contract/interface

@@ -24,7 +24,7 @@ gaps discovered during dogfooding.
 
 1. `docs/requirements.md` §4.7 (daemon startup/single-instance behavior).
 2. `docs/requirements.md` §5.8 (plugin namespace + command availability).
-3. `docs/plugins/ci-monitor/requirements.md` GH-CI-FR-19..24 and GH-CI-TR-7.
+3. `docs/ci-monitoring/requirements.md` GH-CI-FR-19..24 and GH-CI-TR-7.
 
 ## Dependency Graph
 

@@ -1,13 +1,21 @@
 //! CI Monitor plugin implementation
 
 use super::config::{CiMonitorConfig, DedupStrategy};
-use super::github::GitHubActionsProvider;
+use super::github_provider::GitHubActionsProvider;
 use super::loader::CiProviderLoader;
 use super::provider::ErasedCiProvider;
 use super::registry::{CiProviderFactory, CiProviderRegistry};
-use super::types::{CiFilter, CiJob, CiRunConclusion, CiRunStatus};
+#[cfg(unix)]
+use super::service::{fetch_run_details, list_completed_runs};
+#[cfg(unix)]
+use super::types::GhMonitorHealthFile;
+#[cfg(test)]
+use super::types::{CiFilter, CiRunStatus};
+use super::types::{CiJob, CiRunConclusion};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
+use crate::roster::RosterError;
 use agent_team_mail_core::context::{GitProvider as GitProviderType, RepoContext};
+use agent_team_mail_core::daemon_client::GhMonitorHealth;
 use agent_team_mail_core::schema::{AgentMember, InboxMessage, TeamConfig};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -29,23 +37,6 @@ struct RuntimeHistory {
     job_samples: HashMap<String, Vec<u64>>,
     processed_run_ids: Vec<u64>,
     drift_last_alert_epoch_secs: HashMap<String, i64>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
-struct GhMonitorHealthRecord {
-    team: String,
-    lifecycle_state: String,
-    availability_state: String,
-    in_flight: u64,
-    updated_at: String,
-    message: Option<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
-struct GhMonitorHealthFile {
-    records: Vec<GhMonitorHealthRecord>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
@@ -89,6 +80,12 @@ pub struct CiMonitorPlugin {
     runtime_history: RuntimeHistory,
     /// Persisted runtime history path (initialized in init when enabled).
     runtime_history_path: Option<PathBuf>,
+    /// Test-only: when set, `list_members` inside the DuplicateMember adoption arm
+    /// returns this error message as a `PluginError::Init` instead of calling the
+    /// real roster service.  Allows regression coverage of the `map_err` path without
+    /// filesystem timing tricks.
+    #[cfg(test)]
+    list_members_error: Option<String>,
 }
 
 impl CiMonitorPlugin {
@@ -103,6 +100,8 @@ impl CiMonitorPlugin {
             seen_runs: HashMap::new(),
             runtime_history: RuntimeHistory::default(),
             runtime_history_path: None,
+            #[cfg(test)]
+            list_members_error: None,
         }
     }
 
@@ -127,6 +126,17 @@ impl CiMonitorPlugin {
     #[cfg(test)]
     fn with_runtime_history(mut self, runtime_history: RuntimeHistory) -> Self {
         self.runtime_history = runtime_history;
+        self
+    }
+
+    /// Inject a simulated `list_members` error for the `DuplicateMember` adoption path.
+    ///
+    /// When set, the `init()` roster-verify step returns `PluginError::Init` with the
+    /// supplied message instead of calling the real `RosterService::list_members`.
+    /// This provides a deterministic test seam without filesystem timing tricks.
+    #[cfg(test)]
+    fn with_list_members_error(mut self, msg: impl Into<String>) -> Self {
+        self.list_members_error = Some(msg.into());
         self
     }
 
@@ -848,6 +858,7 @@ impl CiMonitorPlugin {
             .unwrap_or_else(|| ctx.config.core.default_team.clone())
     }
 
+    #[cfg(unix)]
     fn write_health_record(
         ctx: &PluginContext,
         team: &str,
@@ -874,8 +885,12 @@ impl CiMonitorPlugin {
             Err(_) => GhMonitorHealthFile::default(),
         };
 
-        let updated_record = GhMonitorHealthRecord {
+        let updated_record = GhMonitorHealth {
             team: team.to_string(),
+            configured: false,
+            enabled: false,
+            config_source: None,
+            config_path: None,
             lifecycle_state: "running".to_string(),
             availability_state: availability_state.to_string(),
             in_flight: 0,
@@ -914,6 +929,15 @@ impl CiMonitorPlugin {
                 warn!("CI Monitor: failed serializing health file: {}", e);
             }
         }
+    }
+
+    #[cfg(not(unix))]
+    fn write_health_record(
+        _ctx: &PluginContext,
+        _team: &str,
+        _availability_state: &str,
+        _message: &str,
+    ) {
     }
 
     fn notify_disabled_transition(&self, ctx: &PluginContext, team: &str, message: &str) {
@@ -1090,12 +1114,63 @@ impl Plugin for CiMonitorPlugin {
             unknown_fields: std::collections::HashMap::new(),
         };
 
-        ctx.roster
+        match ctx
+            .roster
             .add_member(&self.config.team, member, "gh_monitor")
-            .map_err(|e| PluginError::Init {
-                message: format!("Failed to register synthetic member: {e}"),
-                source: None,
-            })?;
+        {
+            Ok(()) => {}
+            Err(RosterError::DuplicateMember { ref name, ref team }) => {
+                // Member already exists. Only adopt if it is the expected synthetic
+                // shape (agent_type == "plugin:gh_monitor"). A non-plugin row with the
+                // same name must not be silently hijacked — cleanup_plugin only purges
+                // rows with agent_type "plugin:gh_monitor", so a mismatched row would
+                // escape cleanup and the plugin would be bound to the wrong entry.
+                #[cfg(test)]
+                if let Some(ref err_msg) = self.list_members_error {
+                    return Err(PluginError::Init {
+                        message: format!(
+                            "Failed to verify existing roster entry for '{name}' in team '{team}': {err_msg}"
+                        ),
+                        source: None,
+                    });
+                }
+                let existing = ctx
+                    .roster
+                    .list_members(team, Some("gh_monitor"))
+                    .map_err(|e| PluginError::Init {
+                        message: format!(
+                            "Failed to verify existing roster entry for '{name}' in team '{team}': {e}"
+                        ),
+                        source: None,
+                    })?;
+
+                let is_valid_synthetic = existing.iter().any(|m| &m.name == name);
+
+                if is_valid_synthetic {
+                    // Note: MembershipTracker has no entry for this triple;
+                    // cleanup_plugin uses agent_type prefix matching so shutdown
+                    // soft-cleanup still fires correctly without tracker presence.
+                    debug!(agent = %name, "gh_monitor: synthetic member already registered, adopting existing roster entry");
+                } else {
+                    let msg = format!(
+                        "Cannot register synthetic member '{name}': a non-plugin roster \
+                         entry with that name already exists in team '{team}'. \
+                         Remove the conflicting member to allow gh_monitor to initialize."
+                    );
+                    self.project_disabled_config_error(ctx, config_table, &msg);
+                    return Err(PluginError::Init {
+                        message: msg,
+                        source: None,
+                    });
+                }
+            }
+            Err(e) => {
+                return Err(PluginError::Init {
+                    message: format!("Failed to register synthetic member: {e}"),
+                    source: None,
+                });
+            }
+        }
 
         // Validate notify targets exist in team config (warn if not found)
         if !self.config.notify_target.is_empty() {
@@ -1175,143 +1250,144 @@ impl Plugin for CiMonitorPlugin {
             return Ok(());
         }
 
-        // Clone context for use in loop (Arc, so cheap)
-        let ctx = self
-            .ctx
-            .as_ref()
-            .ok_or_else(|| PluginError::Runtime {
-                message: "Plugin not initialized".to_string(),
-                source: None,
-            })?
-            .clone();
+        #[cfg(not(unix))]
+        {
+            cancel.cancelled().await;
+            return Ok(());
+        }
 
-        let base_interval_secs = self.config.poll_interval_secs.max(10);
-        let max_backoff_secs = MAX_ERROR_BACKOFF_SECS.max(base_interval_secs);
-        let mut next_delay_secs: u64 = 0;
+        #[cfg(unix)]
+        {
+            // Clone context for use in loop (Arc, so cheap)
+            let ctx = self
+                .ctx
+                .as_ref()
+                .ok_or_else(|| PluginError::Runtime {
+                    message: "Plugin not initialized".to_string(),
+                    source: None,
+                })?
+                .clone();
 
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    break;
-                }
-                _ = sleep(Duration::from_secs(next_delay_secs)) => {
-                    // Evict old dedup cache entries
-                    self.evict_old_dedup_entries();
+            let base_interval_secs = self.config.poll_interval_secs.max(10);
+            let max_backoff_secs = MAX_ERROR_BACKOFF_SECS.max(base_interval_secs);
+            let mut next_delay_secs: u64 = 0;
 
-                    // Build filter from config (no branch filter - we'll filter client-side)
-                    let filter = CiFilter {
-                        status: Some(CiRunStatus::Completed),
-                        per_page: Some(20),
-                        ..Default::default()
-                    };
-
-                    // Fetch all completed runs
-                    let runs = match self.provider.as_ref() {
-                        Some(provider) => provider.list_runs(&filter).await,
-                        None => {
-                            warn!("CI Monitor: Provider disappeared during run");
-                            break;
-                        }
-                    };
-                    match runs {
-                        Ok(runs) => {
-                            next_delay_secs = base_interval_secs;
-                            // Process each run
-                            for run in runs {
-                                // Filter by branch using glob patterns (client-side)
-                                if !self.matches_branch(&run.head_branch) {
-                                    continue;
-                                }
-
-                                let should_notify_failure = run
-                                    .conclusion
-                                    .map(|c| self.config.notify_on.contains(&c))
-                                    .unwrap_or(false);
-                                let needs_full_run =
-                                    should_notify_failure || self.config.runtime_drift_enabled;
-                                if !needs_full_run {
-                                    continue;
-                                }
-
-                                // Fetch full run details with jobs
-                                let full_run_result = match self.provider.as_ref() {
-                                    Some(provider) => provider.get_run(run.id).await,
-                                    None => {
-                                        warn!("CI Monitor: Provider disappeared during run");
-                                        break;
-                                    }
-                                };
-                                let full_run = match full_run_result {
-                                    Ok(r) => r,
-                                    Err(e) => {
-                                        warn!("CI Monitor: Failed to fetch run details for #{}: {e}", run.id);
-                                        continue;
-                                    }
-                                };
-
-                                // Runtime drift alerts (optional enhancement): update persisted
-                                // baselines and notify on significant slowdowns.
-                                if let Some(drift_msg) =
-                                    self.update_runtime_history_and_build_alert(&full_run)
-                                {
-                                    if self.send_message_to_targets(&ctx, &drift_msg, run.id) {
-                                        debug!("CI Monitor: Runtime drift alert sent for run #{}", run.id);
-                                    }
-                                }
-
-                                if should_notify_failure {
-                                    // Generate dedup key
-                                    let key = self.dedup_key(&full_run);
-
-                                    // Skip if we've already seen this run+conclusion
-                                    if self.seen_runs.contains_key(&key) {
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        break;
+                    }
+                    _ = sleep(Duration::from_secs(next_delay_secs)) => {
+                        // Evict old dedup cache entries
+                        self.evict_old_dedup_entries();
+                        // Fetch all completed runs
+                        let runs = match self.provider.as_ref() {
+                            Some(provider) => list_completed_runs(provider.as_ref()).await,
+                            None => {
+                                warn!("CI Monitor: Provider disappeared during run");
+                                break;
+                            }
+                        };
+                        match runs {
+                            Ok(runs) => {
+                                next_delay_secs = base_interval_secs;
+                                // Process each run
+                                for run in runs {
+                                    // Filter by branch using glob patterns (client-side)
+                                    if !self.matches_branch(&run.head_branch) {
                                         continue;
                                     }
 
-                                    // Command-path terminal notifications (atm gh monitor) are
-                                    // authoritative for that run_id. Avoid duplicate alerts
-                                    // from polling path when terminal state is already recorded.
-                                    if self.was_terminal_notified_by_command_path(&ctx, full_run.id)
+                                    let should_notify_failure = run
+                                        .conclusion
+                                        .map(|c| self.config.notify_on.contains(&c))
+                                        .unwrap_or(false);
+                                    let needs_full_run =
+                                        should_notify_failure || self.config.runtime_drift_enabled;
+                                    if !needs_full_run {
+                                        continue;
+                                    }
+
+                                    // Fetch full run details with jobs
+                                    let full_run_result = match self.provider.as_ref() {
+                                        Some(provider) => fetch_run_details(provider.as_ref(), run.id).await,
+                                        None => {
+                                            warn!("CI Monitor: Provider disappeared during run");
+                                            break;
+                                        }
+                                    };
+                                    let full_run = match full_run_result {
+                                        Ok(r) => r,
+                                        Err(e) => {
+                                            warn!("CI Monitor: Failed to fetch run details for #{}: {e}", run.id);
+                                            continue;
+                                        }
+                                    };
+
+                                    // Runtime drift alerts (optional enhancement): update persisted
+                                    // baselines and notify on significant slowdowns.
+                                    if let Some(drift_msg) =
+                                        self.update_runtime_history_and_build_alert(&full_run)
                                     {
-                                        debug!(
-                                            "CI Monitor: Skipping duplicate polling notification for run #{} (command-path terminal state present)",
-                                            full_run.id
-                                        );
-                                        self.seen_runs.insert(key, Utc::now());
-                                        continue;
+                                        if self.send_message_to_targets(&ctx, &drift_msg, run.id) {
+                                            debug!("CI Monitor: Runtime drift alert sent for run #{}", run.id);
+                                        }
                                     }
 
-                                    // Generate failure reports
-                                    if let Err(e) = self.generate_reports(&full_run) {
-                                        warn!("CI Monitor: Failed to generate reports for run #{}: {e}", run.id);
-                                    }
+                                    if should_notify_failure {
+                                        // Generate dedup key
+                                        let key = self.dedup_key(&full_run);
 
-                                    // Create notification message
-                                    let msg = self.run_to_message(&full_run);
-                                    if self.send_message_to_targets(&ctx, &msg, run.id) {
-                                        debug!("CI Monitor: Notified about run #{}", run.id);
-                                        self.seen_runs.insert(key, Utc::now());
+                                        // Skip if we've already seen this run+conclusion
+                                        if self.seen_runs.contains_key(&key) {
+                                            continue;
+                                        }
+
+                                        // Command-path terminal notifications (atm gh monitor) are
+                                        // authoritative for that run_id. Avoid duplicate alerts
+                                        // from polling path when terminal state is already recorded.
+                                        if self.was_terminal_notified_by_command_path(&ctx, full_run.id)
+                                        {
+                                            debug!(
+                                                "CI Monitor: Skipping duplicate polling notification for run #{} (command-path terminal state present)",
+                                                full_run.id
+                                            );
+                                            self.seen_runs.insert(key, Utc::now());
+                                            continue;
+                                        }
+
+                                        // Generate failure reports
+                                        if let Err(e) = self.generate_reports(&full_run) {
+                                            warn!("CI Monitor: Failed to generate reports for run #{}: {e}", run.id);
+                                        }
+
+                                        // Create notification message
+                                        let msg = self.run_to_message(&full_run);
+                                        if self.send_message_to_targets(&ctx, &msg, run.id) {
+                                            debug!("CI Monitor: Notified about run #{}", run.id);
+                                            self.seen_runs.insert(key, Utc::now());
+                                        }
                                     }
                                 }
                             }
-                        }
-                        Err(e) => {
-                            warn!("CI Monitor: Failed to fetch runs: {e}");
-                            // Continue polling after error using bounded exponential backoff.
-                            next_delay_secs = if next_delay_secs == 0 {
-                                base_interval_secs
-                            } else {
-                                next_delay_secs
-                                    .saturating_mul(2)
-                                    .min(max_backoff_secs)
-                            };
+                            Err(e) => {
+                                warn!("CI Monitor: Failed to fetch runs: {e}");
+                                // Continue polling after error using bounded exponential backoff.
+                                next_delay_secs = if next_delay_secs == 0 {
+                                    base_interval_secs
+                                } else {
+                                    next_delay_secs
+                                        .saturating_mul(2)
+                                        .min(max_backoff_secs)
+                                };
+                            }
                         }
                     }
                 }
             }
-        }
 
-        Ok(())
+            Ok(())
+        }
     }
 
     async fn shutdown(&mut self) -> Result<(), PluginError> {
@@ -2084,6 +2160,236 @@ repo = "config-owner/config-repo"
         assert_eq!(member.cwd, temp_dir.path().to_string_lossy());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_init_adopts_existing_ci_monitor_member_without_error() {
+        use crate::plugins::ci_monitor::MockCiProvider;
+        use agent_team_mail_core::schema::{AgentMember, TeamConfig};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let team_dir = teams_root.join("dev-team");
+        let inboxes_dir = team_dir.join("inboxes");
+        std::fs::create_dir_all(&inboxes_dir).unwrap();
+        std::fs::write(inboxes_dir.join("ci-monitor.json"), "[]").unwrap();
+
+        // Pre-populate config.json with ci-monitor already present (simulates a
+        // persisted member from a previous session that would trigger DuplicateMember).
+        let ci_monitor_member = AgentMember {
+            agent_id: "ci-monitor@dev-team".to_string(),
+            name: "ci-monitor".to_string(),
+            agent_type: "plugin:gh_monitor".to_string(),
+            model: String::new(),
+            prompt: None,
+            color: None,
+            plan_mode_required: None,
+            joined_at: 1234567890,
+            tmux_pane_id: None,
+            cwd: ".".to_string(),
+            subscriptions: Vec::new(),
+            backend_type: None,
+            is_active: None,
+            last_active: None,
+            session_id: None,
+            external_backend_type: None,
+            external_model: None,
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        let team_config = TeamConfig {
+            name: "dev-team".to_string(),
+            description: None,
+            created_at: 1234567890,
+            lead_agent_id: "lead@dev-team".to_string(),
+            lead_session_id: "session-123".to_string(),
+            members: vec![ci_monitor_member],
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        std::fs::write(
+            team_dir.join("config.json"),
+            serde_json::to_string(&team_config).unwrap(),
+        )
+        .unwrap();
+
+        let toml_str = r#"
+team = "dev-team"
+repo = "config-owner/config-repo"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let ctx = create_mock_context_with_repo_config(teams_root.clone(), Some(table), false);
+        let mut plugin = CiMonitorPlugin::new().with_provider(Box::new(MockCiProvider::new()));
+
+        let atm_config_path = temp_dir.path().join(".atm.toml");
+        std::fs::write(&atm_config_path, toml_str).unwrap();
+
+        struct EnvRestoreGuard {
+            key: &'static str,
+            original: Option<String>,
+        }
+        impl Drop for EnvRestoreGuard {
+            fn drop(&mut self) {
+                match self.original.take() {
+                    Some(value) => unsafe { std::env::set_var(self.key, value) },
+                    None => unsafe { std::env::remove_var(self.key) },
+                }
+            }
+        }
+        struct CurrentDirGuard(std::path::PathBuf);
+        impl Drop for CurrentDirGuard {
+            fn drop(&mut self) {
+                std::env::set_current_dir(&self.0).expect("restore current directory");
+            }
+        }
+
+        let _atm_config_guard = EnvRestoreGuard {
+            key: "ATM_CONFIG",
+            original: std::env::var("ATM_CONFIG").ok(),
+        };
+        let _cwd_guard = CurrentDirGuard(std::env::current_dir().unwrap());
+        unsafe { std::env::set_var("ATM_CONFIG", &atm_config_path) };
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+
+        // Init must succeed even though ci-monitor is already in the roster.
+        let result = plugin.init(&ctx).await;
+        assert!(
+            result.is_ok(),
+            "init should succeed when ci-monitor already exists: {result:?}"
+        );
+
+        // The existing member should still be present (not duplicated).
+        let roster = ctx.roster.list_members("dev-team", None).expect("members");
+        let ci_members: Vec<_> = roster.iter().filter(|m| m.name == "ci-monitor").collect();
+        assert_eq!(
+            ci_members.len(),
+            1,
+            "ci-monitor should appear exactly once in roster"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_init_rejects_non_plugin_member_with_same_name() {
+        use crate::plugins::ci_monitor::MockCiProvider;
+        use agent_team_mail_core::schema::{AgentMember, TeamConfig};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let team_dir = teams_root.join("dev-team");
+        let inboxes_dir = team_dir.join("inboxes");
+        std::fs::create_dir_all(&inboxes_dir).unwrap();
+        std::fs::write(inboxes_dir.join("ci-monitor.json"), "[]").unwrap();
+
+        // Pre-populate config.json with a non-plugin member named "ci-monitor".
+        // This simulates a human or other non-plugin roster entry that should NOT
+        // be silently hijacked by gh_monitor.
+        let conflicting_member = AgentMember {
+            agent_id: "ci-monitor@dev-team".to_string(),
+            name: "ci-monitor".to_string(),
+            agent_type: "general-purpose".to_string(), // NOT plugin:gh_monitor
+            model: String::new(),
+            prompt: None,
+            color: None,
+            plan_mode_required: None,
+            joined_at: 1234567890,
+            tmux_pane_id: None,
+            cwd: ".".to_string(),
+            subscriptions: Vec::new(),
+            backend_type: None,
+            is_active: None,
+            last_active: None,
+            session_id: None,
+            external_backend_type: None,
+            external_model: None,
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        let team_config = TeamConfig {
+            name: "dev-team".to_string(),
+            description: None,
+            created_at: 1234567890,
+            lead_agent_id: "lead@dev-team".to_string(),
+            lead_session_id: "session-123".to_string(),
+            members: vec![conflicting_member],
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        std::fs::write(
+            team_dir.join("config.json"),
+            serde_json::to_string(&team_config).unwrap(),
+        )
+        .unwrap();
+
+        let toml_str = r#"
+team = "dev-team"
+repo = "config-owner/config-repo"
+"#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let ctx = create_mock_context_with_repo_config(teams_root.clone(), Some(table), false);
+        let mut plugin = CiMonitorPlugin::new().with_provider(Box::new(MockCiProvider::new()));
+
+        let atm_config_path = temp_dir.path().join(".atm.toml");
+        std::fs::write(&atm_config_path, toml_str).unwrap();
+
+        struct EnvRestoreGuard {
+            key: &'static str,
+            original: Option<String>,
+        }
+        impl Drop for EnvRestoreGuard {
+            fn drop(&mut self) {
+                match self.original.take() {
+                    Some(value) => unsafe { std::env::set_var(self.key, value) },
+                    None => unsafe { std::env::remove_var(self.key) },
+                }
+            }
+        }
+        struct CurrentDirGuard(std::path::PathBuf);
+        impl Drop for CurrentDirGuard {
+            fn drop(&mut self) {
+                std::env::set_current_dir(&self.0).expect("restore current directory");
+            }
+        }
+
+        let _atm_config_guard = EnvRestoreGuard {
+            key: "ATM_CONFIG",
+            original: std::env::var("ATM_CONFIG").ok(),
+        };
+        let _cwd_guard = CurrentDirGuard(std::env::current_dir().unwrap());
+        unsafe { std::env::set_var("ATM_CONFIG", &atm_config_path) };
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+
+        // Init must fail because "ci-monitor" is a non-plugin member.
+        let err = plugin
+            .init(&ctx)
+            .await
+            .expect_err("init should fail when ci-monitor name is taken by a non-plugin member");
+        assert!(
+            err.to_string().contains("non-plugin roster entry"),
+            "error should mention non-plugin roster entry conflict: {err}"
+        );
+
+        // Health record must be written as disabled_config_error.
+        let health_path =
+            agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(temp_dir.path());
+        let raw = std::fs::read_to_string(&health_path).expect("health record should be written");
+        let health: GhMonitorHealthFile = serde_json::from_str(&raw).expect("health json");
+        let record = health
+            .records
+            .iter()
+            .find(|r| r.team == "dev-team")
+            .expect("dev-team health record");
+        assert_eq!(
+            record.availability_state, "disabled_config_error",
+            "non-plugin conflict should write disabled_config_error health record"
+        );
+        let msg = record.message.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("non-plugin roster entry"),
+            "health record message should describe the conflict: {msg}"
+        );
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_init_without_git_or_config_repo_writes_disabled_init_health_record() {
         use crate::plugins::ci_monitor::MockCiProvider;
@@ -2336,6 +2642,91 @@ notify_target = ["lead", "qa-bot@qa-team"]
 
         // Verify multi-recipient note is included
         assert!(msg.text.contains("Notified: lead@dev-team, qa-bot@qa-team"));
+    }
+
+    /// Regression test: when `add_member` returns `DuplicateMember` and the
+    /// subsequent `list_members` call fails, `init()` must propagate the error
+    /// as `PluginError::Init` with a message containing
+    /// "Failed to verify existing roster entry".
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_init_propagates_list_members_error_on_duplicate() {
+        use crate::plugins::ci_monitor::MockCiProvider;
+        use agent_team_mail_core::schema::{AgentMember, TeamConfig};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let team_name = "dev-team";
+        let team_dir = teams_root.join(team_name);
+        let inboxes_dir = team_dir.join("inboxes");
+        std::fs::create_dir_all(&inboxes_dir).unwrap();
+
+        // Create ci-monitor inbox (required for synthetic member registration).
+        std::fs::write(inboxes_dir.join("ci-monitor.json"), "[]").unwrap();
+
+        // Pre-seed config.json with the synthetic member already present so that
+        // `add_member` detects a duplicate (DuplicateMember) without writing.
+        let synthetic_member = AgentMember {
+            agent_id: format!("ci-monitor@{team_name}"),
+            name: "ci-monitor".to_string(),
+            agent_type: "plugin:gh_monitor".to_string(),
+            model: "synthetic".to_string(),
+            prompt: None,
+            color: None,
+            plan_mode_required: None,
+            joined_at: 1_234_567_890,
+            tmux_pane_id: None,
+            cwd: ".".to_string(),
+            subscriptions: Vec::new(),
+            backend_type: None,
+            is_active: Some(true),
+            last_active: None,
+            session_id: None,
+            external_backend_type: None,
+            external_model: None,
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        let team_config = TeamConfig {
+            name: team_name.to_string(),
+            description: None,
+            created_at: 1_234_567_890,
+            lead_agent_id: format!("lead@{team_name}"),
+            lead_session_id: "session-test".to_string(),
+            members: vec![synthetic_member],
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        std::fs::write(
+            team_dir.join("config.json"),
+            serde_json::to_string(&team_config).unwrap(),
+        )
+        .unwrap();
+
+        // Build a plugin config that points at the pre-seeded team.
+        let toml_str = format!(
+            r#"
+team = "{team_name}"
+agent = "ci-monitor"
+"#
+        );
+        let table: toml::Table = toml::from_str(&toml_str).unwrap();
+        let ctx = create_mock_context_with_repo_config(teams_root.clone(), Some(table), true);
+
+        // Inject the test seam: list_members will return this error message
+        // instead of reading config.json, simulating an I/O failure between
+        // add_member detecting DuplicateMember and the follow-up roster verify.
+        let mut plugin = CiMonitorPlugin::new()
+            .with_provider(Box::new(MockCiProvider::new()))
+            .with_list_members_error("simulated read failure");
+
+        let result = plugin.init(&ctx).await;
+
+        assert!(result.is_err(), "init() must fail when list_members errors");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Failed to verify existing roster entry"),
+            "error message must contain 'Failed to verify existing roster entry', got: {err_msg}"
+        );
     }
 
     #[test]

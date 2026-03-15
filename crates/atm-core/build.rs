@@ -26,6 +26,13 @@ fn main() {
     let lockfile_contents = match fs::read_to_string(&lockfile_path) {
         Ok(contents) => contents,
         Err(err) => {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                println!(
+                    "cargo:warning=Cargo.lock not found at {}; skipping lockfile validation for package/verify context",
+                    lockfile_path.display()
+                );
+                return;
+            }
             panic!(
                 "RELEASE ERROR: Could not read Cargo.lock at {path}: {err}\n\
                  Run `cargo generate-lockfile` to generate it.",
