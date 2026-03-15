@@ -1001,6 +1001,7 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
 
     let mut first = std::process::Command::new(bin)
         .env("ATM_HOME", temp_dir.path())
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

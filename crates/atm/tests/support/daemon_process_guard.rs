@@ -31,6 +31,7 @@ impl DaemonProcessGuard {
             .env_remove("CLAUDE_SESSION_ID")
             .arg("--team")
             .arg(team)
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
