@@ -28,7 +28,6 @@ use clap::Args;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
 // Embedded hook script bodies (compile-time)
@@ -130,34 +129,28 @@ fn hook_python_cmd() -> String {
         return normalize_for_bash_quoted_path(Path::new(&value));
     }
 
-    static DETECTED_HOOK_PYTHON: OnceLock<String> = OnceLock::new();
+    if let Ok(output) = Command::new("python3")
+        .args(["-c", "import sys; print(sys.executable)"])
+        .output()
+        && output.status.success()
+    {
+        let resolved = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !resolved.is_empty() {
+            return normalize_for_bash_quoted_path(Path::new(&resolved));
+        }
+    }
 
-    DETECTED_HOOK_PYTHON
-        .get_or_init(|| {
-            if let Ok(output) = Command::new("python3")
-                .args(["-c", "import sys; print(sys.executable)"])
-                .output()
-                && output.status.success()
-            {
-                let resolved = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !resolved.is_empty() {
-                    return normalize_for_bash_quoted_path(Path::new(&resolved));
-                }
-            }
+    for candidate in [
+        "/opt/homebrew/bin/python3",
+        "/usr/local/bin/python3",
+        "/usr/bin/python3",
+    ] {
+        if Path::new(candidate).exists() {
+            return normalize_for_bash_quoted_path(Path::new(candidate));
+        }
+    }
 
-            for candidate in [
-                "/opt/homebrew/bin/python3",
-                "/usr/local/bin/python3",
-                "/usr/bin/python3",
-            ] {
-                if Path::new(candidate).exists() {
-                    return normalize_for_bash_quoted_path(Path::new(candidate));
-                }
-            }
-
-            "python3".to_string()
-        })
-        .clone()
+    "python3".to_string()
 }
 
 /// Normalize a filesystem path for inclusion inside a double-quoted command
