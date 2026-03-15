@@ -395,7 +395,10 @@ async fn run_accept_loop(
                     Err(e) => {
                         error!("Accept error on socket {}: {e}", socket_path.display());
                         // Brief pause before retrying to avoid a tight error loop
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            crate::daemon::consts::SOCKET_RETRY_DELAY_MS,
+                        ))
+                        .await;
                     }
                 }
             }
@@ -2329,7 +2332,7 @@ pub(crate) fn validate_control_request(control: &ControlRequest) -> Option<Strin
         .ok()
         .and_then(|v| v.parse::<i64>().ok())
         .filter(|v| *v > 0)
-        .unwrap_or(300);
+        .unwrap_or(crate::daemon::consts::CONTROL_TIMESTAMP_WINDOW_SECS);
     let skew = (chrono::Utc::now() - parsed.with_timezone(&chrono::Utc)).num_seconds();
     if skew.unsigned_abs() > max_skew_secs as u64 {
         return Some(format!("sent_at skew exceeds {max_skew_secs}s"));
@@ -3391,8 +3394,6 @@ struct SessionFileCandidate {
     pid: u32,
 }
 
-const SESSION_FILE_TTL_SECS: f64 = 86400.0;
-
 fn remove_session_file_best_effort(path: &std::path::Path) {
     let _ = std::fs::remove_file(path);
 }
@@ -3475,7 +3476,7 @@ fn scan_live_session_files(
             remove_session_file_best_effort(&path);
             continue;
         };
-        if (now - timestamp) > SESSION_FILE_TTL_SECS {
+        if (now - timestamp) > agent_team_mail_core::consts::SESSION_FILE_TTL_SECS {
             remove_session_file_best_effort(&path);
             continue;
         }
@@ -4275,7 +4276,10 @@ mod tests {
                     .and_then(|p| p.get("reason").and_then(|v| v.as_str()))
                     .is_some_and(|reason| reason.contains("team config not found"));
             if retry && attempts < 4 {
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    crate::daemon::consts::STREAM_CHECK_SLEEP_MS,
+                ))
+                .await;
                 continue;
             }
             return resp;
@@ -4304,7 +4308,10 @@ mod tests {
                     .and_then(|p| p.get("reason").and_then(|v| v.as_str()))
                     .is_some_and(|reason| reason.contains("team config not found"));
             if retry && attempts < 4 {
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    crate::daemon::consts::STREAM_CHECK_SLEEP_MS,
+                ))
+                .await;
                 continue;
             }
             return resp;
@@ -6654,7 +6661,10 @@ mod tests {
         assert!(payload1["processed"].as_bool().unwrap());
         assert!(payload1.get("duplicate").is_none());
 
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(
+            crate::daemon::consts::STREAM_CHECK_SLEEP_MS,
+        ))
+        .await;
 
         let second = handle_hook_event_command_with_dedup_retry(req_json, &store, &sr, &dd).await;
         assert_eq!(second.status, "ok");
@@ -6668,7 +6678,8 @@ mod tests {
             .time_since_transition("team-lead")
             .expect("team-lead transition timestamp should exist");
         assert!(
-            elapsed >= std::time::Duration::from_millis(20),
+            elapsed
+                >= std::time::Duration::from_millis(crate::daemon::consts::MIN_ELAPSED_CHECK_MS,),
             "duplicate hook request should not reset last transition timestamp"
         );
     }
