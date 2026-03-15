@@ -1,4 +1,3 @@
-use assert_cmd::cargo;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -30,6 +29,7 @@ impl DaemonProcessGuard {
         cmd.env("ATM_HOME", home.path())
             .env("ATM_DAEMON_AUTOSTART", "0")
             .env_remove("ATM_CONFIG")
+            .env_remove("ATM_DAEMON_BIN") // F-1: prevent inheriting installed binary
             .env_remove("CLAUDE_SESSION_ID")
             .arg("--team")
             .arg(team)
@@ -48,17 +48,34 @@ impl DaemonProcessGuard {
         }
     }
 
+    /// Adopt an already-running daemon PID into a guard.
+    ///
+    /// `atm_home` must be the test's isolated home directory, not the ambient
+    /// `ATM_HOME` env var, to ensure the correct daemon lock path is used.
     #[allow(dead_code)]
-    pub fn adopt_registered_pid(pid: u32, daemon_bin: &Path) -> Self {
+    pub fn adopt_registered_pid(pid: u32, daemon_bin: &Path, atm_home: &Path) -> Self {
         assert!(pid > 1, "adopted daemon PID must be > 1, got {pid}");
         daemon_test_registry::register_test_daemon(pid, daemon_bin);
-        let daemon_dir = std::env::var_os("ATM_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
-            .join(".atm")
-            .join("daemon");
+        let daemon_dir = atm_home.join(".atm").join("daemon");
         Self {
             child: None,
+            pid,
+            daemon_dir,
+        }
+    }
+
+    /// Adopt an already-spawned `Child` into a guard.
+    ///
+    /// Use this instead of a hand-rolled kill+wait struct. Registers the child
+    /// with the test daemon registry so sweep can find it.
+    #[allow(dead_code)]
+    pub fn from_child(child: Child, daemon_bin: &Path, atm_home: &Path) -> Self {
+        let pid = child.id();
+        assert!(pid > 1, "adopted daemon PID must be > 1, got {pid}");
+        daemon_test_registry::register_test_daemon(pid, daemon_bin);
+        let daemon_dir = atm_home.join(".atm").join("daemon");
+        Self {
+            child: Some(child),
             pid,
             daemon_dir,
         }
@@ -67,6 +84,16 @@ impl DaemonProcessGuard {
     #[allow(dead_code)]
     pub fn pid(&self) -> u32 {
         self.pid
+    }
+
+    /// Return a mutable reference to the inner `Child`.
+    ///
+    /// Panics if this guard was created via `adopt_registered_pid` (no child handle).
+    #[allow(dead_code)]
+    pub fn child_mut(&mut self) -> &mut Child {
+        self.child
+            .as_mut()
+            .expect("no child handle — use from_child or spawn, not adopt_registered_pid")
     }
 
     pub fn wait_ready(&mut self, home: &TempDir) {
@@ -175,10 +202,19 @@ fn pid_alive(_pid: i32) -> bool {
 fn send_signal(_pid: i32, _sig: i32) {}
 
 fn daemon_binary_path() -> PathBuf {
-    let mut candidate = PathBuf::from(cargo::cargo_bin!("atm"));
+    // Locate the build output directory from the current test binary path.
+    // For integration tests, `current_exe()` is in `target/<profile>/deps/`.
+    // The daemon binary lives one level up in `target/<profile>/`.
+    let exe = std::env::current_exe().expect("current_exe");
+    let deps_dir = exe.parent().expect("parent of test binary");
+    let target_dir = if deps_dir.ends_with("deps") {
+        deps_dir.parent().expect("parent of deps dir")
+    } else {
+        deps_dir
+    };
     #[cfg(windows)]
-    candidate.set_file_name("atm-daemon.exe");
+    let name = "atm-daemon.exe";
     #[cfg(not(windows))]
-    candidate.set_file_name("atm-daemon");
-    candidate
+    let name = "atm-daemon";
+    target_dir.join(name)
 }

@@ -151,10 +151,14 @@ pub fn sweep_stale_test_daemons() {
 
 pub fn register_test_daemon(pid: u32, daemon_bin: &Path) {
     with_registry_entries(|entries| {
-        entries.push(RegistryEntry {
-            pid,
-            daemon_bin: daemon_bin.to_string_lossy().to_string(),
-        });
+        // F-3: dedup — both spawn() and adopt_registered_pid() call this; avoid
+        // duplicate entries for the same PID from concurrent or chained calls.
+        if !entries.iter().any(|e| e.pid == pid) {
+            entries.push(RegistryEntry {
+                pid,
+                daemon_bin: daemon_bin.to_string_lossy().to_string(),
+            });
+        }
     });
 }
 
