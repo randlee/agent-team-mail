@@ -6,7 +6,6 @@
 
 use assert_cmd::cargo;
 use serial_test::serial;
-use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -15,36 +14,10 @@ use tempfile::TempDir;
 mod daemon_process_guard;
 #[path = "support/daemon_test_registry.rs"]
 mod daemon_test_registry;
+#[path = "support/env_guard.rs"]
+mod env_guard;
 use daemon_process_guard::DaemonProcessGuard;
-
-struct EnvGuard {
-    key: &'static str,
-    old: Option<OsString>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
-        let old = std::env::var_os(key);
-        // SAFETY: test-scoped env mutation restored by Drop.
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, old }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        // SAFETY: test-scoped env mutation restored by Drop.
-        unsafe {
-            if let Some(old) = &self.old {
-                std::env::set_var(self.key, old);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
-}
+use env_guard::EnvGuard;
 
 /// Helper to set home directory for cross-platform test compatibility.
 /// Uses `ATM_HOME` which is checked first by `get_home_dir()`, avoiding
