@@ -739,7 +739,6 @@ pub fn write_runtime_metadata(home: &Path, metadata: &RuntimeMetadata) -> anyhow
     }
 
     let _guard = acquire_lock(&metadata_lock_path, 10)?;
-    let _current = read_runtime_metadata(home);
 
     let json = serde_json::to_vec_pretty(metadata)?;
     let tmp = metadata_path.with_extension("json.tmp");
@@ -3366,6 +3365,31 @@ sleep 2
             !isolated_runtime_allows_live_github(&created.home).unwrap(),
             "isolated runtime should deny live GitHub polling by default"
         );
+    }
+
+    // Regression test for GH #761: write_runtime_metadata must not call
+    // read_runtime_metadata and discard the result. Verify overwrite persists replacement.
+    #[test]
+    fn test_write_runtime_metadata_overwrites_existing_contents() {
+        let home = tempfile::tempdir().unwrap();
+        let original = RuntimeMetadata {
+            runtime_kind: RuntimeKind::Dev,
+            created_at: "2026-03-14T00:00:00Z".to_string(),
+            expires_at: None,
+            allow_live_github_polling: true,
+        };
+        let replacement = RuntimeMetadata {
+            runtime_kind: RuntimeKind::Isolated,
+            created_at: "2026-03-15T00:00:00Z".to_string(),
+            expires_at: Some("2026-03-15T00:10:00Z".to_string()),
+            allow_live_github_polling: false,
+        };
+
+        write_runtime_metadata(home.path(), &original).unwrap();
+        write_runtime_metadata(home.path(), &replacement).unwrap();
+
+        let persisted = read_runtime_metadata(home.path()).expect("persisted metadata");
+        assert_eq!(persisted, replacement);
     }
 
     #[cfg(unix)]
