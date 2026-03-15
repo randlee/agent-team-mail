@@ -45,6 +45,37 @@ fn count_nested_command_in_hooks(
         .unwrap_or(0)
 }
 
+fn count_nested_command_suffix_in_hooks(
+    settings_path: &Path,
+    hook_category: &str,
+    command_suffix: &str,
+) -> usize {
+    let parsed: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(settings_path).unwrap()).unwrap();
+
+    parsed["hooks"][hook_category]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .get("hooks")
+                        .and_then(|h| h.as_array())
+                        .map(|hooks| {
+                            hooks.iter().any(|h| {
+                                h.get("command")
+                                    .and_then(|c| c.as_str())
+                                    .is_some_and(|command| command.ends_with(command_suffix))
+                            })
+                        })
+                        .unwrap_or(false)
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
 fn count_flat_command_entries(settings_path: &Path, hook_category: &str, command: &str) -> usize {
     let parsed: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(settings_path).unwrap()).unwrap();
@@ -84,6 +115,42 @@ fn count_matcher_command_entries(
                                 .iter()
                                 .filter(|h| {
                                     h.get("command").and_then(|c| c.as_str()) == Some(command)
+                                })
+                                .count()
+                        })
+                        .unwrap_or(0)
+                })
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+fn count_matcher_command_suffix_entries(
+    settings_path: &Path,
+    hook_category: &str,
+    matcher: &str,
+    command_suffix: &str,
+) -> usize {
+    let parsed: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(settings_path).unwrap()).unwrap();
+
+    parsed["hooks"][hook_category]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|entry| entry.get("matcher").and_then(|m| m.as_str()) == Some(matcher))
+                .map(|entry| {
+                    entry
+                        .get("hooks")
+                        .and_then(|h| h.as_array())
+                        .map(|hooks| {
+                            hooks
+                                .iter()
+                                .filter(|h| {
+                                    h.get("command")
+                                        .and_then(|c| c.as_str())
+                                        .is_some_and(|command| command.ends_with(command_suffix))
                                 })
                                 .count()
                         })
@@ -480,21 +547,29 @@ fn test_init_local_relay_hook_paths_use_claude_project_dir() {
         .success();
 
     let settings_path = repo.join(".claude/settings.json");
-    let permission_cmd =
-        "python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/permission-request-relay.py\"";
-    let stop_cmd = "python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/stop-relay.py\"";
-    let notify_cmd = "python3 \"${CLAUDE_PROJECT_DIR}/.claude/scripts/notification-idle-relay.py\"";
+    let permission_suffix = "\"${CLAUDE_PROJECT_DIR}/.claude/scripts/permission-request-relay.py\"";
+    let stop_suffix = "\"${CLAUDE_PROJECT_DIR}/.claude/scripts/stop-relay.py\"";
+    let notify_suffix = "\"${CLAUDE_PROJECT_DIR}/.claude/scripts/notification-idle-relay.py\"";
 
     assert_eq!(
-        count_nested_command_in_hooks(&settings_path, "PermissionRequest", permission_cmd),
+        count_nested_command_suffix_in_hooks(
+            &settings_path,
+            "PermissionRequest",
+            permission_suffix
+        ),
         1
     );
     assert_eq!(
-        count_nested_command_in_hooks(&settings_path, "Stop", stop_cmd),
+        count_nested_command_suffix_in_hooks(&settings_path, "Stop", stop_suffix),
         1
     );
     assert_eq!(
-        count_matcher_command_entries(&settings_path, "Notification", "idle_prompt", notify_cmd),
+        count_matcher_command_suffix_entries(
+            &settings_path,
+            "Notification",
+            "idle_prompt",
+            notify_suffix,
+        ),
         1
     );
 
