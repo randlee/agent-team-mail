@@ -177,7 +177,7 @@ async fn test_ci_failure_delivers_inbox_message() {
     let run_cancel = cancel.clone();
     let run_task = tokio::spawn(async move { plugin.run(run_cancel).await });
     let observed_delivery = wait_for_condition(2_000, || {
-        !read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor").is_empty()
+        !read_inbox(ctx.mail.teams_root(), "test-team", "team-lead").is_empty()
     })
     .await;
     assert!(
@@ -191,7 +191,7 @@ async fn test_ci_failure_delivers_inbox_message() {
         .unwrap();
 
     // Verify inbox message was delivered
-    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor");
+    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "team-lead");
     assert!(
         !messages.is_empty(),
         "Should have at least one message for CI failure"
@@ -333,7 +333,7 @@ async fn test_ci_deduplication() {
     assert!(list_calls >= 2, "Should poll at least twice");
 
     // But only ONE inbox message should be delivered (deduplication)
-    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor");
+    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "team-lead");
     assert_eq!(
         messages.len(),
         1,
@@ -440,7 +440,7 @@ async fn test_status_transition_notification() {
     let run_cancel2 = cancel2.clone();
     let run_task2 = tokio::spawn(async move { plugin2.run(run_cancel2).await });
     let failure_elapsed = wait_for_condition(2_000, || {
-        read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor").len() == 1
+        read_inbox(ctx.mail.teams_root(), "test-team", "team-lead").len() == 1
     })
     .await;
     assert!(
@@ -454,7 +454,7 @@ async fn test_status_transition_notification() {
         .unwrap();
 
     // Now we should have exactly one notification for the failure
-    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor");
+    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "team-lead");
     assert_eq!(
         messages.len(),
         1,
@@ -587,7 +587,7 @@ async fn test_runtime_drift_alert_persisted_across_restart() {
     tokio::task::yield_now().await;
     let _ = run_task_v2.await.unwrap();
 
-    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor");
+    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "team-lead");
     let drift_messages: Vec<_> = messages
         .iter()
         .filter(|m| m.text.contains("[runtime-drift:"))
@@ -698,7 +698,7 @@ async fn test_multiple_failures() {
     let run_cancel = cancel.clone();
     let run_task = tokio::spawn(async move { plugin.run(run_cancel).await });
     let delivery_elapsed = wait_for_condition(2_000, || {
-        read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor").len() == 3
+        read_inbox(ctx.mail.teams_root(), "test-team", "team-lead").len() == 3
     })
     .await;
     assert!(
@@ -712,7 +712,7 @@ async fn test_multiple_failures() {
         .unwrap();
 
     // Should have one message per failure
-    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor");
+    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "team-lead");
     assert_eq!(messages.len(), 3, "Should deliver one message per failure");
 
     // Verify each run ID is present
@@ -799,7 +799,7 @@ async fn test_branch_filtering() {
     let run_cancel = cancel.clone();
     let run_task = tokio::spawn(async move { plugin.run(run_cancel).await });
     let filter_elapsed = wait_for_condition(2_000, || {
-        read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor").len() == 2
+        read_inbox(ctx.mail.teams_root(), "test-team", "team-lead").len() == 2
     })
     .await;
     assert!(
@@ -834,7 +834,7 @@ async fn test_branch_filtering() {
 
     // Only two messages (main and develop, not feature-x)
     // Client-side glob matching filters out feature-x
-    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor");
+    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "team-lead");
     assert_eq!(messages.len(), 2, "Should only notify for watched branches");
     assert!(messages.iter().any(|m| m.text.contains("[ci:301]")));
     assert!(messages.iter().any(|m| m.text.contains("[ci:302]")));
@@ -911,7 +911,7 @@ async fn test_conclusion_filtering() {
     let run_cancel = cancel.clone();
     let run_task = tokio::spawn(async move { plugin.run(run_cancel).await });
     let filter_elapsed = wait_for_condition(2_000, || {
-        read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor").len() == 1
+        read_inbox(ctx.mail.teams_root(), "test-team", "team-lead").len() == 1
     })
     .await;
     assert!(
@@ -925,7 +925,7 @@ async fn test_conclusion_filtering() {
         .unwrap();
 
     // Only failure should be notified (not success or cancelled)
-    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor");
+    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "team-lead");
     assert_eq!(
         messages.len(),
         1,

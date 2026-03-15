@@ -35,6 +35,11 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::consts::{
+    DAEMON_QUERY_TIMEOUT_MS, DAEMON_TIMEOUT_MAX_SECS, DAEMON_TIMEOUT_MIN_SECS, RETRY_SLEEP_MS,
+    SOCKET_IO_TIMEOUT_MS, STARTUP_DEADLINE_SECS,
+};
+
 /// Protocol version for the socket JSON protocol.
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -1024,7 +1029,10 @@ pub fn ensure_daemon_running() -> anyhow::Result<()> {
 pub fn query_daemon(request: &SocketRequest) -> anyhow::Result<Option<SocketResponse>> {
     #[cfg(unix)]
     {
-        query_daemon_unix(request, std::time::Duration::from_millis(500))
+        query_daemon_unix(
+            request,
+            std::time::Duration::from_millis(DAEMON_QUERY_TIMEOUT_MS),
+        )
     }
 
     #[cfg(not(unix))]
@@ -1759,7 +1767,9 @@ pub fn gh_monitor(request: &GhMonitorRequest) -> anyhow::Result<Option<GhMonitor
 
     // `gh-monitor` may wait for CI run discovery up to start_timeout_secs.
     let start_timeout_secs = request.start_timeout_secs.unwrap_or(120);
-    let read_timeout = std::time::Duration::from_secs((start_timeout_secs + 30).min(600));
+    let read_timeout = std::time::Duration::from_secs(
+        (start_timeout_secs + DAEMON_TIMEOUT_MIN_SECS).min(DAEMON_TIMEOUT_MAX_SECS),
+    );
     let response = match query_daemon_with_timeout(&socket_request, read_timeout)? {
         Some(r) => r,
         None => return Ok(None),
@@ -1803,8 +1813,12 @@ pub fn gh_monitor_control(
     };
 
     // Stop/restart can drain in-flight monitors for drain_timeout_secs.
-    let drain_timeout_secs = request.drain_timeout_secs.unwrap_or(30);
-    let read_timeout = std::time::Duration::from_secs((drain_timeout_secs + 30).min(600));
+    let drain_timeout_secs = request
+        .drain_timeout_secs
+        .unwrap_or(DAEMON_TIMEOUT_MIN_SECS);
+    let read_timeout = std::time::Duration::from_secs(
+        (drain_timeout_secs + DAEMON_TIMEOUT_MIN_SECS).min(DAEMON_TIMEOUT_MAX_SECS),
+    );
     let response = match query_daemon_with_timeout(&socket_request, read_timeout)? {
         Some(r) => r,
         None => return Ok(None),
@@ -1940,13 +1954,13 @@ fn query_daemon_unix(
             // Optional daemon auto-start path, enabled by ATM_DAEMON_AUTOSTART.
             if daemon_autostart_enabled() {
                 ensure_daemon_running_unix()?;
-                let deadline = Instant::now() + Duration::from_secs(5);
+                let deadline = Instant::now() + Duration::from_secs(STARTUP_DEADLINE_SECS);
                 loop {
                     match UnixStream::connect(&socket_path) {
                         Ok(s) => break s,
                         Err(e) if Instant::now() < deadline => {
                             let _ = e;
-                            std::thread::sleep(Duration::from_millis(100));
+                            std::thread::sleep(Duration::from_millis(RETRY_SLEEP_MS));
                         }
                         Err(e) => {
                             anyhow::bail!(
@@ -1969,7 +1983,7 @@ fn query_daemon_unix(
                                 connected = Some(s);
                                 break;
                             }
-                            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+                            Err(_) => std::thread::sleep(Duration::from_millis(RETRY_SLEEP_MS)),
                         }
                     }
                     match connected {
@@ -1987,7 +2001,7 @@ fn query_daemon_unix(
     // daemon operations such as gh monitor startup/drain paths.
     stream.set_read_timeout(Some(read_timeout)).ok();
     stream
-        .set_write_timeout(Some(Duration::from_millis(500)))
+        .set_write_timeout(Some(Duration::from_millis(SOCKET_IO_TIMEOUT_MS)))
         .ok();
 
     let request_line = serde_json::to_string(request)?;
@@ -2092,7 +2106,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
                 if daemon_is_running() || daemon_socket_connectable(&home) {
                     return Ok(());
                 }
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(RETRY_SLEEP_MS));
             }
             // Startup did not converge yet. Re-attempt lock acquisition so any
             // fallback spawn still occurs under lock (single-daemon invariant).
@@ -2186,7 +2200,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         }
     };
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(STARTUP_DEADLINE_SECS);
     while Instant::now() < deadline {
         if daemon_is_running() || daemon_socket_connectable(&home) {
             emit_event_best_effort(EventFields {
@@ -2236,14 +2250,15 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
             let _ = std::fs::remove_file(&stderr_capture);
             anyhow::bail!("{error}");
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(RETRY_SLEEP_MS));
     }
     let _ = std::fs::remove_file(&stderr_capture);
 
     let socket_path = daemon_socket_path()?;
     let pid_path = daemon_pid_path()?;
     let timeout_error = format!(
-        "daemon startup timed out after 5s; pid_file_exists={}, socket_exists={}, pid_path={}, socket_path={}",
+        "daemon startup timed out after {}s; pid_file_exists={}, socket_exists={}, pid_path={}, socket_path={}",
+        STARTUP_DEADLINE_SECS,
         pid_path.exists(),
         socket_path.exists(),
         pid_path.display(),
@@ -2541,7 +2556,7 @@ fn restart_mismatched_daemon(home: &std::path::Path, reason: &str) -> anyhow::Re
             if !pid_alive(pid) {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(RETRY_SLEEP_MS));
         }
         if pid_alive(pid) {
             send_signal(pid, 9);
@@ -2549,7 +2564,7 @@ fn restart_mismatched_daemon(home: &std::path::Path, reason: &str) -> anyhow::Re
                 if !pid_alive(pid) {
                     break;
                 }
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(RETRY_SLEEP_MS));
             }
         }
         if pid_alive(pid) {
@@ -2650,7 +2665,7 @@ fn subscribe_stream_events_unix() -> anyhow::Result<Option<StreamSubscription>> 
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_thread = std::sync::Arc::clone(&stop);
     stream
-        .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+        .set_read_timeout(Some(std::time::Duration::from_millis(SOCKET_IO_TIMEOUT_MS)))
         .ok();
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stream);
@@ -2739,20 +2754,24 @@ mod tests {
 
     #[cfg(unix)]
     fn wait_for_daemon_runtime_ready(home: &std::path::Path) -> bool {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(crate::consts::SHORT_DEADLINE_SECS);
         let pid_path = home.join(".atm/daemon/atm-daemon.pid");
         while std::time::Instant::now() < deadline {
             if pid_path.exists() && super::daemon_socket_connectable(home) {
                 return true;
             }
-            std::thread::sleep(std::time::Duration::from_millis(25));
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::consts::POLL_CHECK_SLEEP_MS,
+            ));
         }
         false
     }
 
     #[cfg(unix)]
     fn wait_for_daemon_version(home: &std::path::Path, expected_version: &str) -> Option<i32> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(crate::consts::SHORT_DEADLINE_SECS);
         let pid_path = home.join(".atm/daemon/atm-daemon.pid");
         let status_path = home.join(".atm/daemon/status.json");
         while std::time::Instant::now() < deadline {
@@ -2773,7 +2792,9 @@ mod tests {
             {
                 return Some(pid);
             }
-            std::thread::sleep(std::time::Duration::from_millis(25));
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::consts::POLL_CHECK_SLEEP_MS,
+            ));
         }
         None
     }
@@ -3322,7 +3343,7 @@ sleep 2
         let created = create_isolated_runtime_root_with_base(
             base.path(),
             Some("smoke-test"),
-            Duration::from_secs(600),
+            Duration::from_secs(DAEMON_TIMEOUT_MAX_SECS),
             false,
         )
         .expect("create isolated runtime");
@@ -3381,7 +3402,7 @@ sleep 2
         let created = create_isolated_runtime_root_with_base(
             base.path(),
             Some("live-gh"),
-            Duration::from_secs(600),
+            Duration::from_secs(DAEMON_TIMEOUT_MAX_SECS),
             true,
         )
         .expect("create isolated runtime");
@@ -3582,9 +3603,12 @@ sleep 8
 
         ensure_daemon_running_unix().expect("must recover from dead stale pid metadata");
         let marker = home.join("started-ok");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(crate::consts::SHORT_DEADLINE_SECS);
         while std::time::Instant::now() < deadline && !marker.exists() {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::consts::SHORT_SLEEP_MS,
+            ));
         }
         assert!(marker.exists(), "expected replacement daemon to start");
 
@@ -3753,14 +3777,17 @@ sleep 8
         }
         ensure_daemon_running_unix().expect("mismatch daemon should be restarted");
 
-        let stale_exit_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let stale_exit_deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(crate::consts::SHORT_DEADLINE_SECS);
         let mut stale_exited = false;
         while std::time::Instant::now() < stale_exit_deadline {
             if stale_child.try_wait().ok().flatten().is_some() {
                 stale_exited = true;
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::consts::SHORT_SLEEP_MS,
+            ));
         }
         let new_pid = wait_for_daemon_version(&home, env!("CARGO_PKG_VERSION"))
             .expect("replacement daemon missing");

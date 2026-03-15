@@ -1,3 +1,4 @@
+pub mod consts;
 pub mod dedup;
 pub mod event_loop;
 pub mod gh_monitor_router;
