@@ -6,6 +6,9 @@ pub const SESSION_FILE_TTL_SECS: f64 = 86_400.0;
 /// Timeout for short daemon query/response socket exchanges.
 pub const DAEMON_QUERY_TIMEOUT_MS: u64 = 500;
 
+/// Best-effort timeout for one-way log forwarding to the daemon socket.
+pub const LOG_FORWARD_TIMEOUT_MS: u64 = 100;
+
 /// Maximum time to wait for a freshly started daemon to become reachable.
 pub const STARTUP_DEADLINE_SECS: u64 = 5;
 
