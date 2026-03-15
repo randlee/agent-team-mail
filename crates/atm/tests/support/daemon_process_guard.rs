@@ -201,7 +201,7 @@ fn pid_alive(_pid: i32) -> bool {
 #[cfg(not(unix))]
 fn send_signal(_pid: i32, _sig: i32) {}
 
-fn daemon_binary_path() -> PathBuf {
+pub(crate) fn daemon_binary_path() -> PathBuf {
     // Locate the build output directory from the current test binary path.
     // For integration tests, `current_exe()` is in `target/<profile>/deps/`.
     // The daemon binary lives one level up in `target/<profile>/`.

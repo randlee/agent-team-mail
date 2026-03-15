@@ -17,7 +17,7 @@ mod daemon_process_guard;
 mod daemon_test_registry;
 #[path = "support/env_guard.rs"]
 mod env_guard;
-use daemon_process_guard::DaemonProcessGuard;
+use daemon_process_guard::{DaemonProcessGuard, daemon_binary_path};
 use env_guard::EnvGuard;
 
 /// Helper to set home directory for cross-platform test compatibility.
@@ -45,6 +45,11 @@ fn set_home_env_path(cmd: &mut assert_cmd::Command, home: &std::path::Path) {
 }
 
 #[cfg(unix)]
+/// Guards cleanup of a daemon registered via PID file, not a direct `Child` handle.
+///
+/// Drop uses `reap_child_pid_best_effort` after signaling the PID. That may observe
+/// `ECHILD`, which is expected and harmless when the daemon PID was discovered from
+/// runtime files rather than spawned directly by this test process.
 struct RuntimeDaemonCleanupGuard {
     home: PathBuf,
     daemon_guard: Option<DaemonProcessGuard>,
@@ -181,13 +186,6 @@ fn wait_for_daemon_pid_change(temp_dir: &TempDir, previous_pid: u32, timeout: Du
 }
 
 #[cfg(unix)]
-fn daemon_binary_path() -> PathBuf {
-    let mut candidate = PathBuf::from(cargo::cargo_bin!("atm"));
-    candidate.set_file_name("atm-daemon");
-    candidate
-}
-
-#[cfg(unix)]
 fn write_lock_metadata(temp_dir: &TempDir, pid: u32, home_scope: String, executable_path: String) {
     let metadata_path = temp_dir.path().join(".atm/daemon/daemon.lock.meta.json");
     if let Some(parent) = metadata_path.parent() {
@@ -252,6 +250,12 @@ fn send_signal(pid: i32, sig: i32) {
 }
 
 #[cfg(unix)]
+/// Best-effort reap for test cleanup.
+///
+/// Some AQ/AP cleanup guards record PIDs discovered from runtime files rather than
+/// direct `Child` handles. In those cases `waitpid` may observe `ECHILD` because the
+/// PID is not our child process; that is expected and harmless, and we rely on the
+/// surrounding `kill(pid, 0)` liveness checks to confirm the process is gone.
 fn reap_child_pid_best_effort(pid: i32) {
     unsafe extern "C" {
         fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
@@ -343,6 +347,8 @@ async fn test_concurrent_sends_no_data_loss() {
                         || stderr.contains("No such file or directory")
                         || stderr.contains("The system cannot find the file specified");
                     if (transient_missing_config || transient_missing_file) && attempts < 6 {
+                        // Retry backoff only: this gives the daemon time to finish
+                        // startup/config materialization, not a timing fence for correctness.
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
                     }
@@ -561,8 +567,8 @@ fn test_lock_contention_queues_to_spool() {
 #[test]
 #[serial]
 fn test_spool_drain_delivery_cycle() {
-    // Still serialized: this test mutates ATM_HOME process-wide and exercises
-    // the global spool path directly.
+    // Still serialized: this test mutates ATM_HOME process-wide while exercising
+    // the spool path resolved from that shared env var.
     // This test uses the library API directly since spool_drain is not yet
     // exposed via CLI command.
     use agent_team_mail_core::io::inbox::inbox_append;
