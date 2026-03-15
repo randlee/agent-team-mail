@@ -5,6 +5,8 @@
 //! for translating wire payloads into these CI monitor request/status types before
 //! calling into the service layer.
 
+use crate::daemon::consts::{DEFAULT_DRAIN_TIMEOUT_SECS, DRAIN_SLEEP_MS};
+
 #[cfg(unix)]
 use super::gh_monitor::{
     RunPollProgress, fetch_pr_merge_state, is_pr_merge_state_dirty, poll_monitored_run_once,
@@ -760,7 +762,9 @@ pub(crate) async fn control_request(
             ))
         })?,
         CiMonitorLifecycleAction::Stop => {
-            let drain_timeout_secs = control.drain_timeout_secs.unwrap_or(30);
+            let drain_timeout_secs = control
+                .drain_timeout_secs
+                .unwrap_or(DEFAULT_DRAIN_TIMEOUT_SECS);
             let _ = set_gh_monitor_health_state(
                 home,
                 &control.team,
@@ -781,7 +785,7 @@ pub(crate) async fn control_request(
                 + std::time::Duration::from_secs(drain_timeout_secs.max(1));
             let mut in_flight = count_in_flight_monitors(home, &control.team);
             while in_flight > 0 && std::time::Instant::now() < deadline {
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(DRAIN_SLEEP_MS)).await;
                 in_flight = count_in_flight_monitors(home, &control.team);
             }
 
@@ -829,7 +833,9 @@ pub(crate) async fn control_request(
             health
         }
         CiMonitorLifecycleAction::Restart => {
-            let drain_timeout_secs = control.drain_timeout_secs.unwrap_or(30);
+            let drain_timeout_secs = control
+                .drain_timeout_secs
+                .unwrap_or(DEFAULT_DRAIN_TIMEOUT_SECS);
             let _ = set_gh_monitor_health_state(
                 home,
                 &control.team,
@@ -850,7 +856,7 @@ pub(crate) async fn control_request(
                 + std::time::Duration::from_secs(drain_timeout_secs.max(1));
             let mut in_flight = count_in_flight_monitors(home, &control.team);
             while in_flight > 0 && std::time::Instant::now() < deadline {
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(DRAIN_SLEEP_MS)).await;
                 in_flight = count_in_flight_monitors(home, &control.team);
             }
 

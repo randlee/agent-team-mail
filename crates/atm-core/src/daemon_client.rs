@@ -36,7 +36,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::consts::{
-    DAEMON_QUERY_TIMEOUT_MS, RETRY_SLEEP_MS, SOCKET_IO_TIMEOUT_MS, STARTUP_DEADLINE_SECS,
+    DAEMON_QUERY_TIMEOUT_MS, DAEMON_TIMEOUT_MAX_SECS, DAEMON_TIMEOUT_MIN_SECS, RETRY_SLEEP_MS,
+    SOCKET_IO_TIMEOUT_MS, STARTUP_DEADLINE_SECS,
 };
 
 /// Protocol version for the socket JSON protocol.
@@ -1766,7 +1767,9 @@ pub fn gh_monitor(request: &GhMonitorRequest) -> anyhow::Result<Option<GhMonitor
 
     // `gh-monitor` may wait for CI run discovery up to start_timeout_secs.
     let start_timeout_secs = request.start_timeout_secs.unwrap_or(120);
-    let read_timeout = std::time::Duration::from_secs((start_timeout_secs + 30).min(600));
+    let read_timeout = std::time::Duration::from_secs(
+        (start_timeout_secs + DAEMON_TIMEOUT_MIN_SECS).min(DAEMON_TIMEOUT_MAX_SECS),
+    );
     let response = match query_daemon_with_timeout(&socket_request, read_timeout)? {
         Some(r) => r,
         None => return Ok(None),
@@ -1810,8 +1813,12 @@ pub fn gh_monitor_control(
     };
 
     // Stop/restart can drain in-flight monitors for drain_timeout_secs.
-    let drain_timeout_secs = request.drain_timeout_secs.unwrap_or(30);
-    let read_timeout = std::time::Duration::from_secs((drain_timeout_secs + 30).min(600));
+    let drain_timeout_secs = request
+        .drain_timeout_secs
+        .unwrap_or(DAEMON_TIMEOUT_MIN_SECS);
+    let read_timeout = std::time::Duration::from_secs(
+        (drain_timeout_secs + DAEMON_TIMEOUT_MIN_SECS).min(DAEMON_TIMEOUT_MAX_SECS),
+    );
     let response = match query_daemon_with_timeout(&socket_request, read_timeout)? {
         Some(r) => r,
         None => return Ok(None),
@@ -2744,7 +2751,8 @@ mod tests {
 
     #[cfg(unix)]
     fn wait_for_daemon_runtime_ready(home: &std::path::Path) -> bool {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(crate::consts::SHORT_DEADLINE_SECS);
         let pid_path = home.join(".atm/daemon/atm-daemon.pid");
         while std::time::Instant::now() < deadline {
             if pid_path.exists() && super::daemon_socket_connectable(home) {
@@ -2759,7 +2767,8 @@ mod tests {
 
     #[cfg(unix)]
     fn wait_for_daemon_version(home: &std::path::Path, expected_version: &str) -> Option<i32> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(crate::consts::SHORT_DEADLINE_SECS);
         let pid_path = home.join(".atm/daemon/atm-daemon.pid");
         let status_path = home.join(".atm/daemon/status.json");
         while std::time::Instant::now() < deadline {
@@ -3331,7 +3340,7 @@ sleep 2
         let created = create_isolated_runtime_root_with_base(
             base.path(),
             Some("smoke-test"),
-            Duration::from_secs(600),
+            Duration::from_secs(DAEMON_TIMEOUT_MAX_SECS),
             false,
         )
         .expect("create isolated runtime");
@@ -3390,7 +3399,7 @@ sleep 2
         let created = create_isolated_runtime_root_with_base(
             base.path(),
             Some("live-gh"),
-            Duration::from_secs(600),
+            Duration::from_secs(DAEMON_TIMEOUT_MAX_SECS),
             true,
         )
         .expect("create isolated runtime");
@@ -3591,7 +3600,8 @@ sleep 8
 
         ensure_daemon_running_unix().expect("must recover from dead stale pid metadata");
         let marker = home.join("started-ok");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(crate::consts::SHORT_DEADLINE_SECS);
         while std::time::Instant::now() < deadline && !marker.exists() {
             std::thread::sleep(std::time::Duration::from_millis(
                 crate::consts::SHORT_SLEEP_MS,
@@ -3764,7 +3774,8 @@ sleep 8
         }
         ensure_daemon_running_unix().expect("mismatch daemon should be restarted");
 
-        let stale_exit_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let stale_exit_deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(crate::consts::SHORT_DEADLINE_SECS);
         let mut stale_exited = false;
         while std::time::Instant::now() < stale_exit_deadline {
             if stale_child.try_wait().ok().flatten().is_some() {
