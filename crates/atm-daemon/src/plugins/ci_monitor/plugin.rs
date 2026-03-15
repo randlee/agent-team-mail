@@ -863,6 +863,7 @@ impl CiMonitorPlugin {
             budget_used_in_window: None,
             rate_limit_remaining: None,
             rate_limit_limit: None,
+            rate_limit_reset_at: None,
             poll_owner: None,
             owner_runtime_kind: None,
             owner_pid: None,
@@ -2730,6 +2731,7 @@ notify_target = "team-lead"
 
     #[cfg(unix)]
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_polling_notification_suppressed_when_command_path_already_terminal() {
         use crate::plugins::ci_monitor::mock_support::{MockCiProvider, create_test_run};
         use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus};

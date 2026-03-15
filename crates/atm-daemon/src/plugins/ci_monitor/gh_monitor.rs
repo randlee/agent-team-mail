@@ -1,24 +1,13 @@
 //! GitHub-specific gh_monitor provider logic.
 
 pub(crate) use super::gh_alerts::emit_ci_monitor_message;
-// These schema re-exports keep the legacy gh_monitor tests/builders compiling
-// while AM.6 finishes moving the remaining provider helpers behind the routed surface.
 use super::github_provider::GitHubActionsProvider;
-#[allow(unused_imports)]
 pub(crate) use super::github_schema::{
-    GhPrLookupView, GhPrView, GhPullRequest, GhRunJob, GhRunListEntry, GhRunStep, GhRunView,
+    GhPrLookupView, GhPrView, GhRunJob, GhRunListEntry, GhRunView,
 };
 use super::helpers::upsert_gh_monitor_status_for_repo;
 use super::provider::CiProvider;
-// These routing re-exports preserve the pre-split gh_monitor call surface for
-// downstream code until the final thin-socket cleanup removes the shim layer.
-#[allow(unused_imports)]
-pub(crate) use super::routing::{
-    notify_ci_not_started as emit_ci_not_started_alert,
-    notify_gh_monitor_health_transition as emit_gh_monitor_health_transition,
-    notify_merge_conflict as emit_merge_conflict_alert, repo_scope_matches,
-    resolve_ci_alert_routing,
-};
+use super::routing::{notify_merge_conflict, resolve_ci_alert_routing};
 use super::types::{CiMonitorRequest, CiMonitorStatus, CiMonitorTargetKind, GhAlertTargets};
 use agent_team_mail_core::gh_monitor_observability::{GhCliObserverContext, build_gh_cli_observer};
 use anyhow::Result;
@@ -473,7 +462,7 @@ pub(crate) async fn poll_monitored_run_once(
                 if let Some(merge_state_status) = pr_view.merge_state_status.as_deref()
                     && is_pr_merge_state_dirty(merge_state_status)
                 {
-                    emit_merge_conflict_alert(
+                    notify_merge_conflict(
                         home,
                         status_seed,
                         pr_view.url.as_deref(),

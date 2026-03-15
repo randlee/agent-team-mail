@@ -421,26 +421,15 @@ where
         && existing_owner.pid != current_owner.pid
         && owner_pid_alive(existing_owner.pid)
     {
-        emit_event_best_effort(EventFields {
-            level: "warn",
-            source: "atm",
-            action: "gh_monitor_lease_conflict",
-            team: Some(team.to_string()),
-            target: Some(repo.to_ascii_lowercase()),
-            runtime: Some(current_owner.runtime.clone()),
-            error: Some(format!(
-                "repo lease already owned by pid {} at {}",
-                existing_owner.pid, existing_owner.executable_path
-            )),
-            ..Default::default()
-        });
-        anyhow::bail!(
-            "gh_monitor lease conflict for team={} repo={}: active owner pid={} executable={} home={}",
+        emit_event_best_effort(build_lease_conflict_event_fields(
             team,
             repo,
-            existing_owner.pid,
-            existing_owner.executable_path,
-            existing_owner.home_scope
+            &current_owner.runtime,
+            existing_owner,
+        ));
+        anyhow::bail!(
+            "{}",
+            format_lease_conflict_error(team, repo, existing_owner)
         );
     }
     record.owner = Some(current_owner);
@@ -454,6 +443,34 @@ where
     write_repo_state(home, &GhRepoStateFile { records })
         .context("failed to persist gh monitor repo-state")?;
     Ok(record)
+}
+
+fn build_lease_conflict_event_fields(
+    team: &str,
+    repo: &str,
+    runtime: &str,
+    existing_owner: &GhRuntimeOwner,
+) -> EventFields {
+    EventFields {
+        level: "warn",
+        source: "atm",
+        action: "gh_monitor_lease_conflict",
+        team: Some(team.to_string()),
+        target: Some(repo.to_ascii_lowercase()),
+        runtime: Some(runtime.to_string()),
+        error: Some(format!(
+            "repo lease already owned by pid {} at {}",
+            existing_owner.pid, existing_owner.executable_path
+        )),
+        ..Default::default()
+    }
+}
+
+fn format_lease_conflict_error(team: &str, repo: &str, existing_owner: &GhRuntimeOwner) -> String {
+    format!(
+        "gh_monitor lease conflict for team={} repo={}: active owner pid={} executable={} home={}",
+        team, repo, existing_owner.pid, existing_owner.executable_path, existing_owner.home_scope
+    )
 }
 
 fn read_or_create_record(home: &Path, team: &str, repo: &str) -> Result<GhRepoStateRecord> {
@@ -711,6 +728,10 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut child = Command::new("sleep").arg("2").spawn().unwrap();
         let now = Utc::now();
+        let foreign_daemon_path = std::env::temp_dir()
+            .join("foreign-atm-daemon")
+            .to_string_lossy()
+            .to_string();
         write_repo_state(
             temp.path(),
             &GhRepoStateFile {
@@ -735,10 +756,7 @@ mod tests {
                     rate_limit: None,
                     owner: Some(GhRuntimeOwner {
                         runtime: "dev".to_string(),
-                        executable_path: std::env::temp_dir()
-                            .join("foreign-atm-daemon")
-                            .to_string_lossy()
-                            .to_string(),
+                        executable_path: foreign_daemon_path.clone(),
                         home_scope: temp.path().to_string_lossy().to_string(),
                         pid: child.id(),
                     }),
@@ -764,6 +782,30 @@ mod tests {
             })
             .unwrap_err();
         assert!(err.to_string().contains("lease conflict"));
+        assert!(err.to_string().contains(&format!("pid={}", child.id())));
+        assert!(err.to_string().contains(&foreign_daemon_path));
+        let fields = build_lease_conflict_event_fields(
+            "atm-dev",
+            "owner/repo",
+            "atm-daemon",
+            &GhRuntimeOwner {
+                runtime: "dev".to_string(),
+                executable_path: foreign_daemon_path,
+                home_scope: temp.path().to_string_lossy().to_string(),
+                pid: child.id(),
+            },
+        );
+        assert_eq!(fields.action, "gh_monitor_lease_conflict");
+        assert_eq!(fields.team.as_deref(), Some("atm-dev"));
+        assert_eq!(fields.target.as_deref(), Some("owner/repo"));
+        assert_eq!(fields.runtime.as_deref(), Some("atm-daemon"));
+        assert!(
+            fields
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains(&child.id().to_string())
+        );
         let _ = child.kill();
         let _ = child.wait();
     }
