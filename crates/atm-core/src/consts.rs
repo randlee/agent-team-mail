@@ -33,5 +33,8 @@ pub const SHORT_SLEEP_MS: u64 = 50;
 /// Short deadline used in test-only daemon wait loops.
 pub const SHORT_DEADLINE_SECS: u64 = 2;
 
+/// Brief settle delay before re-reading daemon metadata written asynchronously after startup.
+pub const DAEMON_METADATA_SETTLE_MS: u64 = 150;
+
 /// Capacity for the producer fan-in logging channel.
 pub const LOG_EVENT_CHANNEL_CAPACITY: usize = 512;

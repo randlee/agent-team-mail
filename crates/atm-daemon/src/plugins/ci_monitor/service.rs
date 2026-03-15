@@ -263,7 +263,10 @@ async fn run_shared_repo_poller(home: std::path::PathBuf, team: String, owner_re
             Ok(records) => records,
             Err(err) => {
                 warn!(team = %team, repo = %owner_repo, "failed to load gh monitor state: {err}");
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    crate::daemon::consts::SHARED_POLLER_ERROR_BACKOFF_SECS,
+                ))
+                .await;
                 continue;
             }
         };
@@ -302,7 +305,11 @@ async fn run_shared_repo_poller(home: std::path::PathBuf, team: String, owner_re
         }
 
         let _ = update_gh_repo_state_in_flight(&home, &team, &owner_repo, 0, "atm-daemon");
-        let sleep_secs = if active_records.is_empty() { 300 } else { 60 };
+        let sleep_secs = if active_records.is_empty() {
+            crate::daemon::consts::SHARED_POLLER_IDLE_SLEEP_SECS
+        } else {
+            crate::daemon::consts::SHARED_POLLER_ACTIVE_SLEEP_SECS
+        };
         tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
     }
 }

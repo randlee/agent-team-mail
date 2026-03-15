@@ -2457,7 +2457,9 @@ fn detect_daemon_identity_mismatch(
         && pid_alive(candidate_pid as i32)
     {
         // Retry backoff: daemon may not have flushed lock metadata yet; wait once before re-reading.
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        std::thread::sleep(std::time::Duration::from_millis(
+            crate::consts::DAEMON_METADATA_SETTLE_MS,
+        ));
         metadata = std::fs::read_to_string(&metadata_path)
             .ok()
             .and_then(|s| serde_json::from_str::<DaemonLockMetadata>(&s).ok());
