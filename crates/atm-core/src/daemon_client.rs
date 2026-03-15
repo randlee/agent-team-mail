@@ -2450,6 +2450,7 @@ fn detect_daemon_identity_mismatch(
         && let Some(candidate_pid) = pid_from_file.or(pid_from_status)
         && pid_alive(candidate_pid as i32)
     {
+        // Retry backoff: daemon may not have flushed lock metadata yet; wait once before re-reading.
         std::thread::sleep(std::time::Duration::from_millis(150));
         metadata = std::fs::read_to_string(&metadata_path)
             .ok()

@@ -44,6 +44,11 @@ fn set_home_env_path(cmd: &mut assert_cmd::Command, home: &std::path::Path) {
 }
 
 #[cfg(unix)]
+/// Guards cleanup of a daemon registered via PID file, not a direct `Child` handle.
+///
+/// Drop uses `reap_child_pid_best_effort` after signaling the PID. That may observe
+/// `ECHILD`, which is expected and harmless when the daemon PID was discovered from
+/// runtime files rather than spawned directly by this test process.
 struct RuntimeDaemonCleanupGuard {
     home: PathBuf,
 }
