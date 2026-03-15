@@ -3,8 +3,10 @@
 use agent_team_mail_core::daemon_client::ensure_daemon_running;
 use agent_team_mail_core::logging::{UnifiedLogMode, init_stderr_only, init_unified};
 use agent_team_mail_core::logging_event::{LogEventV1, spool_dir};
+use serial_test::serial;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -34,6 +36,83 @@ impl Drop for EnvGuard {
                 std::env::remove_var(self.key);
             }
         }
+    }
+}
+
+struct AutostartPidGuard {
+    pid: u32,
+}
+
+impl AutostartPidGuard {
+    fn adopt_from_pid_file(pid_path: &Path, timeout: Duration) -> Option<Self> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if let Ok(raw) = fs::read_to_string(pid_path)
+                && let Ok(pid) = raw.trim().parse::<u32>()
+                && pid > 1
+                && pid_alive(pid as i32)
+            {
+                return Some(Self { pid });
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        None
+    }
+
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+}
+
+impl Drop for AutostartPidGuard {
+    fn drop(&mut self) {
+        cleanup_pid(self.pid);
+    }
+}
+
+fn cleanup_pid(pid: u32) {
+    send_signal(pid as i32, 15);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        if !pid_alive(pid as i32) {
+            reap_child_pid_best_effort(pid as i32);
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    send_signal(pid as i32, 9);
+    reap_child_pid_best_effort(pid as i32);
+}
+
+fn pid_alive(pid: i32) -> bool {
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    // SAFETY: signal 0 checks process existence without sending a signal.
+    unsafe { kill(pid, 0) == 0 }
+}
+
+fn send_signal(pid: i32, sig: i32) {
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    // SAFETY: best-effort test cleanup path.
+    let _ = unsafe { kill(pid, sig) };
+}
+
+fn reap_child_pid_best_effort(pid: i32) {
+    unsafe extern "C" {
+        fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+    }
+    const WNOHANG: i32 = 1;
+    for _ in 0..20 {
+        let mut status = 0;
+        // SAFETY: best-effort reap for test child processes; WNOHANG avoids blocking.
+        let waited = unsafe { waitpid(pid, &mut status, WNOHANG) };
+        if waited == pid || !pid_alive(pid) || waited == -1 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -69,16 +148,17 @@ fn read_spool_events(spool: &std::path::Path) -> Vec<LogEventV1> {
 }
 
 #[test]
+#[serial]
 fn autostart_failure_logs_structured_event_with_stderr_tail_context() {
     let tmp = TempDir::new().expect("tempdir");
     let home = tmp.path().to_path_buf();
 
     let script_path = home.join("fake-daemon-fail.sh");
-    let script = r#"#!/bin/sh
-set -eu
-echo "fatal: invalid plugin config" >&2
-exit 42
-"#;
+    let leaked_pid_path = home.join("leaked-autostart-child.pid");
+    let script = format!(
+        "#!/bin/sh\nset -eu\n(sleep 30) &\nbgpid=$!\nprintf '%s\\n' \"$bgpid\" > \"{}\"\necho \"fatal: invalid plugin config\" >&2\nexit 42\n",
+        leaked_pid_path.display()
+    );
     fs::write(&script_path, script).expect("write script");
     let mut perms = fs::metadata(&script_path)
         .expect("script metadata")
@@ -102,6 +182,10 @@ exit 42
     .unwrap_or_else(|_| init_stderr_only());
 
     let err = ensure_daemon_running().expect_err("autostart should fail for test script");
+    let leaked_pid_guard =
+        AutostartPidGuard::adopt_from_pid_file(&leaked_pid_path, Duration::from_secs(1))
+        .expect("autostart failure test should adopt leaked background child");
+    let leaked_pid = leaked_pid_guard.pid();
     let msg = err.to_string();
     assert!(
         msg.contains("stderr_tail="),
@@ -128,11 +212,17 @@ exit 42
                     .unwrap_or_default()
                     .contains("invalid plugin config")
         }) {
+            drop(leaked_pid_guard);
+            assert!(
+                !pid_alive(leaked_pid as i32),
+                "adopted leaked autostart child must be reaped before test exit"
+            );
             return;
         }
         std::thread::sleep(Duration::from_millis(25));
     }
 
+    drop(leaked_pid_guard);
     let events = read_spool_events(&spool);
     panic!(
         "expected daemon_autostart_failure with stderr_tail in structured logs; observed events: {:?}",

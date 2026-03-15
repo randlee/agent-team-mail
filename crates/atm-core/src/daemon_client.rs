@@ -2267,6 +2267,10 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         error: Some(timeout_error.clone()),
         ..Default::default()
     });
+    if child.try_wait()?.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
     anyhow::bail!("{timeout_error}")
 }
 

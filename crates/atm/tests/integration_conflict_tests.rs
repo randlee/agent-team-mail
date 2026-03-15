@@ -8,6 +8,7 @@ use assert_cmd::cargo;
 use serial_test::serial;
 use std::fs;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 #[path = "support/daemon_process_guard.rs"]
@@ -46,6 +47,7 @@ fn set_home_env_path(cmd: &mut assert_cmd::Command, home: &std::path::Path) {
 #[cfg(unix)]
 struct RuntimeDaemonCleanupGuard {
     home: PathBuf,
+    daemon_guard: Option<DaemonProcessGuard>,
 }
 
 #[cfg(unix)]
@@ -54,21 +56,40 @@ impl RuntimeDaemonCleanupGuard {
         daemon_test_registry::sweep_stale_test_daemons();
         Self {
             home: temp_dir.path().to_path_buf(),
+            daemon_guard: None,
         }
+    }
+
+    fn adopt_running_pid(&mut self, daemon_bin: &std::path::Path, timeout: Duration) -> Option<u32> {
+        if let Some(existing) = self.daemon_guard.as_ref() {
+            return Some(existing.pid());
+        }
+
+        let pid_path = self.home.join(".atm/daemon/atm-daemon.pid");
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if let Ok(raw) = fs::read_to_string(&pid_path)
+                && let Ok(pid) = raw.trim().parse::<u32>()
+                && pid > 1
+                && pid_alive(pid as i32)
+            {
+                self.daemon_guard = Some(DaemonProcessGuard::adopt_registered_pid(
+                    pid,
+                    daemon_bin,
+                    &self.home,
+                ));
+                return Some(pid);
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        None
     }
 }
 
 #[cfg(unix)]
 impl Drop for RuntimeDaemonCleanupGuard {
     fn drop(&mut self) {
-        let pid_path = self.home.join(".atm/daemon/atm-daemon.pid");
-        if let Ok(raw) = fs::read_to_string(pid_path)
-            && let Ok(pid) = raw.trim().parse::<u32>()
-            && pid > 1
-            && pid_alive(pid as i32)
-        {
-            cleanup_pid(pid);
-        }
+        drop(self.daemon_guard.take());
         daemon_test_registry::sweep_stale_test_daemons();
     }
 }
@@ -205,6 +226,18 @@ fn pid_alive(pid: i32) -> bool {
     }
     // SAFETY: signal 0 checks process existence.
     unsafe { kill(pid, 0) == 0 }
+}
+
+#[cfg(unix)]
+fn wait_for_pid_exit(pid: i32, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !pid_alive(pid) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("pid {pid} stayed alive beyond {timeout:?}");
 }
 
 #[cfg(unix)]
@@ -415,7 +448,7 @@ fn test_concurrent_cli_and_direct_write_no_loss() {
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
     #[cfg(unix)]
-    let _daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
+    let mut daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
 
     let inbox_path = temp_dir
         .path()
@@ -462,6 +495,7 @@ fn test_concurrent_cli_and_direct_write_no_loss() {
 
     handle1.join().unwrap();
     handle2.join().unwrap();
+    let _ = daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
 
     // Verify all messages are present
     let content = fs::read_to_string(&inbox_path).unwrap();
@@ -917,7 +951,7 @@ fn test_permission_denied_inboxes_dir() {
 
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
-    let _daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
+    let mut daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
 
     let inboxes_dir = temp_dir.path().join(".claude/teams/test-team/inboxes");
 
@@ -938,6 +972,7 @@ fn test_permission_denied_inboxes_dir() {
         !output.status.success(),
         "Send should fail when directory is read-only"
     );
+    let _ = daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
 
     // Restore permissions for cleanup
     fs::set_permissions(&inboxes_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -958,7 +993,7 @@ fn test_no_duplicate_message_ids_under_concurrent_sends() {
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
     #[cfg(unix)]
-    let _daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
+    let mut daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
 
     let num_threads = 4;
     let barrier = Arc::new(Barrier::new(num_threads));
@@ -984,6 +1019,7 @@ fn test_no_duplicate_message_ids_under_concurrent_sends() {
     for handle in handles {
         handle.join().unwrap();
     }
+    let _ = daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
 
     // Check inbox for duplicates
     let inbox_path = temp_dir
@@ -1005,6 +1041,48 @@ fn test_no_duplicate_message_ids_under_concurrent_sends() {
         msg_ids.len(),
         unique_ids.len()
     );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_runtime_daemon_cleanup_guard_adopts_pid_written_after_creation() {
+    let temp_dir = TempDir::new().unwrap();
+    let mut daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
+    let daemon_dir = temp_dir.path().join(".atm/daemon");
+    fs::create_dir_all(&daemon_dir).unwrap();
+
+    let launcher = temp_dir.path().join("late-pid-launcher.sh");
+    fs::write(
+        &launcher,
+        format!(
+            "#!/bin/sh\nset -eu\nmkdir -p \"{}\"\n(sleep 30) &\nbgpid=$!\nprintf '%s\\n' \"$bgpid\" > \"{}\"\nexit 0\n",
+            daemon_dir.display(),
+            daemon_dir.join("atm-daemon.pid").display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&launcher).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&launcher, perms).unwrap();
+    }
+
+    let status = Command::new(&launcher)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let adopted_pid = daemon_cleanup
+        .adopt_running_pid(&launcher, Duration::from_secs(1))
+        .expect("expected cleanup guard to adopt late pid-file daemon");
+    drop(daemon_cleanup);
+    wait_for_pid_exit(adopted_pid as i32, Duration::from_secs(2));
 }
 
 // ============================================================================
