@@ -1142,9 +1142,8 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
         lock_elapsed <= Duration::from_secs(2),
         "first daemon should acquire daemon.lock within 2s: elapsed={lock_elapsed:?}"
     );
-    let lock_elapsed =
-        wait_for_lock_file_acquired_elapsed(temp_dir.path(), 8_000)
-            .expect("first daemon should acquire daemon.lock within 8s");
+    let lock_elapsed = wait_for_lock_file_acquired_elapsed(temp_dir.path(), 8_000)
+        .expect("first daemon should acquire daemon.lock within 8s");
     assert!(
         lock_elapsed <= Duration::from_secs(8),
         "first daemon should acquire daemon.lock within 8s: elapsed={lock_elapsed:?}"
