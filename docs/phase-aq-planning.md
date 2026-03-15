@@ -69,7 +69,10 @@ Phase AQ is a focused cleanup phase addressing findings from the AN/AO/AP phase 
 - ARCH-001 class: any remaining shadow type definitions or re-exports that duplicate canonical types (AN review found shadow `GhMonitorStateRecord`/`GhMonitorStateFile` in plugin.rs — fixed, but audit for similar patterns)
 - Duplicate `notify_target` resolution logic (AN-004 class)
 - Any dead `#[allow(dead_code)]` attributes added as workarounds rather than fixes
-- AP review findings to be incorporated once available
+- **QA-002** (rust-qa minor, AP review): `integration_conflict_tests.rs` has its own local `daemon_binary_path()` helper that duplicates the canonical implementation in `daemon_process_guard.rs`. Remove the local copy and use the shared support module.
+- **ATM-QA-004** (AP review, minor): `RuntimeDaemonCleanupGuard` calls `reap_child_pid_best_effort` on non-child PIDs — harmless (ECHILD) but undocumented. Add doc comment explaining the intent.
+- **ATM-QA-003** (AP review, minor): 1 bare sleep used as retry backoff (not synchronization) — add explanatory comment.
+- **ATM-QA-005** (AP review, minor): `#[serial]` comment on `test_spool_drain_delivery_cycle` is stale — update or remove.
 
 **Deliverables**:
 - `cargo check --all-features` + `cargo clippy -- -D warnings` clean
