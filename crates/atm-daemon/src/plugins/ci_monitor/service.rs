@@ -12,7 +12,7 @@ use super::gh_monitor::{
 };
 use super::github_provider::GitHubActionsProvider;
 #[cfg(unix)]
-use super::health::set_gh_monitor_health_state;
+use super::health::{apply_repo_state_to_health, set_gh_monitor_health_state};
 use super::helpers::{
     apply_config_state_to_status, count_in_flight_monitors, evaluate_gh_monitor_config,
     gh_monitor_key, load_gh_monitor_state_map, load_gh_monitor_state_records,
@@ -28,8 +28,13 @@ use super::types::{
 };
 use agent_team_mail_core::context::GitProvider as GitProviderType;
 use agent_team_mail_core::gh_monitor_observability::{
-    GhCliObserverContext, build_gh_cli_observer, update_gh_repo_state_in_flight,
+    GhCliObserverContext, build_gh_cli_observer, read_gh_repo_state_record,
+    update_gh_repo_state_in_flight,
 };
+use agent_team_mail_core::home::teams_root_dir_for;
+use agent_team_mail_core::io::inbox::inbox_append;
+use agent_team_mail_core::schema::InboxMessage;
+use agent_team_mail_core::team_config_store::TeamConfigStore;
 #[cfg(unix)]
 use std::collections::HashMap;
 #[cfg(unix)]
@@ -41,6 +46,52 @@ use tracing::warn;
 pub(crate) use agent_team_mail_ci_monitor::service::{
     CiMonitorServiceError, CiMonitorServiceResult, fetch_run_details, list_completed_runs,
 };
+
+#[cfg(unix)]
+fn notify_team_lead_of_monitor_control(
+    home: &std::path::Path,
+    actor: &str,
+    actor_team: &str,
+    target_team: &str,
+    action_word: &str,
+    reason: &str,
+) -> anyhow::Result<()> {
+    let teams_root = teams_root_dir_for(home);
+    let team_dir = teams_root.join(target_team);
+    let lead_agent = TeamConfigStore::open(&team_dir)
+        .read()
+        .ok()
+        .and_then(|cfg| {
+            cfg.lead_agent_id
+                .split('@')
+                .next()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "team-lead".to_string());
+    let inbox_path = team_dir.join("inboxes").join(format!("{lead_agent}.json"));
+    let now = chrono::Utc::now().to_rfc3339();
+    let message = InboxMessage {
+        from: actor.to_string(),
+        text: format!(
+            "your gh monitor was {action_word} by {actor}@{actor_team} for {}",
+            reason.trim()
+        ),
+        timestamp: now.clone(),
+        read: false,
+        summary: Some(format!("gh monitor {action_word} by {actor}@{actor_team}")),
+        message_id: Some(format!(
+            "gh-monitor-{}-{}-{}",
+            action_word,
+            target_team,
+            chrono::Utc::now().timestamp_millis()
+        )),
+        unknown_fields: std::collections::HashMap::new(),
+    };
+    let _ = inbox_append(&inbox_path, &message, target_team, &lead_agent)?;
+    Ok(())
+}
 
 #[cfg(unix)]
 fn shared_pollers() -> &'static Mutex<HashMap<String, JoinHandle<()>>> {
@@ -659,6 +710,36 @@ pub(crate) async fn control_request(
 
     let config_state =
         evaluate_gh_monitor_config(home, &control.team, control.config_cwd.as_deref());
+    let caller_team = control
+        .actor_team
+        .as_deref()
+        .unwrap_or(control.team.as_str());
+    let cross_team = caller_team.trim() != control.team.trim();
+    if cross_team && !control.user_authorized {
+        return Err(CiMonitorServiceError::new(
+            "AUTHORIZATION_REQUIRED",
+            "cross-team gh monitor control requires --user-authorized",
+        ));
+    }
+    if cross_team
+        && control
+            .operator_reason
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(str::is_empty)
+    {
+        return Err(CiMonitorServiceError::new(
+            "MISSING_PARAMETER",
+            "cross-team gh monitor control requires a non-empty --reason",
+        ));
+    }
+    let repo_scope = control
+        .repo
+        .as_deref()
+        .or(config_state.owner_repo.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
 
     let health = match control.action {
         CiMonitorLifecycleAction::Start => set_gh_monitor_health_state(
@@ -712,7 +793,7 @@ pub(crate) async fn control_request(
                     in_flight
                 )
             };
-            set_gh_monitor_health_state(
+            let health = set_gh_monitor_health_state(
                 home,
                 &control.team,
                 GhMonitorHealthUpdate {
@@ -726,7 +807,26 @@ pub(crate) async fn control_request(
             )
             .map_err(|e| {
                 CiMonitorServiceError::internal(format!("failed to stop monitor lifecycle: {e}"))
-            })?
+            })?;
+            if cross_team {
+                notify_team_lead_of_monitor_control(
+                    home,
+                    control.actor.as_deref().unwrap_or("team-lead"),
+                    caller_team,
+                    &control.team,
+                    "stopped",
+                    control
+                        .operator_reason
+                        .as_deref()
+                        .unwrap_or("operator-authorized cross-team stop"),
+                )
+                .map_err(|e| {
+                    CiMonitorServiceError::internal(format!(
+                        "failed to notify team lead about cross-team stop: {e}"
+                    ))
+                })?;
+            }
+            health
         }
         CiMonitorLifecycleAction::Restart => {
             let drain_timeout_secs = control.drain_timeout_secs.unwrap_or(30);
@@ -776,7 +876,7 @@ pub(crate) async fn control_request(
                 ));
             }
 
-            set_gh_monitor_health_state(
+            let health = set_gh_monitor_health_state(
                 home,
                 &control.team,
                 GhMonitorHealthUpdate {
@@ -797,10 +897,35 @@ pub(crate) async fn control_request(
             )
             .map_err(|e| {
                 CiMonitorServiceError::internal(format!("failed to restart monitor lifecycle: {e}"))
-            })?
+            })?;
+            if cross_team {
+                notify_team_lead_of_monitor_control(
+                    home,
+                    control.actor.as_deref().unwrap_or("team-lead"),
+                    caller_team,
+                    &control.team,
+                    "restarted",
+                    control
+                        .operator_reason
+                        .as_deref()
+                        .unwrap_or("operator-authorized cross-team restart"),
+                )
+                .map_err(|e| {
+                    CiMonitorServiceError::internal(format!(
+                        "failed to notify team lead about cross-team restart: {e}"
+                    ))
+                })?;
+            }
+            health
         }
     };
 
+    let mut health = health;
+    if let Some(repo_scope) = repo_scope.as_deref()
+        && let Ok(Some(repo_state)) = read_gh_repo_state_record(home, &control.team, repo_scope)
+    {
+        apply_repo_state_to_health(&mut health, &repo_state);
+    }
     Ok(health)
 }
 
@@ -832,22 +957,9 @@ pub(crate) fn health_request(
         health.message = Some(reason.to_string());
     }
     if let Some(repo_scope) = repo_scope.or(config_state.owner_repo.as_deref())
-        && let Ok(Some(repo_state)) =
-            agent_team_mail_core::gh_monitor_observability::read_gh_repo_state_record(
-                home, team, repo_scope,
-            )
+        && let Ok(Some(repo_state)) = read_gh_repo_state_record(home, team, repo_scope)
     {
-        health.repo_state_updated_at = Some(repo_state.updated_at.clone());
-        health.budget_limit_per_hour = Some(repo_state.budget_limit_per_hour);
-        health.budget_used_in_window = Some(repo_state.budget_used_in_window);
-        health.rate_limit_remaining = repo_state.rate_limit.as_ref().map(|rate| rate.remaining);
-        health.rate_limit_limit = repo_state.rate_limit.as_ref().map(|rate| rate.limit);
-        health.poll_owner = repo_state.owner.as_ref().map(|owner| {
-            format!(
-                "{} pid={} runtime={} home={}",
-                owner.executable_path, owner.pid, owner.runtime, owner.home_scope
-            )
-        });
+        apply_repo_state_to_health(&mut health, &repo_state);
     }
     Ok(health)
 }

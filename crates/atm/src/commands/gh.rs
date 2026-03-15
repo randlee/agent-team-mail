@@ -9,6 +9,10 @@ use agent_team_mail_core::daemon_client::{
     GhMonitorStatus, GhMonitorTargetKind, GhStatusRequest, gh_monitor, gh_monitor_control,
     gh_monitor_health_with_context, gh_status,
 };
+use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::io::inbox::inbox_append;
+use agent_team_mail_core::schema::InboxMessage;
+use agent_team_mail_core::team_config_store::TeamConfigStore;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use minijinja::Environment;
@@ -21,7 +25,7 @@ use std::thread;
 use std::time::Duration;
 use tempfile::NamedTempFile;
 
-use crate::util::settings::get_home_dir;
+use crate::util::settings::{get_home_dir, teams_root_dir_for};
 
 /// GitHub CI monitor commands.
 #[derive(Args, Debug)]
@@ -143,6 +147,14 @@ struct MonitorStopArgs {
     /// Graceful drain timeout in seconds before force-stop (default 30s)
     #[arg(long = "drain-timeout", default_value_t = 30)]
     drain_timeout_secs: u64,
+
+    /// Hidden operator confirmation for cross-team shutdown
+    #[arg(long, hide = true)]
+    user_authorized: bool,
+
+    /// Human reason recorded for hidden cross-team shutdown
+    #[arg(long, hide = true, requires = "user_authorized")]
+    reason: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -150,6 +162,14 @@ struct MonitorRestartArgs {
     /// Graceful drain timeout in seconds before restart (default 30s)
     #[arg(long = "drain-timeout", default_value_t = 30)]
     drain_timeout_secs: u64,
+
+    /// Hidden operator confirmation for cross-team restart
+    #[arg(long, hide = true)]
+    user_authorized: bool,
+
+    /// Human reason recorded for hidden cross-team restart
+    #[arg(long, hide = true, requires = "user_authorized")]
+    reason: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -256,6 +276,18 @@ struct GhNamespaceStatus {
     rate_limit_limit: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     poll_owner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_runtime_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_binary_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_atm_home: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_repo: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_poll_interval_secs: Option<u64>,
     actions: Vec<&'static str>,
 }
 
@@ -578,12 +610,24 @@ pub fn execute(args: GhArgs) -> Result<()> {
                         )?),
                         drain_timeout_secs: None,
                         config_cwd: Some(current_dir.to_string_lossy().to_string()),
+                        actor: Some(resolve_monitor_caller_identity(&config)),
+                        actor_team: Some(config.core.default_team.clone()),
+                        user_authorized: false,
+                        operator_reason: None,
                     };
                     GhOutput::MonitorHealth(gh_monitor_control(&request)?.ok_or_else(|| {
                         anyhow::anyhow!("daemon is not reachable for atm gh monitor start command")
                     })?)
                 }
                 MonitorTarget::Stop(stop) => {
+                    let actor = resolve_monitor_caller_identity(&config);
+                    let actor_team = config.core.default_team.clone();
+                    validate_cross_team_monitor_control(
+                        &actor_team,
+                        team,
+                        stop.user_authorized,
+                        stop.reason.as_deref(),
+                    )?;
                     let request = GhMonitorControlRequest {
                         team: team.to_string(),
                         action: GhMonitorLifecycleAction::Stop,
@@ -593,12 +637,46 @@ pub fn execute(args: GhArgs) -> Result<()> {
                         )?),
                         drain_timeout_secs: Some(stop.drain_timeout_secs),
                         config_cwd: Some(current_dir.to_string_lossy().to_string()),
+                        actor: Some(actor.clone()),
+                        actor_team: Some(actor_team.clone()),
+                        user_authorized: stop.user_authorized,
+                        operator_reason: stop.reason.clone(),
                     };
-                    GhOutput::MonitorHealth(gh_monitor_control(&request)?.ok_or_else(|| {
+                    let health = gh_monitor_control(&request)?.ok_or_else(|| {
                         anyhow::anyhow!("daemon is not reachable for atm gh monitor stop command")
-                    })?)
+                    })?;
+                    audit_monitor_control_action(
+                        "stop",
+                        &actor,
+                        &actor_team,
+                        team,
+                        request.repo.as_deref(),
+                        stop.reason.as_deref(),
+                        stop.user_authorized,
+                    );
+                    if stop.user_authorized && actor_team != team {
+                        notify_team_lead_of_monitor_control(
+                            &home_dir,
+                            &actor,
+                            &actor_team,
+                            team,
+                            "disabled",
+                            stop.reason
+                                .as_deref()
+                                .unwrap_or("operator-authorized cross-team stop"),
+                        )?;
+                    }
+                    GhOutput::MonitorHealth(health)
                 }
                 MonitorTarget::Restart(restart) => {
+                    let actor = resolve_monitor_caller_identity(&config);
+                    let actor_team = config.core.default_team.clone();
+                    validate_cross_team_monitor_control(
+                        &actor_team,
+                        team,
+                        restart.user_authorized,
+                        restart.reason.as_deref(),
+                    )?;
                     let request = GhMonitorControlRequest {
                         team: team.to_string(),
                         action: GhMonitorLifecycleAction::Restart,
@@ -608,12 +686,39 @@ pub fn execute(args: GhArgs) -> Result<()> {
                         )?),
                         drain_timeout_secs: Some(restart.drain_timeout_secs),
                         config_cwd: Some(current_dir.to_string_lossy().to_string()),
+                        actor: Some(actor.clone()),
+                        actor_team: Some(actor_team.clone()),
+                        user_authorized: restart.user_authorized,
+                        operator_reason: restart.reason.clone(),
                     };
-                    GhOutput::MonitorHealth(gh_monitor_control(&request)?.ok_or_else(|| {
+                    let health = gh_monitor_control(&request)?.ok_or_else(|| {
                         anyhow::anyhow!(
                             "daemon is not reachable for atm gh monitor restart command"
                         )
-                    })?)
+                    })?;
+                    audit_monitor_control_action(
+                        "restart",
+                        &actor,
+                        &actor_team,
+                        team,
+                        request.repo.as_deref(),
+                        restart.reason.as_deref(),
+                        restart.user_authorized,
+                    );
+                    if restart.user_authorized && actor_team != team {
+                        notify_team_lead_of_monitor_control(
+                            &home_dir,
+                            &actor,
+                            &actor_team,
+                            team,
+                            "restarted",
+                            restart
+                                .reason
+                                .as_deref()
+                                .unwrap_or("operator-authorized cross-team restart"),
+                        )?;
+                    }
+                    GhOutput::MonitorHealth(health)
                 }
                 MonitorTarget::Status(_status) => unreachable!("handled above"),
             };
@@ -1567,6 +1672,12 @@ fn resolve_namespace_health(
             rate_limit_remaining: None,
             rate_limit_limit: None,
             poll_owner: None,
+            owner_runtime_kind: None,
+            owner_pid: None,
+            owner_binary_path: None,
+            owner_atm_home: None,
+            owner_repo: None,
+            owner_poll_interval_secs: None,
         });
     }
 
@@ -1627,6 +1738,12 @@ fn resolve_namespace_health(
         rate_limit_remaining: None,
         rate_limit_limit: None,
         poll_owner: None,
+        owner_runtime_kind: None,
+        owner_pid: None,
+        owner_binary_path: None,
+        owner_atm_home: None,
+        owner_repo: None,
+        owner_poll_interval_secs: None,
     })
 }
 
@@ -1744,6 +1861,24 @@ fn print_namespace_status(health: &GhMonitorHealth, json: bool) -> Result<()> {
     if let Some(owner) = status.poll_owner.as_deref() {
         println!("Poll Owner:        {owner}");
     }
+    if let Some(runtime_kind) = status.owner_runtime_kind.as_deref() {
+        println!("Owner Runtime:     {runtime_kind}");
+    }
+    if let Some(pid) = status.owner_pid {
+        println!("Owner PID:         {pid}");
+    }
+    if let Some(binary_path) = status.owner_binary_path.as_deref() {
+        println!("Owner Binary:      {binary_path}");
+    }
+    if let Some(atm_home) = status.owner_atm_home.as_deref() {
+        println!("Owner ATM_HOME:    {atm_home}");
+    }
+    if let Some(repo) = status.owner_repo.as_deref() {
+        println!("Owner Repo:        {repo}");
+    }
+    if let Some(poll_interval_secs) = status.owner_poll_interval_secs {
+        println!("Poll Interval:     {}s", poll_interval_secs);
+    }
     println!("Updated At:        {}", status.updated_at);
     println!();
     println!("Available actions:");
@@ -1772,6 +1907,12 @@ fn namespace_status_view(health: &GhMonitorHealth) -> GhNamespaceStatus {
         rate_limit_remaining: health.rate_limit_remaining,
         rate_limit_limit: health.rate_limit_limit,
         poll_owner: health.poll_owner.clone(),
+        owner_runtime_kind: health.owner_runtime_kind.clone(),
+        owner_pid: health.owner_pid,
+        owner_binary_path: health.owner_binary_path.clone(),
+        owner_atm_home: health.owner_atm_home.clone(),
+        owner_repo: health.owner_repo.clone(),
+        owner_poll_interval_secs: health.owner_poll_interval_secs,
         actions: namespace_actions(health.enabled && health.configured),
     }
 }
@@ -2053,6 +2194,146 @@ fn resolve_monitor_caller_identity(config: &Config) -> String {
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| config.core.identity.clone())
+}
+
+fn validate_cross_team_monitor_control(
+    actor_team: &str,
+    target_team: &str,
+    user_authorized: bool,
+    reason: Option<&str>,
+) -> Result<()> {
+    if actor_team == target_team {
+        return Ok(());
+    }
+
+    if !user_authorized {
+        bail!(
+            "cross-team gh monitor control from '{}' to '{}' requires --user-authorized",
+            actor_team,
+            target_team
+        );
+    }
+
+    if reason.map(str::trim).is_none_or(str::is_empty) {
+        bail!(
+            "cross-team gh monitor control from '{}' to '{}' requires --reason",
+            actor_team,
+            target_team
+        );
+    }
+
+    Ok(())
+}
+
+fn audit_monitor_control_action(
+    action: &str,
+    actor: &str,
+    actor_team: &str,
+    target_team: &str,
+    repo: Option<&str>,
+    reason: Option<&str>,
+    user_authorized: bool,
+) {
+    emit_event_best_effort(build_monitor_control_audit_fields(
+        action,
+        actor,
+        actor_team,
+        target_team,
+        repo,
+        reason,
+        user_authorized,
+    ));
+}
+
+fn build_monitor_control_audit_fields(
+    action: &str,
+    actor: &str,
+    actor_team: &str,
+    target_team: &str,
+    repo: Option<&str>,
+    reason: Option<&str>,
+    user_authorized: bool,
+) -> EventFields {
+    let mut extra = serde_json::Map::new();
+    extra.insert("actor".to_string(), serde_json::json!(actor));
+    extra.insert("actor_team".to_string(), serde_json::json!(actor_team));
+    extra.insert("target_team".to_string(), serde_json::json!(target_team));
+    extra.insert(
+        "user_authorized".to_string(),
+        serde_json::json!(user_authorized),
+    );
+    if let Some(repo) = repo {
+        extra.insert("repo".to_string(), serde_json::json!(repo));
+    }
+    if let Some(reason) = reason.filter(|value| !value.trim().is_empty()) {
+        extra.insert("reason".to_string(), serde_json::json!(reason.trim()));
+    }
+    EventFields {
+        level: "info",
+        source: "atm",
+        action: "gh_monitor_control",
+        team: Some(target_team.to_string()),
+        target: repo.map(str::to_string),
+        runtime: Some(actor_team.to_string()),
+        result: Some(action.to_string()),
+        agent_name: Some(actor.to_string()),
+        extra_fields: extra,
+        ..Default::default()
+    }
+}
+
+fn notify_team_lead_of_monitor_control(
+    home_dir: &Path,
+    actor: &str,
+    actor_team: &str,
+    target_team: &str,
+    action_word: &str,
+    reason: &str,
+) -> Result<()> {
+    let teams_root = teams_root_dir_for(home_dir);
+    let team_dir = teams_root.join(target_team);
+    let lead_agent = TeamConfigStore::open(&team_dir)
+        .read()
+        .ok()
+        .and_then(|cfg| {
+            cfg.lead_agent_id
+                .split('@')
+                .next()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "team-lead".to_string());
+    let inbox_path = teams_root
+        .join(target_team)
+        .join("inboxes")
+        .join(format!("{lead_agent}.json"));
+    let now = chrono::Utc::now().to_rfc3339();
+    let message = InboxMessage {
+        from: actor.to_string(),
+        text: format!(
+            "your gh monitor was {} by {}@{} for {}",
+            action_word,
+            actor,
+            actor_team,
+            reason.trim()
+        ),
+        timestamp: now.clone(),
+        read: false,
+        summary: Some(format!(
+            "gh monitor {} by {}@{}",
+            action_word, actor, actor_team
+        )),
+        message_id: Some(format!(
+            "gh-monitor-{}-{}-{}",
+            action_word,
+            target_team,
+            chrono::Utc::now().timestamp_millis()
+        )),
+        unknown_fields: std::collections::HashMap::new(),
+    };
+    let _ = inbox_append(&inbox_path, &message, target_team, &lead_agent)?;
+    Ok(())
 }
 
 fn choose_init_config_path(current_dir: &Path, home_dir: &Path) -> PathBuf {
@@ -2402,5 +2683,39 @@ mod tests {
 
         let rendered = render_pr_report_template(&template_path, &report).expect("render template");
         assert_eq!(rendered, "team=atm-dev pr=42 schema=1.0.0");
+    }
+
+    #[test]
+    fn build_monitor_control_audit_fields_captures_authorized_cross_team_stop() {
+        let fields = build_monitor_control_audit_fields(
+            "stop",
+            "team-lead",
+            "atm-dev",
+            "ops-team",
+            Some("owner/repo"),
+            Some("runaway polling"),
+            true,
+        );
+
+        assert_eq!(fields.action, "gh_monitor_control");
+        assert_eq!(fields.team.as_deref(), Some("ops-team"));
+        assert_eq!(fields.target.as_deref(), Some("owner/repo"));
+        assert_eq!(fields.runtime.as_deref(), Some("atm-dev"));
+        assert_eq!(fields.result.as_deref(), Some("stop"));
+        assert_eq!(fields.agent_name.as_deref(), Some("team-lead"));
+        assert_eq!(
+            fields
+                .extra_fields
+                .get("user_authorized")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            fields
+                .extra_fields
+                .get("target_team")
+                .and_then(|value| value.as_str()),
+            Some("ops-team")
+        );
     }
 }

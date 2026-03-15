@@ -234,8 +234,13 @@ fn control_request_from_wire(request: GhMonitorControlRequest) -> CiMonitorContr
     CiMonitorControlRequest {
         team: request.team,
         action: lifecycle_action_from_wire(request.action),
+        repo: request.repo,
         drain_timeout_secs: request.drain_timeout_secs,
         config_cwd: request.config_cwd,
+        actor: request.actor,
+        actor_team: request.actor_team,
+        user_authorized: request.user_authorized,
+        operator_reason: request.operator_reason,
     }
 }
 
@@ -277,6 +282,12 @@ fn health_to_wire(health: CiMonitorHealth) -> agent_team_mail_core::daemon_clien
         rate_limit_remaining: health.rate_limit_remaining,
         rate_limit_limit: health.rate_limit_limit,
         poll_owner: health.poll_owner,
+        owner_runtime_kind: health.owner_runtime_kind,
+        owner_pid: health.owner_pid,
+        owner_binary_path: health.owner_binary_path,
+        owner_atm_home: health.owner_atm_home,
+        owner_repo: health.owner_repo,
+        owner_poll_interval_secs: health.owner_poll_interval_secs,
     }
 }
 

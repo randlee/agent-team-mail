@@ -416,7 +416,23 @@ where
     let mut record = by_key
         .remove(&key)
         .unwrap_or_else(|| default_repo_state_record(team, repo, runtime, home));
-    record.owner = Some(runtime_owner(runtime, home));
+    let current_owner = runtime_owner(runtime, home);
+    if let Some(existing_owner) = record.owner.as_ref()
+        && existing_owner.pid != current_owner.pid
+        && owner_pid_alive(existing_owner.pid)
+    {
+        emit_event_best_effort(build_lease_conflict_event_fields(
+            team,
+            repo,
+            &current_owner.runtime,
+            existing_owner,
+        ));
+        anyhow::bail!(
+            "{}",
+            format_lease_conflict_error(team, repo, existing_owner)
+        );
+    }
+    record.owner = Some(current_owner);
     mutator(&mut record, now);
     if record.budget_used_in_window >= record.budget_limit_per_hour {
         record.blocked = true;
@@ -427,6 +443,34 @@ where
     write_repo_state(home, &GhRepoStateFile { records })
         .context("failed to persist gh monitor repo-state")?;
     Ok(record)
+}
+
+fn build_lease_conflict_event_fields(
+    team: &str,
+    repo: &str,
+    runtime: &str,
+    existing_owner: &GhRuntimeOwner,
+) -> EventFields {
+    EventFields {
+        level: "warn",
+        source: "atm",
+        action: "gh_monitor_lease_conflict",
+        team: Some(team.to_string()),
+        target: Some(repo.to_ascii_lowercase()),
+        runtime: Some(runtime.to_string()),
+        error: Some(format!(
+            "repo lease already owned by pid {} at {}",
+            existing_owner.pid, existing_owner.executable_path
+        )),
+        ..Default::default()
+    }
+}
+
+fn format_lease_conflict_error(team: &str, repo: &str, existing_owner: &GhRuntimeOwner) -> String {
+    format!(
+        "gh_monitor lease conflict for team={} repo={}: active owner pid={} executable={} home={}",
+        team, repo, existing_owner.pid, existing_owner.executable_path, existing_owner.home_scope
+    )
 }
 
 fn read_or_create_record(home: &Path, team: &str, repo: &str) -> Result<GhRepoStateRecord> {
@@ -463,6 +507,15 @@ fn default_repo_state_record(
 }
 
 fn runtime_owner(runtime: &str, home: &Path) -> GhRuntimeOwner {
+    if let Ok(owner) = crate::daemon_client::validate_runtime_admission_for_current_process(home) {
+        return GhRuntimeOwner {
+            runtime: owner.runtime_kind.as_str().to_string(),
+            executable_path: owner.executable_path,
+            home_scope: owner.home_scope,
+            pid: std::process::id(),
+        };
+    }
+
     GhRuntimeOwner {
         runtime: runtime.to_string(),
         executable_path: std::env::current_exe()
@@ -477,6 +530,17 @@ fn runtime_owner(runtime: &str, home: &Path) -> GhRuntimeOwner {
             .to_string(),
         pid: std::process::id(),
     }
+}
+
+#[cfg(unix)]
+fn owner_pid_alive(pid: u32) -> bool {
+    let rc = unsafe { libc::kill(pid as i32, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn owner_pid_alive(pid: u32) -> bool {
+    pid == std::process::id()
 }
 
 fn maybe_reset_budget_window(record: &mut GhRepoStateRecord, now: DateTime<Utc>) {
@@ -586,6 +650,8 @@ fn parse_rfc3339(value: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::process::Command;
     use tempfile::TempDir;
 
     #[test]
@@ -654,5 +720,89 @@ mod tests {
             record.branch_ref_counts[0].branch.as_deref(),
             Some("develop")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_observer_rejects_live_foreign_owner() {
+        let temp = TempDir::new().unwrap();
+        let mut child = Command::new("sleep").arg("2").spawn().unwrap();
+        let now = Utc::now();
+        write_repo_state(
+            temp.path(),
+            &GhRepoStateFile {
+                records: vec![GhRepoStateRecord {
+                    team: "atm-dev".to_string(),
+                    repo: "owner/repo".to_string(),
+                    updated_at: now.to_rfc3339(),
+                    cache_expires_at: (now + Duration::seconds(GH_REPO_STATE_TTL_SECS))
+                        .to_rfc3339(),
+                    last_refresh_at: None,
+                    budget_limit_per_hour: GH_BUDGET_LIMIT_PER_HOUR,
+                    budget_used_in_window: 0,
+                    budget_window_started_at: now.to_rfc3339(),
+                    budget_warning_threshold: GH_WARNING_THRESHOLD,
+                    warning_emitted_at: None,
+                    blocked: false,
+                    in_flight: 0,
+                    idle_poll_interval_secs: GH_IDLE_POLL_INTERVAL_SECS,
+                    active_poll_interval_secs: GH_ACTIVE_POLL_INTERVAL_SECS,
+                    branch_ref_counts: Vec::new(),
+                    last_call: None,
+                    rate_limit: None,
+                    owner: Some(GhRuntimeOwner {
+                        runtime: "dev".to_string(),
+                        executable_path: "/tmp/foreign-atm-daemon".to_string(),
+                        home_scope: temp.path().to_string_lossy().to_string(),
+                        pid: child.id(),
+                    }),
+                }],
+            },
+        )
+        .unwrap();
+
+        let ctx = GhCliObserverContext {
+            home: temp.path().to_path_buf(),
+            team: "atm-dev".to_string(),
+            repo: "owner/repo".to_string(),
+            runtime: "atm-daemon".to_string(),
+        };
+        let observer = SharedGhCliObserver::new(ctx);
+        let err = observer
+            .before_gh_call(&GhCliCallMetadata {
+                repo_scope: "owner/repo".to_string(),
+                action: "gh_run_list".to_string(),
+                args: vec!["run".to_string(), "list".to_string()],
+                branch: Some("main".to_string()),
+                reference: None,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("lease conflict"));
+        assert!(err.to_string().contains(&format!("pid={}", child.id())));
+        assert!(err.to_string().contains("/tmp/foreign-atm-daemon"));
+        let fields = build_lease_conflict_event_fields(
+            "atm-dev",
+            "owner/repo",
+            "atm-daemon",
+            &GhRuntimeOwner {
+                runtime: "dev".to_string(),
+                executable_path: "/tmp/foreign-atm-daemon".to_string(),
+                home_scope: temp.path().to_string_lossy().to_string(),
+                pid: child.id(),
+            },
+        );
+        assert_eq!(fields.action, "gh_monitor_lease_conflict");
+        assert_eq!(fields.team.as_deref(), Some("atm-dev"));
+        assert_eq!(fields.target.as_deref(), Some("owner/repo"));
+        assert_eq!(fields.runtime.as_deref(), Some("atm-daemon"));
+        assert!(
+            fields
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains(&child.id().to_string())
+        );
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
