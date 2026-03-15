@@ -777,6 +777,7 @@ impl CiMonitorPlugin {
         )
     }
 
+    #[cfg(unix)]
     fn was_terminal_notified_by_command_path(&self, ctx: &PluginContext, run_id: u64) -> bool {
         let path = Self::gh_monitor_state_path(ctx);
         let raw = match std::fs::read_to_string(&path) {
