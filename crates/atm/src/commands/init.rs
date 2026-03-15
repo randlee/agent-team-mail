@@ -1538,6 +1538,7 @@ mod tests {
     /// Installing into a nonexistent settings.json creates the file with
     /// core ATM hooks correctly structured.
     #[test]
+    #[serial]
     fn test_fresh_file_install() {
         let dir = TempDir::new().expect("tempdir");
         let path = temp_settings(&dir);
@@ -1618,6 +1619,7 @@ mod tests {
 
     /// Running install twice on the same settings.json must not duplicate hooks.
     #[test]
+    #[serial]
     fn test_idempotent_double_install() {
         let dir = TempDir::new().expect("tempdir");
         let path = temp_settings(&dir);
@@ -1689,6 +1691,7 @@ mod tests {
 
     /// Pre-existing non-ATM hooks must be preserved after install.
     #[test]
+    #[serial]
     fn test_preserves_existing_non_atm_hooks() {
         let dir = TempDir::new().expect("tempdir");
         let path = temp_settings(&dir);
@@ -1755,6 +1758,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_migrates_legacy_catch_all_hook_entries_to_matcher_schema() {
         let mut settings = serde_json::json!({
             "hooks": {

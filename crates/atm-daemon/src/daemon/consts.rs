@@ -3,6 +3,9 @@
 /// Interval between spool drain passes in the daemon event loop.
 pub const SPOOL_DRAIN_INTERVAL_SECS: u64 = 10;
 
+/// Default drain timeout used when control requests omit an explicit value.
+pub const DEFAULT_DRAIN_TIMEOUT_SECS: u64 = 30;
+
 /// Capacity of the watcher-to-dispatch inbox event channel.
 pub const EVENT_CHANNEL_CAPACITY: usize = 100;
 
@@ -20,6 +23,9 @@ pub const SOCKET_RETRY_DELAY_MS: u64 = 100;
 
 /// Delay between config-visibility retries in the socket server.
 pub const STREAM_CHECK_SLEEP_MS: u64 = 25;
+
+/// Sleep interval between repeated drain-status checks.
+pub const DRAIN_SLEEP_MS: u64 = 250;
 
 /// Threshold used for elapsed timestamp assertions in hook dedupe tests.
 pub const MIN_ELAPSED_CHECK_MS: u64 = 20;
