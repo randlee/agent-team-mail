@@ -1697,6 +1697,39 @@ parallel, but AP.1 should start before new daemon-heavy test coverage expands.
 
 ---
 
+## 17.25 Phase AQ: Codebase Cleanup and Contract Consolidation
+
+**Goal**: remove residual dead code and duplicate guard paths, consolidate
+magic numbers into named constants, and close the deferred AN/AO/AP cleanup
+findings before new implementation work expands the surface again.
+
+**Integration branch**: `integrate/phase-AQ`
+
+**Planning doc**: `docs/phase-aq-planning.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Branch | Status |
+|---|---|---|---|
+| AQ.1 | Const consolidation and magic-number elimination | `feature/pAQ-s1-const-consolidation` | PLANNED |
+| AQ.2 | Dead code removal and duplicate elimination | `feature/pAQ-s2-dead-code-dup-removal` | PLANNED |
+| AQ.3 | Deferred non-blocking AO findings | `feature/pAQ-s3-deferred-findings` | PLANNED |
+| AQ.4 | Deferred AP daemon-race and observability cleanup | `feature/pAQ-s4-daemon-race-cleanup` | PLANNED |
+
+### Exit Criteria
+1. Significant numeric literals in production code are replaced with named
+   constants in canonical `consts.rs` locations.
+2. Duplicate guard/helper paths removed by AP remain deleted, and new duplicate
+   lifecycle or env guards are not introduced.
+3. Deferred AO observability findings and deferred AP daemon-race findings are
+   closed with tests or clear contract comments.
+4. The codebase is smaller and more explicit than the post-AP baseline, with no
+   new user-facing capability added during cleanup.
+
+**Dependency graph**: AQ.1 and AQ.2 can proceed in parallel; AQ.3 and AQ.4 can
+proceed in parallel; all merge through `integrate/phase-AQ`
+
+---
+
 ## 17.11 Phase Z: Daemon SSoT + Observability Hardening
 
 **Goal**: Close daemon single-source-of-truth gaps for member/session state and make

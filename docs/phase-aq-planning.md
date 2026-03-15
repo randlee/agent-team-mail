@@ -1,11 +1,11 @@
 # Phase AQ — Codebase Cleanup
 
-**Branch**: `integrate/phase-AQ` off `develop`
+**Integration branch**: `integrate/phase-AQ` off `develop`
 **Prerequisite**: integrate/phase-AN ✅ merged 2026-03-15, integrate/phase-AO ✅ merged 2026-03-15, integrate/phase-AP ✅ merged 2026-03-15 (PR #768)
 
 ## Overview
 
-Phase AQ is a focused cleanup phase addressing findings from the AN/AO/AP phase reviews plus user-directed improvements. No new features. All sprints target `develop` directly via `integrate/phase-AQ`.
+Phase AQ is a focused cleanup phase addressing findings from the AN/AO/AP phase reviews plus user-directed improvements. No new features. The AQ implementation sprints merge through `integrate/phase-AQ`; the initial AQ.0 planning/requirements update is a docs-only direct change on `develop`.
 
 ---
 
