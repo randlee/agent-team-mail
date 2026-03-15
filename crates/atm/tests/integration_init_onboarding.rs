@@ -506,7 +506,11 @@ fn test_init_local_relay_hook_paths_use_claude_project_dir() {
     let notify_suffix = "\"${CLAUDE_PROJECT_DIR}/.claude/scripts/notification-idle-relay.py\"";
 
     assert_eq!(
-        count_nested_command_suffix_in_hooks(&settings_path, "PermissionRequest", permission_suffix),
+        count_nested_command_suffix_in_hooks(
+            &settings_path,
+            "PermissionRequest",
+            permission_suffix
+        ),
         1
     );
     assert_eq!(

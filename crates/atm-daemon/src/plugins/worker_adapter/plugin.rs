@@ -5,9 +5,6 @@ use super::agent_state::{AgentState, AgentStateTracker};
 use super::capture::LogTailer;
 use super::codex_tmux::{CodexTmuxBackend, TmuxPayload};
 use super::config::WorkersConfig;
-use crate::plugins::consts::{
-    INACTIVITY_CHECK_INTERVAL_SECS, LOG_ROTATION_INTERVAL_SECS, NUDGE_SCAN_INTERVAL_SECS,
-};
 use super::hook_watcher::HookWatcher;
 use super::lifecycle::{self, LifecycleManager, WorkerState};
 use super::nudge::NudgeEngine;
@@ -17,6 +14,9 @@ use super::trait_def::{WorkerAdapter, WorkerHandle};
 use crate::daemon::session_registry::SharedSessionRegistry;
 use crate::daemon::socket::LaunchRequest;
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
+use crate::plugins::consts::{
+    INACTIVITY_CHECK_INTERVAL_SECS, LOG_ROTATION_INTERVAL_SECS, NUDGE_SCAN_INTERVAL_SECS,
+};
 use agent_team_mail_core::daemon_client::{LaunchConfig, LaunchResult};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::inbox::inbox_append;
