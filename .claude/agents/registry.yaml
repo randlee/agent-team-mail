@@ -29,6 +29,12 @@ agents:
   quality-mgr:
     version: 1.0.0
     path: .claude/agents/quality-mgr.md
+  daemon-spawn-qa:
+    version: 1.0.0
+    path: .claude/agents/daemon-spawn-qa.md
+  flaky-test-qa:
+    version: 1.0.0
+    path: .claude/agents/flaky-test-qa.md
 
 skills:
   rust-development:
