@@ -1674,9 +1674,10 @@ parallel, but AP.1 should start before new daemon-heavy test coverage expands.
 ### Planned Sprint Map
 | Sprint | Focus | Primary Branch | Status |
 |---|---|---|---|
-| AP.1 | Environment/process safety: scoped `ATM_HOME`, subprocess RAII, autostart diagnostics | `feature/pAP-s1-process-safety` | PLANNED |
-| AP.2 | Deterministic timing: replace wall-clock sleeps, bound loop/watcher waits, improve test attribution | `feature/pAP-s2-deterministic-timing` | PLANNED |
-| AP.3 | Pathing/serialization cleanup and final audit | `feature/pAP-s3-test-hygiene-audit` | PLANNED |
+| AP.1 | Environment/process safety: scoped `ATM_HOME`, subprocess RAII, autostart diagnostics | `feature/pAP-s1-test-isolation-env-cleanup` | PLANNED |
+| AP.2 | Deterministic timing: replace wall-clock sleeps, bound loop/watcher waits, improve test attribution | `feature/pAP-s2-elapsed-time-upper-bound` | PLANNED |
+| AP.3 | Pathing/serialization cleanup and final audit | `feature/pAP-s3-serial-vs-raii` | PLANNED |
+| AP.4 | Daemon-spawn RAII hardening | `feature/pAP-s4-daemon-spawn-hardening` | ACTIVE |
 
 ### Exit Criteria
 1. Blocking/high-priority tests no longer rely on raw wall-clock sleeps as their
@@ -1690,7 +1691,7 @@ parallel, but AP.1 should start before new daemon-heavy test coverage expands.
 5. Duplicate low-value tests and ad hoc helper paths are removed where they do
    not provide unique coverage, leaving a smaller canonical harness.
 
-**Dependency graph**: AP.1 → AP.2 → AP.3
+**Dependency graph**: AP.1 → AP.2 → AP.3 → AP.4
 
 ---
 

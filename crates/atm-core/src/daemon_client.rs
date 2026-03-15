@@ -4323,17 +4323,12 @@ sleep 8
     fn test_ensure_daemon_running_reads_atm_daemon_bin() {
         let tmp = tempfile::TempDir::new().expect("temp dir");
         let _home_guard = EnvGuard::set("ATM_HOME", tmp.path().to_str().unwrap());
+        let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", "/nonexistent-bin-for-atm-test");
         // Skip if a live daemon is already running.
         if daemon_is_running() {
             return;
         }
-        unsafe {
-            std::env::set_var("ATM_DAEMON_BIN", "/nonexistent-bin-for-atm-test");
-        }
         let result = ensure_daemon_running();
-        unsafe {
-            std::env::remove_var("ATM_DAEMON_BIN");
-        }
         // On non-Unix the function is a no-op and always returns Ok(()).
         #[cfg(unix)]
         assert!(
