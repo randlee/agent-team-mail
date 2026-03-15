@@ -2700,6 +2700,7 @@ notify_target = "team-lead"
         assert!(result.is_ok());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_polling_notification_suppressed_when_command_path_already_terminal() {
         use crate::plugins::ci_monitor::mock_support::{MockCiProvider, create_test_run};
