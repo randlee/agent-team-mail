@@ -2933,8 +2933,10 @@ All plugins are **provider-agnostic** where applicable. They read `ctx.system.re
   state snapshot.
 - Cache eviction MUST NOT reset, clear, or otherwise mutate accumulated
   rate-budget state.
-- Budget counters are reset only by explicit operator action or 24-hour
-  rollover.
+- Budget rollover uses a rolling 1-hour window from the oldest call still in
+  the current accounting period.
+- Explicit operator action currently means daemon restart. A future
+  `atm gh monitor reset-budget` command is planned but is not implemented yet.
 
 **CI Monitor without repo**:
 - CI Monitor is only valid for repo contexts.
@@ -3064,8 +3066,9 @@ The core has no awareness of whether a team member is local or remote.
   mitigation (`#[cfg_attr(target_os = "macos", ignore)]`) is allowed only while
   root-cause remediation remains tracked in an active sprint/issue.
 - **RAII daemon guards**: any test that spawns a daemon process MUST adopt it
-  into a `DaemonProcessGuard` before any `await` point or early-return path.
-  Bare `Child` handles in test code are prohibited once daemon lifecycle begins.
+  into a `DaemonProcessGuard` before any suspension point, early-return path,
+  or panic-unwind-exposed path. Bare `Child` handles in test code are
+  prohibited once daemon lifecycle begins.
 - **No duplicate RAII daemon guards**: `DaemonProcessGuard` is the sole
   canonical daemon lifecycle guard for tests. Parallel local guard types are
   prohibited.
@@ -3073,6 +3076,9 @@ The core has no awareness of whether a team member is local or remote.
   (`crates/atm/tests/support/env_guard.rs`) is the sole canonical RAII guard
   for environment-variable mutation in tests. Local redefinitions are
   prohibited.
+- **Production daemon-spawn guard rule**: production code paths that spawn a
+  daemon process MUST adopt the child handle into a `DaemonProcessGuard` or
+  equivalent RAII guard before any suspension or early-return point.
 
 ### 8.4 Performance
 
@@ -3123,13 +3129,20 @@ The core has no awareness of whether a team member is local or remote.
 ### 8.9 Code Quality
 
 - **No magic numbers in production code**: all significant numeric literals in
-  production code MUST be defined as named constants. Only `0`, `1`, and
-  trivial booleans are exempt.
+  production code MUST be defined as named constants. Only `0` and `1` are
+  exempt.
+- **Significant numeric literal** means any literal whose meaning is not
+  self-evident from immediate context, including timeout durations, buffer
+  sizes, retry counts, and threshold values.
 - **Constant placement**: cross-module constants belong in crate-root
   `consts.rs`; module-local constants belong in that module's `consts.rs`.
 - **Clippy cleanliness**: `cargo clippy -- -D warnings` MUST remain clean with
   no `#[allow(...)]` workarounds in production code except documented false
   positives with a clear justification.
+- **Test-code carve-out**: this rule applies to production code only. Test
+  modules and test-support files are not required to extract named constants,
+  but they MUST NOT use magic numbers as synchronization primitives (see
+  §8.3 timing rules).
 
 ---
 
