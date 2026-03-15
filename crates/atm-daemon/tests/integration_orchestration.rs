@@ -17,6 +17,7 @@ use agent_team_mail_daemon::daemon::socket::{
 use agent_team_mail_daemon::plugins::worker_adapter::{AgentState, AgentStateTracker, PubSub};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 #[cfg(unix)]
@@ -30,6 +31,47 @@ fn acquire_test_daemon_lock(
 
 fn new_isolated_session_registry() -> Arc<Mutex<SessionRegistry>> {
     Arc::new(Mutex::new(SessionRegistry::new()))
+}
+
+#[cfg(unix)]
+async fn wait_for_session_query_payload(
+    socket_path: &std::path::Path,
+    team: &str,
+    name: &str,
+    timeout: Duration,
+) -> Option<(serde_json::Value, Duration)> {
+    use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let start = Instant::now();
+    let deadline = start + timeout;
+    let mut attempt = 0usize;
+    while Instant::now() < deadline {
+        let query_req = SocketRequest {
+            version: PROTOCOL_VERSION,
+            request_id: format!("orch-gem-query-{attempt}"),
+            command: "session-query-team".to_string(),
+            payload: serde_json::json!({"name": name, "team": team}),
+        };
+        let stream = tokio::net::UnixStream::connect(socket_path).await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let query_line = format!("{}\n", serde_json::to_string(&query_req).unwrap());
+        reader
+            .get_mut()
+            .write_all(query_line.as_bytes())
+            .await
+            .unwrap();
+        let mut query_resp_line = String::new();
+        reader.read_line(&mut query_resp_line).await.unwrap();
+        let query_resp: agent_team_mail_core::daemon_client::SocketResponse =
+            serde_json::from_str(query_resp_line.trim()).unwrap();
+        if query_resp.is_ok() {
+            return query_resp.payload.map(|payload| (payload, start.elapsed()));
+        }
+        attempt += 1;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    None
 }
 
 // ── Test 1: AgentStateTracker lifecycle ───────────────────────────────────────
@@ -481,33 +523,14 @@ async fn test_launch_gemini_runtime_metadata_roundtrip() {
         launch_resp.error
     );
 
-    let mut payload = None;
-    for attempt in 0..10 {
-        let query_req = SocketRequest {
-            version: PROTOCOL_VERSION,
-            request_id: format!("orch-gem-query-{attempt}"),
-            command: "session-query-team".to_string(),
-            payload: serde_json::json!({"name": "arch-ctm", "team": "atm-dev"}),
-        };
-        let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
-        let mut reader = BufReader::new(stream);
-        let query_line = format!("{}\n", serde_json::to_string(&query_req).unwrap());
-        reader
-            .get_mut()
-            .write_all(query_line.as_bytes())
+    let (payload, elapsed) =
+        wait_for_session_query_payload(&socket_path, "atm-dev", "arch-ctm", Duration::from_secs(2))
             .await
-            .unwrap();
-        let mut query_resp_line = String::new();
-        reader.read_line(&mut query_resp_line).await.unwrap();
-        let query_resp: SocketResponse = serde_json::from_str(query_resp_line.trim()).unwrap();
-        if query_resp.is_ok() {
-            payload = query_resp.payload;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-
-    let payload = payload.expect("session-query should succeed after launch");
+            .expect("session-query should succeed after launch");
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "session-query did not succeed within 2s: elapsed={elapsed:?}"
+    );
     assert_eq!(payload["runtime"].as_str(), Some("gemini"));
     assert_eq!(
         payload["runtime_session_id"].as_str(),

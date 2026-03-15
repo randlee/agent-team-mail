@@ -24,6 +24,8 @@ use serial_test::serial;
 use std::process::Command;
 use tempfile::TempDir;
 
+const FAKE_FOREIGN_DAEMON_BINARY: &str = "fake-daemon-binary";
+
 #[test]
 #[cfg(unix)]
 fn test_is_gh_command_detection() {
@@ -1155,7 +1157,7 @@ async fn test_gh_monitor_health_surfaces_live_foreign_owner_conflict() {
                 rate_limit: None,
                 owner: Some(GhRuntimeOwner {
                     runtime: "dev".to_string(),
-                    executable_path: "/tmp/foreign-atm-daemon".to_string(),
+                    executable_path: FAKE_FOREIGN_DAEMON_BINARY.to_string(),
                     home_scope: temp.path().to_string_lossy().to_string(),
                     pid: child.id(),
                 }),
@@ -1173,7 +1175,7 @@ async fn test_gh_monitor_health_surfaces_live_foreign_owner_conflict() {
     assert_eq!(health["owner_pid"].as_u64(), Some(child.id() as u64));
     assert_eq!(
         health["owner_binary_path"].as_str(),
-        Some("/tmp/foreign-atm-daemon")
+        Some(FAKE_FOREIGN_DAEMON_BINARY)
     );
     assert!(
         health["message"]
