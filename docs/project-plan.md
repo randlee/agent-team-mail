@@ -175,7 +175,9 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AH | Observability Unification + AG Deferred Closure | Unified JSONL logging pipeline via `sc-observability` crate and baseline observability contracts (OTel/scmux/schook deferred) | COMPLETE |
 | AI | GH Monitor Dashboard + Detailed PR Reporting | `atm gh pr list`, `atm gh pr report`, `--template` rendering, `init-report`; CI rollup neutral/skipped fix | IN-PROGRESS |
 | AM | CI Monitor Subsystem Refactor | Extract CI-monitor subsystem boundaries out of `socket.rs`, split provider-neutral logic from GitHub-specific adapter logic, and stabilize routing/health/test support on `integrate/phase-AM` | IN-PROGRESS |
+| AN | CI Monitor Extraction Readiness | Prepare CI monitor for clean extraction: crate boundaries, multi-repo routing, shared type consolidation | COMPLETE ([#748](https://github.com/randlee/agent-team-mail/pull/748)) |
 | AO | GH Monitor Guardrails + Runtime Admission | Prevent accidental shared-runtime pollers, add isolated-runtime TTL policy, and make GH usage attributable/self-limiting with cached repo-state and operator controls | COMPLETE ([#751](https://github.com/randlee/agent-team-mail/pull/751)) |
+| AP | Test Stability and Harness Hardening | Eliminate hang-prone, flaky, and operationally unsafe test patterns; RAII guard consolidation; daemon lifecycle hardening | COMPLETE ([#756](https://github.com/randlee/agent-team-mail/pull/756), [#767](https://github.com/randlee/agent-team-mail/pull/767), [#768](https://github.com/randlee/agent-team-mail/pull/768)) |
 | AJ | Session-ID SSoT Normalization | Canonical `session_id` naming, shared caller resolver, runtime session resolution closure, doctor/session consistency | PLANNED |
 | AK | Mandatory OTel Rollout | Non-optional OTel across in-scope tools with canonical correlation and health/reporting contracts | PLANNED |
 
