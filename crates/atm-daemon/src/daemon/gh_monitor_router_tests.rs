@@ -18,9 +18,13 @@ use crate::plugins::ci_monitor::types::{
 use agent_team_mail_ci_monitor::repo_state::write_repo_state;
 use agent_team_mail_ci_monitor::{GhRepoStateFile, GhRepoStateRecord, GhRuntimeOwner};
 use agent_team_mail_core::gh_monitor_observability::update_gh_repo_state_in_flight;
+// These router tests still serialize because EnvGuard mutates process-wide
+// ATM_HOME/PATH while fake gh scripts and repo-state files are exercised.
 use serial_test::serial;
 use std::process::Command;
 use tempfile::TempDir;
+
+const FAKE_FOREIGN_DAEMON_BINARY: &str = "fake-daemon-binary";
 
 #[test]
 #[cfg(unix)]
@@ -1159,7 +1163,7 @@ async fn test_gh_monitor_health_surfaces_live_foreign_owner_conflict() {
                 rate_limit: None,
                 owner: Some(GhRuntimeOwner {
                     runtime: "dev".to_string(),
-                    executable_path: "/tmp/foreign-atm-daemon".to_string(),
+                    executable_path: FAKE_FOREIGN_DAEMON_BINARY.to_string(),
                     home_scope: temp.path().to_string_lossy().to_string(),
                     pid: child.id(),
                 }),
@@ -1177,7 +1181,7 @@ async fn test_gh_monitor_health_surfaces_live_foreign_owner_conflict() {
     assert_eq!(health["owner_pid"].as_u64(), Some(child.id() as u64));
     assert_eq!(
         health["owner_binary_path"].as_str(),
-        Some("/tmp/foreign-atm-daemon")
+        Some(FAKE_FOREIGN_DAEMON_BINARY)
     );
     assert!(
         health["message"]

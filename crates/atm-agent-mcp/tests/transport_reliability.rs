@@ -22,6 +22,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -86,6 +87,22 @@ fn make_task_state(
         child_stdin: None,
         agent_identity: Some("soak-agent".to_string()),
     }
+}
+
+async fn wait_for_condition(
+    timeout: Duration,
+    poll_interval: Duration,
+    mut condition: impl FnMut() -> bool,
+) -> Duration {
+    let start = tokio::time::Instant::now();
+    let deadline = start + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if condition() {
+            return start.elapsed();
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+    start.elapsed()
 }
 
 // ─── Test A: Repeated steer/interrupt cycles (soak) ─────────────────────────
@@ -168,9 +185,6 @@ async fn test_connection_drop_eof() {
 
     let raw_io = transport.spawn().await.expect("spawn should succeed");
 
-    // Give the background task a moment to start.
-    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-
     // Drop both senders: handle's first, then transport's keepalive copy.
     // `transport` was consumed by `.spawn()` (which calls `self` by reference),
     // but the struct is still alive here.  We explicitly drop both to close the
@@ -232,14 +246,18 @@ async fn test_malformed_input_no_panic() {
     let malformed = b"not json at all\n";
     feed_write.write_all(malformed).await.unwrap();
 
-    // Give the task a tick to process the malformed line.
-    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-
     // Inject a valid turn/started after the malformed line to confirm the loop
     // continued running.
     let started = format!("{}\n", make_turn_started("thread-C", "turn-C"));
     feed_write.write_all(started.as_bytes()).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let elapsed = wait_for_condition(Duration::from_secs(1), Duration::from_millis(10), || {
+        !idle_flag.load(Ordering::Acquire)
+    })
+    .await;
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "malformed-input recovery was not observed within 1s: elapsed={elapsed:?}"
+    );
 
     // idle_flag should be false — the valid turn/started was processed.
     assert!(
@@ -360,8 +378,19 @@ async fn test_interleaved_notifications_and_responses() {
     assert_eq!(resp20["id"], 20, "response 20 id mismatch");
     assert_eq!(resp20["result"]["threadId"], "forked-20");
 
-    // Give the task a final tick to process the last turn/completed.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let elapsed = wait_for_condition(Duration::from_secs(1), Duration::from_millis(10), || {
+        if let Ok(state_map) = turn_state.try_lock() {
+            matches!(state_map.get("thread-E1"), Some(TurnState::Terminal { .. }))
+                && matches!(state_map.get("thread-E2"), Some(TurnState::Busy { .. }))
+        } else {
+            false
+        }
+    })
+    .await;
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "interleaved notification state did not settle within 1s: elapsed={elapsed:?}"
+    );
 
     // thread-E1 should be Terminal (started then completed).
     // thread-E2 should be Busy (started but not completed).

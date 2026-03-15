@@ -108,10 +108,15 @@ impl Plugin for EchoPlugin {
 // ============================================================================
 
 fn create_test_context(teams_root: std::path::PathBuf) -> PluginContext {
+    let claude_root = teams_root
+        .parent()
+        .unwrap_or(teams_root.as_path())
+        .join(".claude");
+    std::fs::create_dir_all(&claude_root).unwrap();
     let system = Arc::new(SystemContext::new(
         "test-host".to_string(),
         agent_team_mail_core::context::Platform::Linux,
-        std::env::temp_dir().join(".claude"),
+        claude_root,
         "2.1.39".to_string(),
         "test-team".to_string(),
     ));
@@ -131,6 +136,21 @@ fn create_test_message(from: &str, text: &str) -> InboxMessage {
         message_id: Some(uuid::Uuid::new_v4().to_string()),
         unknown_fields: HashMap::new(),
     }
+}
+
+async fn wait_until(
+    timeout_ms: u64,
+    mut pred: impl FnMut() -> bool,
+) -> Option<std::time::Duration> {
+    let start = std::time::Instant::now();
+    let deadline = start + std::time::Duration::from_millis(timeout_ms);
+    while std::time::Instant::now() < deadline {
+        if pred() {
+            return Some(start.elapsed());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    pred().then(|| start.elapsed())
 }
 
 // ============================================================================
@@ -391,8 +411,13 @@ async fn test_plugin_run_respects_cancellation() {
     // Spawn run task
     let run_handle = tokio::spawn(async move { plugin.run(cancel_clone).await });
 
-    // Give it a moment to start
-    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    let observed_running = wait_until(1_000, || !run_handle.is_finished())
+        .await
+        .expect("run task should remain pending until cancellation");
+    assert!(
+        observed_running <= tokio::time::Duration::from_secs(1),
+        "run task should remain pending until cancellation"
+    );
 
     // Cancel and verify it completes
     cancel.cancel();

@@ -140,3 +140,44 @@ Acceptance:
 
 Estimate:
 - about 0.5 sprint
+
+## AP.4 Daemon-Spawn RAII Hardening
+
+Goal: eliminate daemon process leaks by adopting all spawned or autostarted
+test daemons into RAII guards and tightening post-signal cleanup semantics.
+
+Integration branch: `integrate/phase-AP`
+
+Branch: `feature/pAP-s4-daemon-spawn-hardening`
+
+Scope:
+- Adopt every spawned or autostarted test daemon in
+  `integration_daemon_autostart.rs` into a guard that guarantees cleanup on
+  panic or early assertion failure.
+- Ensure daemon guards distinguish between owned direct children and adopted
+  non-child PIDs.
+- Keep the daemon test registry authoritative for owned spawns so stale sweeps
+  can reap leaked children.
+- Tighten runtime cleanup after signal-based shutdown to attempt a best-effort
+  reap for direct children.
+
+Findings covered:
+- `DS-AP1-001` through `DS-AP1-005`
+- `DS-AP2-004`
+- `DS-AP2-006`
+
+Acceptance:
+- `integration_daemon_autostart.rs` adopts every spawned or autostarted daemon
+  into a RAII guard
+- `daemon_tests.rs` registers owned child daemon PIDs in
+  `daemon_test_registry`
+- `RuntimeDaemonCleanupGuard` performs best-effort `waitpid(WNOHANG)` cleanup
+  after signal delivery for direct child processes
+- Spec wording distinguishes owned direct children from adopted non-child PIDs:
+  direct children should use `waitpid` after signal-based shutdown, while
+  adopted non-child PIDs must use `kill(pid, 0)` polling because Unix
+  `waitpid` on a non-child returns `ECHILD`
+- zero rogue daemons remain after the test run
+
+Estimate:
+- about 0.5 sprint
