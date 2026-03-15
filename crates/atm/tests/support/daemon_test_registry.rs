@@ -1,5 +1,6 @@
 #![cfg(test)]
 
+use agent_team_mail_core::io::lock::acquire_lock;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -11,6 +12,10 @@ struct RegistryEntry {
 
 fn registry_path() -> std::path::PathBuf {
     std::env::temp_dir().join("atm-test-daemon-registry.json")
+}
+
+fn registry_lock_path() -> std::path::PathBuf {
+    std::env::temp_dir().join("atm-test-daemon-registry.lock")
 }
 
 fn load_entries() -> Vec<RegistryEntry> {
@@ -77,6 +82,7 @@ fn command_matches(entry: &RegistryEntry, cmd: &str) -> bool {
 ///
 /// This only targets PIDs previously registered by this test fixture.
 pub fn sweep_stale_test_daemons() {
+    let _lock = acquire_lock(&registry_lock_path(), 5).expect("lock daemon test registry");
     let mut entries = load_entries();
     if entries.is_empty() {
         return;
@@ -124,6 +130,7 @@ pub fn sweep_stale_test_daemons() {
 }
 
 pub fn register_test_daemon(pid: u32, daemon_bin: &Path) {
+    let _lock = acquire_lock(&registry_lock_path(), 5).expect("lock daemon test registry");
     let mut entries = load_entries();
     entries.push(RegistryEntry {
         pid,
@@ -133,6 +140,7 @@ pub fn register_test_daemon(pid: u32, daemon_bin: &Path) {
 }
 
 pub fn unregister_test_daemon(pid: u32) {
+    let _lock = acquire_lock(&registry_lock_path(), 5).expect("lock daemon test registry");
     let mut entries = load_entries();
     entries.retain(|entry| entry.pid != pid);
     save_entries(&entries);

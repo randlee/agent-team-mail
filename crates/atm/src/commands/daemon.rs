@@ -9,7 +9,7 @@ use chrono::Utc;
 use clap::{Args, Subcommand};
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
-use sysinfo::System;
+use sysinfo::{Pid, ProcessStatus, System};
 use uuid::Uuid;
 
 use crate::commands::logging_health::{LoggingHealthSnapshot, build_logging_health_contract};
@@ -18,6 +18,8 @@ use agent_team_mail_core::daemon_client::{
     create_isolated_runtime_root, daemon_status_path_for, reap_expired_isolated_runtime_roots,
 };
 use std::path::{Path, PathBuf};
+
+const DEFAULT_DAEMON_STOP_TIMEOUT_SECS: u64 = 60;
 
 /// Daemon management commands
 #[derive(Args, Debug)]
@@ -53,16 +55,16 @@ enum DaemonCommands {
 /// Stop the running daemon
 #[derive(Args, Debug)]
 pub struct StopArgs {
-    /// Wait timeout in seconds for graceful shutdown (default 10)
-    #[arg(long, default_value_t = 10)]
+    /// Wait timeout in seconds for graceful shutdown (default 60)
+    #[arg(long, default_value_t = DEFAULT_DAEMON_STOP_TIMEOUT_SECS)]
     timeout: u64,
 }
 
 /// Restart the daemon (stop then autostart)
 #[derive(Args, Debug)]
 pub struct RestartArgs {
-    /// Wait timeout in seconds for graceful shutdown before restart (default 10)
-    #[arg(long, default_value_t = 10)]
+    /// Wait timeout in seconds for graceful shutdown before restart (default 60)
+    #[arg(long, default_value_t = DEFAULT_DAEMON_STOP_TIMEOUT_SECS)]
     timeout: u64,
 }
 
@@ -475,8 +477,22 @@ fn signal_pid(pid: i32, signal: i32) -> std::io::Result<()> {
 
 #[cfg(unix)]
 fn is_pid_alive(pid: i32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+
+    // First ask the kernel if the PID still exists at all.
     // SAFETY: kill(pid, 0) checks liveness without delivering a signal.
-    unsafe { libc::kill(pid, 0) == 0 }
+    let rc = unsafe { libc::kill(pid, 0) };
+    if rc != 0 {
+        return false;
+    }
+
+    let system = System::new_all();
+    system
+        .process(Pid::from_u32(pid as u32))
+        .map(|process| process.status() != ProcessStatus::Zombie)
+        .unwrap_or(true)
 }
 
 #[cfg(unix)]
@@ -643,6 +659,7 @@ where
     FAlive: Fn(i32) -> bool,
 {
     let pid = read_daemon_pid(&paths.pid_path)?;
+    let post_timeout_grace = Duration::from_secs(timeout_secs.clamp(1, 5));
 
     if let Err(err) = send_signal(pid, libc::SIGTERM) {
         if err.raw_os_error() == Some(libc::ESRCH) {
@@ -667,6 +684,26 @@ where
             });
         }
         std::thread::sleep(poll_interval);
+    }
+
+    let grace_deadline = Instant::now() + post_timeout_grace;
+    while Instant::now() < grace_deadline {
+        if !is_alive(pid) {
+            cleanup_runtime_files(paths);
+            return Ok(StopOutcome::Stopped {
+                pid,
+                already_dead: false,
+            });
+        }
+        std::thread::sleep(poll_interval.min(Duration::from_millis(100)));
+    }
+
+    if !is_alive(pid) {
+        cleanup_runtime_files(paths);
+        return Ok(StopOutcome::Stopped {
+            pid,
+            already_dead: false,
+        });
     }
 
     Ok(StopOutcome::TimedOut { pid })
@@ -1081,6 +1118,72 @@ mod tests {
         .expect("stop should return timeout outcome");
 
         assert_eq!(outcome, StopOutcome::TimedOut { pid: 4242 });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_stop_daemon_accepts_exit_detected_after_timeout_loop() {
+        let tmp = TempDir::new().expect("temp dir");
+        let runtime = temp_runtime_paths(&tmp);
+        std::fs::write(&runtime.pid_path, "4242\n").expect("write pid");
+        std::fs::write(&runtime.socket_path, "").expect("write socket");
+
+        let outcome = stop_daemon_with(
+            &runtime,
+            0,
+            |_pid, _signal| Ok(()),
+            |_pid| false,
+            Duration::from_millis(1),
+        )
+        .expect("stop should succeed");
+
+        assert_eq!(
+            outcome,
+            StopOutcome::Stopped {
+                pid: 4242,
+                already_dead: false
+            }
+        );
+        assert!(!runtime.pid_path.exists(), "pid file should be removed");
+        assert!(
+            !runtime.socket_path.exists(),
+            "socket file should be removed"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_stop_daemon_accepts_exit_during_post_timeout_grace() {
+        let tmp = TempDir::new().expect("temp dir");
+        let runtime = temp_runtime_paths(&tmp);
+        std::fs::write(&runtime.pid_path, "4242\n").expect("write pid");
+        std::fs::write(&runtime.socket_path, "").expect("write socket");
+
+        let checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let outcome = stop_daemon_with(
+            &runtime,
+            0,
+            |_pid, _signal| Ok(()),
+            {
+                let checks = std::sync::Arc::clone(&checks);
+                move |_pid| checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+            },
+            Duration::from_millis(1),
+        )
+        .expect("stop should succeed");
+
+        assert_eq!(
+            outcome,
+            StopOutcome::Stopped {
+                pid: 4242,
+                already_dead: false
+            }
+        );
+        assert!(!runtime.pid_path.exists(), "pid file should be removed");
+        assert!(
+            !runtime.socket_path.exists(),
+            "socket file should be removed"
+        );
     }
 
     #[test]

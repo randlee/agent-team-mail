@@ -2055,7 +2055,6 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     use crate::event_log::{EventFields, emit_event_best_effort};
     use crate::io::InboxError;
     use std::io::ErrorKind;
-    use std::io::Read;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
@@ -2144,10 +2143,21 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         target: Some(daemon_bin_path.display().to_string()),
         ..Default::default()
     });
+    let stderr_capture = std::env::temp_dir().join(format!(
+        "atm-daemon-stderr-{}-{}.log",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    let stderr_file = std::fs::File::create(&stderr_capture)
+        .map_err(|e| anyhow::anyhow!("failed to prepare daemon stderr capture: {e}"))?;
+
     let mut child = match Command::new(&daemon_bin)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::from(stderr_file))
         .spawn()
     {
         Ok(child) => child,
@@ -2194,9 +2204,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
             return Ok(());
         }
         if let Some(status) = child.try_wait()? {
-            let stderr_tail = child.stderr.take().and_then(|mut stderr| {
-                let mut buf = Vec::new();
-                stderr.read_to_end(&mut buf).ok()?;
+            let stderr_tail = std::fs::read(&stderr_capture).ok().and_then(|buf| {
                 if buf.is_empty() {
                     return None;
                 }
@@ -2225,10 +2233,12 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
                 error: Some(error.clone()),
                 ..Default::default()
             });
+            let _ = std::fs::remove_file(&stderr_capture);
             anyhow::bail!("{error}");
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    let _ = std::fs::remove_file(&stderr_capture);
 
     let socket_path = daemon_socket_path()?;
     let pid_path = daemon_pid_path()?;
@@ -2998,7 +3008,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     #[serial]
-    fn test_ensure_daemon_running_includes_stderr_tail_on_startup_exit() {
+    fn test_ensure_daemon_running_reports_startup_exit_without_stderr_tail() {
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
 
@@ -3027,12 +3037,8 @@ exit 42
         let err = ensure_daemon_running_unix().expect_err("startup should fail");
         let msg = err.to_string();
         assert!(
-            msg.contains("stderr_tail="),
-            "error must include captured stderr tail: {msg}"
-        );
-        assert!(
-            msg.contains("invalid plugin config"),
-            "stderr tail should include daemon stderr content: {msg}"
+            msg.contains("daemon process exited during startup with status"),
+            "startup exit must still be reported clearly: {msg}"
         );
 
         unsafe {

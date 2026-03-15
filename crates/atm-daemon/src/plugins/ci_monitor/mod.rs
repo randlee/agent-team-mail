@@ -3,11 +3,10 @@
 mod config;
 #[cfg(unix)]
 pub(crate) mod gh_alerts;
-pub(crate) mod gh_cli;
 #[cfg(unix)]
 pub(crate) mod gh_monitor;
 mod github_provider;
-mod github_schema;
+pub(crate) mod github_schema;
 #[cfg(unix)]
 pub(crate) mod health;
 #[cfg(unix)]

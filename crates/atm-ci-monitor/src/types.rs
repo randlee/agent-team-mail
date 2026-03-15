@@ -133,6 +133,8 @@ pub struct CiMonitorHealth {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit_limit: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_reset_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll_owner: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_runtime_kind: Option<String>,

@@ -6,6 +6,7 @@
 
 use assert_cmd::cargo;
 use serial_test::serial;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -16,16 +17,49 @@ mod daemon_process_guard;
 mod daemon_test_registry;
 use daemon_process_guard::DaemonProcessGuard;
 
+struct EnvGuard {
+    key: &'static str,
+    old: Option<OsString>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+        let old = std::env::var_os(key);
+        // SAFETY: test-scoped env mutation restored by Drop.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, old }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: test-scoped env mutation restored by Drop.
+        unsafe {
+            if let Some(old) = &self.old {
+                std::env::set_var(self.key, old);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+}
+
 /// Helper to set home directory for cross-platform test compatibility.
 /// Uses `ATM_HOME` which is checked first by `get_home_dir()`, avoiding
 /// platform-specific differences in how `dirs::home_dir()` resolves.
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
+    set_home_env_path(cmd, temp_dir.path());
+}
+
+fn set_home_env_path(cmd: &mut assert_cmd::Command, home: &std::path::Path) {
     // Use a subdirectory as CWD to avoid:
     // 1. .atm.toml config leak from the repo root
-    // 2. auto-identity CWD matching against team member CWD (temp_dir root)
-    let workdir = temp_dir.path().join("workdir");
+    // 2. auto-identity CWD matching against team member CWD (ATM_HOME root)
+    let workdir = home.join("workdir");
     std::fs::create_dir_all(&workdir).ok();
-    cmd.env("ATM_HOME", temp_dir.path())
+    cmd.env("ATM_HOME", home)
         // Prevent opportunistic daemon autostart from changing expected
         // offline/online label behavior in deterministic integration tests.
         .env("ATM_DAEMON_AUTOSTART", "0")
@@ -34,6 +68,36 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
         .env_remove("ATM_CONFIG")
         .env_remove("CLAUDE_SESSION_ID")
         .current_dir(&workdir);
+}
+
+#[cfg(unix)]
+struct RuntimeDaemonCleanupGuard {
+    home: PathBuf,
+}
+
+#[cfg(unix)]
+impl RuntimeDaemonCleanupGuard {
+    fn new(temp_dir: &TempDir) -> Self {
+        daemon_test_registry::sweep_stale_test_daemons();
+        Self {
+            home: temp_dir.path().to_path_buf(),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RuntimeDaemonCleanupGuard {
+    fn drop(&mut self) {
+        let pid_path = self.home.join(".atm/daemon/atm-daemon.pid");
+        if let Ok(raw) = fs::read_to_string(pid_path)
+            && let Ok(pid) = raw.trim().parse::<u32>()
+            && pid > 1
+            && pid_alive(pid as i32)
+        {
+            cleanup_pid(pid);
+        }
+        daemon_test_registry::sweep_stale_test_daemons();
+    }
 }
 
 /// Create a test team structure with multiple agents
@@ -351,6 +415,8 @@ fn test_concurrent_cli_and_direct_write_no_loss() {
 
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
+    #[cfg(unix)]
+    let _daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
 
     let inbox_path = temp_dir
         .path()
@@ -376,7 +442,7 @@ fn test_concurrent_cli_and_direct_write_no_loss() {
     let handle1 = std::thread::spawn(move || {
         barrier1.wait();
         let mut cmd = cargo::cargo_bin_cmd!("atm");
-        cmd.env("ATM_HOME", &temp_path1);
+        set_home_env_path(&mut cmd, &temp_path1);
         cmd.env("ATM_TEAM", "test-team");
         cmd.env("ATM_IDENTITY", "cli-sender");
         cmd.arg("send").arg("agent-a").arg("CLI message");
@@ -388,7 +454,7 @@ fn test_concurrent_cli_and_direct_write_no_loss() {
     let handle2 = std::thread::spawn(move || {
         barrier2.wait();
         let mut cmd = cargo::cargo_bin_cmd!("atm");
-        cmd.env("ATM_HOME", &temp_path);
+        set_home_env_path(&mut cmd, &temp_path);
         cmd.env("ATM_TEAM", "test-team");
         cmd.env("ATM_IDENTITY", "claude-code");
         cmd.arg("send").arg("agent-a").arg("Claude Code message");
@@ -471,10 +537,7 @@ fn test_spool_drain_delivery_cycle() {
     let temp_dir = TempDir::new().unwrap();
     // Use ATM_HOME to redirect spool dir — works cross-platform (dirs::config_dir()
     // ignores HOME/USERPROFILE on Windows)
-    let prev_atm_home = std::env::var("ATM_HOME").ok();
-    unsafe {
-        std::env::set_var("ATM_HOME", temp_dir.path());
-    }
+    let _atm_home = EnvGuard::set("ATM_HOME", temp_dir.path());
     let teams_dir = temp_dir.path().join("teams");
     let team_dir = teams_dir.join("test-team");
     let inboxes_dir = team_dir.join("inboxes");
@@ -527,14 +590,6 @@ fn test_spool_drain_delivery_cycle() {
         messages.iter().any(|m| m["text"] == "Spooled message"),
         "Delivered message should be in inbox"
     );
-
-    // Restore environment
-    unsafe {
-        match prev_atm_home {
-            Some(val) => std::env::set_var("ATM_HOME", val),
-            None => std::env::remove_var("ATM_HOME"),
-        }
-    }
 }
 
 // ============================================================================
@@ -863,6 +918,7 @@ fn test_permission_denied_inboxes_dir() {
 
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
+    let _daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
 
     let inboxes_dir = temp_dir.path().join(".claude/teams/test-team/inboxes");
 
@@ -900,6 +956,8 @@ fn test_no_duplicate_message_ids_under_concurrent_sends() {
 
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
+    #[cfg(unix)]
+    let _daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
 
     let num_threads = 4;
     let barrier = Arc::new(Barrier::new(num_threads));
@@ -911,7 +969,7 @@ fn test_no_duplicate_message_ids_under_concurrent_sends() {
         let handle = std::thread::spawn(move || {
             barrier.wait();
             let mut cmd = cargo::cargo_bin_cmd!("atm");
-            cmd.env("ATM_HOME", &temp_path);
+            set_home_env_path(&mut cmd, &temp_path);
             cmd.env("ATM_TEAM", "test-team");
             cmd.env("ATM_IDENTITY", format!("thread-{thread_id}"));
             cmd.arg("send")
@@ -1333,9 +1391,8 @@ fn test_dead_pid_stale_lock_starts_daemon_cleanly() {
 
     let new_pid = wait_for_daemon_pid_change(&temp_dir, dead_pid, Duration::from_secs(5));
     assert!(new_pid > 1);
-    daemon_test_registry::register_test_daemon(new_pid, &daemon_binary_path());
-    cleanup_pid(new_pid);
-    daemon_test_registry::unregister_test_daemon(new_pid);
+    let _restarted_daemon =
+        DaemonProcessGuard::adopt_registered_pid(new_pid, &daemon_binary_path());
 }
 
 #[cfg(unix)]
@@ -1359,34 +1416,15 @@ fn test_identity_mismatch_socket_is_detected_and_restarted() {
         daemon_binary_path().to_string_lossy().to_string(),
     );
 
-    let old_home = std::env::var("ATM_HOME").ok();
-    let old_daemon_bin = std::env::var("ATM_DAEMON_BIN").ok();
-    let old_autostart = std::env::var("ATM_DAEMON_AUTOSTART").ok();
-    unsafe {
-        std::env::set_var("ATM_HOME", temp_dir.path());
-        std::env::set_var("ATM_DAEMON_BIN", daemon_binary_path());
-        std::env::set_var("ATM_DAEMON_AUTOSTART", "1");
-    }
+    let daemon_bin = daemon_binary_path();
+    let _atm_home = EnvGuard::set("ATM_HOME", temp_dir.path());
+    let _atm_daemon_bin = EnvGuard::set("ATM_DAEMON_BIN", &daemon_bin);
+    let _atm_daemon_autostart = EnvGuard::set("ATM_DAEMON_AUTOSTART", "1");
     let ensure_result = agent_team_mail_core::daemon_client::ensure_daemon_running();
-    unsafe {
-        match old_home {
-            Some(v) => std::env::set_var("ATM_HOME", v),
-            None => std::env::remove_var("ATM_HOME"),
-        }
-        match old_daemon_bin {
-            Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
-            None => std::env::remove_var("ATM_DAEMON_BIN"),
-        }
-        match old_autostart {
-            Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
-            None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
-        }
-    }
     ensure_result.expect("ensure_daemon_running should restart on identity mismatch");
 
     let new_pid = wait_for_daemon_pid_change(&temp_dir, old_pid, Duration::from_secs(8));
     assert!(new_pid > 1);
-    daemon_test_registry::register_test_daemon(new_pid, &daemon_binary_path());
-    cleanup_pid(new_pid);
-    daemon_test_registry::unregister_test_daemon(new_pid);
+    let _restarted_daemon =
+        DaemonProcessGuard::adopt_registered_pid(new_pid, &daemon_binary_path());
 }
