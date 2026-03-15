@@ -8,8 +8,6 @@ use agent_team_mail_core::schema::InboxMessage;
 use tracing::warn;
 
 #[cfg(unix)]
-pub(crate) use super::gh_alerts::repo_scope_matches;
-#[cfg(unix)]
 use super::types::{CiMonitorStatus, GhAlertTargets};
 
 #[cfg(unix)]
