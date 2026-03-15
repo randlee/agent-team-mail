@@ -1417,7 +1417,7 @@ fn test_dead_pid_stale_lock_starts_daemon_cleanly() {
     let new_pid = wait_for_daemon_pid_change(&temp_dir, dead_pid, Duration::from_secs(5));
     assert!(new_pid > 1);
     let _restarted_daemon =
-        DaemonProcessGuard::adopt_registered_pid(new_pid, &daemon_binary_path());
+        DaemonProcessGuard::adopt_registered_pid(new_pid, &daemon_binary_path(), temp_dir.path());
 }
 
 #[cfg(unix)]
@@ -1454,5 +1454,5 @@ fn test_identity_mismatch_socket_is_detected_and_restarted() {
     let new_pid = wait_for_daemon_pid_change(&temp_dir, old_pid, Duration::from_secs(8));
     assert!(new_pid > 1);
     let _restarted_daemon =
-        DaemonProcessGuard::adopt_registered_pid(new_pid, &daemon_binary_path());
+        DaemonProcessGuard::adopt_registered_pid(new_pid, &daemon_binary_path(), temp_dir.path());
 }

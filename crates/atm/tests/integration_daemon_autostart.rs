@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
-use std::process::{Child, Command};
+use std::process::Command;
 #[cfg(unix)]
 use std::time::{Duration, Instant};
 #[cfg(unix)]
@@ -191,27 +191,6 @@ fn spawn_count(home: &Path) -> usize {
         .count()
 }
 
-#[cfg(unix)]
-struct FakeDaemonChildGuard {
-    child: Child,
-}
-
-#[cfg(unix)]
-impl FakeDaemonChildGuard {
-    fn new(child: Child) -> Self {
-        Self { child }
-    }
-}
-
-#[cfg(unix)]
-impl Drop for FakeDaemonChildGuard {
-    fn drop(&mut self) {
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-    }
-}
 
 #[test]
 #[cfg(unix)]
@@ -241,7 +220,7 @@ fn test_status_autostarts_daemon_when_absent() {
     wait_for_daemon_socket(home);
     let daemon_pid = read_daemon_pid(&temp).expect("status autostart should write daemon pid");
     let _daemon_guard =
-        daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(daemon_pid, &script);
+        daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(daemon_pid, &script, home);
     assert_eq!(
         spawn_count(home),
         1,
@@ -258,7 +237,8 @@ fn test_status_noops_when_daemon_already_healthy() {
     write_team_config(home, team);
     let script = write_fake_daemon_script(home);
     let daemon = Command::new(&script).env("ATM_HOME", home).spawn().unwrap();
-    let _daemon_guard = FakeDaemonChildGuard::new(daemon);
+    let _daemon_guard =
+        daemon_process_guard::DaemonProcessGuard::from_child(daemon, std::path::Path::new(&script), home);
     wait_for_daemon_socket(home);
     assert_eq!(spawn_count(home), 1);
 
@@ -297,7 +277,8 @@ fn test_concurrent_multi_team_status_uses_single_daemon_instance() {
     }
     let script = write_fake_daemon_script(home);
     let daemon = Command::new(&script).env("ATM_HOME", home).spawn().unwrap();
-    let _daemon_guard = FakeDaemonChildGuard::new(daemon);
+    let _daemon_guard =
+        daemon_process_guard::DaemonProcessGuard::from_child(daemon, std::path::Path::new(&script), home);
     wait_for_daemon_socket(home);
     assert_eq!(spawn_count(home), 1);
 
@@ -397,7 +378,7 @@ fn test_daemon_kill_autostarts_daemon_when_absent() {
     let daemon_pid =
         read_daemon_pid(&temp).expect("daemon --kill autostart should write daemon pid");
     let _daemon_guard =
-        daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(daemon_pid, &script);
+        daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(daemon_pid, &script, home);
     assert_eq!(spawn_count(home), 1, "daemon should autostart for --kill");
 }
 
@@ -432,7 +413,7 @@ fn test_cleanup_agent_autostarts_daemon_when_absent() {
     let daemon_pid =
         read_daemon_pid(&temp).expect("cleanup --agent autostart should write daemon pid");
     let _daemon_guard =
-        daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(daemon_pid, &script);
+        daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(daemon_pid, &script, home);
     assert_eq!(spawn_count(home), 1, "daemon should autostart for cleanup");
 }
 
@@ -461,7 +442,7 @@ fn test_doctor_no_daemon_not_running_after_status_autostart() {
     let daemon_pid =
         read_daemon_pid(&temp).expect("status autostart should write daemon pid for doctor");
     let _daemon_guard =
-        daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(daemon_pid, &script);
+        daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(daemon_pid, &script, home);
     assert_eq!(
         spawn_count(home),
         1,

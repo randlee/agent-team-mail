@@ -16,6 +16,12 @@ use agent_team_mail_daemon::roster::RosterService;
 #[path = "../../atm/tests/support/daemon_test_registry.rs"]
 #[allow(dead_code)]
 mod daemon_test_registry;
+#[path = "../../atm/tests/support/daemon_process_guard.rs"]
+#[allow(dead_code)]
+mod daemon_process_guard;
+#[path = "../../atm/tests/support/env_guard.rs"]
+#[allow(dead_code)]
+mod env_guard;
 // These daemon integration tests still serialize because the helper contexts
 // mutate ATM_HOME process-wide before constructing shared daemon state.
 use serial_test::serial;
@@ -150,17 +156,17 @@ impl Plugin for MockPlugin {
     }
 }
 
-/// Create a test plugin context with temporary directories
-fn create_test_context() -> (PluginContext, TempDir) {
+/// Create a test plugin context with temporary directories.
+///
+/// Returns `(ctx, temp_dir, _atm_home_guard)`. The caller must hold the guard
+/// for the lifetime of the test — when it drops, `ATM_HOME` is restored.
+fn create_test_context() -> (PluginContext, TempDir, env_guard::EnvGuard) {
     let temp_dir = tempfile::tempdir().unwrap();
     let teams_root = temp_dir.path().join("teams");
     std::fs::create_dir_all(&teams_root).unwrap();
 
-    // Set ATM_HOME for cross-platform testing
-    // SAFETY: Tests are serialized via #[serial], so no parallel mutation
-    unsafe {
-        std::env::set_var("ATM_HOME", temp_dir.path());
-    }
+    // F-6: use EnvGuard so ATM_HOME is restored even if the test panics.
+    let atm_home_guard = env_guard::EnvGuard::set("ATM_HOME", temp_dir.path());
 
     let claude_root = temp_dir.path().join(".claude");
     std::fs::create_dir_all(&claude_root).unwrap();
@@ -184,17 +190,18 @@ fn create_test_context() -> (PluginContext, TempDir) {
         Arc::new(roster_service),
     );
 
-    (ctx, temp_dir)
+    (ctx, temp_dir, atm_home_guard)
 }
 
 /// Create a test context where mail teams root matches `${ATM_HOME}/.claude/teams`.
-fn create_reconcile_test_context() -> (PluginContext, TempDir) {
+///
+/// Returns `(ctx, temp_dir, _atm_home_guard)`. The caller must hold the guard
+/// for the lifetime of the test — when it drops, `ATM_HOME` is restored.
+fn create_reconcile_test_context() -> (PluginContext, TempDir, env_guard::EnvGuard) {
     let temp_dir = tempfile::tempdir().unwrap();
 
-    // SAFETY: Tests are serialized via #[serial], so no parallel mutation
-    unsafe {
-        std::env::set_var("ATM_HOME", temp_dir.path());
-    }
+    // F-6: use EnvGuard so ATM_HOME is restored even if the test panics.
+    let atm_home_guard = env_guard::EnvGuard::set("ATM_HOME", temp_dir.path());
 
     let claude_root = temp_dir.path().join(".claude");
     let teams_root = claude_root.join("teams");
@@ -219,7 +226,7 @@ fn create_reconcile_test_context() -> (PluginContext, TempDir) {
         Arc::new(roster_service),
     );
 
-    (ctx, temp_dir)
+    (ctx, temp_dir, atm_home_guard)
 }
 
 fn write_team_config(teams_root: &std::path::Path, team: &str, members: serde_json::Value) {
@@ -272,43 +279,6 @@ async fn wait_for_recorded_event_elapsed(
     .await
 }
 
-struct TestDaemonChildGuard {
-    child: std::process::Child,
-    pid: u32,
-}
-
-impl TestDaemonChildGuard {
-    fn spawn(bin: &str, home: &Path) -> Self {
-        let child = std::process::Command::new(bin)
-            .env("ATM_HOME", home)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("failed to spawn first daemon");
-        let pid = child.id();
-        daemon_test_registry::register_test_daemon(pid, Path::new(bin));
-        Self { child, pid }
-    }
-
-    fn child_mut(&mut self) -> &mut std::process::Child {
-        &mut self.child
-    }
-
-    fn kill_and_wait(&mut self) {
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
-        }
-        let _ = self.child.wait();
-    }
-}
-
-impl Drop for TestDaemonChildGuard {
-    fn drop(&mut self) {
-        self.kill_and_wait();
-        daemon_test_registry::unregister_test_daemon(self.pid);
-    }
-}
 
 fn wait_for_child_running_elapsed(
     child: &mut Child,
@@ -400,7 +370,7 @@ fn create_test_daemon_lock(temp_dir: &TempDir) -> agent_team_mail_core::io::lock
 #[tokio::test]
 #[serial]
 async fn test_daemon_starts_and_loads_mock_plugin() {
-    let (ctx, temp_dir) = create_test_context();
+    let (ctx, temp_dir, _atm_home_guard) = create_test_context();
     let events = Arc::new(Mutex::new(Vec::new()));
     let status_writer = create_test_status_writer(&temp_dir);
 
@@ -470,7 +440,7 @@ async fn test_daemon_starts_and_loads_mock_plugin() {
 #[tokio::test]
 #[serial]
 async fn test_signal_triggers_graceful_shutdown() {
-    let (ctx, temp_dir) = create_test_context();
+    let (ctx, temp_dir, _atm_home_guard) = create_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
     let events = Arc::new(Mutex::new(Vec::new()));
 
@@ -532,7 +502,7 @@ async fn test_signal_triggers_graceful_shutdown() {
 #[tokio::test]
 #[serial]
 async fn test_plugin_lifecycle_order() {
-    let (ctx, temp_dir) = create_test_context();
+    let (ctx, temp_dir, _atm_home_guard) = create_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
     let events = Arc::new(Mutex::new(Vec::new()));
 
@@ -591,7 +561,7 @@ async fn test_plugin_lifecycle_order() {
 #[tokio::test]
 #[serial]
 async fn test_spool_drain_runs_on_interval() {
-    let (ctx, temp_dir) = create_test_context();
+    let (ctx, temp_dir, _atm_home_guard) = create_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
     let mut registry = PluginRegistry::new();
 
@@ -639,7 +609,7 @@ async fn test_spool_drain_runs_on_interval() {
 #[tokio::test]
 #[serial]
 async fn test_startup_reconcile_seeds_roster_without_interval_delay() {
-    let (ctx, temp_dir) = create_reconcile_test_context();
+    let (ctx, temp_dir, _atm_home_guard) = create_reconcile_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
     let teams_root = temp_dir.path().join(".claude/teams");
     let cwd = temp_dir.path().display().to_string();
@@ -726,7 +696,7 @@ async fn test_startup_reconcile_seeds_roster_without_interval_delay() {
     ignore = "notify watcher timing flaky on macOS CI"
 )]
 async fn test_config_watch_event_updates_and_removes_members() {
-    let (ctx, temp_dir) = create_reconcile_test_context();
+    let (ctx, temp_dir, _atm_home_guard) = create_reconcile_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
     let teams_root = temp_dir.path().join(".claude/teams");
     let cwd = temp_dir.path().display().to_string();
@@ -862,7 +832,7 @@ async fn test_config_watch_event_updates_and_removes_members() {
 #[tokio::test]
 #[serial]
 async fn test_graceful_shutdown_with_timeout() {
-    let (ctx, temp_dir) = create_test_context();
+    let (ctx, temp_dir, _atm_home_guard) = create_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
     let events = Arc::new(Mutex::new(Vec::new()));
 
@@ -934,7 +904,7 @@ async fn test_graceful_shutdown_with_timeout() {
 #[tokio::test]
 #[serial]
 async fn test_empty_registry_runs_successfully() {
-    let (ctx, temp_dir) = create_test_context();
+    let (ctx, temp_dir, _atm_home_guard) = create_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
     let mut registry = PluginRegistry::new();
 
@@ -978,7 +948,7 @@ async fn test_empty_registry_runs_successfully() {
 #[tokio::test]
 #[serial]
 async fn test_multiple_plugins_run_concurrently() {
-    let (ctx, temp_dir) = create_test_context();
+    let (ctx, temp_dir, _atm_home_guard) = create_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
     let events = Arc::new(Mutex::new(Vec::new()));
 
@@ -1052,7 +1022,7 @@ async fn test_multiple_plugins_run_concurrently() {
 #[tokio::test]
 #[serial]
 async fn test_plugin_run_failure_isolated_from_sibling_plugins() {
-    let (ctx, temp_dir) = create_test_context();
+    let (ctx, temp_dir, _atm_home_guard) = create_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
     let events = Arc::new(Mutex::new(Vec::new()));
 
@@ -1128,7 +1098,19 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
     let temp_dir = TempDir::new().unwrap();
     let bin = env!("CARGO_BIN_EXE_atm-daemon");
 
-    let mut first = TestDaemonChildGuard::spawn(bin, temp_dir.path());
+    let first_child = std::process::Command::new(bin)
+        .env("ATM_HOME", temp_dir.path())
+        .env_remove("ATM_DAEMON_BIN")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn first daemon");
+    let mut first = daemon_process_guard::DaemonProcessGuard::from_child(
+        first_child,
+        Path::new(bin),
+        temp_dir.path(),
+    );
 
     let daemon_running = wait_for_child_running_elapsed(first.child_mut(), 1_000)
         .expect("first daemon should still be running");
@@ -1163,5 +1145,5 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
         stderr.contains("already running") || stderr.contains("Refusing second instance"),
         "second daemon error should indicate lock contention, got: {stderr}"
     );
-    first.kill_and_wait();
+    drop(first);
 }
