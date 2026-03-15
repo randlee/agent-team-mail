@@ -2792,11 +2792,7 @@ poll_interval_secs = 10
                 repo_scope: None,
             }],
         };
-        std::fs::write(
-            &state_path,
-            serde_json::to_string(&state).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(&state_path, serde_json::to_string(&state).unwrap()).unwrap();
 
         let mut plugin = CiMonitorPlugin::new().with_provider(Box::new(provider));
         plugin.init(&ctx).await.unwrap();
