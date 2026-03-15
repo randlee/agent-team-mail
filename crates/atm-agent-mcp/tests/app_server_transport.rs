@@ -83,6 +83,22 @@ fn make_fork_response(id: u64, new_thread_id: &str) -> String {
     .unwrap()
 }
 
+async fn wait_for_condition(
+    timeout: std::time::Duration,
+    poll_interval: std::time::Duration,
+    mut condition: impl FnMut() -> bool,
+) -> std::time::Duration {
+    let start = tokio::time::Instant::now();
+    let deadline = start + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if condition() {
+            return start.elapsed();
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+    start.elapsed()
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 /// Verify that a `MockTransport` can be constructed without panicking.
@@ -151,14 +167,22 @@ async fn test_app_server_handshake_success() {
         .await
         .expect("MockTransport::spawn should succeed");
 
-    // Give the background task a tick to flush stdin writes.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-    // Collect what the "child process" received on stdin.
     let mut requests = Vec::new();
-    while let Ok(msg) = handle.request_rx.try_recv() {
-        requests.push(msg);
-    }
+    let elapsed = wait_for_condition(
+        std::time::Duration::from_millis(250),
+        std::time::Duration::from_millis(10),
+        || {
+            while let Ok(msg) = handle.request_rx.try_recv() {
+                requests.push(msg);
+            }
+            true
+        },
+    )
+    .await;
+    assert!(
+        elapsed < std::time::Duration::from_millis(250),
+        "stdin readiness probe did not settle within 250ms: elapsed={elapsed:?}"
+    );
 
     // MockTransport::spawn() does not perform the JSON-RPC handshake itself —
     // it provides the raw channel infrastructure. Verify spawn succeeded
@@ -315,14 +339,22 @@ async fn test_thread_fork() {
         stdin.write_all(line.as_bytes()).await.unwrap();
     }
 
-    // Give the background task time to process.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-    // Read what the mock received on stdin.
     let mut received = Vec::new();
-    while let Ok(msg) = handle.request_rx.try_recv() {
-        received.push(msg);
-    }
+    let elapsed = wait_for_condition(
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_millis(10),
+        || {
+            while let Ok(msg) = handle.request_rx.try_recv() {
+                received.push(msg);
+            }
+            received.iter().any(|msg| msg.contains("thread/fork"))
+        },
+    )
+    .await;
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "thread/fork request was not observed within 1s: elapsed={elapsed:?}"
+    );
 
     // Verify the thread/fork request was received by the mock.
     let fork_request = received
@@ -553,7 +585,16 @@ async fn test_app_server_background_task_turn_lifecycle() {
     // Inject turn/started.
     let started = format!("{}\n", make_turn_started("turn-T1"));
     feed_write.write_all(started.as_bytes()).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let started_elapsed = wait_for_condition(
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_millis(10),
+        || !idle_flag.load(Ordering::Acquire),
+    )
+    .await;
+    assert!(
+        started_elapsed < std::time::Duration::from_secs(1),
+        "turn/started state was not observed within 1s: elapsed={started_elapsed:?}"
+    );
 
     // idle_flag should be false while turn is in progress.
     assert!(
@@ -574,7 +615,16 @@ async fn test_app_server_background_task_turn_lifecycle() {
     // Inject turn/completed.
     let completed = format!("{}\n", make_turn_completed("turn-T1", "completed"));
     feed_write.write_all(completed.as_bytes()).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let completed_elapsed = wait_for_condition(
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_millis(10),
+        || idle_flag.load(Ordering::Acquire),
+    )
+    .await;
+    assert!(
+        completed_elapsed < std::time::Duration::from_secs(1),
+        "turn/completed state was not observed within 1s: elapsed={completed_elapsed:?}"
+    );
 
     // idle_flag should be true — all threads are now Terminal.
     assert!(
