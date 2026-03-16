@@ -133,7 +133,6 @@ async fn otel_smoke_writer_exports_reachable_with_runtime_and_subagent_id() {
         canonical.lines().any(|line| !line.trim().is_empty()),
         "canonical JSONL should contain at least one event"
     );
-
 }
 
 #[tokio::test]
@@ -160,7 +159,6 @@ async fn otel_smoke_writer_fail_open_when_export_path_unreachable() {
         otel_path.is_dir(),
         "otel path should remain the blocking directory in outage simulation"
     );
-
 }
 
 #[tokio::test]
@@ -207,5 +205,4 @@ async fn otel_outage_rotation_and_spool_merge_smoke() {
         !spool_file.exists(),
         "source spool file should be removed after successful merge"
     );
-
 }

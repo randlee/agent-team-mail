@@ -201,7 +201,6 @@ fn write_lock_metadata(temp_dir: &TempDir, pid: u32, home_scope: String, executa
     .expect("write metadata");
 }
 
-
 // ============================================================================
 // Category 1: Concurrent Write Tests
 // ============================================================================
@@ -434,7 +433,8 @@ fn test_concurrent_cli_and_direct_write_no_loss() {
     // adopt_running_pid returns None if no PID file was written; RuntimeDaemonCleanupGuard's
     // Drop sweep still attempts cleanup of any leaked daemon processes.
     #[cfg(unix)]
-    let _adopted = daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
+    let _adopted =
+        daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
 
     // Verify all messages are present
     let content = fs::read_to_string(&inbox_path).unwrap();
@@ -914,7 +914,8 @@ fn test_permission_denied_inboxes_dir() {
     // Best-effort adoption: daemon may not have auto-started for this error-path test.
     // adopt_running_pid returns None if no PID file was written; RuntimeDaemonCleanupGuard's
     // Drop sweep still attempts cleanup of any leaked daemon processes.
-    let _adopted = daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
+    let _adopted =
+        daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
 
     // Restore permissions for cleanup
     fs::set_permissions(&inboxes_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -965,7 +966,8 @@ fn test_no_duplicate_message_ids_under_concurrent_sends() {
     // adopt_running_pid returns None if no PID file was written; RuntimeDaemonCleanupGuard's
     // Drop sweep still attempts cleanup of any leaked daemon processes.
     #[cfg(unix)]
-    let _adopted = daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
+    let _adopted =
+        daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
 
     // Check inbox for duplicates
     let inbox_path = temp_dir
