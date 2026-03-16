@@ -68,7 +68,7 @@ Current direct `gh` execution / boundary exceptions:
 | Violation | Crate / Area | File:Line | Issue | Status |
 |---|---|---|---|---|
 | Root tracking issue for GitHub boundary elimination plan and enforcement follow-up | planning / governance | `docs/requirements.md` | [#807](https://github.com/randlee/agent-team-mail/issues/807) | root tracking issue |
-| Raw `gh` subprocess in provider-agnostic crate | `atm-ci-monitor` | `crates/atm-ci-monitor/src/github_provider.rs:173` | [#809](https://github.com/randlee/agent-team-mail/issues/809) | audited temporary exception |
+| Raw `gh` subprocess in provider-agnostic crate | `atm-ci-monitor` | `crates/atm-ci-monitor/src/github_provider.rs:173` | [#809](https://github.com/randlee/agent-team-mail/issues/809) | removed in AT.2 (`feature/pAT-s2-ci-monitor-provider-extraction`) |
 | Raw `gh --version` bootstrap probe | `atm` CLI | `crates/atm/src/commands/gh.rs:2154` | [#811](https://github.com/randlee/agent-team-mail/issues/811) | audited temporary exception |
 | Raw `gh auth status` bootstrap probe | `atm` CLI | `crates/atm/src/commands/gh.rs:2167` | [#811](https://github.com/randlee/agent-team-mail/issues/811) | audited temporary exception |
 | Raw `gh` subprocess in issues plugin | `atm-daemon` issues plugin | `crates/atm-daemon/src/plugins/issues/github.rs:31` | [#812](https://github.com/randlee/agent-team-mail/issues/812) | audited temporary exception |

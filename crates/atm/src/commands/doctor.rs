@@ -4,8 +4,9 @@ use agent_team_mail_ci_monitor::{
     GhCliObserverContext, RateLimitUpdate, emit_gh_info_denied, emit_gh_info_live_refresh,
     emit_gh_info_requested, emit_gh_info_served_from_cache, gh_repo_state_cache_age_secs,
     new_gh_execution_call_id, new_gh_info_request_id, read_gh_repo_state,
-    run_attributed_gh_command_with_ids, update_gh_repo_state_rate_limit,
+    update_gh_repo_state_rate_limit,
 };
+use agent_team_mail_daemon::plugins::ci_monitor::gh_execution::run_attributed_gh_command_with_ids;
 use anyhow::{Context, Result};
 use clap::Args;
 use std::collections::{BTreeSet, HashMap, HashSet};

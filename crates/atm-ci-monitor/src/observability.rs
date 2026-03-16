@@ -5,8 +5,7 @@ use crate::repo_state::{
 use crate::{
     CiProviderError, GhBranchRefCount, GhCliCallMetadata, GhCliCallOutcome, GhCliObserver,
     GhLedgerKind, GhLedgerRecord, GhRateLimitSnapshot, GhRepoStateFile, GhRepoStateRecord,
-    GhRuntimeOwner, GitHubActionsProvider, append_gh_observability_record, new_gh_call_id,
-    new_gh_request_id,
+    GhRuntimeOwner, append_gh_observability_record, new_gh_call_id, new_gh_request_id,
 };
 use agent_team_mail_core::consts::{
     GH_ACTIVE_POLL_INTERVAL_SECS, GH_BUDGET_LIMIT_PER_HOUR, GH_IDLE_POLL_INTERVAL_SECS,
@@ -100,52 +99,6 @@ impl GhCliObserver for SharedGhCliObserver {
 
 pub fn build_gh_cli_observer(ctx: GhCliObserverContext) -> Arc<dyn GhCliObserver> {
     Arc::new(SharedGhCliObserver::new(ctx))
-}
-
-pub fn run_attributed_gh_command(
-    ctx: &GhCliObserverContext,
-    action: &str,
-    args: &[&str],
-    branch: Option<&str>,
-    reference: Option<&str>,
-) -> Result<String> {
-    run_attributed_gh_command_with_ids(
-        ctx,
-        action,
-        args,
-        branch,
-        reference,
-        new_gh_request_id(),
-        new_gh_call_id(),
-    )
-}
-
-pub fn run_attributed_gh_command_with_ids(
-    ctx: &GhCliObserverContext,
-    action: &str,
-    args: &[&str],
-    branch: Option<&str>,
-    reference: Option<&str>,
-    request_id: String,
-    call_id: String,
-) -> Result<String> {
-    let observer: Arc<dyn GhCliObserver> = Arc::new(SharedGhCliObserver::new(ctx.clone()));
-    let metadata = GhCliCallMetadata {
-        request_id,
-        call_id,
-        repo_scope: ctx.repo.clone(),
-        caller: action.to_string(),
-        action: action.to_string(),
-        args: args.iter().map(|value| (*value).to_string()).collect(),
-        branch: branch.map(str::to_string),
-        reference: reference.map(str::to_string),
-        ledger_home: Some(ctx.home.clone()),
-        team: Some(ctx.team.clone()),
-        runtime: Some(ctx.runtime.clone()),
-        poller_key: ctx.poller_key.clone(),
-    };
-    GitHubActionsProvider::run_gh_with_metadata_blocking(Some(observer), metadata)
-        .map_err(|err| anyhow::anyhow!(err.to_string()))
 }
 
 pub fn gh_repo_state_path_for(home: &Path) -> PathBuf {
