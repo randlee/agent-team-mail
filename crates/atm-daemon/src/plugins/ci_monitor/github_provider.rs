@@ -1,12 +1,11 @@
 //! GitHub Actions provider and attributed gh execution owned by the daemon plugin layer.
 
-use super::github_schema::{GhJob, GhRun};
+use super::github_schema::{GhJob, GhPrView, GhRun};
 use agent_team_mail_ci_monitor::{
     CiFilter, CiJob, CiProvider, CiProviderError, CiPullRequest, CiRun, CiRunConclusion,
     CiRunStatus, CiStep, GhCliCallMetadata, GhCliCallOutcome, GhCliObserverContext,
     GhCliObserverRef, build_gh_cli_observer, new_gh_call_id, new_gh_request_id,
 };
-use serde::Deserialize;
 use std::process::Command;
 use std::time::Instant;
 
@@ -397,22 +396,6 @@ impl CiProvider for GitHubActionsProvider {
         };
         self.run_gh_with_metadata(metadata).await
     }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GhPrView {
-    number: u64,
-    #[serde(default)]
-    url: Option<String>,
-    #[serde(default)]
-    head_ref_name: Option<String>,
-    #[serde(default)]
-    head_ref_oid: Option<String>,
-    #[serde(default)]
-    created_at: Option<String>,
-    #[serde(default)]
-    merge_state_status: Option<String>,
 }
 
 #[cfg(test)]
