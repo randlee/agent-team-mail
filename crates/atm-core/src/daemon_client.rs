@@ -32,6 +32,7 @@
 //! are surfaced as `Err`.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -139,6 +140,20 @@ pub struct DaemonLockMetadata {
     /// RFC3339 UTC timestamp for metadata write.
     pub written_at: String,
 }
+
+/// Per-team daemon startup sidecar entry written under `${ATM_HOME}/.atm/daemon/`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DaemonTouchEntry {
+    /// Daemon PID that touched this team at startup.
+    pub pid: u32,
+    /// RFC3339 UTC daemon startup timestamp.
+    pub started_at: String,
+    /// Canonical daemon binary path used for the startup touch.
+    pub binary: String,
+}
+
+/// Snapshot of team -> daemon startup touch ownership.
+pub type DaemonTouchSnapshot = BTreeMap<String, DaemonTouchEntry>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RuntimePolicyInput {
@@ -494,6 +509,13 @@ pub fn daemon_status_path() -> anyhow::Result<PathBuf> {
 /// Compute the daemon status snapshot path for an explicit ATM home.
 pub fn daemon_status_path_for(home: &std::path::Path) -> PathBuf {
     daemon_runtime_dir_for(home).join("status.json")
+}
+
+/// Compute the daemon startup touch sidecar path for an explicit ATM home.
+///
+/// The path is `${ATM_HOME}/.atm/daemon/daemon-touch.json`.
+pub fn daemon_touch_path_for(home: &std::path::Path) -> PathBuf {
+    daemon_runtime_dir_for(home).join("daemon-touch.json")
 }
 
 /// Compute the daemon singleton lock path.

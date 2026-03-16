@@ -3,7 +3,9 @@
 //! Writes daemon status to `${ATM_HOME}/.atm/daemon/status.json` for CLI consumption.
 //! Status includes daemon PID, uptime, plugin states, and last update timestamp.
 
-use agent_team_mail_core::daemon_client::RuntimeOwnerMetadata;
+use agent_team_mail_core::daemon_client::{
+    DaemonTouchEntry, DaemonTouchSnapshot, RuntimeOwnerMetadata, daemon_touch_path_for,
+};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -100,8 +102,12 @@ pub enum PluginStatusKind {
 pub struct StatusWriter {
     /// Path to status.json file
     status_path: PathBuf,
+    /// Path to daemon-touch.json startup sidecar
+    touch_path: PathBuf,
     /// Daemon start time for uptime calculation
     start_time: SystemTime,
+    /// RFC3339 startup timestamp reused for daemon-touch sidecar rows.
+    started_at: String,
     /// Daemon version
     version: String,
     /// Runtime owner metadata
@@ -118,13 +124,78 @@ impl StatusWriter {
     pub fn new(home_dir: PathBuf, version: String, owner: RuntimeOwnerMetadata) -> Self {
         let daemon_dir = home_dir.join(".atm/daemon");
         let status_path = daemon_dir.join("status.json");
+        let touch_path = daemon_touch_path_for(&home_dir);
+        let start_time = SystemTime::now();
+        let started_at = format_timestamp(start_time);
 
         Self {
             status_path,
-            start_time: SystemTime::now(),
+            touch_path,
+            start_time,
+            started_at,
             version,
             owner,
         }
+    }
+
+    /// Write a single-writer daemon startup sidecar under `${ATM_HOME}/.atm/daemon/`.
+    ///
+    /// This follows the Phase AO runtime path audit convention: shared-runtime
+    /// daemon ownership files live under `${ATM_HOME}/.atm/daemon/` and are
+    /// written atomically by one writer while readers snapshot-read them.
+    pub fn write_daemon_touch(&self, teams: &[String]) -> Result<()> {
+        use agent_team_mail_core::io::atomic::atomic_swap;
+        use std::io::Write;
+
+        if let Some(parent) = self.touch_path.parent() {
+            std::fs::create_dir_all(parent).context("Failed to create daemon touch directory")?;
+        }
+
+        let snapshot: DaemonTouchSnapshot = teams
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(|team| {
+                (
+                    team,
+                    DaemonTouchEntry {
+                        pid: std::process::id(),
+                        started_at: self.started_at.clone(),
+                        binary: self.owner.executable_path.clone(),
+                    },
+                )
+            })
+            .collect();
+
+        let json = serde_json::to_vec_pretty(&snapshot)
+            .context("Failed to serialize daemon touch snapshot")?;
+        let tmp_path = self.touch_path.with_extension("json.tmp");
+        let mut tmp_file =
+            std::fs::File::create(&tmp_path).context("Failed to create daemon touch temp file")?;
+        tmp_file
+            .write_all(&json)
+            .context("Failed to write daemon touch temp file")?;
+        tmp_file
+            .sync_all()
+            .context("Failed to fsync daemon touch temp file")?;
+        drop(tmp_file);
+
+        if !self.touch_path.exists() {
+            let placeholder = std::fs::File::create(&self.touch_path)
+                .context("Failed to create daemon touch placeholder")?;
+            placeholder
+                .sync_all()
+                .context("Failed to fsync daemon touch placeholder")?;
+        }
+
+        atomic_swap(&self.touch_path, &tmp_path)
+            .context("Failed to atomically swap daemon touch snapshot")?;
+        if tmp_path.exists() {
+            std::fs::remove_file(&tmp_path).context("Failed to remove daemon touch temp file")?;
+        }
+
+        Ok(())
     }
 
     /// Write daemon status to status.json atomically
@@ -263,6 +334,34 @@ mod tests {
             .unwrap();
 
         assert!(writer.status_path().exists());
+    }
+
+    #[test]
+    fn test_status_writer_writes_daemon_touch_snapshot() {
+        let temp_dir = TempDir::new().unwrap();
+        let writer = StatusWriter::new(
+            temp_dir.path().to_path_buf(),
+            "0.8.0".to_string(),
+            runtime_owner(temp_dir.path()),
+        );
+
+        writer
+            .write_daemon_touch(&["atm-dev".to_string(), "qa-team".to_string()])
+            .expect("write daemon touch");
+
+        let raw =
+            std::fs::read_to_string(temp_dir.path().join(".atm/daemon/daemon-touch.json")).unwrap();
+        let snapshot: DaemonTouchSnapshot = serde_json::from_str(&raw).unwrap();
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot["atm-dev"].pid, std::process::id());
+        assert_eq!(
+            snapshot["atm-dev"].binary,
+            temp_dir.path().join("atm-daemon").to_string_lossy()
+        );
+        assert_eq!(
+            snapshot["qa-team"].started_at,
+            snapshot["atm-dev"].started_at
+        );
     }
 
     #[test]
