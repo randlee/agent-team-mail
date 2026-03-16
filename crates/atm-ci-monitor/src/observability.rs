@@ -754,7 +754,7 @@ where
     let runtime_dir = home.join(".atm/daemon");
     std::fs::create_dir_all(&runtime_dir)?;
     let lock_path = runtime_dir.join("gh-monitor-repo-state.lock");
-    let _guard = crate::io::lock::acquire_lock(&lock_path, 5)
+    let _guard = agent_team_mail_core::io::lock::acquire_lock(&lock_path, 5)
         .map_err(|err| anyhow::anyhow!("failed to lock gh repo-state: {err}"))?;
     let now = Utc::now();
     let mut state = load_repo_state(home).context("failed to load gh monitor repo-state")?;
@@ -880,7 +880,9 @@ fn default_repo_state_record(
 }
 
 fn runtime_owner(runtime: &str, home: &Path) -> GhRuntimeOwner {
-    if let Ok(owner) = crate::daemon_client::validate_runtime_admission_for_current_process(home) {
+    if let Ok(owner) =
+        agent_team_mail_core::daemon_client::validate_runtime_admission_for_current_process(home)
+    {
         return GhRuntimeOwner {
             runtime: owner.runtime_kind.as_str().to_string(),
             executable_path: owner.executable_path,
