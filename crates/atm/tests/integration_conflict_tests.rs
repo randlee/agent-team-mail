@@ -450,6 +450,7 @@ fn test_concurrent_cli_and_direct_write_no_loss() {
 
     handle1.join().unwrap();
     handle2.join().unwrap();
+    #[cfg(unix)]
     let _ = daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
 
     // Verify all messages are present
@@ -974,6 +975,7 @@ fn test_no_duplicate_message_ids_under_concurrent_sends() {
     for handle in handles {
         handle.join().unwrap();
     }
+    #[cfg(unix)]
     let _ = daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
 
     // Check inbox for duplicates
