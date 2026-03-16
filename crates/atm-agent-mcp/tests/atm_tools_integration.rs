@@ -14,6 +14,11 @@ use serde_json::{Value, json};
 use serial_test::serial;
 use tempfile::TempDir;
 
+#[path = "support/env_guard.rs"]
+mod env_guard;
+
+use env_guard::EnvGuard;
+
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
@@ -159,7 +164,7 @@ fn write_team_config(home: &std::path::Path, team: &str, member_names: &[&str]) 
 #[serial]
 async fn integration_atm_send_with_config_identity() {
     let dir = TempDir::new().unwrap();
-    unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+    let _atm_home = EnvGuard::set("ATM_HOME", dir.path());
 
     let mut proxy = make_proxy(Some("team-lead"), "atm-dev");
 
@@ -177,7 +182,6 @@ async fn integration_atm_send_with_config_identity() {
     });
 
     let resp = roundtrip_tools_call(&mut proxy, msg).await;
-    unsafe { std::env::remove_var("ATM_HOME") };
 
     assert!(
         resp.get("error").is_none(),
@@ -217,7 +221,7 @@ async fn integration_atm_send_with_config_identity() {
 #[serial]
 async fn integration_atm_send_explicit_identity_override() {
     let dir = TempDir::new().unwrap();
-    unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+    let _atm_home = EnvGuard::set("ATM_HOME", dir.path());
 
     let mut proxy = make_proxy(Some("config-agent"), "team");
 
@@ -236,7 +240,6 @@ async fn integration_atm_send_explicit_identity_override() {
     });
 
     let resp = roundtrip_tools_call(&mut proxy, msg).await;
-    unsafe { std::env::remove_var("ATM_HOME") };
 
     assert_ne!(
         resp["result"]["isError"],
@@ -264,7 +267,7 @@ async fn integration_atm_send_explicit_identity_override() {
 #[serial]
 async fn integration_atm_send_no_identity_returns_error() {
     let dir = TempDir::new().unwrap();
-    unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+    let _atm_home = EnvGuard::set("ATM_HOME", dir.path());
 
     let mut proxy = make_proxy(None, "team");
 
@@ -282,7 +285,6 @@ async fn integration_atm_send_no_identity_returns_error() {
     });
 
     let resp = roundtrip_tools_call(&mut proxy, msg).await;
-    unsafe { std::env::remove_var("ATM_HOME") };
 
     let code = resp.pointer("/error/code").and_then(|v| v.as_i64());
     assert_eq!(
@@ -297,7 +299,7 @@ async fn integration_atm_send_no_identity_returns_error() {
 #[serial]
 async fn integration_atm_read_empty_inbox() {
     let dir = TempDir::new().unwrap();
-    unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+    let _atm_home = EnvGuard::set("ATM_HOME", dir.path());
 
     let mut proxy = make_proxy(Some("my-agent"), "team");
 
@@ -312,7 +314,6 @@ async fn integration_atm_read_empty_inbox() {
     });
 
     let resp = roundtrip_tools_call(&mut proxy, msg).await;
-    unsafe { std::env::remove_var("ATM_HOME") };
 
     assert!(
         resp.get("error").is_none(),
@@ -336,7 +337,7 @@ async fn integration_atm_read_empty_inbox() {
 #[serial]
 async fn integration_atm_pending_count_no_inbox() {
     let dir = TempDir::new().unwrap();
-    unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+    let _atm_home = EnvGuard::set("ATM_HOME", dir.path());
 
     let mut proxy = make_proxy(Some("nobody"), "team");
 
@@ -351,7 +352,6 @@ async fn integration_atm_pending_count_no_inbox() {
     });
 
     let resp = roundtrip_tools_call(&mut proxy, msg).await;
-    unsafe { std::env::remove_var("ATM_HOME") };
 
     assert!(
         resp.get("error").is_none(),
@@ -377,7 +377,7 @@ async fn integration_atm_pending_count_no_inbox() {
 #[serial]
 async fn integration_agent_sessions_returns_list() {
     let dir = TempDir::new().unwrap();
-    unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+    let _atm_home = EnvGuard::set("ATM_HOME", dir.path());
 
     let mut proxy = make_proxy(Some("team-lead"), "team");
 
@@ -392,7 +392,6 @@ async fn integration_agent_sessions_returns_list() {
     });
 
     let resp = roundtrip_tools_call(&mut proxy, msg).await;
-    unsafe { std::env::remove_var("ATM_HOME") };
 
     assert!(
         resp.get("error").is_none(),
@@ -422,7 +421,7 @@ async fn integration_agent_sessions_returns_list() {
 #[serial]
 async fn integration_agent_status_returns_object() {
     let dir = TempDir::new().unwrap();
-    unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+    let _atm_home = EnvGuard::set("ATM_HOME", dir.path());
 
     let mut proxy = make_proxy(Some("team-lead"), "myteam");
 
@@ -437,7 +436,6 @@ async fn integration_agent_status_returns_object() {
     });
 
     let resp = roundtrip_tools_call(&mut proxy, msg).await;
-    unsafe { std::env::remove_var("ATM_HOME") };
 
     assert!(
         resp.get("error").is_none(),
@@ -480,7 +478,7 @@ async fn integration_agent_status_returns_object() {
 #[serial]
 async fn integration_atm_read_no_identity_returns_error() {
     let dir = TempDir::new().unwrap();
-    unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+    let _atm_home = EnvGuard::set("ATM_HOME", dir.path());
 
     let mut proxy = make_proxy(None, "team");
 
@@ -495,7 +493,6 @@ async fn integration_atm_read_no_identity_returns_error() {
     });
 
     let resp = roundtrip_tools_call(&mut proxy, msg).await;
-    unsafe { std::env::remove_var("ATM_HOME") };
 
     let code = resp.pointer("/error/code").and_then(|v| v.as_i64());
     assert_eq!(
@@ -510,7 +507,7 @@ async fn integration_atm_read_no_identity_returns_error() {
 #[serial]
 async fn integration_atm_broadcast_no_identity_returns_error() {
     let dir = TempDir::new().unwrap();
-    unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+    let _atm_home = EnvGuard::set("ATM_HOME", dir.path());
 
     let mut proxy = make_proxy(None, "team");
 
@@ -525,7 +522,6 @@ async fn integration_atm_broadcast_no_identity_returns_error() {
     });
 
     let resp = roundtrip_tools_call(&mut proxy, msg).await;
-    unsafe { std::env::remove_var("ATM_HOME") };
 
     let code = resp.pointer("/error/code").and_then(|v| v.as_i64());
     assert_eq!(
@@ -540,7 +536,7 @@ async fn integration_atm_broadcast_no_identity_returns_error() {
 #[serial]
 async fn integration_atm_broadcast_delivers_to_members() {
     let dir = TempDir::new().unwrap();
-    unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+    let _atm_home = EnvGuard::set("ATM_HOME", dir.path());
 
     write_team_config(
         dir.path(),
@@ -561,7 +557,6 @@ async fn integration_atm_broadcast_delivers_to_members() {
     });
 
     let resp = roundtrip_tools_call(&mut proxy, msg).await;
-    unsafe { std::env::remove_var("ATM_HOME") };
 
     assert!(
         resp.get("error").is_none(),

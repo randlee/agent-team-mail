@@ -451,6 +451,13 @@ pub async fn run(
         let startup_state_store = state_store.clone();
         let startup_cycle_state = reconcile_cycle_state.clone();
         let startup_result = tokio::task::spawn_blocking(move || {
+            let pruned = {
+                let mut reg = startup_registry.lock().unwrap();
+                reg.prune_pid_dead_sessions_on_startup()
+            };
+            if pruned > 0 {
+                debug!("startup session prune removed {pruned} dead session record(s)");
+            }
             reconcile_team_member_activity(
                 &claude_root,
                 &startup_registry,
