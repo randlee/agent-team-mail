@@ -3148,15 +3148,35 @@ sleep 10
         let home = tmp.path().to_path_buf();
         let script_path = home.join("fake-daemon.sh");
 
-        let script = r#"#!/bin/sh
+        let script = format!(
+            r#"#!/bin/sh
 set -eu
-home="${ATM_HOME:?}"
+home="${{ATM_HOME:?}}"
 mkdir -p "$home/.atm/daemon"
 mkdir -p "$home/spawn-markers"
 touch "$home/spawn-markers/spawn.$$"
 echo $$ > "$home/.atm/daemon/atm-daemon.pid"
+cat > "$home/.atm/daemon/status.json" <<'EOF'
+{{"pid":$$,"version":"{}"}}
+EOF
+cat > "$home/.atm/daemon/daemon.lock.meta.json" <<'EOF'
+{{
+  "pid": $$,
+  "runtime_kind": "isolated",
+  "build_profile": "release",
+  "executable_path": "{}",
+  "home_scope": "{}",
+  "version": "{}",
+  "written_at": "2026-03-16T00:00:00Z"
+}}
+EOF
 sleep 2
-"#;
+"#,
+            env!("CARGO_PKG_VERSION"),
+            script_path.display(),
+            home.display(),
+            env!("CARGO_PKG_VERSION"),
+        );
         fs::write(&script_path, script).unwrap();
         let mut perms = fs::metadata(&script_path).unwrap().permissions();
         perms.set_mode(0o755);
