@@ -59,6 +59,8 @@ When adding or refactoring a provider:
 Final AT audit result: AT.5 closed the planned exception list, and AT.6
 resolved the two IMPORTANT findings from the Phase AT ending review (#822 and
 #823) before the phase could be considered fully clean.
+AT.6 follow-up (`feature/pAT-s6-gh-findings-fix`): removed dead
+`run_plugin_owned_gh_subprocess` re-export; zero-violation state maintained.
 
 | Violation | Crate / Area | Former File:Line | Issue | Final status |
 |---|---|---|---|---|
