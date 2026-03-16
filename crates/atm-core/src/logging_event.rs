@@ -1137,9 +1137,15 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_spool_dir_path() {
         // Use a TempDir as the home path so the path is platform-native.
         let home = TempDir::new().expect("temp dir");
+        // SAFETY: test-scoped cleanup.
+        unsafe {
+            std::env::remove_var("ATM_LOG_FILE");
+            std::env::remove_var("ATM_LOG_PATH");
+        }
         let expected = home.path().join(".config/atm/logs/atm/spool");
         assert_eq!(spool_dir(home.path()), expected);
     }
