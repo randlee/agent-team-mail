@@ -4,6 +4,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
+use agent_team_mail_ci_monitor::consts::{
+    GH_MONITOR_HEADROOM_FLOOR, GH_MONITOR_HEADROOM_RECOVERY_FLOOR,
+};
+#[cfg(unix)]
 use agent_team_mail_ci_monitor::read_gh_repo_state_record;
 use agent_team_mail_core::daemon_client::isolated_runtime_allows_live_github;
 #[cfg(unix)]
@@ -16,14 +20,59 @@ use super::types::{
 };
 
 #[cfg(unix)]
-pub(crate) fn count_in_flight_monitors(home: &Path, team: &str) -> u64 {
-    load_gh_monitor_state_map(home)
+pub(crate) fn lifecycle_state_allows_polling(state: &str) -> bool {
+    state.trim().eq_ignore_ascii_case("running")
+}
+
+#[cfg(unix)]
+pub(crate) fn current_monitor_lifecycle_state(home: &Path, team: &str) -> Option<String> {
+    super::health::read_gh_monitor_health(home, team)
         .ok()
-        .map(|map| {
-            map.values()
-                .filter(|status| {
-                    status.team == team
-                        && matches!(status.state.as_str(), "tracking" | "monitoring")
+        .map(|health| health.lifecycle_state)
+}
+
+#[cfg(unix)]
+pub(crate) fn repo_state_polling_suppressed(
+    record: &agent_team_mail_ci_monitor::GhRepoStateRecord,
+) -> bool {
+    if record.budget_used_in_window >= record.budget_limit_per_hour {
+        return true;
+    }
+    let Some(rate_limit) = record.rate_limit.as_ref() else {
+        return record.blocked;
+    };
+    if record.blocked {
+        rate_limit.remaining < GH_MONITOR_HEADROOM_RECOVERY_FLOOR
+    } else {
+        rate_limit.remaining <= GH_MONITOR_HEADROOM_FLOOR
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn count_in_flight_monitors(home: &Path, team: &str) -> u64 {
+    if current_monitor_lifecycle_state(home, team)
+        .as_deref()
+        .is_some_and(|state| !lifecycle_state_allows_polling(state))
+    {
+        return 0;
+    }
+
+    load_gh_monitor_state_records(home)
+        .ok()
+        .map(|records| {
+            records
+                .into_iter()
+                .filter(|record| {
+                    record.status.team == team
+                        && matches!(record.status.state.as_str(), "tracking" | "monitoring")
+                        && record.repo_scope.as_deref().is_none_or(|repo_scope| {
+                            read_gh_repo_state_record(home, team, repo_scope)
+                                .ok()
+                                .flatten()
+                                .is_none_or(|repo_state| {
+                                    !repo_state_polling_suppressed(&repo_state)
+                                })
+                        })
                 })
                 .count() as u64
         })
