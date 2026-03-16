@@ -422,6 +422,9 @@ AO.3 reserves these `action` strings:
 - `rate_limit_warning`
 - `rate_limit_critical`
 
+AS.2 extends this registry; see `GH-CI-FR-51` (execution ledger) and
+`GH-CI-FR-52` (freshness ledger) for the full reserved set.
+
 Required payload fields:
 - `team`
 - `repo`

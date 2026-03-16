@@ -49,8 +49,10 @@ mandatory adapter and make bypasses impossible by policy.
 
 **Acceptance Criteria**:
 - no in-scope GitHub monitor/status path can launch `gh` outside the firewall
-- blocked calls fail with a structured reason
+  (`GH-CI-FR-46`)
+- blocked calls fail with a structured reason (`GH-CI-FR-46`)
 - review/QA can identify the single canonical execution surface
+  (`GH-CI-FR-45`, `GH-CI-FR-46`)
 
 ### AS.2 — Two-Layer GitHub Observability
 
@@ -74,8 +76,11 @@ mandatory adapter and make bypasses impossible by policy.
 
 **Acceptance Criteria**:
 - every real `gh` subprocess call is represented in the execution ledger
+  (`GH-CI-FR-47`, `GH-CI-FR-51`)
 - every GH-backed status/info request is represented in the freshness ledger
+  (`GH-CI-FR-48`, `GH-CI-FR-52`)
 - the two ledgers can be correlated for one request path end-to-end
+  (`GH-CI-FR-47`, `GH-CI-FR-48`)
 
 ### AS.3 — Budgeting, Headroom, and Lifecycle Suppression
 
@@ -90,8 +95,11 @@ mandatory adapter and make bypasses impossible by policy.
 
 **Acceptance Criteria**:
 - stop/restart no longer leave a shared poller continuing to spend tokens
+  (`GH-CI-FR-49`)
 - active monitor count and `in_flight` reflect only pollable work
+  (`GH-CI-FR-26`, `GH-CI-FR-49`)
 - budget enforcement is visible in logs and status surfaces
+  (`GH-CI-FR-22`, `GH-CI-FR-50`)
 
 ### AS.4 — Smoke Thresholds and Verification
 
@@ -107,8 +115,11 @@ mandatory adapter and make bypasses impossible by policy.
 
 **Acceptance Criteria**:
 - smoke protocol distinguishes single fresh monitor from multi-monitor runs
+  (`GH-CI-FR-50`)
 - the expected budget envelope is documented and reviewable
+  (`GH-CI-FR-50`)
 - verification plan proves both “no bypass” and “useful degraded answers”
+  (`GH-CI-FR-46`, `GH-CI-FR-48`, `GH-CI-FR-50`)
 
 ---
 

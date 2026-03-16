@@ -1807,7 +1807,8 @@ thresholds for single-monitor vs multi-monitor runs.
 4. Shared pollers do not continue issuing GitHub calls after lifecycle enters
    `stopped` or `draining`.
 5. Smoke guidance distinguishes single-monitor and multi-monitor budget
-   envelopes and remains explainable from local logs.
+   envelopes as documented in `docs/smoke-test-an-ao-ap-aq.md` (updated by
+   AS.4) and remains explainable from local logs.
 
 **Dependency graph**: Phase AR completion → AS.1; AS.1 is foundational; AS.2
 depends on AS.1; AS.3 depends on AS.1 + AS.2; AS.4 depends on AS.2 + AS.3.
