@@ -21,6 +21,9 @@ impl GitHubProvider {
 
     /// Execute a `gh` command and return stdout
     async fn run_gh(&self, args: &[&str]) -> Result<String, PluginError> {
+        // NOT_MONITORED_PATH: the issues plugin is outside the gh_monitor /
+        // `atm gh ...` status+budget firewall scope. AS.4 only hardens monitor/status
+        // execution paths; this provider remains an explicit non-monitor exception.
         // Run gh command in a blocking task
         let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         tokio::task::spawn_blocking(move || {
