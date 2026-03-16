@@ -2937,6 +2937,13 @@ All plugins are **provider-agnostic** where applicable. They read `ctx.system.re
   the current accounting period.
 - Explicit operator action currently means daemon restart. A future
   `atm gh monitor reset-budget` command is planned but is not implemented yet.
+- GitHub access limiting MUST use a hard execution firewall plus two distinct
+  observability layers:
+  - an execution/token ledger for every real `gh` subprocess call
+  - an info/freshness ledger for GH-backed requests that may be served from
+    cache, live refresh, or degraded policy fallback
+- Shared pollers in lifecycle state `stopped` or `draining` MUST NOT continue
+  spending GitHub budget merely because stale active monitor records remain.
 
 **CI Monitor without repo**:
 - CI Monitor is only valid for repo contexts.
