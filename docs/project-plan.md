@@ -1834,7 +1834,7 @@ execution, and `atm gh` command processing.
 |---|---|---|---|
 | AT.1 | Baseline `atm-core` isolation: verify AS.5 (AS5-ARCH-001) closed the non-dev dep and relocated `gh_monitor_observability.rs`; add per-package isolation CI job (#808); confirm `cargo test --package agent-team-mail-core` passes in isolation with zero provider imports | TBD | PLANNED |
 | AT.2 | Move GitHub-specific provider execution out of `crates/atm-ci-monitor/src/github_provider.rs` into the gh plugin/provider layer, leaving `atm-ci-monitor` provider-agnostic only | TBD | PLANNED |
-| AT.3 | Route all GitHub command semantics through the gh plugin/provider layer; `crates/atm/src/commands/gh.rs` becomes CLI bootstrap/routing/capability UX only and stops owning raw `gh` probes or GitHub behavior | TBD | PLANNED |
+| AT.3 | Route all GitHub command semantics through the gh plugin/provider layer; `crates/atm/src/commands/gh.rs` becomes CLI bootstrap/routing/capability UX only and stops owning raw `gh` probes or GitHub behavior | `feature/pAT-s3-gh-command-routing` | COMPLETE |
 | AT.4 | Remove non-gh-plugin raw `gh` execution paths in `crates/atm-daemon/src/plugins/issues/github.rs`, smoke harnesses, and any additional script/helper violations found by the AS.7 search | TBD | PLANNED |
 | AT.5 | Run the final repo-wide illegal-reference audit, delete the allowlist, and close the remaining tracked boundary violations with zero tolerated exceptions | TBD | PLANNED |
 
