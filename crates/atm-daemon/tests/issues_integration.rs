@@ -9,6 +9,9 @@ use agent_team_mail_daemon::plugins::issues::{
     Issue, IssueLabel, IssueState, IssuesPlugin, MockCall, MockProvider,
 };
 use agent_team_mail_daemon::roster::RosterService;
+#[path = "../../atm/tests/support/env_guard.rs"]
+#[allow(dead_code)]
+mod env_guard;
 use serial_test::serial;
 use std::collections::HashMap;
 use std::path::Path;
@@ -19,11 +22,11 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 /// Helper to create a test PluginContext with mock provider injection
-fn create_test_context(temp_dir: &TempDir, provider: Option<GitProvider>) -> PluginContext {
-    // Set ATM_HOME for cross-platform compliance
-    unsafe {
-        std::env::set_var("ATM_HOME", temp_dir.path());
-    }
+fn create_test_context(
+    temp_dir: &TempDir,
+    provider: Option<GitProvider>,
+) -> (PluginContext, env_guard::EnvGuard) {
+    let atm_home_guard = env_guard::EnvGuard::set("ATM_HOME", temp_dir.path());
 
     let claude_root = temp_dir.path().join(".claude");
     let teams_root = claude_root.join("teams");
@@ -54,7 +57,10 @@ fn create_test_context(temp_dir: &TempDir, provider: Option<GitProvider>) -> Plu
 
     let roster = Arc::new(RosterService::new(teams_root));
 
-    PluginContext::new(system, mail, config, roster)
+    (
+        PluginContext::new(system, mail, config, roster),
+        atm_home_guard,
+    )
 }
 
 /// Helper to create a team config for testing
@@ -148,7 +154,7 @@ async fn test_issue_created_delivers_inbox_message() {
         owner: "test".to_string(),
         repo: "repo".to_string(),
     };
-    let mut ctx = create_test_context(&temp_dir, Some(git_provider));
+    let (mut ctx, _atm_home_guard) = create_test_context(&temp_dir, Some(git_provider));
 
     // Add plugin config to context
     let mut plugin_config = toml::Table::new();
@@ -233,7 +239,7 @@ async fn test_inbox_reply_posts_comment() {
         owner: "test".to_string(),
         repo: "repo".to_string(),
     };
-    let mut ctx = create_test_context(&temp_dir, Some(git_provider));
+    let (mut ctx, _atm_home_guard) = create_test_context(&temp_dir, Some(git_provider));
 
     // Add plugin config to context
     let mut plugin_config = toml::Table::new();
@@ -322,7 +328,7 @@ async fn test_issue_filter_applies_labels() {
         owner: "test".to_string(),
         repo: "repo".to_string(),
     };
-    let mut ctx = create_test_context(&temp_dir, Some(git_provider));
+    let (mut ctx, _atm_home_guard) = create_test_context(&temp_dir, Some(git_provider));
 
     // Add plugin config to context
     let mut plugin_config = toml::Table::new();
@@ -417,7 +423,7 @@ async fn test_issue_updates_deliver_multiple_messages() {
         owner: "test".to_string(),
         repo: "repo".to_string(),
     };
-    let mut ctx = create_test_context(&temp_dir, Some(git_provider));
+    let (mut ctx, _atm_home_guard) = create_test_context(&temp_dir, Some(git_provider));
 
     // Add plugin config to context
     let mut plugin_config = toml::Table::new();
@@ -509,7 +515,7 @@ async fn test_synthetic_member_lifecycle() {
         owner: "test".to_string(),
         repo: "repo".to_string(),
     };
-    let ctx = create_test_context(&temp_dir, Some(git_provider));
+    let (ctx, _atm_home_guard) = create_test_context(&temp_dir, Some(git_provider));
 
     // Create team structure
     let team_name = "test-team";
@@ -559,7 +565,7 @@ async fn test_disabled_plugin_skips_init() {
         owner: "test".to_string(),
         repo: "repo".to_string(),
     };
-    let mut ctx = create_test_context(&temp_dir, Some(git_provider));
+    let (mut ctx, _atm_home_guard) = create_test_context(&temp_dir, Some(git_provider));
 
     // Create team structure
     create_team_config(ctx.mail.teams_root(), "test-team");
@@ -611,7 +617,7 @@ async fn test_full_lifecycle_init_run_shutdown() {
         owner: "test".to_string(),
         repo: "repo".to_string(),
     };
-    let ctx = create_test_context(&temp_dir, Some(git_provider));
+    let (ctx, _atm_home_guard) = create_test_context(&temp_dir, Some(git_provider));
 
     // Create team structure
     create_team_config(ctx.mail.teams_root(), "test-team");
@@ -667,7 +673,7 @@ async fn test_missing_provider_init_fails() {
     let temp_dir = TempDir::new().unwrap();
 
     // Create context WITHOUT git provider
-    let ctx = create_test_context(&temp_dir, None);
+    let (ctx, _atm_home_guard) = create_test_context(&temp_dir, None);
 
     // Create and init plugin
     let mut plugin = IssuesPlugin::new();

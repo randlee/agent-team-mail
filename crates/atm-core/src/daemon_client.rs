@@ -2814,18 +2814,8 @@ mod tests {
     use serial_test::serial;
 
     fn with_autostart_disabled<T>(f: impl FnOnce() -> T) -> T {
-        let old = std::env::var("ATM_DAEMON_AUTOSTART").ok();
-        // SAFETY: test-only env mutation guarded by #[serial] on callers.
-        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "0") };
-        let out = f();
-        // SAFETY: test-only env mutation guarded by #[serial] on callers.
-        unsafe {
-            match old {
-                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
-                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
-            }
-        }
-        out
+        let _guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "0");
+        f()
     }
 
     #[test]
@@ -2911,42 +2901,42 @@ mod tests {
     #[test]
     #[serial]
     fn test_daemon_autostart_flag_parsing() {
-        let old = std::env::var("ATM_DAEMON_AUTOSTART").ok();
-
         // Unset => enabled (opt-out model).
-        // SAFETY: serialized env mutation in test.
-        unsafe { std::env::remove_var("ATM_DAEMON_AUTOSTART") };
-        assert!(daemon_autostart_enabled());
+        {
+            let _guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "");
+            // SAFETY: serialized env mutation in test; guard restores previous value.
+            unsafe { std::env::remove_var("ATM_DAEMON_AUTOSTART") };
+            assert!(daemon_autostart_enabled());
+        }
 
-        // SAFETY: serialized env mutation in test.
-        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "1") };
-        assert!(daemon_autostart_enabled());
-        // SAFETY: serialized env mutation in test.
-        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "true") };
-        assert!(daemon_autostart_enabled());
-        // SAFETY: serialized env mutation in test.
-        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "yes") };
-        assert!(daemon_autostart_enabled());
-        // SAFETY: serialized env mutation in test.
-        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "0") };
-        assert!(!daemon_autostart_enabled());
-        // SAFETY: serialized env mutation in test.
-        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "false") };
-        assert!(!daemon_autostart_enabled());
-        // SAFETY: serialized env mutation in test.
-        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "no") };
-        assert!(!daemon_autostart_enabled());
+        {
+            let _guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "1");
+            assert!(daemon_autostart_enabled());
+        }
+        {
+            let _guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "true");
+            assert!(daemon_autostart_enabled());
+        }
+        {
+            let _guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "yes");
+            assert!(daemon_autostart_enabled());
+        }
+        {
+            let _guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "0");
+            assert!(!daemon_autostart_enabled());
+        }
+        {
+            let _guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "false");
+            assert!(!daemon_autostart_enabled());
+        }
+        {
+            let _guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "no");
+            assert!(!daemon_autostart_enabled());
+        }
         // Invalid values remain enabled unless explicitly falsey.
-        // SAFETY: serialized env mutation in test.
-        unsafe { std::env::set_var("ATM_DAEMON_AUTOSTART", "maybe") };
-        assert!(daemon_autostart_enabled());
-
-        // SAFETY: serialized env mutation in test.
-        unsafe {
-            match old {
-                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
-                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
-            }
+        {
+            let _guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "maybe");
+            assert!(daemon_autostart_enabled());
         }
     }
 
@@ -2954,21 +2944,12 @@ mod tests {
     #[test]
     #[serial]
     fn test_resolve_daemon_binary_honors_override() {
-        let old = std::env::var("ATM_DAEMON_BIN").ok();
         let tmp = tempfile::tempdir().unwrap();
         let custom = tmp.path().join("custom-atm-daemon");
         std::fs::write(&custom, "#!/bin/sh\nexit 0\n").unwrap();
-        // SAFETY: serialized env mutation in test.
-        unsafe { std::env::set_var("ATM_DAEMON_BIN", &custom) };
+        let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", custom.to_str().unwrap());
         let resolved = resolve_daemon_binary();
         assert_eq!(std::path::PathBuf::from(resolved), custom);
-        // SAFETY: serialized env mutation in test.
-        unsafe {
-            match old {
-                Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
-                None => std::env::remove_var("ATM_DAEMON_BIN"),
-            }
-        }
     }
 
     #[cfg(unix)]
@@ -3672,7 +3653,7 @@ sleep 8
         fs::set_permissions(&expected_script, expected_perms).unwrap();
 
         let _home_guard = EnvGuard::set("ATM_HOME", home.to_str().unwrap());
-        let _auto_guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "0");
+        let _auto_guard_stale = EnvGuard::set("ATM_DAEMON_AUTOSTART", "0");
         let mut stale_child = std::process::Command::new(&stale_script)
             .env("ATM_HOME", &home)
             .spawn()
@@ -3707,7 +3688,7 @@ sleep 8
         .unwrap();
 
         let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", expected_script.to_str().unwrap());
-        let _auto_guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "1");
+        let _auto_guard_run = EnvGuard::set("ATM_DAEMON_AUTOSTART", "1");
         ensure_daemon_running_unix().expect("mismatch daemon should be restarted");
 
         let stale_exit_deadline = std::time::Instant::now()
