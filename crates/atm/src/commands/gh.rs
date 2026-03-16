@@ -1,9 +1,5 @@
 //! GitHub CI monitor command surface (`atm gh ...`).
 
-use agent_team_mail_ci_monitor::{
-    GhCliObserverContext, emit_gh_info_denied, emit_gh_info_live_refresh, emit_gh_info_requested,
-    new_gh_execution_call_id, new_gh_info_request_id,
-};
 use agent_team_mail_core::config::{
     Config, ConfigOverrides, resolve_config, resolve_plugin_config_location,
 };
@@ -18,7 +14,6 @@ use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
 use agent_team_mail_core::team_config_store::TeamConfigStore;
-use agent_team_mail_daemon::plugins::ci_monitor::gh_execution::run_attributed_gh_command_with_ids;
 use agent_team_mail_daemon::plugins::ci_monitor::{
     GH_MONITOR_REPORT_SCHEMA_VERSION, GhCiRollup, GhPrListSummary, GhPrReportSummary,
     build_pr_list_summary, build_pr_report_summary, validate_gh_cli_prerequisites,
