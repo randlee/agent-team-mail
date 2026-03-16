@@ -30,4 +30,8 @@ default = []
 test-support = []
 
 [dev-dependencies]
+tempfile = "3.13"
 tokio = { version = "1", features = ["full", "test-util"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
