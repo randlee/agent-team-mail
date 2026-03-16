@@ -1,8 +1,8 @@
 //! Integration tests for `atm gh ...` daemon-routed commands.
 
-use assert_cmd::cargo;
 #[cfg(unix)]
 use agent_team_mail_core::consts::WAIT_FOR_DAEMON_SOCKET_SECS;
+use assert_cmd::cargo;
 use predicates::prelude::PredicateBooleanExt;
 #[cfg(unix)]
 use serial_test::serial;

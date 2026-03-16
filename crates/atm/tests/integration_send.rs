@@ -1,8 +1,8 @@
 //! Integration tests for the send command
 
-use assert_cmd::cargo;
 #[cfg(unix)]
 use agent_team_mail_core::consts::WAIT_FOR_DAEMON_SOCKET_SECS;
+use assert_cmd::cargo;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;

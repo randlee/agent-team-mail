@@ -1,6 +1,6 @@
-use assert_cmd::cargo;
 #[cfg(unix)]
 use agent_team_mail_core::consts::WAIT_FOR_DAEMON_SOCKET_SECS;
+use assert_cmd::cargo;
 use predicates::prelude::*;
 use serial_test::serial;
 use std::fs;
