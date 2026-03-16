@@ -27,6 +27,15 @@ pub const STREAM_CHECK_SLEEP_MS: u64 = 25;
 /// Sleep interval between repeated drain-status checks.
 pub const DRAIN_SLEEP_MS: u64 = 250;
 
+/// Backoff delay after shared repo-state refresh/load errors in the shared poller loop.
+pub const SHARED_POLLER_ERROR_BACKOFF_SECS: u64 = 60;
+
+/// Active shared-poller cadence while at least one monitor is subscribed.
+pub const SHARED_POLLER_ACTIVE_SLEEP_SECS: u64 = 60;
+
+/// Idle shared-poller cadence when no active monitor subscriptions exist.
+pub const SHARED_POLLER_IDLE_SLEEP_SECS: u64 = 300;
+
 /// Threshold used for elapsed timestamp assertions in hook dedupe tests.
 pub const MIN_ELAPSED_CHECK_MS: u64 = 20;
 
