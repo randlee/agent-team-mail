@@ -6,6 +6,8 @@ use crate::types::{
 };
 use serde::Deserialize;
 use std::process::Command;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 pub struct GitHubActionsProvider {
@@ -28,47 +30,20 @@ impl GitHubActionsProvider {
         self
     }
 
-    async fn run_gh_with_metadata(
-        &self,
+    pub fn run_gh_with_metadata_blocking(
+        observer: Option<GhCliObserverRef>,
         metadata: GhCliCallMetadata,
     ) -> Result<String, CiProviderError> {
-        if let Some(observer) = &self.observer {
+        if let Some(observer) = &observer {
             observer.before_gh_call(&metadata)?;
         }
 
         let started = Instant::now();
-        let observer = self.observer.clone();
         let metadata_for_outcome = metadata.clone();
-        let args_owned: Vec<String> = metadata.args.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            let output = Command::new("gh").args(&args_owned).output().map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    CiProviderError::provider(
-                        "gh CLI not found. Install from https://cli.github.com/",
-                    )
-                } else {
-                    CiProviderError::provider(format!("Failed to execute gh: {e}"))
-                }
-            })?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(CiProviderError::provider(format!(
-                    "gh command failed: {stderr}"
-                )));
-            }
-
-            let stdout = String::from_utf8(output.stdout).map_err(|e| {
-                CiProviderError::provider(format!("Invalid UTF-8 in gh output: {e}"))
-            })?;
-
-            Ok(stdout)
-        })
-        .await
-        .map_err(|e| CiProviderError::runtime(format!("Task join error: {e}")))?;
+        let result = run_gh_subprocess(&metadata.args);
+        let duration_ms = started.elapsed().as_millis() as u64;
 
         if let Some(observer) = observer {
-            let duration_ms = started.elapsed().as_millis() as u64;
             match &result {
                 Ok(_) => observer.after_gh_call(&GhCliCallOutcome {
                     metadata: metadata_for_outcome,
@@ -86,6 +61,16 @@ impl GitHubActionsProvider {
         }
 
         result
+    }
+
+    async fn run_gh_with_metadata(
+        &self,
+        metadata: GhCliCallMetadata,
+    ) -> Result<String, CiProviderError> {
+        let observer = self.observer.clone();
+        tokio::task::spawn_blocking(move || Self::run_gh_with_metadata_blocking(observer, metadata))
+            .await
+            .map_err(|e| CiProviderError::runtime(format!("Task join error: {e}")))?
     }
 
     fn repo_scope(&self) -> String {
@@ -176,6 +161,32 @@ impl GitHubActionsProvider {
         }
     }
 }
+
+fn run_gh_subprocess(args: &[String]) -> Result<String, CiProviderError> {
+    #[cfg(test)]
+    GH_SUBPROCESS_COUNT.fetch_add(1, Ordering::SeqCst);
+
+    let output = Command::new("gh").args(args).output().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            CiProviderError::provider("gh CLI not found. Install from https://cli.github.com/")
+        } else {
+            CiProviderError::provider(format!("Failed to execute gh: {e}"))
+        }
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CiProviderError::provider(format!(
+            "gh command failed: {stderr}"
+        )));
+    }
+
+    String::from_utf8(output.stdout)
+        .map_err(|e| CiProviderError::provider(format!("Invalid UTF-8 in gh output: {e}")))
+}
+
+#[cfg(test)]
+static GH_SUBPROCESS_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 impl std::fmt::Debug for GitHubActionsProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -394,4 +405,48 @@ struct GhPrView {
     created_at: Option<String>,
     #[serde(default)]
     merge_state_status: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[derive(Debug)]
+    struct BlockingObserver;
+
+    impl crate::provider::GhCliObserver for BlockingObserver {
+        fn before_gh_call(&self, _metadata: &GhCliCallMetadata) -> Result<(), CiProviderError> {
+            Err(CiProviderError::provider(
+                r#"{"code":"gh_firewall_blocked","reason":"test_block","message":"blocked by test observer"}"#,
+            ))
+        }
+
+        fn after_gh_call(&self, _outcome: &GhCliCallOutcome) {}
+    }
+
+    #[test]
+    fn blocked_calls_do_not_spawn_gh_subprocess() {
+        GH_SUBPROCESS_COUNT.store(0, Ordering::SeqCst);
+        let metadata = GhCliCallMetadata {
+            repo_scope: "owner/repo".to_string(),
+            action: "gh_run_list".to_string(),
+            args: vec!["run".to_string(), "list".to_string()],
+            branch: None,
+            reference: None,
+        };
+
+        let err = GitHubActionsProvider::run_gh_with_metadata_blocking(
+            Some(Arc::new(BlockingObserver)),
+            metadata,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("\"code\":\"gh_firewall_blocked\""));
+        assert_eq!(
+            GH_SUBPROCESS_COUNT.load(Ordering::SeqCst),
+            0,
+            "blocked requests must fail before launching gh"
+        );
+    }
 }

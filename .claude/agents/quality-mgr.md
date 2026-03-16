@@ -211,6 +211,14 @@ After every QA run, apply these escalation checks:
    - installed-binary fallback instead of isolated test runtime
 3. Output: fenced JSON findings with affected runtime, risk type, still_active, remediation_direction
 
+#### gh-firewall QA rule:
+1. Treat any new direct `Command::new("gh")` in `gh_monitor`, `atm gh` monitor/status paths,
+   repo-state refresh, or GitHub budget/rate auditing as a **blocking failure**.
+2. The only allowed exceptions are explicit `// NOT_MONITORED_PATH:` callsites with rationale
+   outside monitor/status enforcement scope.
+3. Any in-scope bypass without that rationale must be reported as a firewall defect against
+   `GH-CI-FR-45` / `GH-CI-FR-46`.
+
 #### arch-qa-agent prompt (fenced JSON):
 1. `worktree_path`: absolute path to the sprint worktree
 2. `branch`: branch name
