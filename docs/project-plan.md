@@ -1827,7 +1827,7 @@ execution, and `atm gh` command processing.
 
 **Integration branch**: `integrate/phase-AT`
 
-**Status**: COMPLETE
+**Status**: IN PROGRESS
 
 ### Sprint Map
 | Sprint | Focus | Branch | Status |
@@ -1837,6 +1837,7 @@ execution, and `atm gh` command processing.
 | AT.3 | Route all GitHub command semantics through the gh plugin/provider layer; `crates/atm/src/commands/gh.rs` becomes CLI bootstrap/routing/capability UX only and stops owning raw `gh` probes or GitHub behavior | `feature/pAT-s3-gh-command-routing` | COMPLETE |
 | AT.4 | Remove non-gh-plugin raw `gh` execution paths in `crates/atm-daemon/src/plugins/issues/github.rs`, smoke harnesses, and any additional script/helper violations found by the AS.7 search | `feature/pAT-s4-daemon-issues-boundary` | COMPLETE |
 | AT.5 | Run the final repo-wide illegal-reference audit, delete the allowlist, and close the remaining tracked boundary violations with zero tolerated exceptions | `feature/pAT-s5-final-audit` | COMPLETE |
+| AT.6 | Fix #822 (issues plugin gh routing) and #823 (boundary check script scope) | `feature/pAT-s6-gh-findings-fix` | COMPLETE |
 
 ### Planned Inputs
 - audited exceptions and issue set from AS.7:

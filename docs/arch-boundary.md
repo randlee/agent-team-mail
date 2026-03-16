@@ -56,7 +56,11 @@ When adding or refactoring a provider:
 
 ## Audit Results
 
-Final AT.5 audit result: zero remaining GitHub boundary violations.
+Final AT audit result: AT.5 closed the planned exception list, and AT.6
+resolved the two IMPORTANT findings from the Phase AT ending review (#822 and
+#823) before the phase could be considered fully clean.
+AT.6 follow-up (`feature/pAT-s6-gh-findings-fix`): removed dead
+`run_plugin_owned_gh_subprocess` re-export; zero-violation state maintained.
 
 | Violation | Crate / Area | Former File:Line | Issue | Final status |
 |---|---|---|---|---|
@@ -66,6 +70,8 @@ Final AT.5 audit result: zero remaining GitHub boundary violations.
 | Raw `gh --version` and `gh auth status` bootstrap probes plus CLI-owned GitHub command semantics | `atm` CLI | `crates/atm/src/commands/gh.rs:2154`, `crates/atm/src/commands/gh.rs:2167` | [#811](https://github.com/randlee/agent-team-mail/issues/811) | removed in AT.3 (`feature/pAT-s3-gh-command-routing`) |
 | Raw `gh` subprocess in issues plugin | `atm-daemon` issues plugin | `crates/atm-daemon/src/plugins/issues/github.rs:31` | [#812](https://github.com/randlee/agent-team-mail/issues/812) | removed in AT.4 (`feature/pAT-s4-daemon-issues-boundary`) |
 | Direct `gh` shell calls in smoke harness | manual smoke harness | `scripts/dev-daemon-smoke.py:117`, `scripts/dev-daemon-smoke.py:131`, `scripts/dev-daemon-smoke.py:145` | [#813](https://github.com/randlee/agent-team-mail/issues/813) | removed in AT.4 (`feature/pAT-s4-daemon-issues-boundary`) |
+| Issues plugin still used the un-attributed provider helper instead of the request/call-ID-attributed provider entrypoint | `atm-daemon` issues plugin | `crates/atm-daemon/src/plugins/issues/github.rs:25` | [#822](https://github.com/randlee/agent-team-mail/issues/822) | resolved in AT.6 (`feature/pAT-s6-gh-findings-fix`) |
+| Boundary grep gate missed the confirmed `tokio::process::Command` variant and only scanned a single smoke script instead of all script targets | CI boundary gate | `scripts/ci/gh_boundary_check.sh:8`, `scripts/dev-daemon-smoke.py` | [#823](https://github.com/randlee/agent-team-mail/issues/823) | resolved in AT.6 (`feature/pAT-s6-gh-findings-fix`) |
 
 Additional notes:
 - The final `scripts/ci/gh_boundary_check.sh` acceptance gate now runs without
