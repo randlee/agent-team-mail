@@ -3,6 +3,7 @@
 use agent_team_mail_core::config::{
     Config, ConfigOverrides, resolve_config, resolve_plugin_config_location,
 };
+use agent_team_mail_core::consts::GH_MONITOR_DEFAULT_DRAIN_TIMEOUT_SECS;
 use agent_team_mail_core::context::GitProvider;
 use agent_team_mail_core::daemon_client::{
     GhMonitorControlRequest, GhMonitorHealth, GhMonitorLifecycleAction, GhMonitorRequest,
@@ -147,8 +148,11 @@ struct MonitorStartArgs {}
 
 #[derive(Args, Debug)]
 struct MonitorStopArgs {
-    /// Graceful drain timeout in seconds before force-stop (default 30s)
-    #[arg(long = "drain-timeout", default_value_t = 30)]
+    /// Graceful drain timeout in seconds before force-stop (default 10s)
+    #[arg(
+        long = "drain-timeout",
+        default_value_t = GH_MONITOR_DEFAULT_DRAIN_TIMEOUT_SECS
+    )]
     drain_timeout_secs: u64,
 
     /// Hidden operator confirmation for cross-team shutdown
@@ -162,8 +166,11 @@ struct MonitorStopArgs {
 
 #[derive(Args, Debug)]
 struct MonitorRestartArgs {
-    /// Graceful drain timeout in seconds before restart (default 30s)
-    #[arg(long = "drain-timeout", default_value_t = 30)]
+    /// Graceful drain timeout in seconds before restart (default 10s)
+    #[arg(
+        long = "drain-timeout",
+        default_value_t = GH_MONITOR_DEFAULT_DRAIN_TIMEOUT_SECS
+    )]
     drain_timeout_secs: u64,
 
     /// Hidden operator confirmation for cross-team restart

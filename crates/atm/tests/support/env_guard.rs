@@ -26,6 +26,17 @@ impl EnvGuard {
         }
         Self { key, old }
     }
+
+    /// Remove `key` and return a guard that restores the original value on drop.
+    #[allow(dead_code)]
+    pub fn unset(key: &'static str) -> Self {
+        let old = std::env::var_os(key);
+        // SAFETY: test-scoped env mutation restored by Drop.
+        unsafe {
+            std::env::remove_var(key);
+        }
+        Self { key, old }
+    }
 }
 
 impl Drop for EnvGuard {

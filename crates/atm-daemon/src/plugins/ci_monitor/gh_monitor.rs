@@ -13,6 +13,11 @@ use agent_team_mail_core::gh_monitor_observability::{GhCliObserverContext, build
 use anyhow::Result;
 use tracing::warn;
 
+#[cfg(all(test, unix))]
+const INITIAL_POLL_INTERVAL_SECS: u64 = 5;
+#[cfg(all(test, unix))]
+const SUBSEQUENT_POLL_INTERVAL_SECS: u64 = 15;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GhRunTerminalState {
     Success,
@@ -315,7 +320,11 @@ pub(crate) async fn monitor_gh_run(
             return Ok(());
         }
 
-        let sleep_secs = if first_poll { 5 } else { 15 };
+        let sleep_secs = if first_poll {
+            INITIAL_POLL_INTERVAL_SECS
+        } else {
+            SUBSEQUENT_POLL_INTERVAL_SECS
+        };
         first_poll = false;
         tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
     }
