@@ -69,12 +69,12 @@ Current direct `gh` execution / boundary exceptions:
 |---|---|---|---|---|
 | Root tracking issue for GitHub boundary elimination plan and enforcement follow-up | planning / governance | `docs/requirements.md` | [#807](https://github.com/randlee/agent-team-mail/issues/807) | root tracking issue |
 | Raw `gh` subprocess in provider-agnostic crate | `atm-ci-monitor` | `crates/atm-ci-monitor/src/github_provider.rs:173` | [#809](https://github.com/randlee/agent-team-mail/issues/809) | removed in AT.2 (`feature/pAT-s2-ci-monitor-provider-extraction`) |
-| Raw `gh --version` bootstrap probe | `atm` CLI | `crates/atm/src/commands/gh.rs:2154` | [#811](https://github.com/randlee/agent-team-mail/issues/811) | audited temporary exception |
-| Raw `gh auth status` bootstrap probe | `atm` CLI | `crates/atm/src/commands/gh.rs:2167` | [#811](https://github.com/randlee/agent-team-mail/issues/811) | audited temporary exception |
-| Raw `gh` subprocess in issues plugin | `atm-daemon` issues plugin | `crates/atm-daemon/src/plugins/issues/github.rs:31` | [#812](https://github.com/randlee/agent-team-mail/issues/812) | audited temporary exception |
-| Direct `gh api rate_limit` shell call | manual smoke harness | `scripts/dev-daemon-smoke.py:117` | [#813](https://github.com/randlee/agent-team-mail/issues/813) | audited temporary exception |
-| Direct `gh pr list` shell call | manual smoke harness | `scripts/dev-daemon-smoke.py:131` | [#813](https://github.com/randlee/agent-team-mail/issues/813) | audited temporary exception |
-| Direct `gh run list` shell call | manual smoke harness | `scripts/dev-daemon-smoke.py:145` | [#813](https://github.com/randlee/agent-team-mail/issues/813) | audited temporary exception |
+| Raw `gh --version` bootstrap probe | `atm` CLI | `crates/atm/src/commands/gh.rs:2154` | [#811](https://github.com/randlee/agent-team-mail/issues/811) | removed in AT.3 (`feature/pAT-s3-gh-command-routing`) |
+| Raw `gh auth status` bootstrap probe | `atm` CLI | `crates/atm/src/commands/gh.rs:2167` | [#811](https://github.com/randlee/agent-team-mail/issues/811) | removed in AT.3 (`feature/pAT-s3-gh-command-routing`) |
+| Raw `gh` subprocess in issues plugin | `atm-daemon` issues plugin | `crates/atm-daemon/src/plugins/issues/github.rs:31` | [#812](https://github.com/randlee/agent-team-mail/issues/812) | removed in AT.4 (`feature/pAT-s4-daemon-issues-boundary`) |
+| Direct `gh api rate_limit` shell call | manual smoke harness | `scripts/dev-daemon-smoke.py:117` | [#813](https://github.com/randlee/agent-team-mail/issues/813) | removed in AT.4 (`feature/pAT-s4-daemon-issues-boundary`) |
+| Direct `gh pr list` shell call | manual smoke harness | `scripts/dev-daemon-smoke.py:131` | [#813](https://github.com/randlee/agent-team-mail/issues/813) | removed in AT.4 (`feature/pAT-s4-daemon-issues-boundary`) |
+| Direct `gh run list` shell call | manual smoke harness | `scripts/dev-daemon-smoke.py:145` | [#813](https://github.com/randlee/agent-team-mail/issues/813) | removed in AT.4 (`feature/pAT-s4-daemon-issues-boundary`) |
 
 Additional notes:
 - `atm-core` non-dev dependency on `agent-team-mail-ci-monitor` was removed by
