@@ -12,6 +12,9 @@ pub const LOG_FORWARD_TIMEOUT_MS: u64 = 100;
 /// Maximum time to wait for a freshly started daemon to become reachable.
 pub const STARTUP_DEADLINE_SECS: u64 = 5;
 
+/// Socket wait budget used by integration tests that start fake daemons.
+pub const WAIT_FOR_DAEMON_SOCKET_SECS: u64 = 10;
+
 /// Minimum timeout budget added around daemon start and drain requests.
 pub const DAEMON_TIMEOUT_MIN_SECS: u64 = 30;
 

@@ -1,6 +1,8 @@
 //! Integration tests for `atm gh ...` daemon-routed commands.
 
 use assert_cmd::cargo;
+#[cfg(unix)]
+use agent_team_mail_core::consts::WAIT_FOR_DAEMON_SOCKET_SECS;
 use predicates::prelude::PredicateBooleanExt;
 #[cfg(unix)]
 use serial_test::serial;
@@ -15,9 +17,6 @@ use std::process::{Child, Command};
 #[cfg(unix)]
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
-
-#[cfg(unix)]
-const WAIT_FOR_DAEMON_SOCKET_SECS: u64 = 10;
 
 fn write_repo_gh_monitor_config(workdir: &Path, team: &str) {
     let content = format!(

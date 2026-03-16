@@ -1,5 +1,7 @@
 use assert_cmd::cargo;
 #[cfg(unix)]
+use agent_team_mail_core::consts::WAIT_FOR_DAEMON_SOCKET_SECS;
+#[cfg(unix)]
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -157,7 +159,7 @@ finally:
 #[cfg(unix)]
 fn wait_for_daemon_socket(home: &Path) {
     let socket = home.join(".atm/daemon/atm-daemon.sock");
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(WAIT_FOR_DAEMON_SOCKET_SECS);
     while Instant::now() < deadline {
         if socket.exists() {
             return;
