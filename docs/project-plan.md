@@ -1791,17 +1791,17 @@ with two-layer observability to eliminate runaway token consumption.
 - `docs/requirements.md` + `docs/ci-monitoring/requirements.md` — GH governance
   requirements and ownership rules hardened during AS.4–AS.7
 
-**Status**: PLANNED
+**Status**: ACTIVE
 
 ### Sprint Map
 | Sprint | Focus | Branch | Status |
 |---|---|---|---|
-| AS.1 | Quick wins: 8 bug fixes (#760,#759,#758,#726,#741,#708,#620,#626) | `feature/pAS-s1-quick-wins` | PLANNED |
-| AS.2 | Doctor polish + EnvGuard test migration (#688,#681,#701,#784) | `feature/pAS-s2-observability` | PLANNED |
-| AS.3 | Daemon-touch sidecar + teams status table (#700,#699) | `feature/pAS-s3-sidecar` | PLANNED |
-| AS.4 | GH API hard firewall (GH-CI-FR-46) | TBD | PLANNED |
-| AS.5 | Execution ledger (GH-CI-FR-47) | TBD | PLANNED |
-| AS.6 | Freshness ledger + budget constants (GH-CI-FR-48–50) | TBD | PLANNED |
+| AS.1 | Quick wins: 8 bug fixes (#760,#759,#758,#726,#741,#708,#620,#626) | `feature/pAS-s1-quick-wins` | COMPLETE |
+| AS.2 | Doctor polish + EnvGuard test migration (#688,#681,#701,#784) | `feature/pAS-s2-observability` | COMPLETE |
+| AS.3 | Daemon-touch sidecar + teams status table (#700,#699) | `feature/pAS-s3-sidecar` | COMPLETE |
+| AS.4 | GH API hard firewall (GH-CI-FR-46) | `feature/pAS-s4-gh-firewall` | COMPLETE |
+| AS.5 | Execution ledger (GH-CI-FR-47) | `feature/pAS-s5-gh-observability` | COMPLETE |
+| AS.6 | Freshness ledger + budget constants (GH-CI-FR-48–50) | `feature/pAS-s6-gh-budgeting` | COMPLETE |
 | AS.7 | Requirements hardening + repo-wide violation search/audit/gate + Phase AT handoff | `feature/pAS-s7-smoke-thresholds` | COMPLETE |
 
 ### Exit Criteria
@@ -1809,11 +1809,10 @@ with two-layer observability to eliminate runaway token consumption.
 2. `cargo test --all-targets` passes on all 3 platforms.
 3. No in-scope GitHub monitor/status path can launch `gh` outside the firewall (GH-CI-FR-46).
 4. Token ledger and freshness ledger emit structured events for all GH interactions (GH-CI-FR-47/48).
-5. GH budget constants locked in `crates/atm-ci-monitor` with documented defaults (GH-CI-FR-50).
-6. Smoke guidance distinguishes single-monitor and multi-monitor budget envelopes as documented in `docs/smoke-test-an-ao-ap-aq.md` (updated by AS.7).
-7. Requirements explicitly state that non-plugin crates must not own GitHub behavior.
-8. AS.7 performs a repository-wide search for live boundary violations across crates, scripts, CI helpers, and support tooling.
-9. Every live violation found by the AS.7 search is either removed in AS or mapped to a named AT sprint with file-level ownership; no silent allowlist remains.
+5. GH budget constants locked with documented defaults and smoke guidance distinguishes single-monitor and multi-monitor budget envelopes.
+6. Requirements explicitly state that non-plugin crates must not own GitHub behavior.
+7. AS.7 performs a repository-wide search for live boundary violations across crates, scripts, CI helpers, and support tooling.
+8. Every live violation found by the AS.7 search is either removed in AS or mapped to a named AT sprint with file-level ownership; no silent allowlist remains.
 
 **Dependency graph**: AS.1 is foundational; AS.2 depends on AS.1; AS.3 depends on AS.2;
 AS.4–AS.7 GH governance track may proceed in parallel with AS.1–AS.3.
@@ -1822,22 +1821,22 @@ AS.4–AS.7 GH governance track may proceed in parallel with AS.1–AS.3.
 
 ## 17.28 Phase AT: GitHub Boundary Elimination
 
-**Goal**: eliminate every audited GitHub-boundary exception so only the owning
+**Goal**: Eliminate every audited GitHub-boundary exception so only the owning
 gh plugin/provider layer contains GitHub-specific behavior, raw `gh`
 execution, and `atm gh` command processing.
 
 **Integration branch**: `integrate/phase-AT`
 
-**Status**: PLANNED
+**Status**: COMPLETE
 
 ### Sprint Map
 | Sprint | Focus | Branch | Status |
 |---|---|---|---|
-| AT.1 | Remove `atm-core -> atm-ci-monitor` non-dev dependency and remove raw `gh` execution from `crates/atm-core/src/gh_monitor_observability.rs` so `atm-core` has zero provider knowledge | TBD | PLANNED |
-| AT.2 | Move GitHub-specific provider execution out of `crates/atm-ci-monitor/src/github_provider.rs` into the gh plugin/provider layer, leaving `atm-ci-monitor` provider-agnostic only | TBD | PLANNED |
-| AT.3 | Route all GitHub command semantics through the gh plugin/provider layer; `crates/atm/src/commands/gh.rs` becomes CLI bootstrap/routing/capability UX only and stops owning raw `gh` probes or GitHub behavior | TBD | PLANNED |
-| AT.4 | Remove non-gh-plugin raw `gh` execution paths in `crates/atm-daemon/src/plugins/issues/github.rs`, smoke harnesses, and any additional script/helper violations found by the AS.7 search | TBD | PLANNED |
-| AT.5 | Run the final repo-wide illegal-reference audit, delete the allowlist, and close the remaining tracked boundary violations with zero tolerated exceptions | TBD | PLANNED |
+| AT.1 | Baseline `atm-core` isolation: verify AS.5 (AS5-ARCH-001) closed the non-dev dep and relocated `gh_monitor_observability.rs`; add per-package isolation CI job (#808); confirm `cargo test --package agent-team-mail-core` passes in isolation with zero provider imports | `feature/pAT-s1-atm-core-isolation` | COMPLETE |
+| AT.2 | Move GitHub-specific provider execution out of `crates/atm-ci-monitor/src/github_provider.rs` into the gh plugin/provider layer, leaving `atm-ci-monitor` provider-agnostic only | `feature/pAT-s2-ci-monitor-provider-extraction` | COMPLETE |
+| AT.3 | Route all GitHub command semantics through the gh plugin/provider layer; `crates/atm/src/commands/gh.rs` becomes CLI bootstrap/routing/capability UX only and stops owning raw `gh` probes or GitHub behavior | `feature/pAT-s3-gh-command-routing` | COMPLETE |
+| AT.4 | Remove non-gh-plugin raw `gh` execution paths in `crates/atm-daemon/src/plugins/issues/github.rs`, smoke harnesses, and any additional script/helper violations found by the AS.7 search | `feature/pAT-s4-daemon-issues-boundary` | COMPLETE |
+| AT.5 | Run the final repo-wide illegal-reference audit, delete the allowlist, and close the remaining tracked boundary violations with zero tolerated exceptions | `feature/pAT-s5-final-audit` | COMPLETE |
 
 ### Planned Inputs
 - audited exceptions and issue set from AS.7:
@@ -1848,16 +1847,27 @@ execution, and `atm gh` command processing.
   - `#813`
 - `ARCH-BOUNDARY-001` requirements and CI grep gate from AS.7
 - current live violations found by the AS.7 repository-wide search:
-  - `crates/atm-core/Cargo.toml` non-dev dependency on `agent-team-mail-ci-monitor`
-  - `crates/atm-core/src/gh_monitor_observability.rs` raw `gh` execution in core
   - `crates/atm-ci-monitor/src/github_provider.rs` GitHub-specific provider implementation in shared crate
   - `crates/atm/src/commands/gh.rs` GitHub semantics and raw `gh` bootstrap/query behavior in CLI routing layer
   - `crates/atm-daemon/src/plugins/issues/github.rs` raw `gh` execution outside the gh plugin/provider layer
   - script/helper violations captured by the AS.7 audit and CI boundary gate
 
+### Sprint Execution Contract
+- Each AT sprint must leave the repository buildable and testable; no sprint may
+  depend on merging a temporary broken intermediate state first.
+- Dev completion for a sprint requires the sprint's named illegal references to
+  be removed or explicitly re-planned with file-level ownership and approval.
+- QA review for a sprint must verify both:
+  - the positive seam/ownership contract introduced by the sprint, and
+  - the removal of the exact file-level violations assigned to that sprint.
+- A sprint is not complete if it only adds abstractions while leaving the named
+  illegal references untouched.
+
+
 ### Exit Criteria
 1. `atm-core` has zero plugin/provider knowledge and no non-dev dependency on
-   `atm-ci-monitor`.
+   `atm-ci-monitor`, and that isolation is verified by CI and package-scoped
+   validation.
 2. `atm-ci-monitor` contains only provider-agnostic abstractions; no
    GitHub-specific provider execution remains.
 3. All GitHub-specific behavior, including raw `gh` execution, lives only in
@@ -1865,7 +1875,10 @@ execution, and `atm gh` command processing.
 4. `atm gh` namespace routing remains available only when the plugin is
    present, and non-plugin crates do not implement GitHub semantics.
 5. `scripts/ci/gh_boundary_check.sh` passes with no allowlisted exceptions.
-6. The final AT audit confirms there are no remaining illegal GitHub boundary references anywhere in the repository.
+6. The final AT audit confirms there are no remaining illegal GitHub boundary
+   references anywhere in the repository.
+7. `scripts/ci/gh_boundary_allowlist.txt` is deleted and the boundary gate runs
+   with zero exception entries.
 
 ### Dependency Notes
 - AT begins after AS.7 requirement hardening and audit are accepted by QA.

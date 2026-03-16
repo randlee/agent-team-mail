@@ -12,6 +12,9 @@ pub const LOG_FORWARD_TIMEOUT_MS: u64 = 100;
 /// Maximum time to wait for a freshly started daemon to become reachable.
 pub const STARTUP_DEADLINE_SECS: u64 = 5;
 
+/// Socket wait budget used by integration tests that start fake daemons.
+pub const WAIT_FOR_DAEMON_SOCKET_SECS: u64 = 10;
+
 /// Minimum timeout budget added around daemon start and drain requests.
 pub const DAEMON_TIMEOUT_MIN_SECS: u64 = 30;
 
@@ -35,6 +38,9 @@ pub const SHORT_DEADLINE_SECS: u64 = 2;
 
 /// Brief settle delay before re-reading daemon metadata written asynchronously after startup.
 pub const DAEMON_METADATA_SETTLE_MS: u64 = 150;
+
+/// Default TTL for explicitly created isolated runtimes.
+pub const ISOLATED_RUNTIME_DEFAULT_TTL_SECS: u64 = 600;
 
 /// Default graceful drain timeout for gh monitor stop/restart operations.
 ///

@@ -112,39 +112,27 @@ def kill_dev_daemons():
 
 
 def gh_rate():
-    result = run("gh api rate_limit", env=os.environ.copy(), timeout=20)
+    result = run(f"atm doctor --team {TEAM} --json", env=os.environ.copy(), timeout=20)
     data = parse_json(result["stdout"]) or {}
-    core = ((data.get("resources") or {}).get("core") or {}) if isinstance(data, dict) else {}
+    audit = (data.get("gh_rate_limit_audit") or {}) if isinstance(data, dict) else {}
     return {
-        "remaining": core.get("remaining"),
-        "limit": core.get("limit"),
-        "reset": core.get("reset"),
+        "remaining": audit.get("live_remaining"),
+        "limit": audit.get("live_limit"),
+        "reset": audit.get("live_reset_at"),
     }
 
 
 def latest_pr():
     result = run(
-        "gh pr list --state open --limit 10 --json number,state",
+        f"atm gh --team {TEAM} pr list --json",
         env=os.environ.copy(),
         timeout=20,
     )
-    data = parse_json(result["stdout"]) or []
-    if data:
-        return data[0].get("number")
+    data = parse_json(result["stdout"]) or {}
+    items = data.get("items") if isinstance(data, dict) else []
+    if items:
+        return items[0].get("number")
     return 792
-
-
-def latest_run():
-    result = run(
-        "gh run list --limit 10 --json databaseId,status,headBranch",
-        env=os.environ.copy(),
-        timeout=20,
-    )
-    data = parse_json(result["stdout"]) or []
-    for item in data:
-        if item.get("databaseId"):
-            return item["databaseId"]
-    return None
 
 
 def read_status(home: pathlib.Path):
@@ -179,6 +167,7 @@ def fields(data):
         "enabled": data.get("enabled"),
         "availability_state": data.get("availability_state"),
         "lifecycle_state": data.get("lifecycle_state"),
+        "run_id": data.get("run_id"),
         "message": data.get("message"),
         "in_flight": health.get("in_flight", data.get("in_flight")),
         "owner_runtime_kind": owner.get("runtime_kind") or data.get("owner_runtime_kind"),
@@ -215,7 +204,7 @@ def main():
     pre_pgrep = ps_lines()
     rate_before = gh_rate()
     pr_num = latest_pr()
-    run_id = latest_run()
+    run_id = None
     results = []
 
     r1, j1, restart1, restart_json1 = ensure_monitor_running(TEAM)
@@ -232,6 +221,7 @@ def main():
         f"monitor code={r2['code']} timeout={r2['timeout']} secs={r2['secs']} out={(r2['stdout'] or '').strip()[:220]}",
         f"final={fields(j3)}",
     ])
+    run_id = fields(j3).get("run_id") or (fields(j2).get("run_id") if isinstance(j2, dict) else None)
     add_case(results, "AN.1", "GH monitor start / status round trip", r2["code"] == 0 and fields(j3).get("enabled") is True and fields(j3).get("availability_state") == "healthy", details)
 
     r1 = run(f"atm gh --team {TEAM} monitor stop --json", timeout=20)
@@ -245,13 +235,21 @@ def main():
     add_case(results, "AN.2", "GH monitor lifecycle control", (not r1["timeout"]) and (not r3["timeout"]) and fields(j2).get("lifecycle_state") in ("stopped", "idle") and fields(j4).get("lifecycle_state") in ("running", "active"), [f"stop code={r1['code']} timeout={r1['timeout']} secs={r1['secs']}", f"after-stop={fields(j2)}", f"restart code={r3['code']} timeout={r3['timeout']} secs={r3['secs']}", f"after-restart={fields(j4)}"])
     kill_dev_daemons()
 
-    r1 = run(f"atm gh --team {TEAM} monitor run {run_id} --json", timeout=20)
-    r2 = run(f"atm gh --team {TEAM} status --json", timeout=20)
-    j2 = parse_json(r2["stdout"])
-    r3 = run(f"atm gh --team {TEAM} --repo randlee/agent-team-mail monitor run {run_id} --json", timeout=20)
-    r4 = run(f"atm gh --team {TEAM} status --json", timeout=20)
-    j4 = parse_json(r4["stdout"])
-    add_case(results, "AN.3", "Multi-repo repo-scope resolution", r1["code"] == 0 and r3["code"] == 0, [f"default code={r1['code']} timeout={r1['timeout']} out={(r1['stdout'] or '').strip()[:200]}", f"status-default={fields(j2)}", f"override code={r3['code']} timeout={r3['timeout']} out={(r3['stdout'] or '').strip()[:200]}", f"status-override={fields(j4)}"])
+    if run_id is None:
+        r1 = {"code": None, "timeout": False, "stdout": "", "secs": 0}
+        r2 = {"stdout": ""}
+        j2 = {}
+        r3 = {"code": None, "timeout": False, "stdout": "", "secs": 0}
+        r4 = {"stdout": ""}
+        j4 = {}
+    else:
+        r1 = run(f"atm gh --team {TEAM} monitor run {run_id} --json", timeout=20)
+        r2 = run(f"atm gh --team {TEAM} status --json", timeout=20)
+        j2 = parse_json(r2["stdout"])
+        r3 = run(f"atm gh --team {TEAM} --repo randlee/agent-team-mail monitor run {run_id} --json", timeout=20)
+        r4 = run(f"atm gh --team {TEAM} status --json", timeout=20)
+        j4 = parse_json(r4["stdout"])
+    add_case(results, "AN.3", "Multi-repo repo-scope resolution", run_id is not None and r1["code"] == 0 and r3["code"] == 0, [f"run_id={run_id}", f"default code={r1['code']} timeout={r1['timeout']} out={(r1['stdout'] or '').strip()[:200]}", f"status-default={fields(j2)}", f"override code={r3['code']} timeout={r3['timeout']} out={(r3['stdout'] or '').strip()[:200]}", f"status-override={fields(j4)}"])
     kill_dev_daemons()
 
     before = len(dev_lines())

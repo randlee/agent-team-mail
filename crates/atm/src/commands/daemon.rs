@@ -1,7 +1,10 @@
 //! Daemon management commands
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
-use agent_team_mail_core::daemon_client::RuntimeOwnerMetadata;
+use agent_team_mail_core::consts::ISOLATED_RUNTIME_DEFAULT_TTL_SECS;
+use agent_team_mail_core::daemon_client::{
+    DaemonTouchSnapshot, RuntimeOwnerMetadata, daemon_touch_path_for,
+};
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
 use anyhow::{Context, Result};
@@ -76,7 +79,7 @@ pub struct IsolatedArgs {
     name: Option<String>,
 
     /// TTL in minutes before the isolated runtime becomes cleanup-eligible
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = ISOLATED_RUNTIME_DEFAULT_TTL_SECS / 60)]
     ttl_minutes: u64,
 
     /// Allow live GitHub polling in this isolated runtime
@@ -820,6 +823,7 @@ fn execute_status(args: StatusArgs) -> Result<()> {
 
     let status: DaemonStatus =
         serde_json::from_str(&content).context("Failed to parse daemon status file")?;
+    let touch_rows = read_daemon_touch_rows(&home_dir);
 
     // Check if status is stale (timestamp older than 2x poll interval = 60 seconds)
     let stale_threshold_secs = 60;
@@ -864,7 +868,31 @@ fn execute_status(args: StatusArgs) -> Result<()> {
             println!("         The daemon may not be running.");
         }
 
-        if !status.teams.is_empty() {
+        if !touch_rows.is_empty() {
+            println!();
+            println!("Teams ({}):", touch_rows.len());
+            let team_width = touch_rows
+                .iter()
+                .map(|row| row.team.len())
+                .max()
+                .unwrap_or(4)
+                .max(4);
+            println!(
+                "  {team:<team_width$}  {pid:<7}  STARTED_AT",
+                team = "TEAM",
+                pid = "PID",
+                team_width = team_width
+            );
+            for row in &touch_rows {
+                println!(
+                    "  {team:<team_width$}  {pid:<7}  {started_at}",
+                    team = row.team,
+                    pid = row.pid,
+                    started_at = row.started_at,
+                    team_width = team_width
+                );
+            }
+        } else if !status.teams.is_empty() {
             println!();
             println!("Teams ({}):", status.teams.len());
             for team in &status.teams {
@@ -985,6 +1013,25 @@ fn format_duration(secs: u64) -> String {
     }
 }
 
+fn read_daemon_touch_rows(home_dir: &Path) -> Vec<DaemonTouchRow> {
+    let touch_path = daemon_touch_path_for(home_dir);
+    let Ok(raw) = std::fs::read_to_string(&touch_path) else {
+        return Vec::new();
+    };
+    let Ok(snapshot) = serde_json::from_str::<DaemonTouchSnapshot>(&raw) else {
+        return Vec::new();
+    };
+
+    snapshot
+        .into_iter()
+        .map(|(team, entry)| DaemonTouchRow {
+            team,
+            pid: entry.pid,
+            started_at: entry.started_at,
+        })
+        .collect()
+}
+
 // Re-export types from daemon crate for status file parsing
 use serde::{Deserialize, Serialize};
 
@@ -1000,6 +1047,13 @@ struct DaemonStatus {
     teams: Vec<String>,
     #[serde(default)]
     logging: LoggingHealthSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DaemonTouchRow {
+    team: String,
+    pid: u32,
+    started_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1060,6 +1114,28 @@ mod tests {
     #[test]
     fn test_is_status_stale_invalid() {
         assert!(is_status_stale("not-a-timestamp", 60));
+    }
+
+    #[test]
+    fn test_read_daemon_touch_rows_returns_sorted_rows() {
+        let tmp = TempDir::new().expect("temp dir");
+        let daemon_dir = tmp.path().join(".atm/daemon");
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        std::fs::write(
+            daemon_dir.join("daemon-touch.json"),
+            r#"{
+  "team-b": {"pid": 22, "started_at": "2026-03-16T00:00:02Z", "binary": "/tmp/b"},
+  "team-a": {"pid": 11, "started_at": "2026-03-16T00:00:01Z", "binary": "/tmp/a"}
+}"#,
+        )
+        .expect("write daemon touch");
+
+        let rows = read_daemon_touch_rows(tmp.path());
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].team, "team-a");
+        assert_eq!(rows[0].pid, 11);
+        assert_eq!(rows[1].team, "team-b");
+        assert_eq!(rows[1].started_at, "2026-03-16T00:00:02Z");
     }
 
     #[cfg(unix)]

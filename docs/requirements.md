@@ -2658,31 +2658,49 @@ Informed by analysis of the `coding_agent_session_search` connector system (14-p
 - Stateful plugins (daemon plugins maintain connections, sync cursors, watch handles)
 - Plugin metadata with versioning
 
-### 5.1.1 Plugin Ownership and Dependency Boundaries
+### 5.1.1 ARCH-BOUNDARY-001 GitHub Boundary Enforcement
 
-Plugin extraction into a separate crate is not sufficient by itself to define
-ownership. The requirements must explicitly assign ownership of plugin behavior.
+`ARCH-BOUNDARY-001` is a hard crate-boundary rule for all GitHub-specific code.
 
 Required rules:
-- Plugin implementation code is owned by the plugin/provider layer, not by
-  `atm-core` or unrelated shared crates.
-- Shared crates may define generic interfaces and data contracts only; they
-  must not depend on plugin implementations.
-- `atm-core` must not import plugin/provider crates or own provider-specific
-  behavior.
-- A shared support crate such as `atm-ci-monitor` may exist only for
-  provider-agnostic abstractions; it must not become a second home for
-  provider-specific GitHub execution or command semantics.
-- All plugin-owned commands are processed by the owning plugin/provider layer.
-  CLI command modules may route requests, but they must not implement the
-  plugin's external-system behavior themselves.
-- Any raw `gh` execution outside the owning gh plugin/provider layer is a
+- All GitHub-specific code must live exclusively in the gh-monitor provider
+  layer (`crates/atm-daemon/src/plugins/ci_monitor/` or a successor provider
+  crate that is explicitly documented as the gh-monitor provider layer).
+- `atm-ci-monitor` must contain only provider-agnostic CI-monitor abstractions:
+  observer traits, firewall traits, ledger interfaces, and budget/freshness
+  policy that is not GitHub-specific.
+- `atm-core` must contain zero provider knowledge:
+  - no imports of plugin/provider crates,
+  - no GitHub-specific types,
+  - no raw `gh` subprocess invocations.
+- Dependency direction is one-way:
+  - providers/plugins -> `atm-core`
+  - providers/plugins -> `atm-ci-monitor`
+  - never `atm-core` -> providers/plugins
+- Any `Command::new("gh")` call outside the gh-monitor provider layer is a hard
   boundary violation.
-- Boundary-enforcement work must include a repository-wide search for current
-  violations across Rust crates, shell/Python scripts, CI helpers, and support
-  tooling. Any surviving violation found by that search must be either removed
-  in the active implementation phase or explicitly mapped to a named follow-up
-  sprint with file-level ownership; silent allowlisting is not sufficient.
+- CI must enforce `ARCH-BOUNDARY-001` with a grep gate that fails on new or
+  untracked violations.
+- Boundary-enforcement work must include a repository-wide search for live
+  violations across crates, shell/Python scripts, CI helpers, and support
+  tooling.
+- Boundary-elimination implementation sprints must leave the repository
+  buildable and testable at the end of each sprint; no sprint may rely on a
+  temporary broken intermediate state being merged first.
+- Any surviving violation found by the repository-wide search must be either
+  removed in the active implementation sprint or mapped to a named follow-up
+  sprint with file-level ownership and explicit QA review scope.
+- Boundary enforcement work must run a repository-wide violation search and map
+  every live violation to a named removal sprint.
+
+Temporary audited exceptions are permitted only when:
+- the violating line is explicitly annotated with
+  `TODO(ARCH-BOUNDARY-001)`,
+- the migration is tracked by a GitHub issue, and
+- the location is listed in the audited allowlist used by the CI grep gate.
+
+See [docs/arch-boundary.md](./arch-boundary.md) for the crate-boundary map,
+allowed import matrix, audited exceptions, and migration checklist.
 
 ### 5.2 Plugin Trait
 

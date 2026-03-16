@@ -1,5 +1,7 @@
 //! Integration tests for `atm gh ...` daemon-routed commands.
 
+#[cfg(unix)]
+use agent_team_mail_core::consts::WAIT_FOR_DAEMON_SOCKET_SECS;
 use assert_cmd::cargo;
 use predicates::prelude::PredicateBooleanExt;
 #[cfg(unix)]
@@ -116,6 +118,25 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
     .unwrap();
 
     team_dir
+}
+
+#[cfg(unix)]
+fn read_gh_ledger_actions(home: &Path) -> Vec<String> {
+    let ledger_path = home.join(".atm/daemon/gh-observability.jsonl");
+    if !ledger_path.exists() {
+        return Vec::new();
+    }
+    fs::read_to_string(&ledger_path)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["action"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect()
 }
 
 #[cfg(unix)]
@@ -369,7 +390,7 @@ finally:
 #[cfg(unix)]
 fn wait_for_daemon_socket(home: &Path) {
     let socket = home.join(".atm/daemon/atm-daemon.sock");
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(WAIT_FOR_DAEMON_SOCKET_SECS);
     while Instant::now() < deadline {
         if socket.exists() && std::os::unix::net::UnixStream::connect(&socket).is_ok() {
             return;
@@ -1459,6 +1480,29 @@ fn test_gh_monitor_list_json_reports_rollups_without_daemon() {
     assert_eq!(items[1]["number"].as_u64(), Some(102));
     assert_eq!(items[1]["ci"]["state"].as_str(), Some("fail"));
     assert_eq!(items[1]["draft"].as_bool(), Some(true));
+
+    // The `atm` binary flushes the gh observability ledger writer thread before
+    // process exit (see main.rs).  By the time `assert()` returns above, all
+    // records are guaranteed written — no deadline-based polling required.
+    let actions = read_gh_ledger_actions(temp_dir.path());
+    assert!(
+        actions.iter().any(|action| action == "gh_info_requested"),
+        "gh info request must be logged"
+    );
+    assert!(
+        actions.iter().any(|action| action == "gh_call_started"),
+        "gh execution start must be logged"
+    );
+    assert!(
+        actions.iter().any(|action| action == "gh_call_finished"),
+        "gh execution finish must be logged"
+    );
+    assert!(
+        actions
+            .iter()
+            .any(|action| action == "gh_info_live_refresh"),
+        "gh live refresh must be logged"
+    );
 }
 
 #[test]

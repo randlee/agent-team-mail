@@ -3,9 +3,9 @@ use std::collections::HashMap;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 
-use agent_team_mail_core::daemon_client::isolated_runtime_allows_live_github;
 #[cfg(unix)]
-use agent_team_mail_core::gh_monitor_observability::read_gh_repo_state_record;
+use agent_team_mail_ci_monitor::read_gh_repo_state_record;
+use agent_team_mail_core::daemon_client::isolated_runtime_allows_live_github;
 #[cfg(unix)]
 use anyhow::Result;
 
@@ -297,7 +297,9 @@ mod tests {
     fn test_evaluate_gh_monitor_config_disables_isolated_runtime_by_default() {
         let runtime = agent_team_mail_core::daemon_client::create_isolated_runtime_root(
             Some("ci-monitor"),
-            std::time::Duration::from_secs(600),
+            std::time::Duration::from_secs(
+                agent_team_mail_core::consts::ISOLATED_RUNTIME_DEFAULT_TTL_SECS,
+            ),
             false,
         )
         .unwrap();

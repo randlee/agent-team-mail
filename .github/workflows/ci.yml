@@ -51,6 +51,51 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+  gh-boundary:
+    name: gh-boundary (ubuntu)
+    needs: [fmt]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enforce ARCH-BOUNDARY-001
+        run: bash scripts/ci/gh_boundary_check.sh
+
+  core-isolation:
+    name: core-isolation (${{ matrix.os }})
+    needs: [clippy]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-core-isolation-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-core-isolation-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-core-isolation-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run atm-core isolated package tests
+        run: cargo test --package agent-team-mail-core
+
   manifest-validation:
     name: manifest-validation (ubuntu)
     needs: [clippy]
@@ -246,7 +291,7 @@ jobs:
   test:
     # `cli-publishability` is intentionally skipped in regular PR/push CI; keep
     # test matrix independent so integration tests still run on every PR.
-    needs: [clippy, manifest-validation, parity-contract, parity-adapter, parity-render, mcp-inspector-smoke]
+    needs: [clippy, gh-boundary, core-isolation, manifest-validation, parity-contract, parity-adapter, parity-render, mcp-inspector-smoke]
     strategy:
       fail-fast: false
       matrix:
