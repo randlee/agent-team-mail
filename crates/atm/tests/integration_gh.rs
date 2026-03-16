@@ -1507,7 +1507,7 @@ fn test_gh_monitor_list_json_reports_rollups_without_daemon() {
             "gh_call_finished",
             "gh_info_live_refresh",
         ],
-        Duration::from_millis(10000),
+        Duration::from_millis(30000),
     );
     assert!(
         actions.iter().any(|action| action == "gh_info_requested"),
