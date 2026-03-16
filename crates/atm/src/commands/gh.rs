@@ -2112,9 +2112,10 @@ fn execute_init(
 }
 
 fn validate_gh_cli_prerequisites() -> Result<()> {
-    // NOT_MONITORED_PATH: `atm gh init` validates local gh installation/auth before
-    // monitor configuration exists, so this bootstrap probe intentionally stays
-    // outside the gh_monitor execution firewall.
+    // NOT_MONITORED_PATH / TODO(ARCH-BOUNDARY-001, #811): `atm gh init`
+    // still performs raw local bootstrap probes outside the provider layer.
+    // Keep this audited exception until init uses an approved boundary-aware
+    // prerequisite path.
     let version = Command::new("gh")
         .arg("--version")
         .output()
@@ -2125,8 +2126,9 @@ fn validate_gh_cli_prerequisites() -> Result<()> {
         );
     }
 
-    // NOT_MONITORED_PATH: `gh auth status` is a local auth prerequisite check for
-    // `atm gh init`, not a monitored repo-state refresh or gh_monitor budgeted call.
+    // NOT_MONITORED_PATH / TODO(ARCH-BOUNDARY-001, #811): this bootstrap auth
+    // check remains a temporary exception until it is routed through an
+    // explicit local-prereq abstraction.
     let auth = Command::new("gh")
         .args(["auth", "status"])
         .output()

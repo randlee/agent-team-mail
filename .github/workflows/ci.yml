@@ -51,6 +51,16 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+  gh-boundary:
+    name: gh-boundary (ubuntu)
+    needs: [fmt]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enforce ARCH-BOUNDARY-001
+        run: bash scripts/ci/gh_boundary_check.sh
+
   manifest-validation:
     name: manifest-validation (ubuntu)
     needs: [clippy]
@@ -246,7 +256,7 @@ jobs:
   test:
     # `cli-publishability` is intentionally skipped in regular PR/push CI; keep
     # test matrix independent so integration tests still run on every PR.
-    needs: [clippy, manifest-validation, parity-contract, parity-adapter, parity-render, mcp-inspector-smoke]
+    needs: [clippy, gh-boundary, manifest-validation, parity-contract, parity-adapter, parity-render, mcp-inspector-smoke]
     strategy:
       fail-fast: false
       matrix:

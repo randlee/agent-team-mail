@@ -1,0 +1,10 @@
+# Temporary audited exceptions for ARCH-BOUNDARY-001.
+# Format: path:line
+crates/atm-core/Cargo.toml:17
+crates/atm-ci-monitor/src/github_provider.rs:172
+crates/atm-daemon/src/plugins/issues/github.rs:31
+crates/atm/src/commands/gh.rs:2119
+crates/atm/src/commands/gh.rs:2132
+scripts/dev-daemon-smoke.py:117
+scripts/dev-daemon-smoke.py:131
+scripts/dev-daemon-smoke.py:145

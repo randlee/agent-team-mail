@@ -12,6 +12,8 @@ keywords = ["ai-agents", "messaging", "team-communication", "claude", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
+# TODO(ARCH-BOUNDARY-001, #808): remove this non-dev dependency once the
+# provider-observability split is fully merged and isolated package gates pass.
 agent-team-mail-ci-monitor.workspace = true
 serde.workspace = true
 serde_json.workspace = true

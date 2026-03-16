@@ -2640,6 +2640,39 @@ Informed by analysis of the `coding_agent_session_search` connector system (14-p
 - Stateful plugins (daemon plugins maintain connections, sync cursors, watch handles)
 - Plugin metadata with versioning
 
+### 5.1.1 ARCH-BOUNDARY-001 GitHub Boundary Enforcement
+
+`ARCH-BOUNDARY-001` is a hard crate-boundary rule for all GitHub-specific code.
+
+Required rules:
+- All GitHub-specific code must live exclusively in the gh-monitor provider
+  layer (`crates/atm-daemon/src/plugins/ci_monitor/` or a successor provider
+  crate that is explicitly documented as the gh-monitor provider layer).
+- `atm-ci-monitor` must contain only provider-agnostic CI-monitor abstractions:
+  observer traits, firewall traits, ledger interfaces, and budget/freshness
+  policy that is not GitHub-specific.
+- `atm-core` must contain zero provider knowledge:
+  - no imports of plugin/provider crates,
+  - no GitHub-specific types,
+  - no raw `gh` subprocess invocations.
+- Dependency direction is one-way:
+  - providers/plugins -> `atm-core`
+  - providers/plugins -> `atm-ci-monitor`
+  - never `atm-core` -> providers/plugins
+- Any `Command::new("gh")` call outside the gh-monitor provider layer is a hard
+  boundary violation.
+- CI must enforce `ARCH-BOUNDARY-001` with a grep gate that fails on new or
+  untracked violations.
+
+Temporary audited exceptions are permitted only when:
+- the violating line is explicitly annotated with
+  `TODO(ARCH-BOUNDARY-001)`,
+- the migration is tracked by a GitHub issue, and
+- the location is listed in the audited allowlist used by the CI grep gate.
+
+See [docs/arch-boundary.md](./arch-boundary.md) for the crate-boundary map,
+allowed import matrix, audited exceptions, and migration checklist.
+
 ### 5.2 Plugin Trait
 
 ```rust
