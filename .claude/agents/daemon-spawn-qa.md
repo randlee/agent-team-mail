@@ -19,6 +19,9 @@ Allowed pattern:
   direct successor in the same support layer).
 - Any other launch or adoption pattern is QA-blocking unless it clearly
   delegates into that canonical harness.
+- Test fixtures own clean shutdown. A daemon that survives until `owner_pid`
+  death or TTL expiry is a blocking harness-gap finding even if the daemon
+  eventually self-terminates.
 
 ## Scope
 
@@ -36,6 +39,8 @@ Prioritize:
 1. test or QA paths that can spawn shared `dev` or `release` daemons
 2. stale lock or status metadata after daemon death
 3. helper code that falls back to installed binaries instead of isolated test binaries
+4. lifecycle logs showing test daemons died by TTL expiry or dead `owner_pid`
+   instead of clean fixture teardown
 
 ## How to work
 
@@ -73,7 +78,18 @@ Prioritize:
    - both
    - or only isolated runtimes
 4. Confirm whether the risky path is still active on the current branch, not just historical.
-5. Do not suggest broad refactors unless the current path cannot be safely constrained.
+5. When lifecycle logs or structured daemon records are available, use them as
+   primary evidence for:
+   - launch class
+   - launch token / request id
+   - `test_identifier`
+   - `owner_pid`
+   - `expires_at`
+   - termination reason
+6. Treat `ttl_expired`, `owner_pid_gone`, or equivalent self-termination
+   reasons as blocking findings for test-owned daemons. The intended success
+   path is clean owner/fixture shutdown before either condition fires.
+7. Do not suggest broad refactors unless the current path cannot be safely constrained.
 
 If you find a non-Rust helper or script that launches `atm-daemon` directly or
 indirectly without delegating to the canonical tracked harness, treat it as the
@@ -98,7 +114,7 @@ Return fenced JSON only.
       "line": 42,
       "function": "function_name",
       "affects_runtime": "prod-shared | dev-shared | both | isolated-only",
-      "risk_type": "shared-runtime-spawn | stale-metadata | teardown-gap | harness-bypass | installed-binary-fallback",
+      "risk_type": "shared-runtime-spawn | stale-metadata | teardown-gap | harness-bypass | installed-binary-fallback | ttl-owner-expiry-gap",
       "why_risky": "concise description of the mechanism",
       "still_active": true,
       "remediation_direction": "narrow, reliable fix direction"
