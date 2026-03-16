@@ -11,6 +11,9 @@ while IFS= read -r match; do
   if [[ "$match" == crates/atm-daemon/src/plugins/ci_monitor/github_provider.rs:* ]]; then
     continue
   fi
+  if [[ "$match" == crates/atm-daemon/src/plugins/ci_monitor/gh_command_routing.rs:* ]]; then
+    continue
+  fi
   matches+=("$match")
 done < <(grep -RInE 'Command::new\("gh"\)' "$ROOT/crates" --exclude='*.md' | cut -d: -f1,2 | sed "s#^$ROOT/##" || true)
 
