@@ -17,6 +17,7 @@ This primary requirements document registers secondary source-of-truth documents
 - CI monitoring requirements: `docs/ci-monitoring/requirements.md`
 - CI monitoring architecture: `docs/ci-monitoring/architecture.md`
 - CI monitoring ADR index: `docs/ci-monitoring/adr.md`
+- Daemon spawn authorization requirements: `docs/daemon-spawn-auth/requirements.md`
 
 All logging/OpenTelemetry requirements for ATM and companion tools are defined
 in the observability documents above. This file references that contract and
@@ -3161,9 +3162,14 @@ The core has no awareness of whether a team member is local or remote.
 #### 8.3.1 Daemon Spawn Authorization
 
 - **Single authorized launcher**: all real `atm-daemon` launches MUST flow
-  through one canonical launcher module. Private `ensure_daemon_running`
-  copies, helper-local `Command::new("atm-daemon")`, shell wrappers, or other
-  direct spawn paths are forbidden unless they delegate to that launcher.
+  through one canonical launcher owned by the product layer, not by shared
+  crates. The planned owning surface is a dedicated launcher crate (for
+  example `crates/atm-daemon-launch`); if that crate split is deliberately
+  deferred, the only acceptable temporary owner is a thin
+  `agent_team_mail_daemon::spawn_auth` module in `atm-daemon`. Private
+  `ensure_daemon_running` copies, helper-local `Command::new("atm-daemon")`,
+  shell wrappers, or other direct spawn paths are forbidden unless they
+  delegate to that launcher.
 - **Mandatory launch-token firewall**: the daemon MUST reject startup unless
   the caller presents a valid launch token issued by the canonical launcher.
   Missing, invalid, expired, replayed, or mismatched launch tokens MUST cause
@@ -3175,6 +3181,10 @@ The core has no awareness of whether a team member is local or remote.
   - `isolated-test`
   Each class MUST bind the token to the expected binary/channel, target
   `ATM_HOME`, runtime kind, and singleton/lease policy for that class.
+- **No GitHub metadata in launch tokens**: launch-token fields and lifecycle
+  lease records MUST remain daemon/runtime scoped only. They MUST NOT include
+  GitHub-specific metadata such as runner IDs, GitHub Actions context, workflow
+  identifiers, PR numbers, or other GH provider payload.
 - **Shared-runtime hard fail**: `prod-shared` and `dev-shared` launches MUST
   hard-fail when a live daemon already owns that shared runtime. No fallback or
   best-effort second launch is allowed.

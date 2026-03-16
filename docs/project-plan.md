@@ -1894,7 +1894,7 @@ blocking CI/QA failure.
 | AU.5 | Remove remaining bypass spawn paths and run final repo-wide audit proving the canonical launcher is the only daemon spawn path left | TBD | PLANNED |
 
 ### Planned Inputs
-- DSQ-001 through DSQ-005 daemon leak findings from Phase AT
+- DSQ-001 through DSQ-009 daemon leak findings from Phase AT
 - rogue-daemon containment requirements in `docs/requirements.md`
 - Phase AQ/AP daemon harness constraints and `daemon-spawn-qa` policy
 
@@ -1912,8 +1912,9 @@ blocking CI/QA failure.
    valid launch metadata.
 
 ### Dependency Notes
-- AU begins after Phase AT merge stabilization and uses DSQ root-cause findings
-  as the primary design input.
+- AU begins only after `integrate/phase-AT` is merged to `develop` and
+  `docs/arch-boundary.md` records the final AT zero-violation audit state.
+  DSQ root-cause findings are the primary design input after that gate.
 - AU.1 is the mandatory first sprint; AU.2 depends on AU.1, AU.3 depends on
   AU.1/AU.2, AU.4 depends on AU.2/AU.3, and AU.5 is the final removal/audit sprint.
 

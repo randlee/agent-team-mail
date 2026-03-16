@@ -2,6 +2,7 @@
 
 **Integration branch**: `integrate/phase-AU` off `develop`
 **Prerequisites**: Phase AT merged to `develop`
+**Status**: PLANNED
 
 ## Overview
 
@@ -39,6 +40,11 @@ teardown. Clean shutdown by the owning test fixture remains mandatory.
 
 **Deliverables**:
 - one canonical launcher API for all daemon starts/adoptions
+  The owning implementation lives in a dedicated product-layer launcher crate
+  (planned target: `crates/atm-daemon-launch`). If the crate split is
+  deliberately deferred, the only acceptable temporary owner is
+  `agent_team_mail_daemon::spawn_auth`. `atm-core` and `atm-ci-monitor` must
+  not own launcher code.
 - token issuance surface owned by the canonical launcher
 - token schema covering:
   - launch class
@@ -51,7 +57,10 @@ teardown. Clean shutdown by the owning test fixture remains mandatory.
 - removal/deprecation plan for all known bypass helpers
 
 **Acceptance Criteria**:
-- review can point to one launcher module as the only valid path
+- review can point to one launcher implementation as the only valid path, and
+  that implementation lives in the dedicated launcher crate (or explicitly
+  approved temporary `agent_team_mail_daemon::spawn_auth` fallback), with zero
+  launcher ownership in `atm-core`
 - token schema is documented and stable enough for daemon-side validation
 - every known daemon launch site is mapped to migrate to the canonical launcher
 
@@ -154,7 +163,7 @@ authorization model is the only one left.
 
 ## Inputs and References
 
-- DSQ-001 through DSQ-005 daemon leak findings
+- DSQ-001 through DSQ-009 daemon leak findings
 - incident: 449 leaked `atm-daemon` processes during Phase AT session
 - `crates/atm-core/src/daemon_client.rs`
 - `crates/atm-tui/src/main.rs`

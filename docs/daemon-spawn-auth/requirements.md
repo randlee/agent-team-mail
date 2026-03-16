@@ -1,0 +1,74 @@
+# Daemon Spawn Authorization Requirements
+
+**Status**: Draft
+**Scope**: normative subsystem requirements for daemon launch authorization,
+launch-token validation, isolated-test leases, and lifecycle logging.
+
+## Ownership Boundary
+
+- The canonical daemon launcher is product-layer owned.
+- `atm-core` and `atm-ci-monitor` MUST NOT own daemon lifecycle, launch-token
+  issuance, or daemon launch validation.
+- Planned ownership target: a dedicated launcher crate (for example
+  `crates/atm-daemon-launch`).
+- If that crate split is intentionally deferred, the only acceptable temporary
+  owner is a thin `agent_team_mail_daemon::spawn_auth` module.
+
+## Mandatory Launch Firewall
+
+- `atm-daemon` MUST reject startup without a valid launch token issued by the
+  canonical launcher.
+- Missing, invalid, expired, replayed, or mismatched tokens MUST cause
+  immediate exit with structured rejection logs.
+- Shared runtimes (`prod-shared`, `dev-shared`) MUST hard-fail duplicate starts.
+
+## Launch Classes
+
+- `prod-shared`
+- `dev-shared`
+- `isolated-test`
+
+Each launch class MUST bind:
+- target `ATM_HOME`
+- binary/channel identity
+- runtime kind
+- singleton / lease policy
+- issue time
+- expiry
+- nonce / token id
+
+## Isolated-Test Lease
+
+- Every isolated test daemon MUST carry:
+  - `test_identifier`
+  - `owner_pid`
+  - `issued_at`
+  - `expires_at`
+  - `atm_home`
+  - token id / nonce
+- TTL expiry and dead-owner shutdown are fail-safe conditions only.
+- The owning fixture remains responsible for clean shutdown before TTL expiry or
+  owner loss.
+
+## Lifecycle Logging
+
+- The system MUST log:
+  - launch accepted
+  - launch rejected
+  - clean owner shutdown
+  - TTL-expiry shutdown
+  - dead-owner shutdown
+  - janitor/stale-runtime reap
+- These logs are the primary evidence source for `daemon-spawn-qa`.
+
+## QA / CI Contract
+
+- Any non-canonical daemon spawn path is a blocking violation.
+- Any rogue daemon without canonical launch metadata is a blocking violation.
+- Any test daemon whose termination reason is TTL expiry or dead `owner_pid`
+  instead of clean fixture shutdown is a blocking harness-gap finding.
+
+## Non-Goals
+
+- Launch-token fields MUST NOT embed GitHub-specific metadata, runner context,
+  or CI provider payload.
