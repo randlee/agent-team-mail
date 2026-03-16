@@ -46,6 +46,12 @@ pub use types::{
     CiFilter, CiJob, CiProviderError, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep,
 };
 
+pub mod gh_execution {
+    pub use super::github_provider::{
+        run_attributed_gh_command, run_attributed_gh_command_with_ids,
+    };
+}
+
 // Production surface: config, provider traits, plugin entrypoint, factory metadata, and
 // CI domain types only. Concrete providers/loaders/registries stay internal so this module
 // matches the future crate-facing boundary more closely.

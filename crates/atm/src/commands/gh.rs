@@ -1,5 +1,9 @@
 //! GitHub CI monitor command surface (`atm gh ...`).
 
+use agent_team_mail_ci_monitor::{
+    GhCliObserverContext, emit_gh_info_denied, emit_gh_info_live_refresh, emit_gh_info_requested,
+    new_gh_execution_call_id, new_gh_info_request_id,
+};
 use agent_team_mail_core::config::{
     Config, ConfigOverrides, resolve_config, resolve_plugin_config_location,
 };
@@ -24,6 +28,7 @@ use agent_team_mail_daemon::plugins::ci_monitor::{
     extract_check_reports, extract_review_reports, normalize_merge_status,
     normalize_report_review_decision, summarize_ci_rollup,
 };
+use agent_team_mail_daemon::plugins::ci_monitor::gh_execution::run_attributed_gh_command_with_ids;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use minijinja::Environment;
