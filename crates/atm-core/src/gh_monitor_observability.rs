@@ -4,15 +4,13 @@ use agent_team_mail_ci_monitor::repo_state::{
 };
 use agent_team_mail_ci_monitor::{
     CiProviderError, GhBranchRefCount, GhCliCallMetadata, GhCliCallOutcome, GhCliObserver,
-    GhRateLimitSnapshot, GhRepoStateFile, GhRepoStateRecord, GhRuntimeOwner,
+    GhRateLimitSnapshot, GhRepoStateFile, GhRepoStateRecord, GhRuntimeOwner, GitHubActionsProvider,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
-use std::time::Instant;
 
 use crate::consts::{
     GH_ACTIVE_POLL_INTERVAL_SECS, GH_BUDGET_LIMIT_PER_HOUR, GH_IDLE_POLL_INTERVAL_SECS,
@@ -50,12 +48,16 @@ impl GhCliObserver for SharedGhCliObserver {
             .map_err(|err| CiProviderError::runtime(err.to_string()))?;
         if record.budget_used_in_window >= record.budget_limit_per_hour {
             emit_rate_limit_event("rate_limit_critical", &self.ctx, metadata, &record, None);
-            return Err(CiProviderError::provider(format!(
-                "GitHub budget exhausted for team {} on repo {} ({}/{})",
-                self.ctx.team,
-                self.ctx.repo,
-                record.budget_used_in_window,
-                record.budget_limit_per_hour
+            return Err(CiProviderError::provider(format_firewall_blocked_reason(
+                "budget_exhausted",
+                "GitHub budget exhausted",
+                json!({
+                    "team": self.ctx.team,
+                    "repo": self.ctx.repo,
+                    "budget_used_in_window": record.budget_used_in_window,
+                    "budget_limit_per_hour": record.budget_limit_per_hour,
+                    "action": metadata.action,
+                }),
             )));
         }
         Ok(())
@@ -77,7 +79,7 @@ pub fn run_attributed_gh_command(
     branch: Option<&str>,
     reference: Option<&str>,
 ) -> Result<String> {
-    let observer = SharedGhCliObserver::new(ctx.clone());
+    let observer: Arc<dyn GhCliObserver> = Arc::new(SharedGhCliObserver::new(ctx.clone()));
     let metadata = GhCliCallMetadata {
         repo_scope: ctx.repo.clone(),
         action: action.to_string(),
@@ -85,35 +87,8 @@ pub fn run_attributed_gh_command(
         branch: branch.map(str::to_string),
         reference: reference.map(str::to_string),
     };
-    observer
-        .before_gh_call(&metadata)
-        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-
-    let started = Instant::now();
-    let output = Command::new("gh")
-        .args(args)
-        .output()
-        .map_err(|err| anyhow::anyhow!("failed to execute gh: {err}"))?;
-    let duration_ms = started.elapsed().as_millis() as u64;
-
-    let result = if output.status.success() {
-        String::from_utf8(output.stdout)
-            .map_err(|err| anyhow::anyhow!("invalid UTF-8 in gh output: {err}"))
-    } else {
-        Err(anyhow::anyhow!(
-            "gh command failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
-    };
-
-    observer.after_gh_call(&GhCliCallOutcome {
-        metadata,
-        duration_ms,
-        success: result.is_ok(),
-        error: result.as_ref().err().map(|err| err.to_string()),
-    });
-
-    result
+    GitHubActionsProvider::run_gh_with_metadata_blocking(Some(observer), metadata)
+        .map_err(|err| anyhow::anyhow!(err.to_string()))
 }
 
 pub fn gh_repo_state_path_for(home: &Path) -> PathBuf {
@@ -459,10 +434,31 @@ fn build_lease_conflict_event_fields(
 }
 
 fn format_lease_conflict_error(team: &str, repo: &str, existing_owner: &GhRuntimeOwner) -> String {
-    format!(
-        "gh_monitor lease conflict for team={} repo={}: active owner pid={} executable={} home={}",
-        team, repo, existing_owner.pid, existing_owner.executable_path, existing_owner.home_scope
+    format_firewall_blocked_reason(
+        "lease_conflict",
+        "gh_monitor lease conflict",
+        json!({
+            "team": team,
+            "repo": repo,
+            "owner_pid": existing_owner.pid,
+            "owner_executable_path": existing_owner.executable_path,
+            "owner_home_scope": existing_owner.home_scope,
+        }),
     )
+}
+
+fn format_firewall_blocked_reason(
+    reason: &str,
+    message: &str,
+    details: serde_json::Value,
+) -> String {
+    json!({
+        "code": "gh_firewall_blocked",
+        "reason": reason,
+        "message": message,
+        "details": details,
+    })
+    .to_string()
 }
 
 fn read_or_create_record(home: &Path, team: &str, repo: &str) -> Result<GhRepoStateRecord> {
@@ -686,7 +682,8 @@ mod tests {
                 reference: None,
             })
             .unwrap_err();
-        assert!(err.to_string().contains("budget exhausted"));
+        assert!(err.to_string().contains("\"code\":\"gh_firewall_blocked\""));
+        assert!(err.to_string().contains("\"reason\":\"budget_exhausted\""));
     }
 
     #[test]
@@ -858,8 +855,9 @@ mod tests {
                 reference: None,
             })
             .unwrap_err();
-        assert!(err.to_string().contains("lease conflict"));
-        assert!(err.to_string().contains(&format!("pid={}", child.id())));
+        assert!(err.to_string().contains("\"code\":\"gh_firewall_blocked\""));
+        assert!(err.to_string().contains("\"reason\":\"lease_conflict\""));
+        assert!(err.to_string().contains(&child.id().to_string()));
         assert!(err.to_string().contains(FAKE_FOREIGN_DAEMON_BINARY));
         let fields = build_lease_conflict_event_fields(
             "atm-dev",
