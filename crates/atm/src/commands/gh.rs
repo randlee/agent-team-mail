@@ -2,7 +2,7 @@
 
 use agent_team_mail_ci_monitor::{
     GhCliObserverContext, emit_gh_info_denied, emit_gh_info_live_refresh, emit_gh_info_requested,
-    new_gh_execution_call_id, new_gh_info_request_id, run_attributed_gh_command_with_ids,
+    new_gh_execution_call_id, new_gh_info_request_id,
 };
 use agent_team_mail_core::config::{
     Config, ConfigOverrides, resolve_config, resolve_plugin_config_location,
@@ -18,6 +18,7 @@ use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
 use agent_team_mail_core::team_config_store::TeamConfigStore;
+use agent_team_mail_daemon::plugins::ci_monitor::run_attributed_gh_command_with_ids;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use minijinja::Environment;

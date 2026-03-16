@@ -40,5 +40,6 @@ anyhow = "1.0"
 # Internal dependencies
 agent-team-mail-ci-monitor = { path = "crates/atm-ci-monitor", version = "=0.44.9" }
 agent-team-mail-core = { path = "crates/atm-core", version = "=0.44.9" }
+agent-team-mail-daemon = { path = "crates/atm-daemon", version = "=0.44.9" }
 sc-composer = { path = "crates/sc-composer", version = "=0.44.9" }
 sc-observability = { path = "crates/sc-observability", version = "=0.44.9" }

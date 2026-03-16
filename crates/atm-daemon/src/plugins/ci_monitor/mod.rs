@@ -26,6 +26,9 @@ pub(crate) mod test_support;
 pub(crate) mod types;
 
 pub use config::{CiMonitorConfig, DedupStrategy, NotifyTarget};
+pub use github_provider::{
+    GitHubActionsProvider, run_attributed_gh_command, run_attributed_gh_command_with_ids,
+};
 pub use plugin::CiMonitorPlugin;
 pub use provider::{CiProvider, ErasedCiProvider};
 pub use registry::CiProviderFactory;
