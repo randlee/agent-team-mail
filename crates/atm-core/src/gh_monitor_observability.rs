@@ -258,6 +258,20 @@ pub fn update_gh_repo_state_in_flight(
     })
 }
 
+pub fn update_gh_repo_state_blocked(
+    home: &Path,
+    team: &str,
+    repo: &str,
+    blocked: bool,
+    runtime: &str,
+) -> Result<GhRepoStateRecord> {
+    mutate_record(home, team, repo, runtime, |record, now| {
+        record.blocked = blocked;
+        record.updated_at = now.to_rfc3339();
+        record.cache_expires_at = (now + Duration::seconds(GH_REPO_STATE_TTL_SECS)).to_rfc3339();
+    })
+}
+
 pub fn update_gh_repo_state_rate_limit(
     home: &Path,
     team: &str,
