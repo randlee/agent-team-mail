@@ -8,9 +8,10 @@ use std::path::{Path, PathBuf};
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    AgentSummary, CanonicalMemberState, SessionQueryResult, daemon_is_running, daemon_lock_path,
-    daemon_pid_path, daemon_socket_path, daemon_status_path_for, query_list_agents,
-    query_list_agents_for_team, query_session_for_team, query_team_member_states,
+    AgentSummary, CanonicalMemberState, DaemonTouchSnapshot, SessionQueryResult,
+    daemon_is_running, daemon_lock_path, daemon_pid_path, daemon_socket_path,
+    daemon_status_path_for, daemon_touch_path_for, query_list_agents, query_list_agents_for_team,
+    query_session_for_team, query_team_member_states, read_daemon_lock_metadata,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::gh_monitor_observability::{
@@ -18,6 +19,7 @@ use agent_team_mail_core::gh_monitor_observability::{
     update_gh_repo_state_rate_limit,
 };
 use agent_team_mail_core::log_reader::{LogFilter, LogReader};
+use agent_team_mail_core::pid::is_pid_alive;
 use agent_team_mail_core::schema::TeamConfig;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -1069,7 +1071,41 @@ fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
         ));
     }
 
+    findings.extend(check_competing_daemon_touch(home_dir, &pid_path));
+
     findings
+}
+
+fn check_competing_daemon_touch(home_dir: &Path, pid_path: &Path) -> Vec<Finding> {
+    let touch_path = daemon_touch_path_for(home_dir);
+    let Ok(raw) = fs::read_to_string(&touch_path) else {
+        return Vec::new();
+    };
+    let Ok(snapshot) = serde_json::from_str::<DaemonTouchSnapshot>(&raw) else {
+        return Vec::new();
+    };
+    let current_pid = fs::read_to_string(pid_path)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+        .or_else(|| read_daemon_lock_metadata(home_dir).map(|meta| meta.pid));
+
+    snapshot
+        .into_iter()
+        .filter_map(|(team, entry)| {
+            if current_pid.is_some_and(|pid| pid == entry.pid) || !is_pid_alive(entry.pid) {
+                return None;
+            }
+            Some(finding(
+                Severity::Critical,
+                "daemon_health",
+                "COMPETING_DAEMON_DETECTED",
+                format!(
+                    "Team '{}' daemon-touch sidecar points at live foreign pid={} (started_at={}, binary={})",
+                    team, entry.pid, entry.started_at, entry.binary
+                ),
+            ))
+        })
+        .collect()
 }
 
 fn check_plugin_init_failures(home_dir: &Path) -> Vec<Finding> {
@@ -2804,6 +2840,36 @@ mod tests {
         assert_eq!(findings[0].code, "PLUGIN_INIT_FAILED");
         assert!(findings[0].message.contains("issues"));
         assert!(findings[0].message.contains("bad token"));
+    }
+
+    #[test]
+    #[serial]
+    fn check_daemon_health_reports_competing_live_pid_from_touch_sidecar() {
+        let _guard = EnvGuard::isolate(OVERRIDE_ENV_KEYS);
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon_dir = tmp.path().join(".atm/daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+        fs::write(daemon_dir.join("atm-daemon.pid"), "999999\n").unwrap();
+        fs::write(
+            daemon_dir.join("daemon-touch.json"),
+            format!(
+                r#"{{
+  "atm-dev": {{
+    "pid": {},
+    "started_at": "2026-03-16T00:00:00Z",
+    "binary": "/tmp/foreign-atm-daemon"
+  }}
+}}"#,
+                std::process::id()
+            ),
+        )
+        .unwrap();
+        unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+
+        let findings = check_daemon_health(tmp.path());
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "COMPETING_DAEMON_DETECTED"));
     }
 
     #[test]

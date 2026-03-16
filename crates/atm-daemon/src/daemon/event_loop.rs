@@ -1368,6 +1368,9 @@ async fn status_writer_loop(
     let plugin_statuses = build_plugin_statuses(&plugins, &init_failed_plugins, &ctx).await;
     let teams = get_active_teams(&ctx).await;
     let logging = build_logging_health(&ctx, &log_event_queue).await;
+    if let Err(e) = status_writer.write_daemon_touch(&teams) {
+        error!("Failed to write daemon touch sidecar: {}", e);
+    }
     if let Err(e) = status_writer.write_status(plugin_statuses.clone(), teams.clone(), logging) {
         error!("Failed to write initial daemon status: {}", e);
     }
