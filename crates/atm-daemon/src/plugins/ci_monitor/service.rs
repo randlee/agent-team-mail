@@ -36,13 +36,13 @@ use super::types::{
     CiMonitorStatus, CiMonitorStatusRequest, CiMonitorTargetKind, GhAlertTargets,
     GhMonitorConfigState, GhMonitorHealthUpdate, GhMonitorStateRecord,
 };
-use agent_team_mail_core::context::GitProvider as GitProviderType;
-use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_ci_monitor::{
     GhCliObserverContext, build_gh_cli_observer, emit_gh_info_requested,
     emit_gh_info_served_from_cache, gh_repo_state_cache_age_secs, new_gh_info_request_id,
     read_gh_repo_state_record, update_gh_repo_state_blocked, update_gh_repo_state_in_flight,
 };
+use agent_team_mail_core::context::GitProvider as GitProviderType;
+use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::home::teams_root_dir_for;
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
