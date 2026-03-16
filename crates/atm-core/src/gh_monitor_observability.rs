@@ -135,6 +135,10 @@ pub fn new_gh_info_request_id() -> String {
     new_gh_request_id()
 }
 
+pub fn new_gh_execution_call_id() -> String {
+    new_gh_call_id()
+}
+
 pub fn emit_gh_info_requested(ctx: &GhCliObserverContext, request_id: &str, info_type: &str) {
     emit_freshness_record(
         ctx,

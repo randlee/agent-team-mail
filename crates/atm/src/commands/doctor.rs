@@ -17,8 +17,8 @@ use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::gh_monitor_observability::{
     GhCliObserverContext, RateLimitUpdate, emit_gh_info_denied, emit_gh_info_live_refresh,
     emit_gh_info_requested, emit_gh_info_served_from_cache, gh_repo_state_cache_age_secs,
-    new_gh_info_request_id, read_gh_repo_state, run_attributed_gh_command_with_ids,
-    update_gh_repo_state_rate_limit,
+    new_gh_execution_call_id, new_gh_info_request_id, read_gh_repo_state,
+    run_attributed_gh_command_with_ids, update_gh_repo_state_rate_limit,
 };
 use agent_team_mail_core::log_reader::{LogFilter, LogReader};
 use agent_team_mail_core::pid::is_pid_alive;
@@ -426,7 +426,7 @@ fn build_gh_rate_limit_audit(home_dir: &Path, team: &str) -> Result<Option<GhRat
         runtime: "atm".to_string(),
     };
     let request_id = new_gh_info_request_id();
-    let call_id = agent_team_mail_ci_monitor::new_gh_call_id();
+    let call_id = new_gh_execution_call_id();
     emit_gh_info_requested(&observer_ctx, &request_id, "gh_api_rate_limit");
     if let Some(cached_rate_limit) = team_records
         .iter()
