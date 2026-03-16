@@ -859,19 +859,15 @@ fn check_hook_audit(home_dir: &Path, current_dir: &Path) -> Vec<Finding> {
 
     let codex_config_path = home_dir.join(".codex/config.toml");
     if runtime_detected("codex", &codex_config_path) {
-        let expected_notify = vec![
-            toml::Value::String("python3".to_string()),
-            toml::Value::String(
-                claude_scripts_dir
-                    .join("atm-hook-relay.py")
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-            ),
-        ];
+        let expected_notify_script = claude_scripts_dir
+            .join("atm-hook-relay.py")
+            .to_string_lossy()
+            .replace('\\', "/");
         match fs::read_to_string(&codex_config_path) {
             Ok(raw) => match raw.parse::<toml::Table>() {
                 Ok(table) => match table.get("notify").and_then(|value| value.as_array()) {
-                    Some(array) if array == &expected_notify => {}
+                    Some(array)
+                        if codex_notify_matches_expected(array, &expected_notify_script) => {}
                     Some(_) => findings.push(finding(
                         Severity::Warn,
                         "hook_audit",
@@ -992,6 +988,19 @@ fn check_hook_audit(home_dir: &Path, current_dir: &Path) -> Vec<Finding> {
     }
 
     findings
+}
+
+fn codex_notify_matches_expected(array: &[toml::Value], expected_script: &str) -> bool {
+    if array.len() != 2 {
+        return false;
+    }
+
+    let python = array[0].as_str().map(str::trim).unwrap_or_default();
+    let script = array[1].as_str().map(str::trim).unwrap_or_default();
+    let python_name_matches =
+        Path::new(python).file_name().and_then(|name| name.to_str()) == Some("python3");
+
+    python_name_matches && script.replace('\\', "/") == expected_script
 }
 
 fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {

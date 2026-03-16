@@ -1,6 +1,7 @@
 //! Daemon management commands
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
+use agent_team_mail_core::consts::ISOLATED_RUNTIME_DEFAULT_TTL_SECS;
 use agent_team_mail_core::daemon_client::RuntimeOwnerMetadata;
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
@@ -76,7 +77,7 @@ pub struct IsolatedArgs {
     name: Option<String>,
 
     /// TTL in minutes before the isolated runtime becomes cleanup-eligible
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = ISOLATED_RUNTIME_DEFAULT_TTL_SECS / 60)]
     ttl_minutes: u64,
 
     /// Allow live GitHub polling in this isolated runtime
