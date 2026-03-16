@@ -140,24 +140,6 @@ fn read_gh_ledger_actions(home: &Path) -> Vec<String> {
 }
 
 #[cfg(unix)]
-fn wait_for_gh_ledger_actions(home: &Path, expected: &[&str], timeout: Duration) -> Vec<String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let actions = read_gh_ledger_actions(home);
-        if expected
-            .iter()
-            .all(|action| actions.iter().any(|value| value == action))
-        {
-            return actions;
-        }
-        if Instant::now() >= deadline {
-            return actions;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-}
-
-#[cfg(unix)]
 fn write_fake_gh_daemon_script(home: &Path) -> PathBuf {
     let script = home.join("fake-gh-daemon.py");
     let body = r#"#!/usr/bin/env python3
@@ -1499,16 +1481,10 @@ fn test_gh_monitor_list_json_reports_rollups_without_daemon() {
     assert_eq!(items[1]["ci"]["state"].as_str(), Some("fail"));
     assert_eq!(items[1]["draft"].as_bool(), Some(true));
 
-    let actions = wait_for_gh_ledger_actions(
-        temp_dir.path(),
-        &[
-            "gh_info_requested",
-            "gh_call_started",
-            "gh_call_finished",
-            "gh_info_live_refresh",
-        ],
-        Duration::from_millis(30000),
-    );
+    // The `atm` binary flushes the gh observability ledger writer thread before
+    // process exit (see main.rs).  By the time `assert()` returns above, all
+    // records are guaranteed written — no deadline-based polling required.
+    let actions = read_gh_ledger_actions(temp_dir.path());
     assert!(
         actions.iter().any(|action| action == "gh_info_requested"),
         "gh info request must be logged"
