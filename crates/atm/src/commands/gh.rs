@@ -18,6 +18,7 @@ use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
 use agent_team_mail_core::team_config_store::TeamConfigStore;
+use agent_team_mail_daemon::plugins::ci_monitor::gh_execution::run_attributed_gh_command_with_ids;
 use agent_team_mail_daemon::plugins::ci_monitor::{
     GH_MONITOR_REPORT_SCHEMA_VERSION, GhCiRollup, GhPrListSummary, GhPrReportSummary,
     build_pr_list_summary, build_pr_report_summary, validate_gh_cli_prerequisites,
@@ -28,7 +29,6 @@ use agent_team_mail_daemon::plugins::ci_monitor::{
     extract_check_reports, extract_review_reports, normalize_merge_status,
     normalize_report_review_decision, summarize_ci_rollup,
 };
-use agent_team_mail_daemon::plugins::ci_monitor::gh_execution::run_attributed_gh_command_with_ids;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use minijinja::Environment;
