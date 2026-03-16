@@ -2,6 +2,9 @@ use agent_team_mail_daemon::plugins::worker_adapter::codex_tmux::TmuxPayload;
 use agent_team_mail_daemon::plugins::worker_adapter::{
     CodexTmuxBackend, WorkerAdapter, WorkerHandle,
 };
+#[path = "../../atm/tests/support/env_guard.rs"]
+#[allow(dead_code)]
+mod env_guard;
 use serial_test::serial;
 use std::fs;
 #[cfg(unix)]
@@ -70,21 +73,18 @@ async fn test_gemini_shutdown_escalates_to_sigkill_after_sigterm() {
         .spawn()
         .expect("spawn worker child");
 
-    let old_path = std::env::var("PATH").ok();
-    // SAFETY: test-scoped environment mutation, serialized with #[serial].
-    unsafe {
-        std::env::set_var(
-            "PATH",
-            format!(
-                "{}:{}",
-                bin_dir.display(),
-                old_path.clone().unwrap_or_default()
-            ),
-        );
-        std::env::set_var("ATM_FAKE_TMUX_LOG", tmux_log.display().to_string());
-        std::env::set_var("ATM_FAKE_PANE_PID", child.id().to_string());
-        std::env::set_var("ATM_GEMINI_SHUTDOWN_WAIT_SECS", "1");
-    }
+    let _path_guard = env_guard::EnvGuard::set(
+        "PATH",
+        format!(
+            "{}:{}",
+            bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    );
+    let _tmux_log_guard =
+        env_guard::EnvGuard::set("ATM_FAKE_TMUX_LOG", tmux_log.display().to_string());
+    let _pane_pid_guard = env_guard::EnvGuard::set("ATM_FAKE_PANE_PID", child.id().to_string());
+    let _shutdown_wait_guard = env_guard::EnvGuard::set("ATM_GEMINI_SHUTDOWN_WAIT_SECS", "1");
 
     let log_dir = temp.path().join("logs");
     fs::create_dir_all(&log_dir).expect("create log dir");
@@ -129,15 +129,4 @@ async fn test_gemini_shutdown_escalates_to_sigkill_after_sigterm() {
     assert!(tmux_trace.contains("display-message -t %42 -p #{pane_pid}"));
     assert!(tmux_trace.contains("send-keys -t %42 C-c"));
     assert!(tmux_trace.contains("kill-pane -t %42"));
-
-    // SAFETY: restore env after test; serialized with #[serial].
-    unsafe {
-        match old_path {
-            Some(path) => std::env::set_var("PATH", path),
-            None => std::env::remove_var("PATH"),
-        }
-        std::env::remove_var("ATM_FAKE_TMUX_LOG");
-        std::env::remove_var("ATM_FAKE_PANE_PID");
-        std::env::remove_var("ATM_GEMINI_SHUTDOWN_WAIT_SECS");
-    }
 }

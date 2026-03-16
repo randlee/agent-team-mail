@@ -1700,19 +1700,11 @@ parallel, but AP.1 should start before new daemon-heavy test coverage expands.
 
 ---
 
-<<<<<<< integrate/phase-AQ
 ## 17.25 Phase AQ: Codebase Cleanup + Rogue Daemon Spawn Elimination
 
 **Goal**: Close remaining cleanup debt from AN/AO/AP and make rogue daemon
 spawns structurally impossible in test and QA code by enforcing one canonical
 real-daemon harness.
-=======
-## 17.25 Phase AQ: Codebase Cleanup and Contract Consolidation
-
-**Goal**: remove residual dead code and duplicate guard paths, consolidate
-magic numbers into named constants, and close the deferred AN/AO/AP cleanup
-findings before new implementation work expands the surface again.
->>>>>>> develop
 
 **Integration branch**: `integrate/phase-AQ`
 
@@ -1721,11 +1713,11 @@ findings before new implementation work expands the surface again.
 ### Planned Sprint Map
 | Sprint | Focus | Primary Branch | Status |
 |---|---|---|---|
-<<<<<<< integrate/phase-AQ
+| AQ.0 | Planning and Requirements | `develop` | COMPLETE (docs-only direct-to-develop; not via `integrate/phase-AQ`) |
 | AQ.1 | Const consolidation and magic-number elimination | `feature/pAQ-s1-const-consolidation` | ACTIVE |
-| AQ.2 | Dead code removal and duplicate elimination | `feature/pAQ-s2-dead-code` | ACTIVE |
-| AQ.3 | Deferred AO non-blocking GH observability fixes | `feature/pAQ-s3-gh-observability-cleanup` | ACTIVE |
-| AQ.4 | PID-file race and autostart observability hardening | `feature/pAQ-s4-pid-race` | ACTIVE |
+| AQ.2 | Dead code removal and duplicate elimination | `feature/pAQ-s2-dead-code` | COMPLETE |
+| AQ.3 | Deferred AO non-blocking GH observability fixes | `feature/pAQ-s3-gh-observability-cleanup` | COMPLETE |
+| AQ.4 | PID-file race and autostart observability hardening | `feature/pAQ-s4-pid-race` | COMPLETE |
 | AQ.5 | Rogue daemon spawn elimination and QA contract hardening | `feature/pAQ-s5-rogue-daemon-spawn-elimination` | ACTIVE |
 
 ### Exit Criteria
@@ -1745,32 +1737,10 @@ findings before new implementation work expands the surface again.
 **Dependency graph**: AQ.1 and AQ.2 may run in parallel; AQ.3 and AQ.4 may run
 in parallel; AQ.5 starts once the AP daemon-spawn findings are known and
 merge-forwards from `integrate/phase-AQ` as needed.
-=======
-| AQ.0 | Planning and Requirements | `develop` | COMPLETE (docs-only direct-to-develop; not via `integrate/phase-AQ`) |
-| AQ.1 | Const consolidation and magic-number elimination | `feature/pAQ-s1-const-consolidation` | PLANNED |
-| AQ.2 | Dead code removal and duplicate elimination | `feature/pAQ-s2-dead-code-dup-removal` | PLANNED |
-| AQ.3 | Deferred non-blocking AO findings | `feature/pAQ-s3-deferred-findings` | PLANNED |
-| AQ.4 | Deferred AP daemon-race and observability cleanup | `feature/pAQ-s4-daemon-race-cleanup` | PLANNED |
-
-### Exit Criteria
-1. Significant numeric literals in production code are replaced with named
-   constants in canonical `consts.rs` locations.
-2. Duplicate guard/helper paths removed by AP remain deleted, and new duplicate
-   lifecycle or env guards are not introduced.
-3. Deferred AO observability findings (GH #761, GH #763) and deferred AP
-   daemon-race findings are closed with tests demonstrating the fixed
-   behaviors.
-4. The codebase is smaller and more explicit than the post-AP baseline, with no
-   new user-facing capability added during cleanup.
-
-**Dependency graph**: AQ.1 and AQ.2 can proceed in parallel; AQ.3 and AQ.4 can
-proceed in parallel; all merge through `integrate/phase-AQ`
-
 ### Release Gate
 Before version bump and publish:
 1. Dogfood on `develop` via `dev-install`.
 2. Publish as the next version bump only after dogfood passes.
->>>>>>> develop
 
 ---
 
