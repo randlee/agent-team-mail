@@ -3061,6 +3061,27 @@ The core has no awareness of whether a team member is local or remote.
 - **Long-run test guardrails**: daemon/concurrency integration tests MUST have
   explicit bounded timeouts and deterministic teardown guards that terminate
   spawned daemon processes on timeout/failure.
+- **Canonical real-daemon harness**: Tests or QA helpers that need a real
+  `atm-daemon` process MUST spawn or adopt it only through the canonical
+  tracked harness (`DaemonProcessGuard` plus `daemon_test_registry`, or the
+  direct successor designated by the same support module). Ad hoc guard types,
+  direct `Command::new("atm-daemon")`, shell wrappers, or helper-local launch
+  patterns are forbidden unless they delegate to that canonical harness.
+- **Immediate ownership and teardown**: A real test daemon MUST be owned by the
+  test fixture that created or adopted it, registered immediately on
+  detection/spawn, and terminated plus reaped in fixture teardown even on panic
+  or timeout. Discarding adoption/registration results is forbidden.
+- **No shared-runtime test daemons**: Test, QA, smoke-test, and helper code
+  MUST NOT launch or adopt the shared `release` or `dev` daemons. Such flows
+  MUST use isolated runtime state only and MUST fail closed when the canonical
+  test binary cannot be resolved.
+- **No ambient spawn fallbacks**: Test daemon launch helpers MUST NOT fall back
+  to PATH lookup, inherited `ATM_DAEMON_BIN`, or ambient shared `ATM_HOME`
+  state. Environment mutation for daemon tests MUST use scoped RAII guards.
+- **QA daemon-spawn gate**: Any daemon launch vector outside the canonical
+  allowed test harness, including Rust, shell, Python, CI, or other helper
+  scripts, is a blocking QA failure and MUST be removed or rewritten to use the
+  canonical harness before merge.
 - **Platform mitigation policy**: when a test has a known platform-specific hang
   risk (for example macOS `test_concurrent_sends_no_data_loss`), temporary CI
   mitigation (`#[cfg_attr(target_os = "macos", ignore)]`) is allowed only while

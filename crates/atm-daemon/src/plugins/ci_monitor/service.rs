@@ -5,6 +5,11 @@
 //! for translating wire payloads into these CI monitor request/status types before
 //! calling into the service layer.
 
+use crate::daemon::consts::{
+    DEFAULT_DRAIN_TIMEOUT_SECS, DRAIN_SLEEP_MS, SHARED_POLLER_ACTIVE_SLEEP_SECS,
+    SHARED_POLLER_ERROR_BACKOFF_SECS, SHARED_POLLER_IDLE_SLEEP_SECS,
+};
+
 #[cfg(unix)]
 use super::gh_monitor::{
     RunPollProgress, fetch_pr_merge_state, is_pr_merge_state_dirty, poll_monitored_run_once,
@@ -261,7 +266,10 @@ async fn run_shared_repo_poller(home: std::path::PathBuf, team: String, owner_re
             Ok(records) => records,
             Err(err) => {
                 warn!(team = %team, repo = %owner_repo, "failed to load gh monitor state: {err}");
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    SHARED_POLLER_ERROR_BACKOFF_SECS,
+                ))
+                .await;
                 continue;
             }
         };
@@ -300,7 +308,11 @@ async fn run_shared_repo_poller(home: std::path::PathBuf, team: String, owner_re
         }
 
         let _ = update_gh_repo_state_in_flight(&home, &team, &owner_repo, 0, "atm-daemon");
-        let sleep_secs = if active_records.is_empty() { 300 } else { 60 };
+        let sleep_secs = if active_records.is_empty() {
+            SHARED_POLLER_IDLE_SLEEP_SECS
+        } else {
+            SHARED_POLLER_ACTIVE_SLEEP_SECS
+        };
         tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
     }
 }
@@ -760,7 +772,9 @@ pub(crate) async fn control_request(
             ))
         })?,
         CiMonitorLifecycleAction::Stop => {
-            let drain_timeout_secs = control.drain_timeout_secs.unwrap_or(30);
+            let drain_timeout_secs = control
+                .drain_timeout_secs
+                .unwrap_or(DEFAULT_DRAIN_TIMEOUT_SECS);
             let _ = set_gh_monitor_health_state(
                 home,
                 &control.team,
@@ -781,7 +795,7 @@ pub(crate) async fn control_request(
                 + std::time::Duration::from_secs(drain_timeout_secs.max(1));
             let mut in_flight = count_in_flight_monitors(home, &control.team);
             while in_flight > 0 && std::time::Instant::now() < deadline {
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(DRAIN_SLEEP_MS)).await;
                 in_flight = count_in_flight_monitors(home, &control.team);
             }
 
@@ -829,7 +843,9 @@ pub(crate) async fn control_request(
             health
         }
         CiMonitorLifecycleAction::Restart => {
-            let drain_timeout_secs = control.drain_timeout_secs.unwrap_or(30);
+            let drain_timeout_secs = control
+                .drain_timeout_secs
+                .unwrap_or(DEFAULT_DRAIN_TIMEOUT_SECS);
             let _ = set_gh_monitor_health_state(
                 home,
                 &control.team,
@@ -850,7 +866,7 @@ pub(crate) async fn control_request(
                 + std::time::Duration::from_secs(drain_timeout_secs.max(1));
             let mut in_flight = count_in_flight_monitors(home, &control.team);
             while in_flight > 0 && std::time::Instant::now() < deadline {
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(DRAIN_SLEEP_MS)).await;
                 in_flight = count_in_flight_monitors(home, &control.team);
             }
 

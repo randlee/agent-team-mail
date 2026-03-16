@@ -384,12 +384,24 @@ fn wait_for_daemon_socket(home: &Path) {
 
 #[cfg(unix)]
 fn start_fake_gh_daemon(home: &Path) -> Child {
-    start_fake_gh_daemon_with_mode_and_delays(home, true, true, 0, 0)
+    start_fake_gh_daemon_with_mode_and_delays(home, true, true, 0, 0, None)
 }
 
 #[cfg(unix)]
 fn start_fake_gh_daemon_with_mode(home: &Path, configured: bool, enabled: bool) -> Child {
-    start_fake_gh_daemon_with_mode_and_delays(home, configured, enabled, 0, 0)
+    start_fake_gh_daemon_with_mode_and_delays(home, configured, enabled, 0, 0, None)
+}
+
+/// Start the fake daemon with an explicit request log path.
+///
+/// Use instead of `start_fake_gh_daemon` when the test needs to inspect the
+/// last socket request the daemon received. Passing the path here (rather than
+/// setting `ATM_FAKE_GH_REQUEST_LOG` in the test-process environment) prevents
+/// concurrently-started daemons from other tests from inheriting the env var
+/// and accidentally overwriting the log.
+#[cfg(unix)]
+fn start_fake_gh_daemon_with_request_log(home: &Path, request_log: &std::path::Path) -> Child {
+    start_fake_gh_daemon_with_mode_and_delays(home, true, true, 0, 0, Some(request_log))
 }
 
 #[cfg(unix)]
@@ -399,6 +411,7 @@ fn start_fake_gh_daemon_with_mode_and_delays(
     enabled: bool,
     monitor_delay_ms: u64,
     control_delay_ms: u64,
+    request_log: Option<&std::path::Path>,
 ) -> Child {
     let script = write_fake_gh_daemon_script(home);
     // Retry on ETXTBUSY (code 26): Linux can transiently block execution of a
@@ -406,15 +419,21 @@ fn start_fake_gh_daemon_with_mode_and_delays(
     let child = {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
-            match Command::new(&script)
-                .env("ATM_HOME", home)
+            let mut cmd = Command::new(&script);
+            cmd.env("ATM_HOME", home)
                 .env("ATM_FAKE_GH_CONFIGURED", if configured { "1" } else { "0" })
                 .env("ATM_FAKE_GH_ENABLED", if enabled { "1" } else { "0" })
                 .env("ATM_FAKE_GH_MONITOR_DELAY_MS", monitor_delay_ms.to_string())
                 .env("ATM_FAKE_GH_CONTROL_DELAY_MS", control_delay_ms.to_string())
-                .env("ATM_FAKE_DAEMON_VERSION", env!("CARGO_PKG_VERSION"))
-                .spawn()
-            {
+                .env("ATM_FAKE_DAEMON_VERSION", env!("CARGO_PKG_VERSION"));
+            // Explicitly control ATM_FAKE_GH_REQUEST_LOG: always override the
+            // inherited process-env value so that parallel serial/non-serial tests
+            // cannot write to each other's log files.
+            match request_log {
+                Some(path) => cmd.env("ATM_FAKE_GH_REQUEST_LOG", path),
+                None => cmd.env_remove("ATM_FAKE_GH_REQUEST_LOG"),
+            };
+            match cmd.spawn() {
                 Ok(child) => break child,
                 Err(e) if e.raw_os_error() == Some(26) && Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(50));
@@ -596,7 +615,7 @@ fn test_gh_monitor_and_control_allow_daemon_responses_over_500ms() {
     std::fs::create_dir_all(&workdir).unwrap();
     init_git_repo_with_origin(&workdir, "https://github.com/acme/agent-team-mail.git");
     let mut daemon =
-        start_fake_gh_daemon_with_mode_and_delays(temp_dir.path(), true, true, 750, 750);
+        start_fake_gh_daemon_with_mode_and_delays(temp_dir.path(), true, true, 750, 750, None);
 
     let mut monitor = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut monitor, &temp_dir, "test-team", true);
@@ -1104,9 +1123,10 @@ fn test_gh_monitor_infers_repo_scope_from_git_remote() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
     let request_log = temp_dir.path().join("request-log.json");
-    // SAFETY: serial test mutates process env before spawning the fake daemon.
-    unsafe { std::env::set_var("ATM_FAKE_GH_REQUEST_LOG", &request_log) };
-    let mut daemon = start_fake_gh_daemon(temp_dir.path());
+    // Pass the log path directly to the daemon rather than via process env so
+    // that concurrently-running non-serial tests cannot inherit ATM_FAKE_GH_REQUEST_LOG
+    // and accidentally overwrite this test's log with their own daemon requests.
+    let mut daemon = start_fake_gh_daemon_with_request_log(temp_dir.path(), &request_log);
     let workdir = temp_dir.path().join("workdir");
     std::fs::create_dir_all(&workdir).unwrap();
     init_git_repo_with_origin(&workdir, "https://github.com/acme/agent-team-mail.git");
@@ -1116,7 +1136,6 @@ fn test_gh_monitor_infers_repo_scope_from_git_remote() {
     let output = cmd
         .env("ATM_TEAM", "test-team")
         .env("ATM_IDENTITY", "arch-ctm")
-        .env("ATM_FAKE_GH_REQUEST_LOG", &request_log)
         .arg("gh")
         .arg("--team")
         .arg("test-team")
@@ -1143,8 +1162,6 @@ fn test_gh_monitor_infers_repo_scope_from_git_remote() {
     );
     let _ = daemon.kill();
     let _ = daemon.wait();
-    // SAFETY: serial test clears the temporary env override after the child exits.
-    unsafe { std::env::remove_var("ATM_FAKE_GH_REQUEST_LOG") };
 }
 
 #[test]
@@ -1154,9 +1171,10 @@ fn test_gh_monitor_repo_override_accepts_github_url_and_cc() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
     let request_log = temp_dir.path().join("request-log.json");
-    // SAFETY: serial test mutates process env before spawning the fake daemon.
-    unsafe { std::env::set_var("ATM_FAKE_GH_REQUEST_LOG", &request_log) };
-    let mut daemon = start_fake_gh_daemon(temp_dir.path());
+    // Pass the log path directly to the daemon rather than via process env so
+    // that concurrently-running non-serial tests cannot inherit ATM_FAKE_GH_REQUEST_LOG
+    // and accidentally overwrite this test's log with their own daemon requests.
+    let mut daemon = start_fake_gh_daemon_with_request_log(temp_dir.path(), &request_log);
     let workdir = temp_dir.path().join("workdir");
     std::fs::create_dir_all(&workdir).unwrap();
     write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "config-owner", "config-repo");
@@ -1165,7 +1183,6 @@ fn test_gh_monitor_repo_override_accepts_github_url_and_cc() {
     let output = cmd
         .env("ATM_TEAM", "test-team")
         .env("ATM_IDENTITY", "arch-ctm")
-        .env("ATM_FAKE_GH_REQUEST_LOG", &request_log)
         .arg("gh")
         .arg("--team")
         .arg("test-team")
@@ -1201,8 +1218,6 @@ fn test_gh_monitor_repo_override_accepts_github_url_and_cc() {
     );
     let _ = daemon.kill();
     let _ = daemon.wait();
-    // SAFETY: serial test clears the temporary env override after the child exits.
-    unsafe { std::env::remove_var("ATM_FAKE_GH_REQUEST_LOG") };
 }
 
 #[test]

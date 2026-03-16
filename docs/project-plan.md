@@ -180,6 +180,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AP | Test Stability and Harness Hardening | Eliminate hang-prone, flaky, and operationally unsafe test patterns; RAII guard consolidation; daemon lifecycle hardening | COMPLETE ([#756](https://github.com/randlee/agent-team-mail/pull/756), [#767](https://github.com/randlee/agent-team-mail/pull/767), [#768](https://github.com/randlee/agent-team-mail/pull/768)) |
 | AJ | Session-ID SSoT Normalization | Canonical `session_id` naming, shared caller resolver, runtime session resolution closure, doctor/session consistency | PLANNED |
 | AK | Mandatory OTel Rollout | Non-optional OTel across in-scope tools with canonical correlation and health/reporting contracts | PLANNED |
+| AQ | Codebase Cleanup + Rogue Daemon Spawn Elimination | Remove cleanup debt from AN/AO/AP reviews, consolidate constants/dead code, and eliminate non-canonical test daemon spawn paths | ACTIVE |
 
 ---
 
@@ -1699,11 +1700,11 @@ parallel, but AP.1 should start before new daemon-heavy test coverage expands.
 
 ---
 
-## 17.25 Phase AQ: Codebase Cleanup and Contract Consolidation
+## 17.25 Phase AQ: Codebase Cleanup + Rogue Daemon Spawn Elimination
 
-**Goal**: remove residual dead code and duplicate guard paths, consolidate
-magic numbers into named constants, and close the deferred AN/AO/AP cleanup
-findings before new implementation work expands the surface again.
+**Goal**: Close remaining cleanup debt from AN/AO/AP and make rogue daemon
+spawns structurally impossible in test and QA code by enforcing one canonical
+real-daemon harness.
 
 **Integration branch**: `integrate/phase-AQ`
 
@@ -1713,25 +1714,29 @@ findings before new implementation work expands the surface again.
 | Sprint | Focus | Primary Branch | Status |
 |---|---|---|---|
 | AQ.0 | Planning and Requirements | `develop` | COMPLETE (docs-only direct-to-develop; not via `integrate/phase-AQ`) |
-| AQ.1 | Const consolidation and magic-number elimination | `feature/pAQ-s1-const-consolidation` | PLANNED |
-| AQ.2 | Dead code removal and duplicate elimination | `feature/pAQ-s2-dead-code-dup-removal` | PLANNED |
-| AQ.3 | Deferred non-blocking AO findings | `feature/pAQ-s3-deferred-findings` | PLANNED |
-| AQ.4 | Deferred AP daemon-race and observability cleanup | `feature/pAQ-s4-daemon-race-cleanup` | PLANNED |
+| AQ.1 | Const consolidation and magic-number elimination | `feature/pAQ-s1-const-consolidation` | ACTIVE |
+| AQ.2 | Dead code removal and duplicate elimination | `feature/pAQ-s2-dead-code` | COMPLETE |
+| AQ.3 | Deferred AO non-blocking GH observability fixes | `feature/pAQ-s3-gh-observability-cleanup` | COMPLETE |
+| AQ.4 | PID-file race and autostart observability hardening | `feature/pAQ-s4-pid-race` | COMPLETE |
+| AQ.5 | Rogue daemon spawn elimination and QA contract hardening | `feature/pAQ-s5-rogue-daemon-spawn-elimination` | ACTIVE |
 
 ### Exit Criteria
-1. Significant numeric literals in production code are replaced with named
-   constants in canonical `consts.rs` locations.
-2. Duplicate guard/helper paths removed by AP remain deleted, and new duplicate
-   lifecycle or env guards are not introduced.
-3. Deferred AO observability findings (GH #761, GH #763) and deferred AP
-   daemon-race findings are closed with tests demonstrating the fixed
-   behaviors.
-4. The codebase is smaller and more explicit than the post-AP baseline, with no
-   new user-facing capability added during cleanup.
+1. AQ cleanup findings from AN, AO, and AP are closed without introducing new
+   parallel helper or duplicate-type paths.
+2. Constants and dead-code cleanup land without behavior drift and with
+   workspace validation green.
+3. PID-file adoption and daemon observability tests use the canonical support
+   harness and do not leak child daemons.
+4. Real test daemons can only be spawned or adopted through the canonical
+   tracked harness; test and QA code cannot launch shared `dev` or `release`
+   daemons, PATH fallback daemon binaries, or untracked helper-local launch
+   scripts.
+5. `daemon-spawn-qa` blocks any non-canonical daemon launch vector, including
+   Rust, shell, Python, CI, and helper scripts.
 
-**Dependency graph**: AQ.1 and AQ.2 can proceed in parallel; AQ.3 and AQ.4 can
-proceed in parallel; all merge through `integrate/phase-AQ`
-
+**Dependency graph**: AQ.1 and AQ.2 may run in parallel; AQ.3 and AQ.4 may run
+in parallel; AQ.5 starts once the AP daemon-spawn findings are known and
+merge-forwards from `integrate/phase-AQ` as needed.
 ### Release Gate
 Before version bump and publish:
 1. Dogfood on `develop` via `dev-install`.

@@ -20,6 +20,8 @@
 
 use std::sync::OnceLock;
 
+use crate::consts::{LOG_EVENT_CHANNEL_CAPACITY, LOG_FORWARD_TIMEOUT_MS};
+
 static INIT: OnceLock<()> = OnceLock::new();
 
 /// Global channel sender for the ProducerFanIn background thread.
@@ -233,7 +235,8 @@ fn setup_producer_fan_in(
     use std::sync::mpsc;
 
     // Bounded channel: capacity 512.  If full, callers drop the event silently.
-    let (tx, rx) = mpsc::sync_channel::<crate::logging_event::LogEventV1>(512);
+    let (tx, rx) =
+        mpsc::sync_channel::<crate::logging_event::LogEventV1>(LOG_EVENT_CHANNEL_CAPACITY);
 
     // Store the sender globally so emit_event_best_effort can use it.
     // If already set (e.g., second call to init_unified), we silently skip.
@@ -300,7 +303,7 @@ fn try_forward_to_socket(
         Err(_) => return false,
     };
 
-    let timeout = Duration::from_millis(100);
+    let timeout = Duration::from_millis(LOG_FORWARD_TIMEOUT_MS);
     let _ = stream.set_write_timeout(Some(timeout));
     let _ = stream.set_read_timeout(Some(timeout));
 

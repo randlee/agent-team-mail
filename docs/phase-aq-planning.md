@@ -117,6 +117,46 @@ Phase AQ is a focused cleanup phase addressing findings from the AN/AO/AP phase 
 
 ---
 
+### AQ.5 — Rogue Daemon Spawn Elimination
+
+**Scope**: Close the remaining daemon-spawn escape hatches so test and QA code
+cannot launch untracked or shared-runtime daemons. This sprint is explicitly
+deletion-oriented: remove non-canonical spawn patterns instead of stabilizing
+them in parallel.
+
+**Hard rules for AQ.5**:
+- Real `atm-daemon` test processes may be spawned or adopted only through the
+  canonical support harness (`DaemonProcessGuard` + `daemon_test_registry`).
+- The harness owner must register the daemon immediately and must kill plus
+  reap it during fixture teardown.
+- Test/QA code must not launch shared `release` or `dev` daemons.
+- PATH fallback, inherited `ATM_DAEMON_BIN`, raw process-global env mutation,
+  and discarded adoption results are blocking failures.
+- Non-Rust launch vectors count too: shell scripts, Python helpers, CI glue,
+  and wrapper launchers are all in scope.
+
+**Items**:
+- DSQ-NEW-004 — replace remaining raw `unsafe set_var` daemon-test env mutation
+  with `EnvGuard` RAII.
+- DSQ-NEW-005 — eliminate discarded `adopt_running_pid` results so adoption
+  failure cannot silently leak a daemon.
+- quality-mgr minor — remove helper-local PID probing duplicates and use the
+  canonical support helpers instead.
+- daemon-spawn-qa contract — expand the QA auditor so it scans Rust plus shell,
+  Python, CI, and helper-script launch vectors and treats any non-canonical
+  daemon launch path as a blocking QA failure.
+
+**Deliverables**:
+- One canonical real-daemon spawn/adopt pattern remains in test support.
+- No remaining test/helper launch path can start a daemon without immediate
+  ownership, registry tracking, and teardown.
+- No test/helper path can resolve to shared `dev`/`release` daemons or PATH
+  fallback binaries.
+- `daemon-spawn-qa` documents the allowed patterns and blocks everything else,
+  including non-Rust launch vectors.
+
+---
+
 ## Findings from Phase Reviews (consolidated input)
 
 ### Phase AN (fixed before merge)
@@ -177,12 +217,15 @@ All 6 fixed by team-lead on `feature/pAP-fix-r1-duplicate-guards` (PR #767). Re-
 AQ.1 (consts)      ─┐
 AQ.2 (dead code)   ─┤─→ integrate/phase-AQ → develop → release
 AQ.3 (GH#761/763)  ─┤
-AQ.4 (AP.5 scope)  ─┘
+AQ.4 (AP.5 scope)  ─┤
+AQ.5 (rogue daemon)─┘
 ```
 
 AQ.1 and AQ.2 can run in parallel (different files, no overlap).
 AQ.3 and AQ.4 can run in parallel.
-All four can merge to `integrate/phase-AQ` independently once CI green.
+AQ.5 starts after AP daemon-spawn findings are known and may run in parallel
+with late AQ fix passes if merge-forwarded from `integrate/phase-AQ`.
+All five can merge to `integrate/phase-AQ` independently once CI green.
 
 ---
 

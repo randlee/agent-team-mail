@@ -14,6 +14,9 @@ use super::trait_def::{WorkerAdapter, WorkerHandle};
 use crate::daemon::session_registry::SharedSessionRegistry;
 use crate::daemon::socket::LaunchRequest;
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
+use crate::plugins::consts::{
+    INACTIVITY_CHECK_INTERVAL_SECS, LOG_ROTATION_INTERVAL_SECS, NUDGE_SCAN_INTERVAL_SECS,
+};
 use agent_team_mail_core::daemon_client::{LaunchConfig, LaunchResult};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::inbox::inbox_append;
@@ -1204,7 +1207,7 @@ impl Plugin for WorkerAdapterPlugin {
         }
 
         // Set up periodic inactivity check (every 30 seconds)
-        let mut inactivity_timer = interval(Duration::from_secs(30));
+        let mut inactivity_timer = interval(Duration::from_secs(INACTIVITY_CHECK_INTERVAL_SECS));
 
         // Set up periodic health check (configurable, default 30 seconds)
         let health_check_interval = Duration::from_secs(self.config.health_check_interval_secs);
@@ -1214,13 +1217,13 @@ impl Plugin for WorkerAdapterPlugin {
         let mut pid_poll_timer = interval(Duration::from_secs(PID_POLL_INTERVAL_SECS));
 
         // Set up periodic log rotation check (every 5 minutes)
-        let mut log_rotation_timer = interval(Duration::from_secs(300));
+        let mut log_rotation_timer = interval(Duration::from_secs(LOG_ROTATION_INTERVAL_SECS));
 
         // Set up periodic nudge scan (every 5 seconds).
         // This catches Busy → Idle transitions driven by hook events, which
         // arrive asynchronously via HookWatcher and are not otherwise signalled
         // to the plugin main loop.
-        let mut nudge_scan_timer = interval(Duration::from_secs(5));
+        let mut nudge_scan_timer = interval(Duration::from_secs(NUDGE_SCAN_INTERVAL_SECS));
 
         // Set up periodic pub/sub GC (every 60 seconds) to evict expired
         // subscriptions and keep memory usage bounded.

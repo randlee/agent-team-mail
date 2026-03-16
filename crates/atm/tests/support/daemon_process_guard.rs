@@ -64,6 +64,32 @@ impl DaemonProcessGuard {
         }
     }
 
+    /// Adopt a daemon PID written to `pid_path` into a guard.
+    ///
+    /// This registers the PID with the daemon test registry as soon as it is
+    /// observed, closing the race where a delayed PID file write can panic a
+    /// test before cleanup is registered.
+    #[allow(dead_code)]
+    pub fn adopt_from_pid_file(
+        pid_path: &Path,
+        daemon_bin: &Path,
+        atm_home: &Path,
+        timeout: Duration,
+    ) -> Option<Self> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if let Ok(raw) = fs::read_to_string(pid_path)
+                && let Ok(pid) = raw.trim().parse::<u32>()
+                && pid > 1
+                && pid_alive(pid as i32)
+            {
+                return Some(Self::adopt_registered_pid(pid, daemon_bin, atm_home));
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        None
+    }
+
     /// Adopt an already-spawned `Child` into a guard.
     ///
     /// Use this instead of a hand-rolled kill+wait struct. Registers the child
@@ -160,7 +186,19 @@ impl Drop for DaemonProcessGuard {
             }
             if pid_alive(self.pid as i32) {
                 send_signal(self.pid as i32, 9);
+                for _ in 0..20 {
+                    if !pid_alive(self.pid as i32) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
             }
+            // On the adopt path (`child` is None), `self.pid` is not a direct child of
+            // this process. `waitpid` will return ECHILD, which is expected and harmless.
+            // We call reap_child_pid_best_effort here to handle the uncommon case where
+            // the adopted daemon was originally spawned as a child of a prior test process
+            // that has since exited, leaving the daemon as a re-parented orphan.
+            reap_child_pid_best_effort(self.pid as i32);
         }
         let lock_path = self.daemon_dir.join("daemon.lock");
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -176,12 +214,26 @@ impl Drop for DaemonProcessGuard {
 }
 
 #[cfg(unix)]
-fn pid_alive(pid: i32) -> bool {
+#[allow(dead_code)]
+pub fn pid_alive(pid: i32) -> bool {
     unsafe extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;
     }
     // SAFETY: signal 0 checks process existence without signaling the process.
     unsafe { kill(pid, 0) == 0 }
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+pub fn wait_for_pid_exit(pid: i32, timeout: std::time::Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if !pid_alive(pid) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("pid {pid} stayed alive beyond {timeout:?}");
 }
 
 #[cfg(unix)]
@@ -193,15 +245,42 @@ fn send_signal(pid: i32, sig: i32) {
     let _ = unsafe { kill(pid, sig) };
 }
 
+#[cfg(unix)]
+fn reap_child_pid_best_effort(pid: i32) {
+    unsafe extern "C" {
+        fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+    }
+    const WNOHANG: i32 = 1;
+    for _ in 0..20 {
+        let mut status = 0;
+        // SAFETY: best-effort reap for test child processes; WNOHANG avoids blocking.
+        let waited = unsafe { waitpid(pid, &mut status, WNOHANG) };
+        if waited == pid || waited == -1 || !pid_alive(pid) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 #[cfg(not(unix))]
-fn pid_alive(_pid: i32) -> bool {
+#[allow(dead_code)]
+pub fn pid_alive(_pid: i32) -> bool {
     false
+}
+
+#[cfg(not(unix))]
+#[allow(dead_code)]
+pub fn wait_for_pid_exit(_pid: i32, _timeout: std::time::Duration) {
+    // No-op on non-unix: process probing is not supported.
 }
 
 #[cfg(not(unix))]
 fn send_signal(_pid: i32, _sig: i32) {}
 
-fn daemon_binary_path() -> PathBuf {
+#[cfg(not(unix))]
+fn reap_child_pid_best_effort(_pid: i32) {}
+
+pub(crate) fn daemon_binary_path() -> PathBuf {
     // Locate the build output directory from the current test binary path.
     // For integration tests, `current_exe()` is in `target/<profile>/deps/`.
     // The daemon binary lives one level up in `target/<profile>/`.

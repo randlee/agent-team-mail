@@ -8,6 +8,7 @@ use assert_cmd::cargo;
 use serial_test::serial;
 use std::fs;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 #[path = "support/daemon_process_guard.rs"]
@@ -16,7 +17,7 @@ mod daemon_process_guard;
 mod daemon_test_registry;
 #[path = "support/env_guard.rs"]
 mod env_guard;
-use daemon_process_guard::DaemonProcessGuard;
+use daemon_process_guard::{DaemonProcessGuard, daemon_binary_path, pid_alive, wait_for_pid_exit};
 use env_guard::EnvGuard;
 
 /// Helper to set home directory for cross-platform test compatibility.
@@ -44,8 +45,10 @@ fn set_home_env_path(cmd: &mut assert_cmd::Command, home: &std::path::Path) {
 }
 
 #[cfg(unix)]
+/// Guards cleanup of a daemon registered via PID file, not a direct `Child` handle.
 struct RuntimeDaemonCleanupGuard {
     home: PathBuf,
+    daemon_guard: Option<DaemonProcessGuard>,
 }
 
 #[cfg(unix)]
@@ -54,21 +57,42 @@ impl RuntimeDaemonCleanupGuard {
         daemon_test_registry::sweep_stale_test_daemons();
         Self {
             home: temp_dir.path().to_path_buf(),
+            daemon_guard: None,
         }
+    }
+
+    fn adopt_running_pid(
+        &mut self,
+        daemon_bin: &std::path::Path,
+        timeout: Duration,
+    ) -> Option<u32> {
+        if let Some(existing) = self.daemon_guard.as_ref() {
+            return Some(existing.pid());
+        }
+
+        let pid_path = self.home.join(".atm/daemon/atm-daemon.pid");
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if let Ok(raw) = fs::read_to_string(&pid_path)
+                && let Ok(pid) = raw.trim().parse::<u32>()
+                && pid > 1
+                && pid_alive(pid as i32)
+            {
+                self.daemon_guard = Some(DaemonProcessGuard::adopt_registered_pid(
+                    pid, daemon_bin, &self.home,
+                ));
+                return Some(pid);
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        None
     }
 }
 
 #[cfg(unix)]
 impl Drop for RuntimeDaemonCleanupGuard {
     fn drop(&mut self) {
-        let pid_path = self.home.join(".atm/daemon/atm-daemon.pid");
-        if let Ok(raw) = fs::read_to_string(pid_path)
-            && let Ok(pid) = raw.trim().parse::<u32>()
-            && pid > 1
-            && pid_alive(pid as i32)
-        {
-            cleanup_pid(pid);
-        }
+        drop(self.daemon_guard.take());
         daemon_test_registry::sweep_stale_test_daemons();
     }
 }
@@ -158,13 +182,6 @@ fn wait_for_daemon_pid_change(temp_dir: &TempDir, previous_pid: u32, timeout: Du
 }
 
 #[cfg(unix)]
-fn daemon_binary_path() -> PathBuf {
-    let mut candidate = PathBuf::from(cargo::cargo_bin!("atm"));
-    candidate.set_file_name("atm-daemon");
-    candidate
-}
-
-#[cfg(unix)]
 fn write_lock_metadata(temp_dir: &TempDir, pid: u32, home_scope: String, executable_path: String) {
     let metadata_path = temp_dir.path().join(".atm/daemon/daemon.lock.meta.json");
     if let Some(parent) = metadata_path.parent() {
@@ -182,58 +199,6 @@ fn write_lock_metadata(temp_dir: &TempDir, pid: u32, home_scope: String, executa
         serde_json::to_string_pretty(&payload).expect("serialize metadata"),
     )
     .expect("write metadata");
-}
-
-#[cfg(unix)]
-fn cleanup_pid(pid: u32) {
-    send_signal(pid as i32, 15);
-    for _ in 0..20 {
-        if !pid_alive(pid as i32) {
-            reap_child_pid_best_effort(pid as i32);
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    send_signal(pid as i32, 9);
-    reap_child_pid_best_effort(pid as i32);
-}
-
-#[cfg(unix)]
-fn pid_alive(pid: i32) -> bool {
-    unsafe extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
-    // SAFETY: signal 0 checks process existence.
-    unsafe { kill(pid, 0) == 0 }
-}
-
-#[cfg(unix)]
-fn send_signal(pid: i32, sig: i32) {
-    unsafe extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
-    // SAFETY: best-effort test cleanup path.
-    let _ = unsafe { kill(pid, sig) };
-}
-
-#[cfg(unix)]
-fn reap_child_pid_best_effort(pid: i32) {
-    unsafe extern "C" {
-        fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
-    }
-    const WNOHANG: i32 = 1;
-    for _ in 0..20 {
-        let mut status = 0;
-        // SAFETY: best-effort reap for test child processes; WNOHANG avoids blocking.
-        let waited = unsafe { waitpid(pid, &mut status, WNOHANG) };
-        if waited == pid || !pid_alive(pid) {
-            break;
-        }
-        if waited == -1 {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
 }
 
 // ============================================================================
@@ -308,6 +273,8 @@ async fn test_concurrent_sends_no_data_loss() {
                         || stderr.contains("No such file or directory")
                         || stderr.contains("The system cannot find the file specified");
                     if (transient_missing_config || transient_missing_file) && attempts < 6 {
+                        // Retry backoff only: this gives the daemon time to finish
+                        // startup/config materialization, not a timing fence for correctness.
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
                     }
@@ -415,7 +382,7 @@ fn test_concurrent_cli_and_direct_write_no_loss() {
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
     #[cfg(unix)]
-    let _daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
+    let mut daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
 
     let inbox_path = temp_dir
         .path()
@@ -462,6 +429,12 @@ fn test_concurrent_cli_and_direct_write_no_loss() {
 
     handle1.join().unwrap();
     handle2.join().unwrap();
+    // Best-effort adoption: daemon may not have auto-started for these file-based operations.
+    // adopt_running_pid returns None if no PID file was written; RuntimeDaemonCleanupGuard's
+    // Drop sweep still attempts cleanup of any leaked daemon processes.
+    #[cfg(unix)]
+    let _adopted =
+        daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
 
     // Verify all messages are present
     let content = fs::read_to_string(&inbox_path).unwrap();
@@ -525,8 +498,8 @@ fn test_lock_contention_queues_to_spool() {
 #[test]
 #[serial]
 fn test_spool_drain_delivery_cycle() {
-    // Still serialized: this test mutates ATM_HOME process-wide and exercises
-    // the global spool path directly.
+    // Still serialized: this test mutates ATM_HOME process-wide while exercising
+    // the spool path resolved from that shared env var.
     // This test uses the library API directly since spool_drain is not yet
     // exposed via CLI command.
     use agent_team_mail_core::io::inbox::inbox_append;
@@ -917,7 +890,7 @@ fn test_permission_denied_inboxes_dir() {
 
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
-    let _daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
+    let mut daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
 
     let inboxes_dir = temp_dir.path().join(".claude/teams/test-team/inboxes");
 
@@ -938,6 +911,11 @@ fn test_permission_denied_inboxes_dir() {
         !output.status.success(),
         "Send should fail when directory is read-only"
     );
+    // Best-effort adoption: daemon may not have auto-started for this error-path test.
+    // adopt_running_pid returns None if no PID file was written; RuntimeDaemonCleanupGuard's
+    // Drop sweep still attempts cleanup of any leaked daemon processes.
+    let _adopted =
+        daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
 
     // Restore permissions for cleanup
     fs::set_permissions(&inboxes_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -958,7 +936,7 @@ fn test_no_duplicate_message_ids_under_concurrent_sends() {
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
     #[cfg(unix)]
-    let _daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
+    let mut daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
 
     let num_threads = 4;
     let barrier = Arc::new(Barrier::new(num_threads));
@@ -984,6 +962,12 @@ fn test_no_duplicate_message_ids_under_concurrent_sends() {
     for handle in handles {
         handle.join().unwrap();
     }
+    // Best-effort adoption: daemon may not have auto-started for these file-based concurrent sends.
+    // adopt_running_pid returns None if no PID file was written; RuntimeDaemonCleanupGuard's
+    // Drop sweep still attempts cleanup of any leaked daemon processes.
+    #[cfg(unix)]
+    let _adopted =
+        daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
 
     // Check inbox for duplicates
     let inbox_path = temp_dir
@@ -1005,6 +989,48 @@ fn test_no_duplicate_message_ids_under_concurrent_sends() {
         msg_ids.len(),
         unique_ids.len()
     );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_runtime_daemon_cleanup_guard_adopts_pid_written_after_creation() {
+    let temp_dir = TempDir::new().unwrap();
+    let mut daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
+    let daemon_dir = temp_dir.path().join(".atm/daemon");
+    fs::create_dir_all(&daemon_dir).unwrap();
+
+    let launcher = temp_dir.path().join("late-pid-launcher.sh");
+    fs::write(
+        &launcher,
+        format!(
+            "#!/bin/sh\nset -eu\nmkdir -p \"{}\"\n(sleep 30) &\nbgpid=$!\nprintf '%s\\n' \"$bgpid\" > \"{}\"\nexit 0\n",
+            daemon_dir.display(),
+            daemon_dir.join("atm-daemon.pid").display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&launcher).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&launcher, perms).unwrap();
+    }
+
+    let status = Command::new(&launcher)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let adopted_pid = daemon_cleanup
+        .adopt_running_pid(&launcher, Duration::from_secs(1))
+        .expect("expected cleanup guard to adopt late pid-file daemon");
+    drop(daemon_cleanup);
+    wait_for_pid_exit(adopted_pid as i32, Duration::from_secs(2));
 }
 
 // ============================================================================

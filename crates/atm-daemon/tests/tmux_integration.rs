@@ -1,10 +1,19 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agent_team_mail_daemon::plugins::worker_adapter::{CodexTmuxBackend, WorkerAdapter};
+#[path = "../../atm/tests/support/daemon_process_guard.rs"]
+#[allow(dead_code)]
+mod daemon_process_guard;
+#[path = "../../atm/tests/support/daemon_test_registry.rs"]
+#[allow(dead_code)]
+mod daemon_test_registry;
+#[path = "../../atm/tests/support/env_guard.rs"]
+#[allow(dead_code)]
+mod env_guard;
 fn tmux_available() -> bool {
     Command::new("tmux")
         .arg("-V")
@@ -93,26 +102,7 @@ impl Drop for SessionGuard {
     }
 }
 
-struct DaemonGuard {
-    child: Child,
-    session: String,
-}
-
-impl Drop for DaemonGuard {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = Command::new("tmux")
-            .arg("kill-session")
-            .arg("-t")
-            .arg(&self.session)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-}
-
-fn start_daemon(env: &DaemonEnv) -> DaemonGuard {
+fn start_daemon(env: &DaemonEnv) -> daemon_process_guard::DaemonProcessGuard {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_atm-daemon"));
     cmd.current_dir(env.workdir.path())
         .env("ATM_HOME", &env.atm_home)
@@ -128,10 +118,11 @@ fn start_daemon(env: &DaemonEnv) -> DaemonGuard {
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
     let child = cmd.spawn().unwrap();
-    DaemonGuard {
+    daemon_process_guard::DaemonProcessGuard::from_child(
         child,
-        session: env.session.clone(),
-    }
+        &daemon_process_guard::daemon_binary_path(),
+        &env.atm_home,
+    )
 }
 
 fn wait_for_tmux_session(session: &str, timeout: Duration) -> bool {
@@ -261,6 +252,9 @@ fn tmux_worker_autostarts() {
         return;
     }
     let env = DaemonEnv::new();
+    let _session = SessionGuard {
+        session: env.session.clone(),
+    };
     let _guard = start_daemon(&env);
     assert!(
         wait_for_tmux_session(&env.session, Duration::from_secs(5)),
@@ -320,9 +314,7 @@ async fn tmux_delivery_method_comparison() {
     }
 
     async fn run_method(method: &str) -> (u128, usize, usize) {
-        unsafe {
-            std::env::set_var("ATM_TMUX_DELIVERY_METHOD", method);
-        }
+        let _method_guard = env_guard::EnvGuard::set("ATM_TMUX_DELIVERY_METHOD", method);
         let env = DaemonEnv::new();
         let _session = SessionGuard {
             session: env.session.clone(),
@@ -352,9 +344,6 @@ async fn tmux_delivery_method_comparison() {
     use std::time::Instant;
     let (send_keys_ms, send_keys_ok, send_keys_failed) = run_method("send-keys").await;
     let (paste_ms, paste_ok, paste_failed) = run_method("paste-buffer").await;
-    unsafe {
-        std::env::remove_var("ATM_TMUX_DELIVERY_METHOD");
-    }
 
     eprintln!(
         "delivery comparison: send-keys={}ms ok={} fail={}, paste-buffer={}ms ok={} fail={}",
