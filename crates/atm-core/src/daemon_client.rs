@@ -2755,6 +2755,15 @@ mod tests {
             }
             Self { key, old }
         }
+
+        fn unset(key: &'static str) -> Self {
+            let old = std::env::var(key).ok();
+            // SAFETY: test-scoped env mutation guarded by RAII restore in Drop.
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, old }
+        }
     }
 
     impl Drop for EnvGuard {
@@ -2926,9 +2935,7 @@ mod tests {
     fn test_daemon_autostart_flag_parsing() {
         // Unset => enabled (opt-out model).
         {
-            let _guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "");
-            // SAFETY: serialized env mutation in test; guard restores previous value.
-            unsafe { std::env::remove_var("ATM_DAEMON_AUTOSTART") };
+            let _guard = EnvGuard::unset("ATM_DAEMON_AUTOSTART");
             assert!(daemon_autostart_enabled());
         }
 
