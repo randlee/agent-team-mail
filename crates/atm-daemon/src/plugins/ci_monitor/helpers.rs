@@ -3,9 +3,9 @@ use std::collections::HashMap;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 
-use agent_team_mail_core::daemon_client::isolated_runtime_allows_live_github;
 #[cfg(unix)]
-use agent_team_mail_core::gh_monitor_observability::read_gh_repo_state_record;
+use agent_team_mail_ci_monitor::read_gh_repo_state_record;
+use agent_team_mail_core::daemon_client::isolated_runtime_allows_live_github;
 #[cfg(unix)]
 use anyhow::Result;
 

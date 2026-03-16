@@ -4,9 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
-use agent_team_mail_ci_monitor::GhRepoStateRecord;
-#[cfg(unix)]
-use agent_team_mail_core::gh_monitor_observability::read_gh_repo_state_record;
+use agent_team_mail_ci_monitor::{GhRepoStateRecord, read_gh_repo_state_record};
 #[cfg(unix)]
 use agent_team_mail_core::pid::is_pid_alive;
 #[cfg(unix)]

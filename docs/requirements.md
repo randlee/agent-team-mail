@@ -2663,6 +2663,15 @@ Required rules:
   boundary violation.
 - CI must enforce `ARCH-BOUNDARY-001` with a grep gate that fails on new or
   untracked violations.
+- Boundary-enforcement work must include a repository-wide search for live
+  violations across crates, shell/Python scripts, CI helpers, and support
+  tooling.
+- Boundary-elimination implementation sprints must leave the repository
+  buildable and testable at the end of each sprint; no sprint may rely on a
+  temporary broken intermediate state being merged first.
+- Any surviving violation found by the repository-wide search must be either
+  removed in the active implementation sprint or mapped to a named follow-up
+  sprint with file-level ownership and explicit QA review scope.
 
 Temporary audited exceptions are permitted only when:
 - the violating line is explicitly annotated with
@@ -2827,13 +2836,19 @@ temp/atm/<plugin-name>/
 
 - Each plugin may own one top-level CLI namespace.
 - The namespace owner is exclusive; no other plugin or core command may claim it.
+- The owning plugin/provider layer must process the namespace's external-system
+  behavior. Non-plugin crates may route/bootstrap, but must not implement that
+  behavior directly.
 - Each plugin namespace must provide:
   - `<namespace>` status entrypoint (no subcommand),
   - `<namespace> init` setup/enable command,
   - help output.
-- If a plugin is not configured/enabled for the current team, only the three
-  surfaces above are available. All other namespace operations must fail fast
-  with a stable, actionable init guidance error.
+- If a plugin is compiled in but not configured/enabled for the current team,
+  only the bootstrap/management surfaces above are available. All other
+  namespace operations must fail fast with a stable, actionable init guidance
+  error.
+- If a plugin is not compiled in/present, its namespace must not be advertised
+  in normal help or capability-discovery UX.
 - `<namespace>` status output must always make disabled/unconfigured state
   explicit and list only currently available actions.
 - If plugin is enabled, `<namespace>` status output must include current
