@@ -19,6 +19,7 @@ pub struct GhCliCallMetadata {
     pub ledger_home: Option<PathBuf>,
     pub team: Option<String>,
     pub runtime: Option<String>,
+    pub poller_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]

@@ -31,12 +31,12 @@ use super::types::{
     CiMonitorStatus, CiMonitorStatusRequest, CiMonitorTargetKind, GhAlertTargets,
     GhMonitorConfigState, GhMonitorHealthUpdate,
 };
-use agent_team_mail_core::context::GitProvider as GitProviderType;
-use agent_team_mail_core::gh_monitor_observability::{
+use agent_team_mail_ci_monitor::{
     GhCliObserverContext, build_gh_cli_observer, emit_gh_info_requested,
     emit_gh_info_served_from_cache, gh_repo_state_cache_age_secs, new_gh_info_request_id,
     read_gh_repo_state_record, update_gh_repo_state_in_flight,
 };
+use agent_team_mail_core::context::GitProvider as GitProviderType;
 use agent_team_mail_core::home::teams_root_dir_for;
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
@@ -133,10 +133,14 @@ async fn refresh_shared_repo_state(
         .split_once('/')
         .ok_or_else(|| anyhow::anyhow!("invalid owner/repo scope for gh command: {owner_repo}"))?;
     let observer = build_gh_cli_observer(GhCliObserverContext {
-        home: home.to_path_buf(),
-        team: team.to_string(),
-        repo: owner_repo.to_string(),
-        runtime: "atm-daemon".to_string(),
+        poller_key: Some(shared_poller_key(team, owner_repo)),
+        lifecycle_state: Some("running".to_string()),
+        ..GhCliObserverContext::new(
+            home.to_path_buf(),
+            team.to_string(),
+            owner_repo.to_string(),
+            "atm-daemon".to_string(),
+        )
     });
     let provider =
         GitHubActionsProvider::new(owner.to_string(), repo.to_string()).with_observer(observer);
@@ -394,10 +398,13 @@ pub(crate) fn create_provider_from_registry(
 
     if provider_name == "github" {
         let observer = build_gh_cli_observer(GhCliObserverContext {
-            home: home.to_path_buf(),
-            team: team.to_string(),
-            repo: format!("{owner}/{repo}"),
-            runtime: "atm-daemon".to_string(),
+            lifecycle_state: Some("running".to_string()),
+            ..GhCliObserverContext::new(
+                home.to_path_buf(),
+                team.to_string(),
+                format!("{owner}/{repo}"),
+                "atm-daemon".to_string(),
+            )
         });
         return Ok(Box::new(
             GitHubActionsProvider::new(owner, repo).with_observer(observer),
@@ -941,19 +948,27 @@ pub(crate) async fn control_request(
     if let Some(repo_scope) = repo_scope.as_deref()
         && let Ok(Some(repo_state)) = read_gh_repo_state_record(home, &control.team, repo_scope)
     {
-        let observer_ctx = GhCliObserverContext {
-            home: home.to_path_buf(),
-            team: control.team.clone(),
-            repo: repo_scope.to_string(),
-            runtime: "atm-daemon".to_string(),
-        };
+        let observer_ctx = GhCliObserverContext::new(
+            home.to_path_buf(),
+            control.team.clone(),
+            repo_scope.to_string(),
+            "atm-daemon".to_string(),
+        );
         let request_id = new_gh_info_request_id();
-        emit_gh_info_requested(&observer_ctx, &request_id, "gh_monitor_control_health");
+        emit_gh_info_requested(
+            &observer_ctx,
+            &request_id,
+            "gh_monitor_control_health",
+            None,
+            None,
+        );
         emit_gh_info_served_from_cache(
             &observer_ctx,
             &request_id,
             "gh_monitor_control_health",
             gh_repo_state_cache_age_secs(&repo_state),
+            None,
+            None,
         );
         apply_repo_state_to_health(&mut health, &repo_state);
     }
@@ -990,19 +1005,21 @@ pub(crate) fn health_request(
     if let Some(repo_scope) = repo_scope.or(config_state.owner_repo.as_deref())
         && let Ok(Some(repo_state)) = read_gh_repo_state_record(home, team, repo_scope)
     {
-        let observer_ctx = GhCliObserverContext {
-            home: home.to_path_buf(),
-            team: team.to_string(),
-            repo: repo_scope.to_string(),
-            runtime: "atm-daemon".to_string(),
-        };
+        let observer_ctx = GhCliObserverContext::new(
+            home.to_path_buf(),
+            team.to_string(),
+            repo_scope.to_string(),
+            "atm-daemon".to_string(),
+        );
         let request_id = new_gh_info_request_id();
-        emit_gh_info_requested(&observer_ctx, &request_id, "gh_monitor_health");
+        emit_gh_info_requested(&observer_ctx, &request_id, "gh_monitor_health", None, None);
         emit_gh_info_served_from_cache(
             &observer_ctx,
             &request_id,
             "gh_monitor_health",
             gh_repo_state_cache_age_secs(&repo_state),
+            None,
+            None,
         );
         apply_repo_state_to_health(&mut health, &repo_state);
     }
@@ -1143,7 +1160,7 @@ poll_interval_secs = 60
                     }),
                     owner: Some(GhRuntimeOwner {
                         runtime: "dev".to_string(),
-                        executable_path: "/tmp/fake-atm-daemon".to_string(),
+                        executable_path: "fake-atm-daemon".to_string(),
                         home_scope: temp.path().display().to_string(),
                         pid: std::process::id(),
                     }),

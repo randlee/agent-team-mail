@@ -1,27 +1,26 @@
-use agent_team_mail_ci_monitor::repo_state::{
+use crate::repo_state::{
     gh_repo_state_path_for as ci_repo_state_path_for, load_repo_state, repo_state_key,
     write_repo_state,
 };
-use agent_team_mail_ci_monitor::{
+use crate::{
     CiProviderError, GhBranchRefCount, GhCliCallMetadata, GhCliCallOutcome, GhCliObserver,
     GhLedgerKind, GhLedgerRecord, GhRateLimitSnapshot, GhRepoStateFile, GhRepoStateRecord,
     GhRuntimeOwner, GitHubActionsProvider, append_gh_observability_record, new_gh_call_id,
     new_gh_request_id,
 };
+use agent_team_mail_core::consts::{
+    GH_ACTIVE_POLL_INTERVAL_SECS, GH_BUDGET_LIMIT_PER_HOUR, GH_IDLE_POLL_INTERVAL_SECS,
+    GH_REPO_STATE_TTL_SECS, GH_WARNING_THRESHOLD,
+};
+use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::io::inbox::inbox_append;
+use agent_team_mail_core::schema::InboxMessage;
+use agent_team_mail_core::team_config_store::TeamConfigStore;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-use crate::consts::{
-    GH_ACTIVE_POLL_INTERVAL_SECS, GH_BUDGET_LIMIT_PER_HOUR, GH_IDLE_POLL_INTERVAL_SECS,
-    GH_REPO_STATE_TTL_SECS, GH_WARNING_THRESHOLD,
-};
-use crate::event_log::{EventFields, emit_event_best_effort};
-use crate::io::inbox::inbox_append;
-use crate::schema::InboxMessage;
-use crate::team_config_store::TeamConfigStore;
 #[cfg(test)]
 const FAKE_FOREIGN_DAEMON_BINARY: &str = "fake-daemon-binary";
 
@@ -31,6 +30,27 @@ pub struct GhCliObserverContext {
     pub team: String,
     pub repo: String,
     pub runtime: String,
+    pub lifecycle_state: Option<String>,
+    pub daemon_pid: Option<u32>,
+    pub executable_path: Option<String>,
+    pub poller_key: Option<String>,
+}
+
+impl GhCliObserverContext {
+    pub fn new(home: PathBuf, team: String, repo: String, runtime: String) -> Self {
+        Self {
+            home,
+            team,
+            repo,
+            runtime,
+            lifecycle_state: None,
+            daemon_pid: Some(std::process::id()),
+            executable_path: std::env::current_exe()
+                .ok()
+                .map(|path| path.to_string_lossy().to_string()),
+            poller_key: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +142,7 @@ pub fn run_attributed_gh_command_with_ids(
         ledger_home: Some(ctx.home.clone()),
         team: Some(ctx.team.clone()),
         runtime: Some(ctx.runtime.clone()),
+        poller_key: ctx.poller_key.clone(),
     };
     GitHubActionsProvider::run_gh_with_metadata_blocking(Some(observer), metadata)
         .map_err(|err| anyhow::anyhow!(err.to_string()))
@@ -139,13 +160,23 @@ pub fn new_gh_execution_call_id() -> String {
     new_gh_call_id()
 }
 
-pub fn emit_gh_info_requested(ctx: &GhCliObserverContext, request_id: &str, info_type: &str) {
+pub fn emit_gh_info_requested(
+    ctx: &GhCliObserverContext,
+    request_id: &str,
+    info_type: &str,
+    branch: Option<&str>,
+    reference: Option<&str>,
+) {
     emit_freshness_record(
         ctx,
         GhLedgerRecord {
             request_id: Some(request_id.to_string()),
             caller: Some(info_type.to_string()),
             info_type: Some(info_type.to_string()),
+            branch: branch.map(str::to_string),
+            reference: reference.map(str::to_string),
+            degraded: false,
+            denied: false,
             ..base_freshness_record("gh_info_requested", ctx)
         },
     );
@@ -156,6 +187,8 @@ pub fn emit_gh_info_served_from_cache(
     request_id: &str,
     info_type: &str,
     cache_age_secs: Option<u64>,
+    branch: Option<&str>,
+    reference: Option<&str>,
 ) {
     emit_freshness_record(
         ctx,
@@ -164,6 +197,11 @@ pub fn emit_gh_info_served_from_cache(
             caller: Some(info_type.to_string()),
             info_type: Some(info_type.to_string()),
             cache_age_secs,
+            cache_hit: Some(true),
+            branch: branch.map(str::to_string),
+            reference: reference.map(str::to_string),
+            degraded: false,
+            denied: false,
             result: Some("cache".to_string()),
             ..base_freshness_record("gh_info_served_from_cache", ctx)
         },
@@ -175,6 +213,8 @@ pub fn emit_gh_info_live_refresh(
     request_id: &str,
     info_type: &str,
     call_id: &str,
+    branch: Option<&str>,
+    reference: Option<&str>,
 ) {
     emit_freshness_record(
         ctx,
@@ -183,6 +223,11 @@ pub fn emit_gh_info_live_refresh(
             caller: Some(info_type.to_string()),
             info_type: Some(info_type.to_string()),
             linked_call_ids: Some(vec![call_id.to_string()]),
+            cache_hit: Some(false),
+            branch: branch.map(str::to_string),
+            reference: reference.map(str::to_string),
+            degraded: false,
+            denied: false,
             result: Some("live_refresh".to_string()),
             ..base_freshness_record("gh_info_live_refresh", ctx)
         },
@@ -194,6 +239,8 @@ pub fn emit_gh_info_degraded(
     request_id: &str,
     info_type: &str,
     reason: &str,
+    branch: Option<&str>,
+    reference: Option<&str>,
 ) {
     emit_freshness_record(
         ctx,
@@ -202,6 +249,10 @@ pub fn emit_gh_info_degraded(
             caller: Some(info_type.to_string()),
             info_type: Some(info_type.to_string()),
             degraded_reason: Some(reason.to_string()),
+            branch: branch.map(str::to_string),
+            reference: reference.map(str::to_string),
+            degraded: true,
+            denied: false,
             result: Some("degraded".to_string()),
             ..base_freshness_record("gh_info_degraded", ctx)
         },
@@ -213,6 +264,8 @@ pub fn emit_gh_info_denied(
     request_id: &str,
     info_type: &str,
     reason: &str,
+    branch: Option<&str>,
+    reference: Option<&str>,
 ) {
     emit_freshness_record(
         ctx,
@@ -221,6 +274,10 @@ pub fn emit_gh_info_denied(
             caller: Some(info_type.to_string()),
             info_type: Some(info_type.to_string()),
             degraded_reason: Some(reason.to_string()),
+            branch: branch.map(str::to_string),
+            reference: reference.map(str::to_string),
+            degraded: false,
+            denied: true,
             result: Some("denied".to_string()),
             ..base_freshness_record("gh_info_denied", ctx)
         },
@@ -253,6 +310,20 @@ pub fn update_gh_repo_state_in_flight(
 ) -> Result<GhRepoStateRecord> {
     mutate_record(home, team, repo, runtime, |record, now| {
         record.in_flight = in_flight;
+        record.updated_at = now.to_rfc3339();
+        record.cache_expires_at = (now + Duration::seconds(GH_REPO_STATE_TTL_SECS)).to_rfc3339();
+    })
+}
+
+pub fn update_gh_repo_state_blocked(
+    home: &Path,
+    team: &str,
+    repo: &str,
+    blocked: bool,
+    runtime: &str,
+) -> Result<GhRepoStateRecord> {
+    mutate_record(home, team, repo, runtime, |record, now| {
+        record.blocked = blocked;
         record.updated_at = now.to_rfc3339();
         record.cache_expires_at = (now + Duration::seconds(GH_REPO_STATE_TTL_SECS)).to_rfc3339();
     })
@@ -314,7 +385,7 @@ fn record_call_outcome(ctx: &GhCliObserverContext, outcome: &GhCliCallOutcome) -
                 outcome.metadata.branch.as_deref(),
                 outcome.metadata.reference.as_deref(),
             );
-            record.last_call = Some(agent_team_mail_ci_monitor::GhObservedCall {
+            record.last_call = Some(crate::GhObservedCall {
                 action: outcome.metadata.action.clone(),
                 branch: outcome.metadata.branch.clone(),
                 reference: outcome.metadata.reference.clone(),
@@ -375,6 +446,13 @@ fn emit_execution_ledger_started(
             argv: Some(metadata.args.clone()),
             branch: metadata.branch.clone(),
             reference: metadata.reference.clone(),
+            lifecycle_state: ctx.lifecycle_state.clone(),
+            daemon_pid: ctx.daemon_pid,
+            executable_path: ctx.executable_path.clone(),
+            poller_key: metadata
+                .poller_key
+                .clone()
+                .or_else(|| ctx.poller_key.clone()),
             in_flight: Some(record.in_flight),
             budget_used_in_window: Some(record.budget_used_in_window),
             budget_limit_per_hour: Some(record.budget_limit_per_hour),
@@ -405,6 +483,13 @@ fn emit_execution_ledger_blocked(
             argv: Some(metadata.args.clone()),
             branch: metadata.branch.clone(),
             reference: metadata.reference.clone(),
+            lifecycle_state: ctx.lifecycle_state.clone(),
+            daemon_pid: ctx.daemon_pid,
+            executable_path: ctx.executable_path.clone(),
+            poller_key: metadata
+                .poller_key
+                .clone()
+                .or_else(|| ctx.poller_key.clone()),
             in_flight: record.map(|value| value.in_flight),
             budget_used_in_window: record.map(|value| value.budget_used_in_window),
             budget_limit_per_hour: record.map(|value| value.budget_limit_per_hour),
@@ -440,6 +525,14 @@ fn emit_execution_ledger_finished(
             argv: Some(outcome.metadata.args.clone()),
             branch: outcome.metadata.branch.clone(),
             reference: outcome.metadata.reference.clone(),
+            lifecycle_state: ctx.lifecycle_state.clone(),
+            daemon_pid: ctx.daemon_pid,
+            executable_path: ctx.executable_path.clone(),
+            poller_key: outcome
+                .metadata
+                .poller_key
+                .clone()
+                .or_else(|| ctx.poller_key.clone()),
             in_flight: Some(record.in_flight),
             budget_used_in_window: Some(record.budget_used_in_window),
             budget_limit_per_hour: Some(record.budget_limit_per_hour),
@@ -469,6 +562,10 @@ fn base_execution_record(action: &str, ctx: &GhCliObserverContext) -> GhLedgerRe
     record.team = Some(ctx.team.clone());
     record.repo = Some(ctx.repo.clone());
     record.runtime = Some(ctx.runtime.clone());
+    record.lifecycle_state = ctx.lifecycle_state.clone();
+    record.daemon_pid = ctx.daemon_pid;
+    record.executable_path = ctx.executable_path.clone();
+    record.poller_key = ctx.poller_key.clone();
     record
 }
 
@@ -477,6 +574,10 @@ fn base_freshness_record(action: &str, ctx: &GhCliObserverContext) -> GhLedgerRe
     record.team = Some(ctx.team.clone());
     record.repo = Some(ctx.repo.clone());
     record.runtime = Some(ctx.runtime.clone());
+    record.lifecycle_state = ctx.lifecycle_state.clone();
+    record.daemon_pid = ctx.daemon_pid;
+    record.executable_path = ctx.executable_path.clone();
+    record.poller_key = ctx.poller_key.clone();
     record
 }
 
@@ -933,7 +1034,7 @@ fn parse_rfc3339(value: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_team_mail_ci_monitor::read_gh_observability_records;
+    use crate::read_gh_observability_records;
     #[cfg(unix)]
     use std::process::Command;
     use tempfile::TempDir;
@@ -941,12 +1042,12 @@ mod tests {
     #[test]
     fn test_observer_blocks_after_budget_exhaustion() {
         let temp = TempDir::new().unwrap();
-        let ctx = GhCliObserverContext {
-            home: temp.path().to_path_buf(),
-            team: "atm-dev".to_string(),
-            repo: "owner/repo".to_string(),
-            runtime: "atm-daemon".to_string(),
-        };
+        let ctx = GhCliObserverContext::new(
+            temp.path().to_path_buf(),
+            "atm-dev".to_string(),
+            "owner/repo".to_string(),
+            "atm-daemon".to_string(),
+        );
         let observer = SharedGhCliObserver::new(ctx.clone());
         mutate_record(
             temp.path(),
@@ -971,6 +1072,7 @@ mod tests {
                 ledger_home: Some(temp.path().to_path_buf()),
                 team: Some("atm-dev".to_string()),
                 runtime: Some("atm-daemon".to_string()),
+                poller_key: None,
             })
             .unwrap_err();
         assert!(err.to_string().contains("\"code\":\"gh_firewall_blocked\""));
@@ -993,12 +1095,12 @@ mod tests {
     #[test]
     fn test_observer_records_branch_counts() {
         let temp = TempDir::new().unwrap();
-        let ctx = GhCliObserverContext {
-            home: temp.path().to_path_buf(),
-            team: "atm-dev".to_string(),
-            repo: "owner/repo".to_string(),
-            runtime: "atm-daemon".to_string(),
-        };
+        let ctx = GhCliObserverContext::new(
+            temp.path().to_path_buf(),
+            "atm-dev".to_string(),
+            "owner/repo".to_string(),
+            "atm-daemon".to_string(),
+        );
         record_call_outcome(
             &ctx,
             &GhCliCallOutcome {
@@ -1014,6 +1116,7 @@ mod tests {
                     ledger_home: Some(temp.path().to_path_buf()),
                     team: Some("atm-dev".to_string()),
                     runtime: Some("atm-daemon".to_string()),
+                    poller_key: None,
                 },
                 duration_ms: 42,
                 success: true,
@@ -1067,7 +1170,7 @@ mod tests {
                         reference: Some("refs/heads/main".to_string()),
                         count: 73,
                     }],
-                    last_call: Some(agent_team_mail_ci_monitor::GhObservedCall {
+                    last_call: Some(crate::GhObservedCall {
                         action: "gh_pr_list".to_string(),
                         branch: Some("main".to_string()),
                         reference: Some("refs/heads/main".to_string()),
@@ -1156,12 +1259,12 @@ mod tests {
         )
         .unwrap();
 
-        let ctx = GhCliObserverContext {
-            home: temp.path().to_path_buf(),
-            team: "atm-dev".to_string(),
-            repo: "owner/repo".to_string(),
-            runtime: "atm-daemon".to_string(),
-        };
+        let ctx = GhCliObserverContext::new(
+            temp.path().to_path_buf(),
+            "atm-dev".to_string(),
+            "owner/repo".to_string(),
+            "atm-daemon".to_string(),
+        );
         let observer = SharedGhCliObserver::new(ctx);
         let err = observer
             .before_gh_call(&GhCliCallMetadata {
@@ -1176,6 +1279,7 @@ mod tests {
                 ledger_home: Some(temp.path().to_path_buf()),
                 team: Some("atm-dev".to_string()),
                 runtime: Some("atm-daemon".to_string()),
+                poller_key: None,
             })
             .unwrap_err();
         assert!(err.to_string().contains("\"code\":\"gh_firewall_blocked\""));
