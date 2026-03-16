@@ -7,8 +7,9 @@ SELF_REL="scripts/ci/gh_boundary_check.sh"
 declare -a matches=()
 
 # This gate catches the concrete raw-gh execution patterns we expect to regress:
-# direct std/tokio Command::new("gh") usage in Rust crates, script-level raw gh
-# invocations under scripts/, and the forbidden atm-core -> atm-ci-monitor dep.
+# direct std::process::Command::new("gh") and the AT.6-confirmed
+# tokio::process::Command::new("gh") variant in Rust crates, script-level raw
+# gh invocations under scripts/, and the forbidden atm-core -> atm-ci-monitor dep.
 # It does not attempt full static analysis for variable-based launches,
 # shell indirection outside scripts/, or non-Rust helper ecosystems.
 while IFS= read -r match; do
