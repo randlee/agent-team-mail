@@ -12,7 +12,8 @@ use agent_team_mail_core::daemon_client::{
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::gh_monitor_observability::{
-    GhCliObserverContext, run_attributed_gh_command,
+    GhCliObserverContext, emit_gh_info_denied, emit_gh_info_live_refresh, emit_gh_info_requested,
+    new_gh_execution_call_id, new_gh_info_request_id, run_attributed_gh_command_with_ids,
 };
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
@@ -982,8 +983,28 @@ fn run_repo_scoped_gh_command(
         repo: repo.to_string(),
         runtime: "atm".to_string(),
     };
+    let request_id = new_gh_info_request_id();
+    let call_id = new_gh_execution_call_id();
+    emit_gh_info_requested(&observer_ctx, &request_id, action);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_attributed_gh_command(&observer_ctx, action, &arg_refs, None, reference)
+    match run_attributed_gh_command_with_ids(
+        &observer_ctx,
+        action,
+        &arg_refs,
+        None,
+        reference,
+        request_id.clone(),
+        call_id.clone(),
+    ) {
+        Ok(output) => {
+            emit_gh_info_live_refresh(&observer_ctx, &request_id, action, &call_id);
+            Ok(output)
+        }
+        Err(err) => {
+            emit_gh_info_denied(&observer_ctx, &request_id, action, &err.to_string());
+            Err(err)
+        }
+    }
 }
 
 fn execute_pr_init_report(

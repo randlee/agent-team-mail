@@ -15,8 +15,10 @@ use agent_team_mail_core::daemon_client::{
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::gh_monitor_observability::{
-    GhCliObserverContext, RateLimitUpdate, read_gh_repo_state, run_attributed_gh_command,
-    update_gh_repo_state_rate_limit,
+    GhCliObserverContext, RateLimitUpdate, emit_gh_info_denied, emit_gh_info_live_refresh,
+    emit_gh_info_requested, emit_gh_info_served_from_cache, gh_repo_state_cache_age_secs,
+    new_gh_execution_call_id, new_gh_info_request_id, read_gh_repo_state,
+    run_attributed_gh_command_with_ids, update_gh_repo_state_rate_limit,
 };
 use agent_team_mail_core::log_reader::{LogFilter, LogReader};
 use agent_team_mail_core::pid::is_pid_alive;
@@ -423,14 +425,44 @@ fn build_gh_rate_limit_audit(home_dir: &Path, team: &str) -> Result<Option<GhRat
         repo: repo_scope.to_string(),
         runtime: "atm".to_string(),
     };
-    let output = run_attributed_gh_command(
+    let request_id = new_gh_info_request_id();
+    let call_id = new_gh_execution_call_id();
+    emit_gh_info_requested(&observer_ctx, &request_id, "gh_api_rate_limit");
+    if let Some(cached_rate_limit) = team_records
+        .iter()
+        .filter_map(|record| record.rate_limit.as_ref().map(|_| record))
+        .max_by_key(|record| record.updated_at.clone())
+    {
+        emit_gh_info_served_from_cache(
+            &observer_ctx,
+            &request_id,
+            "gh_api_rate_limit",
+            gh_repo_state_cache_age_secs(cached_rate_limit),
+        );
+    }
+    let output = match run_attributed_gh_command_with_ids(
         &observer_ctx,
         "gh_api_rate_limit",
         &["api", "rate_limit"],
         None,
         None,
-    )
-    .context("gh api rate_limit failed via attributed provider path")?;
+        request_id.clone(),
+        call_id.clone(),
+    ) {
+        Ok(output) => {
+            emit_gh_info_live_refresh(&observer_ctx, &request_id, "gh_api_rate_limit", &call_id);
+            output
+        }
+        Err(err) => {
+            emit_gh_info_denied(
+                &observer_ctx,
+                &request_id,
+                "gh_api_rate_limit",
+                &err.to_string(),
+            );
+            return Err(err).context("gh api rate_limit failed via attributed provider path");
+        }
+    };
 
     let live: GhRateLimitResponse =
         serde_json::from_str(&output).context("failed to parse gh api rate_limit response")?;

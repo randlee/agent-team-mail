@@ -121,6 +121,25 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
 }
 
 #[cfg(unix)]
+fn read_gh_ledger_actions(home: &Path) -> Vec<String> {
+    let ledger_path = home.join(".atm/daemon/gh-observability.jsonl");
+    if !ledger_path.exists() {
+        return Vec::new();
+    }
+    fs::read_to_string(&ledger_path)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["action"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect()
+}
+
+#[cfg(unix)]
 fn write_fake_gh_daemon_script(home: &Path) -> PathBuf {
     let script = home.join("fake-gh-daemon.py");
     let body = r#"#!/usr/bin/env python3
@@ -1461,6 +1480,26 @@ fn test_gh_monitor_list_json_reports_rollups_without_daemon() {
     assert_eq!(items[1]["number"].as_u64(), Some(102));
     assert_eq!(items[1]["ci"]["state"].as_str(), Some("fail"));
     assert_eq!(items[1]["draft"].as_bool(), Some(true));
+
+    let actions = read_gh_ledger_actions(temp_dir.path());
+    assert!(
+        actions.iter().any(|action| action == "gh_info_requested"),
+        "gh info request must be logged"
+    );
+    assert!(
+        actions.iter().any(|action| action == "gh_call_started"),
+        "gh execution start must be logged"
+    );
+    assert!(
+        actions.iter().any(|action| action == "gh_call_finished"),
+        "gh execution finish must be logged"
+    );
+    assert!(
+        actions
+            .iter()
+            .any(|action| action == "gh_info_live_refresh"),
+        "gh live refresh must be logged"
+    );
 }
 
 #[test]

@@ -4,6 +4,7 @@ use crate::provider::{CiProvider, GhCliCallMetadata, GhCliCallOutcome, GhCliObse
 use crate::types::{
     CiFilter, CiJob, CiProviderError, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep,
 };
+use crate::{new_gh_call_id, new_gh_request_id};
 use serde::Deserialize;
 use std::process::Command;
 #[cfg(test)]
@@ -330,11 +331,17 @@ impl CiProvider for GitHubActionsProvider {
         reference: Option<&str>,
     ) -> Result<String, CiProviderError> {
         let metadata = GhCliCallMetadata {
+            request_id: new_gh_request_id(),
+            call_id: new_gh_call_id(),
             repo_scope: self.repo_scope(),
+            caller: action.to_string(),
             action: action.to_string(),
             args: args.iter().map(|arg| (*arg).to_string()).collect(),
             branch: branch.map(str::to_string),
             reference: reference.map(str::to_string),
+            ledger_home: None,
+            team: None,
+            runtime: None,
         };
         self.run_gh_with_metadata(metadata).await
     }
@@ -429,11 +436,17 @@ mod tests {
     fn blocked_calls_do_not_spawn_gh_subprocess() {
         GH_SUBPROCESS_COUNT.store(0, Ordering::SeqCst);
         let metadata = GhCliCallMetadata {
+            request_id: new_gh_request_id(),
+            call_id: new_gh_call_id(),
             repo_scope: "owner/repo".to_string(),
+            caller: "gh_run_list".to_string(),
             action: "gh_run_list".to_string(),
             args: vec!["run".to_string(), "list".to_string()],
             branch: None,
             reference: None,
+            ledger_home: None,
+            team: None,
+            runtime: None,
         };
 
         let err = GitHubActionsProvider::run_gh_with_metadata_blocking(

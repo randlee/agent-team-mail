@@ -2,16 +2,23 @@
 
 use crate::types::{CiFilter, CiProviderError, CiPullRequest, CiRun};
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct GhCliCallMetadata {
+    pub request_id: String,
+    pub call_id: String,
     pub repo_scope: String,
+    pub caller: String,
     pub action: String,
     pub args: Vec<String>,
     pub branch: Option<String>,
     pub reference: Option<String>,
+    pub ledger_home: Option<PathBuf>,
+    pub team: Option<String>,
+    pub runtime: Option<String>,
 }
 
 #[derive(Debug, Clone)]

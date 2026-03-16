@@ -36,10 +36,12 @@ dependencies = [
 name = "agent-team-mail-ci-monitor"
 version = "0.44.9"
 dependencies = [
+ "chrono",
  "serde",
  "serde_json",
  "tokio",
  "toml",
+ "uuid",
 ]
 
 [[package]]
