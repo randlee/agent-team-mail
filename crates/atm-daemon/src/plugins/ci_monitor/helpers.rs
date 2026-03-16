@@ -297,7 +297,9 @@ mod tests {
     fn test_evaluate_gh_monitor_config_disables_isolated_runtime_by_default() {
         let runtime = agent_team_mail_core::daemon_client::create_isolated_runtime_root(
             Some("ci-monitor"),
-            std::time::Duration::from_secs(600),
+            std::time::Duration::from_secs(
+                agent_team_mail_core::consts::ISOLATED_RUNTIME_DEFAULT_TTL_SECS,
+            ),
             false,
         )
         .unwrap();

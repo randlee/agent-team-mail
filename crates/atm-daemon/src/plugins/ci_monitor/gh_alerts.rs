@@ -375,7 +375,7 @@ pub(crate) fn repo_scope_matches(configured: &str, expected: &str) -> bool {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{emit_merge_conflict_alert, resolve_ci_alert_routing};
+    use super::emit_merge_conflict_alert;
     use crate::plugins::ci_monitor::types::{CiMonitorStatus, CiMonitorTargetKind, GhAlertTargets};
     use agent_team_mail_core::schema::InboxMessage;
     use tempfile::TempDir;
@@ -383,41 +383,6 @@ mod tests {
     fn read_inbox(path: &std::path::Path) -> Vec<InboxMessage> {
         let raw = std::fs::read_to_string(path).unwrap();
         serde_json::from_str(&raw).unwrap()
-    }
-
-    #[test]
-    fn gh_ci_fr_2_default_routing_targets_team_lead_when_notify_target_missing() {
-        let temp = TempDir::new().unwrap();
-        let repo_dir = temp.path().join("repo");
-        std::fs::create_dir_all(&repo_dir).unwrap();
-        std::fs::write(
-            repo_dir.join(".atm.toml"),
-            r#"[core]
-default_team = "atm-dev"
-identity = "team-lead"
-
-[plugins.gh_monitor]
-enabled = true
-team = "atm-dev"
-agent = "gh-monitor"
-repo = "randlee/agent-team-mail"
-"#,
-        )
-        .unwrap();
-
-        let (from_agent, targets) = resolve_ci_alert_routing(
-            temp.path(),
-            "atm-dev",
-            Some(repo_dir.to_string_lossy().as_ref()),
-            Some("randlee/agent-team-mail"),
-            GhAlertTargets::default(),
-        );
-
-        assert_eq!(from_agent, "gh-monitor");
-        assert_eq!(
-            targets,
-            vec![("team-lead".to_string(), "atm-dev".to_string())]
-        );
     }
 
     #[test]

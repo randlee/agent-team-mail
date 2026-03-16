@@ -1283,6 +1283,9 @@ fn render_pr_list_merge_label(merge: &str) -> String {
 }
 
 fn render_pr_list_ci_label(ci: &GhCiRollup, merge: &str) -> String {
+    if ci.total == 0 && is_merge_conflict_status(merge) {
+        return "BLOCKED(conflict)".to_string();
+    }
     if ci.state == "fail" && is_merge_conflict_status(merge) && ci.fail > 0 && ci.pass == 0 {
         return "BLOCKED — merge conflict".to_string();
     }
@@ -2585,6 +2588,20 @@ mod tests {
             render_pr_list_ci_label(&ci, "dirty"),
             "BLOCKED — merge conflict"
         );
+    }
+
+    #[test]
+    fn render_pr_list_labels_mark_conflict_without_checks_as_blocked() {
+        let ci = GhCiRollup {
+            state: "none".to_string(),
+            total: 0,
+            pass: 0,
+            fail: 0,
+            pending: 0,
+            skip: 0,
+            neutral: 0,
+        };
+        assert_eq!(render_pr_list_ci_label(&ci, "dirty"), "BLOCKED(conflict)");
     }
 
     #[test]

@@ -110,7 +110,7 @@ pub fn execute(args: SpawnArgs) -> Result<()> {
             .model
             .clone()
             .or(frontmatter.model)
-            .unwrap_or_else(|| "unknown".to_string()),
+            .unwrap_or_else(|| default_model_for_runtime(&args.runtime).to_string()),
         agent_type: args.agent_type.clone(),
         pane_mode: parse_pane_mode(&args.pane_mode)?,
         worktree: args
@@ -258,6 +258,15 @@ fn runtime_name(runtime: &RuntimeKind) -> &'static str {
         RuntimeKind::Codex => "codex",
         RuntimeKind::Gemini => "gemini",
         RuntimeKind::Opencode => "opencode",
+    }
+}
+
+fn default_model_for_runtime(runtime: &RuntimeKind) -> &'static str {
+    match runtime {
+        // Codex spawns should default to the roster baseline when neither the
+        // CLI nor the agent frontmatter pins a model explicitly.
+        RuntimeKind::Codex => "claude-sonnet-4-5",
+        _ => "unknown",
     }
 }
 
@@ -691,5 +700,18 @@ mod tests {
         let mut panel = PanelState::default();
         apply_panel_edits(&mut d, &mut panel, "7=2").unwrap();
         assert_eq!(panel.selected_existing_pane.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn test_codex_runtime_defaults_to_claude_sonnet_when_model_missing() {
+        assert_eq!(
+            default_model_for_runtime(&RuntimeKind::Codex),
+            "claude-sonnet-4-5"
+        );
+    }
+
+    #[test]
+    fn test_claude_runtime_does_not_receive_codex_default_model() {
+        assert_eq!(default_model_for_runtime(&RuntimeKind::Claude), "unknown");
     }
 }

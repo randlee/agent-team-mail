@@ -78,6 +78,21 @@ fn render_members_human(team_name: &str, member_rows: &[MemberRow]) -> String {
     out
 }
 
+fn render_members_json(team_name: &str, member_rows: &[MemberRow]) -> serde_json::Value {
+    json!({
+        "team": team_name,
+        "members": member_rows.iter().map(|m| json!({
+            "name": m.name,
+            "type": m.agent_type,
+            "model": m.model,
+            "sessionId": m.session_id,
+            "liveness": m.liveness,
+            "inConfig": m.in_config,
+            "ghost": !m.in_config,
+        })).collect::<Vec<_>>()
+    })
+}
+
 /// Execute the members command
 pub fn execute(args: MembersArgs) -> Result<()> {
     // Prime daemon connectivity so daemon-backed liveness can be queried.
@@ -118,18 +133,7 @@ pub fn execute(args: MembersArgs) -> Result<()> {
 
     // Output results
     if args.json {
-        let output = json!({
-            "team": team_name,
-            "members": member_rows.iter().map(|m| json!({
-                "name": m.name,
-                "type": m.agent_type,
-                "model": m.model,
-                "sessionId": m.session_id,
-                "liveness": m.liveness,
-                "inConfig": m.in_config,
-                "ghost": !m.in_config,
-            })).collect::<Vec<_>>()
-        });
+        let output = render_members_json(team_name, &member_rows);
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         print!("{}", render_members_human(team_name, &member_rows));
@@ -265,5 +269,23 @@ mod tests {
         let rendered = render_members_human("atm-dev", &rows);
         assert!(rendered.contains("123e4567"));
         assert!(!rendered.contains("123e4567-e89b-12d3-a456-426614174000"));
+    }
+
+    #[test]
+    fn render_members_json_preserves_full_precision_session_uuid() {
+        let rows = vec![MemberRow {
+            name: "arch-ctm".to_string(),
+            agent_type: "codex".to_string(),
+            model: "custom:codex".to_string(),
+            session_id: Some("123e4567-e89b-12d3-a456-426614174000".to_string()),
+            liveness: Some(true),
+            in_config: true,
+        }];
+
+        let rendered = render_members_json("atm-dev", &rows);
+        assert_eq!(
+            rendered["members"][0]["sessionId"].as_str(),
+            Some("123e4567-e89b-12d3-a456-426614174000")
+        );
     }
 }
