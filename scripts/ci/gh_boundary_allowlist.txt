@@ -1,8 +1,6 @@
 # Temporary audited exceptions for ARCH-BOUNDARY-001.
 # Format: path:line
 crates/atm-daemon/src/plugins/issues/github.rs:31
-crates/atm/src/commands/gh.rs:2155
-crates/atm/src/commands/gh.rs:2168
 scripts/dev-daemon-smoke.py:117
 scripts/dev-daemon-smoke.py:131
 scripts/dev-daemon-smoke.py:145
