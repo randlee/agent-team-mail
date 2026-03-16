@@ -1,7 +1,7 @@
 # Phase AS — GitHub API Access Limiting
 
 **Integration branch**: `integrate/phase-AS` off `develop`
-**Prerequisites**: `integrate/phase-AQ` and `integrate/phase-AR`
+**Prerequisites**: Phase AQ merged to `develop`; Phase AR merged to `develop`
 
 ## Overview
 
@@ -39,6 +39,9 @@ mandatory adapter and make bypasses impossible by policy.
 
 **Deliverables**:
 - one canonical adapter for real `gh` subprocess execution
+  The adapter is the existing `GhCliObserver::before_gh_call` gate paired with
+  `GitHubActionsProvider::run_gh_with_metadata` as the only permitted `gh`
+  spawn path for `gh_monitor` behavior.
 - all `gh_monitor` and `atm gh` execution paths routed through that adapter
 - direct `Command::new("gh")` bypasses removed or converted to explicit
   non-monitor exceptions with rationale
@@ -59,8 +62,15 @@ mandatory adapter and make bypasses impossible by policy.
 - `gh_call_blocked`, `gh_call_started`, `gh_call_finished` event family
 - `gh_info_requested`, `gh_info_served_from_cache`, `gh_info_live_refresh`,
   `gh_info_degraded`, `gh_info_denied` event family
-- correlation via `call_id` / `request_id`
+- correlation via UUID v4 `call_id` / `request_id`
 - stable JSONL/event fields for QA and operator inspection
+- ownership model:
+  - owning crate: `crates/atm-ci-monitor`
+  - storage: append-only on-disk JSONL ledgers under the runtime directory
+  - sync model: all producers send records through a channel to one writer task;
+    the writer task is the only component that mutates the ledger files
+- a single unified record schema with a discriminating kind field is acceptable
+  if it preserves the execution-layer vs freshness-layer separation in queries
 
 **Acceptance Criteria**:
 - every real `gh` subprocess call is represented in the execution ledger
@@ -88,6 +98,8 @@ mandatory adapter and make bypasses impossible by policy.
 **Scope**: update smoke expectations and verification around bounded GitHub use.
 
 **Deliverables**:
+- update `docs/smoke-test-an-ao-ap-aq.md` with calibrated single-monitor and
+  multi-monitor thresholds
 - explicit single-monitor threshold guidance
 - explicit multi-monitor/shared-poller threshold guidance
 - smoke/test plan for verifying both the firewall and the budget model
@@ -102,17 +114,16 @@ mandatory adapter and make bypasses impossible by policy.
 
 ## Proposed Constants / Config Surface
 
-Potential new constants or config fields:
-- `GH_MONITOR_PER_ACTIVE_MONITOR_MAX_CALLS`
-- `GH_MONITOR_HEADROOM_FLOOR`
-- `GH_MONITOR_HEADROOM_RECOVERY_FLOOR`
-- `GH_MONITOR_SINGLE_SMOKE_MAX_CALLS`
-- `GH_MONITOR_MULTI_SMOKE_MAX_CALLS`
-- explicit event names and JSONL field contracts for the two observability
-  layers
+Initial default constants/config fields, owned by `crates/atm-ci-monitor`:
+- `GH_MONITOR_PER_ACTIVE_MONITOR_MAX_CALLS = 6`
+- `GH_MONITOR_HEADROOM_FLOOR = 200`
+- `GH_MONITOR_HEADROOM_RECOVERY_FLOOR = 300`
+- `GH_MONITOR_SINGLE_SMOKE_MAX_CALLS = 10`
+- `GH_MONITOR_MULTI_SMOKE_MAX_CALLS = 30`
+- `GH_MONITOR_POST_STOP_MAX_DELTA = 5`
 
-These should remain minimal and must be justified by operator use or
-testability, not by preference for extra knobs.
+The daemon plugin consumes these through provider/observer wiring; policy
+ownership stays in the CI-monitor domain rather than daemon plugin constants.
 
 ---
 

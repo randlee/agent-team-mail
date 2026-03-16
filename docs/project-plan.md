@@ -181,6 +181,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AJ | Session-ID SSoT Normalization | Canonical `session_id` naming, shared caller resolver, runtime session resolution closure, doctor/session consistency | PLANNED |
 | AK | Mandatory OTel Rollout | Non-optional OTel across in-scope tools with canonical correlation and health/reporting contracts | PLANNED |
 | AQ | Codebase Cleanup + Rogue Daemon Spawn Elimination | Remove cleanup debt from AN/AO/AP reviews, consolidate constants/dead code, and eliminate non-canonical test daemon spawn paths | ACTIVE |
+| AR | Smoke Follow-Up + Lifecycle Timing Corrections | Align drain/client timing, close smoke false negatives, and add the manual dev-daemon smoke protocol/script used to validate AN/AO/AP/AQ end-to-end behavior | COMPLETE |
 | AS | GitHub API Access Limiting | Add a hard `gh` execution firewall, two-layer GitHub observability, bounded poller budgeting, and calibrated smoke thresholds for multi-monitor runs | PLANNED |
 
 ---
@@ -1745,7 +1746,39 @@ Before version bump and publish:
 
 ---
 
-## 17.26 Phase AS: GitHub API Access Limiting
+## 17.26 Phase AR: Smoke Follow-Up + Lifecycle Timing Corrections
+
+**Goal**: Close the smoke-run failures discovered after AQ by aligning lifecycle
+timers, removing smoke false negatives, and adding the canonical manual
+dev-daemon smoke protocol/script used to validate AN/AO/AP/AQ behavior.
+
+**Integration branch**: `integrate/phase-AR`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Branch | Status |
+|---|---|---|---|
+| AR.1 | Drain timeout alignment, const consolidation, daemon harness cleanup, EnvGuard closure | `feature/pAR-s1-code-fixes` | COMPLETE |
+| AR.2 | Smoke script/protocol delivery and AO.2/AP.2 smoke correction | `feature/pAR-s2-smoke-investigation` | COMPLETE |
+
+### Exit Criteria
+1. Client-side stop/restart/drain timeouts no longer fail before the daemon's
+   own bounded drain window.
+2. Smoke failures caused by return-code/readiness mismatches are corrected or
+   reclassified with explicit evidence.
+3. The canonical manual dev-daemon smoke protocol and executable smoke script
+   exist in-repo for AN/AO/AP/AQ verification.
+
+**Dependency graph**: AR.1 → AR.2
+
+### Release Gate
+Before Phase AR is considered complete:
+1. Run the canonical dev-daemon smoke protocol on `develop`.
+2. Verify smoke results identify real lifecycle defects rather than protocol
+   false negatives.
+
+---
+
+## 17.27 Phase AS: GitHub API Access Limiting
 
 **Goal**: add a hard GitHub execution firewall, complete two-layer
 observability, bounded shared-poller budgeting, and calibrated smoke
@@ -1776,8 +1809,8 @@ thresholds for single-monitor vs multi-monitor runs.
 5. Smoke guidance distinguishes single-monitor and multi-monitor budget
    envelopes and remains explainable from local logs.
 
-**Dependency graph**: AS.1 is foundational; AS.2 depends on AS.1; AS.3 depends
-on AS.1 + AS.2; AS.4 depends on AS.2 + AS.3.
+**Dependency graph**: Phase AR completion → AS.1; AS.1 is foundational; AS.2
+depends on AS.1; AS.3 depends on AS.1 + AS.2; AS.4 depends on AS.2 + AS.3.
 
 ### Release Gate
 Before Phase AS is considered complete:

@@ -526,6 +526,9 @@ ATM must enforce one mandatory execution firewall between a requested GitHub
 operation and the actual `gh` subprocess call.
 
 Requirements:
+- the canonical execution adapter is the existing
+  `GhCliObserver::before_gh_call` gate paired with
+  `GitHubActionsProvider::run_gh_with_metadata`
 - every real `gh` subprocess invocation for `gh_monitor`, `atm gh ...` command
   paths, repo-state refresh, and GitHub budget/rate auditing must pass through
   one canonical adapter
@@ -541,7 +544,7 @@ ATM must emit a complete local execution ledger for real `gh` subprocess calls.
 
 The execution ledger is the token-correlated source of truth and must record
 every allowed and blocked GitHub call attempt with at least:
-- `call_id`
+- `call_id` (UUID v4)
 - timestamp
 - team
 - repo
@@ -556,6 +559,12 @@ every allowed and blocked GitHub call attempt with at least:
 - budget/rate snapshot before and after when available
 - duration
 - success/failure or block reason
+
+Ownership and write discipline:
+- owning crate: `crates/atm-ci-monitor`
+- storage format: append-only JSONL under the runtime directory
+- synchronization model: all producers send execution records through a channel
+  to one writer task; only that writer task may mutate the execution ledger
 
 If GitHub token consumption moves, a matching execution-ledger record must
 exist or the call path is considered a firewall bypass defect.
@@ -572,7 +581,7 @@ Purpose:
 - show when policy/budget/lifecycle prevented a live refresh
 
 Required fields:
-- `request_id`
+- `request_id` (UUID v4)
 - caller/subsystem
 - requested info type
 - team/repo/ref scope
@@ -581,6 +590,13 @@ Required fields:
 - degraded/denied reason when a live refresh is blocked
 - linked `call_id` values for any real `gh` subprocesses triggered by that
   request
+
+Ownership and write discipline:
+- owning crate: `crates/atm-ci-monitor`
+- storage format: append-only JSONL under the runtime directory
+- synchronization model: all producers send freshness records through a
+  channel to one writer task; only that writer task may mutate the freshness
+  ledger
 
 ### GH-CI-FR-49 Lifecycle suppression of GitHub polling
 
@@ -604,6 +620,45 @@ Requirements:
 - define a per-active-monitor maximum call cadence or budget envelope
 - define a global headroom floor below which shared polling pauses or degrades
   instead of continuing at normal cadence
+- lock the following defaults in `crates/atm-ci-monitor`:
+  - `GH_MONITOR_PER_ACTIVE_MONITOR_MAX_CALLS = 6`
+  - `GH_MONITOR_HEADROOM_FLOOR = 200`
+  - `GH_MONITOR_HEADROOM_RECOVERY_FLOOR = 300`
+  - `GH_MONITOR_SINGLE_SMOKE_MAX_CALLS = 10`
+  - `GH_MONITOR_MULTI_SMOKE_MAX_CALLS = 30`
+  - `GH_MONITOR_POST_STOP_MAX_DELTA = 5`
 - the policy must distinguish single-monitor smoke expectations from
   multi-monitor/shared-poller expectations
 - the chosen thresholds and constants must be documented and testable
+
+### GH-CI-FR-51 Execution ledger action registry
+
+Reserved execution-ledger `action` strings are:
+- `gh_call_blocked`
+- `gh_call_started`
+- `gh_call_finished`
+
+Required payload behavior:
+- `gh_call_blocked` must include requested `argv`, caller/subsystem, runtime
+  metadata, and `block_reason`
+- `gh_call_started` must include exact `argv`, caller/subsystem, lifecycle
+  state, and pre-call budget/rate snapshot when available
+- `gh_call_finished` must include duration/result and post-call budget/rate
+  snapshot when available
+
+### GH-CI-FR-52 Freshness ledger action registry
+
+Reserved freshness-ledger `action` strings are:
+- `gh_info_requested`
+- `gh_info_served_from_cache`
+- `gh_info_live_refresh`
+- `gh_info_degraded`
+- `gh_info_denied`
+
+Required payload behavior:
+- `gh_info_requested` must identify the caller, requested info type, and repo
+  scope
+- `gh_info_served_from_cache` must include cache age / freshness metadata
+- `gh_info_live_refresh` must link the request to the resulting `call_id`
+- `gh_info_degraded` must explain why cached or partial data was returned
+- `gh_info_denied` must explain why no useful answer was returned
