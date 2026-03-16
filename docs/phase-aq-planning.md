@@ -1,11 +1,11 @@
 # Phase AQ — Codebase Cleanup
 
-**Branch**: `integrate/phase-AQ` off `develop`
+**Integration branch**: `integrate/phase-AQ` off `develop`
 **Prerequisite**: integrate/phase-AN ✅ merged 2026-03-15, integrate/phase-AO ✅ merged 2026-03-15, integrate/phase-AP ✅ merged 2026-03-15 (PR #768)
 
 ## Overview
 
-Phase AQ is a focused cleanup phase addressing findings from the AN/AO/AP phase reviews plus user-directed improvements. No new features. All sprints target `develop` directly via `integrate/phase-AQ`.
+Phase AQ is a focused cleanup phase addressing findings from the AN/AO/AP phase reviews plus user-directed improvements. No new features. The AQ implementation sprints merge through `integrate/phase-AQ`; the initial AQ.0 planning/requirements update is a docs-only direct change on `develop`.
 
 ---
 
@@ -25,7 +25,7 @@ Phase AQ is a focused cleanup phase addressing findings from the AN/AO/AP phase 
 
 | Crate | Current location | Constant | Value | Suggested name |
 |-------|-----------------|----------|-------|----------------|
-| atm / atm-daemon | `commands/send.rs`, `commands/broadcast.rs` | `MAX_LEN` | `100` | `MESSAGE_MAX_LEN` → `atm/src/consts.rs` |
+| atm | `commands/send.rs`, `commands/broadcast.rs` | `MAX_LEN` | `100` | `MESSAGE_MAX_LEN` → `atm/src/consts.rs` |
 | atm / atm-daemon | `util/hook_identity.rs`, `daemon/socket.rs` | `SESSION_FILE_TTL_SECS` | `86400.0` | Consolidate to `atm-core/src/consts.rs` |
 | atm-daemon | `daemon/event_loop.rs:232` | spool drain interval | `10` | `SPOOL_DRAIN_INTERVAL_SECS` |
 | atm-daemon | `daemon/event_loop.rs:242` | event channel buffer | `100` | `EVENT_CHANNEL_CAPACITY` |
@@ -58,6 +58,9 @@ Phase AQ is a focused cleanup phase addressing findings from the AN/AO/AP phase 
 - 4 new `consts.rs` files with full documentation comments
 - All callsites updated to reference named constants
 - No behavioral changes; CI must pass green
+- While editing `daemon/socket.rs`, AQ.1 MUST preserve the pre-existing
+  `RULE-001` `sc_observability` import boundary. Const migration work must not
+  expand that import surface.
 
 ---
 
@@ -102,6 +105,11 @@ Phase AQ is a focused cleanup phase addressing findings from the AN/AO/AP phase 
 **Items**:
 - `integration_conflict_tests.rs:415`, `:922`, `:963` — `RuntimeDaemonCleanupGuard` PID-file race: daemon writes PID file after guard is created, so guard may attempt cleanup before PID is written. Add synchronization or retry logic.
 - `daemon_autostart_observability.rs` — missing RAII guard: autostart path spawns daemon but doesn't adopt it into a cleanup guard before any await point, leaving a leak window.
+
+**Constraint**:
+- The fix for `RuntimeDaemonCleanupGuard` MUST extend or delegate to
+  `DaemonProcessGuard` rather than introduce a third independent cleanup
+  pattern. Ad-hoc PID-file retry logic in `Drop` is prohibited.
 
 **Deliverables**:
 - Both race conditions covered by tests demonstrating the fix

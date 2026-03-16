@@ -175,7 +175,9 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AH | Observability Unification + AG Deferred Closure | Unified JSONL logging pipeline via `sc-observability` crate and baseline observability contracts (OTel/scmux/schook deferred) | COMPLETE |
 | AI | GH Monitor Dashboard + Detailed PR Reporting | `atm gh pr list`, `atm gh pr report`, `--template` rendering, `init-report`; CI rollup neutral/skipped fix | IN-PROGRESS |
 | AM | CI Monitor Subsystem Refactor | Extract CI-monitor subsystem boundaries out of `socket.rs`, split provider-neutral logic from GitHub-specific adapter logic, and stabilize routing/health/test support on `integrate/phase-AM` | IN-PROGRESS |
-| AO | GH Monitor Guardrails + Runtime Admission | Prevent accidental shared-runtime pollers, add isolated-runtime TTL policy, and make GH usage attributable/self-limiting with cached repo-state and operator controls | PLANNED |
+| AN | CI Monitor Extraction Readiness | Prepare CI monitor for clean extraction: crate boundaries, multi-repo routing, shared type consolidation | COMPLETE ([#748](https://github.com/randlee/agent-team-mail/pull/748)) |
+| AO | GH Monitor Guardrails + Runtime Admission | Prevent accidental shared-runtime pollers, add isolated-runtime TTL policy, and make GH usage attributable/self-limiting with cached repo-state and operator controls | COMPLETE ([#751](https://github.com/randlee/agent-team-mail/pull/751)) |
+| AP | Test Stability and Harness Hardening | Eliminate hang-prone, flaky, and operationally unsafe test patterns; RAII guard consolidation; daemon lifecycle hardening | COMPLETE ([#756](https://github.com/randlee/agent-team-mail/pull/756), [#767](https://github.com/randlee/agent-team-mail/pull/767), [#768](https://github.com/randlee/agent-team-mail/pull/768)) |
 | AJ | Session-ID SSoT Normalization | Canonical `session_id` naming, shared caller resolver, runtime session resolution closure, doctor/session consistency | PLANNED |
 | AK | Mandatory OTel Rollout | Non-optional OTel across in-scope tools with canonical correlation and health/reporting contracts | PLANNED |
 | AQ | Codebase Cleanup + Rogue Daemon Spawn Elimination | Remove cleanup debt from AN/AO/AP reviews, consolidate constants/dead code, and eliminate non-canonical test daemon spawn paths | ACTIVE |
@@ -1644,11 +1646,11 @@ operator-controllable.
 ### Planned Sprint Map
 | Sprint | Focus | Primary Branch | Status |
 |---|---|---|---|
-| AO.1 | Shared runtime admission guard (`release`/`dev` only, hard-stop invalid shared launches) | `feature/pAO-s1-runtime-admission` | COMPLETE |
-| AO.2 | Explicit isolated runtime creation + 10-minute TTL cleanup policy | `feature/pAO-s2-isolated-runtime-ttl` | ACTIVE |
-| AO.3 | Shared repo-state cache, single `(team, repo)` shared poller, PR-list primary poll surface, bounded poll cadence, team budgets (`100/hour`), attributed `run_gh()` path, merge-conflict checks, and config/init parity | `feature/pAO-s3-repo-state-budget-observability` | ACTIVE |
-| AO.4 | Single `(team, repo)` lease ownership + hidden human-authorized cross-team stop/disable path with operator-facing owner metadata | `feature/pAO-s4-operator-control` | ACTIVE |
-| AO.5 | Post-integration deletion sprint: simplify runtime/poller paths and narrow final contracts | `feature/pAO-s5-path-contract-simplification` | ACTIVE |
+| AO.1 | Shared runtime admission guard (`release`/`dev` only, hard-stop invalid shared launches) | `feature/pAO-s1-runtime-admission` | COMPLETE ([#751](https://github.com/randlee/agent-team-mail/pull/751)) |
+| AO.2 | Explicit isolated runtime creation + 10-minute TTL cleanup policy | `feature/pAO-s2-isolated-runtime-ttl` | COMPLETE ([#751](https://github.com/randlee/agent-team-mail/pull/751)) |
+| AO.3 | Shared repo-state cache, single `(team, repo)` shared poller, PR-list primary poll surface, bounded poll cadence, team budgets (`100/hour`), attributed `run_gh()` path, merge-conflict checks, and config/init parity | `feature/pAO-s3-repo-state-budget-observability` | COMPLETE ([#751](https://github.com/randlee/agent-team-mail/pull/751)) |
+| AO.4 | Single `(team, repo)` lease ownership + hidden human-authorized cross-team stop/disable path with operator-facing owner metadata | `feature/pAO-s4-operator-control` | COMPLETE ([#751](https://github.com/randlee/agent-team-mail/pull/751)) |
+| AO.5 | Post-integration deletion sprint: simplify runtime/poller paths and narrow final contracts | `feature/pAO-s5-path-contract-simplification` | COMPLETE ([#751](https://github.com/randlee/agent-team-mail/pull/751)) |
 
 ### Exit Criteria
 1. Shared `release` and `dev` runtimes reject invalid owners and duplicate daemon starts.
@@ -1677,10 +1679,10 @@ parallel, but AP.1 should start before new daemon-heavy test coverage expands.
 ### Planned Sprint Map
 | Sprint | Focus | Primary Branch | Status |
 |---|---|---|---|
-| AP.1 | Environment/process safety: scoped `ATM_HOME`, subprocess RAII, autostart diagnostics | `feature/pAP-s1-test-isolation-env-cleanup` | PLANNED |
-| AP.2 | Deterministic timing: replace wall-clock sleeps, bound loop/watcher waits, improve test attribution | `feature/pAP-s2-elapsed-time-upper-bound` | PLANNED |
-| AP.3 | Pathing/serialization cleanup and final audit | `feature/pAP-s3-serial-vs-raii` | PLANNED |
-| AP.4 | Daemon-spawn RAII hardening | `feature/pAP-s4-daemon-spawn-hardening` | ACTIVE |
+| AP.1 | Environment/process safety: scoped `ATM_HOME`, subprocess RAII, autostart diagnostics | `feature/pAP-s1-test-isolation-env-cleanup` | COMPLETE ([#756](https://github.com/randlee/agent-team-mail/pull/756)) |
+| AP.2 | Deterministic timing: replace wall-clock sleeps, bound loop/watcher waits, improve test attribution | `feature/pAP-s2-elapsed-time-upper-bound` | COMPLETE ([#768](https://github.com/randlee/agent-team-mail/pull/768)) |
+| AP.3 | Pathing/serialization cleanup and final audit | `feature/pAP-s3-serial-vs-raii` | COMPLETE ([#768](https://github.com/randlee/agent-team-mail/pull/768)) |
+| AP.4 | Daemon-spawn RAII hardening | `feature/pAP-s4-daemon-spawn-hardening` | COMPLETE ([#767](https://github.com/randlee/agent-team-mail/pull/767), [#768](https://github.com/randlee/agent-team-mail/pull/768)) |
 
 ### Exit Criteria
 1. Blocking/high-priority tests no longer rely on raw wall-clock sleeps as their
@@ -1698,11 +1700,19 @@ parallel, but AP.1 should start before new daemon-heavy test coverage expands.
 
 ---
 
+<<<<<<< integrate/phase-AQ
 ## 17.25 Phase AQ: Codebase Cleanup + Rogue Daemon Spawn Elimination
 
 **Goal**: Close remaining cleanup debt from AN/AO/AP and make rogue daemon
 spawns structurally impossible in test and QA code by enforcing one canonical
 real-daemon harness.
+=======
+## 17.25 Phase AQ: Codebase Cleanup and Contract Consolidation
+
+**Goal**: remove residual dead code and duplicate guard paths, consolidate
+magic numbers into named constants, and close the deferred AN/AO/AP cleanup
+findings before new implementation work expands the surface again.
+>>>>>>> develop
 
 **Integration branch**: `integrate/phase-AQ`
 
@@ -1711,6 +1721,7 @@ real-daemon harness.
 ### Planned Sprint Map
 | Sprint | Focus | Primary Branch | Status |
 |---|---|---|---|
+<<<<<<< integrate/phase-AQ
 | AQ.1 | Const consolidation and magic-number elimination | `feature/pAQ-s1-const-consolidation` | ACTIVE |
 | AQ.2 | Dead code removal and duplicate elimination | `feature/pAQ-s2-dead-code` | ACTIVE |
 | AQ.3 | Deferred AO non-blocking GH observability fixes | `feature/pAQ-s3-gh-observability-cleanup` | ACTIVE |
@@ -1734,6 +1745,32 @@ real-daemon harness.
 **Dependency graph**: AQ.1 and AQ.2 may run in parallel; AQ.3 and AQ.4 may run
 in parallel; AQ.5 starts once the AP daemon-spawn findings are known and
 merge-forwards from `integrate/phase-AQ` as needed.
+=======
+| AQ.0 | Planning and Requirements | `develop` | COMPLETE (docs-only direct-to-develop; not via `integrate/phase-AQ`) |
+| AQ.1 | Const consolidation and magic-number elimination | `feature/pAQ-s1-const-consolidation` | PLANNED |
+| AQ.2 | Dead code removal and duplicate elimination | `feature/pAQ-s2-dead-code-dup-removal` | PLANNED |
+| AQ.3 | Deferred non-blocking AO findings | `feature/pAQ-s3-deferred-findings` | PLANNED |
+| AQ.4 | Deferred AP daemon-race and observability cleanup | `feature/pAQ-s4-daemon-race-cleanup` | PLANNED |
+
+### Exit Criteria
+1. Significant numeric literals in production code are replaced with named
+   constants in canonical `consts.rs` locations.
+2. Duplicate guard/helper paths removed by AP remain deleted, and new duplicate
+   lifecycle or env guards are not introduced.
+3. Deferred AO observability findings (GH #761, GH #763) and deferred AP
+   daemon-race findings are closed with tests demonstrating the fixed
+   behaviors.
+4. The codebase is smaller and more explicit than the post-AP baseline, with no
+   new user-facing capability added during cleanup.
+
+**Dependency graph**: AQ.1 and AQ.2 can proceed in parallel; AQ.3 and AQ.4 can
+proceed in parallel; all merge through `integrate/phase-AQ`
+
+### Release Gate
+Before version bump and publish:
+1. Dogfood on `develop` via `dev-install`.
+2. Publish as the next version bump only after dogfood passes.
+>>>>>>> develop
 
 ---
 

@@ -285,6 +285,9 @@ Requirements:
   refresh may occur if the shared gate permits it
 - if cache age is `1 minute` or less, responses should reuse cached state
 - stale entries must be evicted after TTL
+- Cache TTL eviction MUST NOT reset or clear accumulated rate-budget state.
+  Budget counters are reset only by explicit operator action or hourly rollover
+  as defined in `docs/requirements.md` §6.2.
 
 `monitor pr`, `monitor workflow`, and `monitor run` must all use the same
 shared team/repo gate even when they require different underlying GitHub query
