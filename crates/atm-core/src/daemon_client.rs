@@ -3073,14 +3073,9 @@ exit 42
         perms.set_mode(0o755);
         fs::set_permissions(&script_path, perms).unwrap();
 
-        let old_home = std::env::var("ATM_HOME").ok();
-        let old_bin = std::env::var("ATM_DAEMON_BIN").ok();
-        let old_auto = std::env::var("ATM_DAEMON_AUTOSTART").ok();
-        unsafe {
-            std::env::set_var("ATM_HOME", &home);
-            std::env::set_var("ATM_DAEMON_BIN", &script_path);
-            std::env::set_var("ATM_DAEMON_AUTOSTART", "1");
-        }
+        let _home_guard = EnvGuard::set("ATM_HOME", home.to_str().unwrap());
+        let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", script_path.to_str().unwrap());
+        let _auto_guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "1");
 
         let err = ensure_daemon_running_unix().expect_err("startup should fail");
         let msg = err.to_string();
@@ -3088,21 +3083,6 @@ exit 42
             msg.contains("daemon process exited during startup with status"),
             "startup exit must still be reported clearly: {msg}"
         );
-
-        unsafe {
-            match old_home {
-                Some(v) => std::env::set_var("ATM_HOME", v),
-                None => std::env::remove_var("ATM_HOME"),
-            }
-            match old_bin {
-                Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
-                None => std::env::remove_var("ATM_DAEMON_BIN"),
-            }
-            match old_auto {
-                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
-                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
-            }
-        }
     }
 
     #[cfg(unix)]
@@ -3124,14 +3104,9 @@ sleep 10
         perms.set_mode(0o755);
         fs::set_permissions(&script_path, perms).unwrap();
 
-        let old_home = std::env::var("ATM_HOME").ok();
-        let old_bin = std::env::var("ATM_DAEMON_BIN").ok();
-        let old_auto = std::env::var("ATM_DAEMON_AUTOSTART").ok();
-        unsafe {
-            std::env::set_var("ATM_HOME", &home);
-            std::env::set_var("ATM_DAEMON_BIN", &script_path);
-            std::env::set_var("ATM_DAEMON_AUTOSTART", "1");
-        }
+        let _home_guard = EnvGuard::set("ATM_HOME", home.to_str().unwrap());
+        let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", script_path.to_str().unwrap());
+        let _auto_guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "1");
 
         let err = ensure_daemon_running_unix().expect_err("startup should time out");
         let msg = err.to_string();
@@ -3147,21 +3122,6 @@ sleep 10
             msg.contains("socket_path="),
             "timeout error should include socket path"
         );
-
-        unsafe {
-            match old_home {
-                Some(v) => std::env::set_var("ATM_HOME", v),
-                None => std::env::remove_var("ATM_HOME"),
-            }
-            match old_bin {
-                Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
-                None => std::env::remove_var("ATM_DAEMON_BIN"),
-            }
-            match old_auto {
-                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
-                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
-            }
-        }
     }
 
     #[cfg(unix)]
@@ -3191,14 +3151,9 @@ sleep 2
         perms.set_mode(0o755);
         fs::set_permissions(&script_path, perms).unwrap();
 
-        let old_home = std::env::var("ATM_HOME").ok();
-        let old_bin = std::env::var("ATM_DAEMON_BIN").ok();
-        let old_auto = std::env::var("ATM_DAEMON_AUTOSTART").ok();
-        unsafe {
-            std::env::set_var("ATM_HOME", &home);
-            std::env::set_var("ATM_DAEMON_BIN", &script_path);
-            std::env::set_var("ATM_DAEMON_AUTOSTART", "1");
-        }
+        let _home_guard = EnvGuard::set("ATM_HOME", home.to_str().unwrap());
+        let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", script_path.to_str().unwrap());
+        let _auto_guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "1");
 
         let mut handles = Vec::new();
         let barrier = Arc::new(std::sync::Barrier::new(2));
@@ -3223,21 +3178,6 @@ sleep 2
             count, 1,
             "concurrent startup attempts should spawn at most one daemon process"
         );
-
-        unsafe {
-            match old_home {
-                Some(v) => std::env::set_var("ATM_HOME", v),
-                None => std::env::remove_var("ATM_HOME"),
-            }
-            match old_bin {
-                Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
-                None => std::env::remove_var("ATM_DAEMON_BIN"),
-            }
-            match old_auto {
-                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
-                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
-            }
-        }
     }
 
     #[cfg(unix)]
@@ -3612,14 +3552,9 @@ sleep 8
         perms.set_mode(0o755);
         fs::set_permissions(&script_path, perms).unwrap();
 
-        let old_home = std::env::var("ATM_HOME").ok();
-        let old_bin = std::env::var("ATM_DAEMON_BIN").ok();
-        let old_auto = std::env::var("ATM_DAEMON_AUTOSTART").ok();
-        unsafe {
-            std::env::set_var("ATM_HOME", &home);
-            std::env::set_var("ATM_DAEMON_BIN", &script_path);
-            std::env::set_var("ATM_DAEMON_AUTOSTART", "1");
-        }
+        let _home_guard = EnvGuard::set("ATM_HOME", home.to_str().unwrap());
+        let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", script_path.to_str().unwrap());
+        let _auto_guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "1");
 
         ensure_daemon_running_unix().expect("must recover from dead stale pid metadata");
         let marker = home.join("started-ok");
@@ -3637,21 +3572,6 @@ sleep 8
             && pid_alive(pid)
         {
             send_signal(pid, 15);
-        }
-
-        unsafe {
-            match old_home {
-                Some(v) => std::env::set_var("ATM_HOME", v),
-                None => std::env::remove_var("ATM_HOME"),
-            }
-            match old_bin {
-                Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
-                None => std::env::remove_var("ATM_DAEMON_BIN"),
-            }
-            match old_auto {
-                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
-                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
-            }
         }
     }
 
@@ -3751,13 +3671,8 @@ sleep 8
         expected_perms.set_mode(0o755);
         fs::set_permissions(&expected_script, expected_perms).unwrap();
 
-        let old_home = std::env::var("ATM_HOME").ok();
-        let old_bin = std::env::var("ATM_DAEMON_BIN").ok();
-        let old_auto = std::env::var("ATM_DAEMON_AUTOSTART").ok();
-        unsafe {
-            std::env::set_var("ATM_HOME", &home);
-            std::env::set_var("ATM_DAEMON_AUTOSTART", "0");
-        }
+        let _home_guard = EnvGuard::set("ATM_HOME", home.to_str().unwrap());
+        let _auto_guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "0");
         let mut stale_child = std::process::Command::new(&stale_script)
             .env("ATM_HOME", &home)
             .spawn()
@@ -3791,10 +3706,8 @@ sleep 8
         )
         .unwrap();
 
-        unsafe {
-            std::env::set_var("ATM_DAEMON_BIN", &expected_script);
-            std::env::set_var("ATM_DAEMON_AUTOSTART", "1");
-        }
+        let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", expected_script.to_str().unwrap());
+        let _auto_guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "1");
         ensure_daemon_running_unix().expect("mismatch daemon should be restarted");
 
         let stale_exit_deadline = std::time::Instant::now()
@@ -3823,21 +3736,6 @@ sleep 8
 
         if pid_alive(new_pid) {
             send_signal(new_pid, 15);
-        }
-
-        unsafe {
-            match old_home {
-                Some(v) => std::env::set_var("ATM_HOME", v),
-                None => std::env::remove_var("ATM_HOME"),
-            }
-            match old_bin {
-                Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
-                None => std::env::remove_var("ATM_DAEMON_BIN"),
-            }
-            match old_auto {
-                Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
-                None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
-            }
         }
     }
 
@@ -3882,19 +3780,9 @@ sleep 8
     fn test_query_team_member_states_offline_returns_none() {
         with_autostart_disabled(|| {
             let tmp = tempfile::tempdir().expect("tempdir");
-            let old_home = std::env::var("ATM_HOME").ok();
-            // SAFETY: serialized test env mutation.
-            unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+            let _home_guard = EnvGuard::set("ATM_HOME", tmp.path().to_str().unwrap());
 
             let result = query_team_member_states("atm-dev");
-
-            // SAFETY: serialized test env mutation cleanup.
-            unsafe {
-                match old_home {
-                    Some(v) => std::env::set_var("ATM_HOME", v),
-                    None => std::env::remove_var("ATM_HOME"),
-                }
-            }
 
             assert!(
                 matches!(result, Ok(None)),
@@ -3961,19 +3849,9 @@ sleep 8
                 panic!("expected list-agents request within retry budget");
             });
 
-            let old_home = std::env::var("ATM_HOME").ok();
-            // SAFETY: serialized test env mutation.
-            unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+            let _home_guard = EnvGuard::set("ATM_HOME", tmp.path().to_str().unwrap());
 
             let result = query_team_member_states("atm-dev");
-
-            // SAFETY: serialized test env mutation cleanup.
-            unsafe {
-                match old_home {
-                    Some(v) => std::env::set_var("ATM_HOME", v),
-                    None => std::env::remove_var("ATM_HOME"),
-                }
-            }
 
             handle.join().expect("mock daemon thread");
             let err = result.expect_err("invalid payload must return Err");
