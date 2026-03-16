@@ -8,6 +8,7 @@ fn init_cmd<'a>(home: &'a TempDir, repo: &'a Path) -> assert_cmd::Command {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", home.path())
         .env("ATM_DAEMON_AUTOSTART", "0")
+        .env("ATM_HOOK_PYTHON", "python3")
         .env_remove("ATM_TEAM")
         .env_remove("ATM_IDENTITY")
         .env_remove("ATM_CONFIG")
@@ -444,7 +445,7 @@ fn test_init_global_relay_hook_paths_are_absolute() {
         1
     );
     assert_eq!(
-        count_matcher_command_entries(&settings_path, "Notification", "idle_prompt", &notify_cmd),
+        count_matcher_command_entries(&settings_path, "Notification", "idle_prompt", &notify_cmd,),
         1
     );
 

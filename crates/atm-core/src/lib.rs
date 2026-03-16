@@ -9,6 +9,7 @@
 //! - Support round-trip serialization without data loss
 
 pub mod config;
+pub mod consts;
 pub mod context;
 pub mod control;
 pub mod daemon_client;

@@ -8,6 +8,7 @@ use agent_team_mail_core::logging;
 use clap::Parser;
 
 mod commands;
+mod consts;
 mod util;
 
 use commands::Cli;

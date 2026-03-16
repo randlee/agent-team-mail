@@ -2,5 +2,6 @@
 
 pub mod bridge;
 pub mod ci_monitor;
+pub mod consts;
 pub mod issues;
 pub mod worker_adapter;
