@@ -180,9 +180,10 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AP | Test Stability and Harness Hardening | Eliminate hang-prone, flaky, and operationally unsafe test patterns; RAII guard consolidation; daemon lifecycle hardening | COMPLETE ([#756](https://github.com/randlee/agent-team-mail/pull/756), [#767](https://github.com/randlee/agent-team-mail/pull/767), [#768](https://github.com/randlee/agent-team-mail/pull/768)) |
 | AJ | Session-ID SSoT Normalization | Canonical `session_id` naming, shared caller resolver, runtime session resolution closure, doctor/session consistency | PLANNED |
 | AK | Mandatory OTel Rollout | Non-optional OTel across in-scope tools with canonical correlation and health/reporting contracts | PLANNED |
-| AQ | Codebase Cleanup + Rogue Daemon Spawn Elimination | Remove cleanup debt from AN/AO/AP reviews, consolidate constants/dead code, and eliminate non-canonical test daemon spawn paths | ACTIVE |
-| AR | Smoke Follow-Up + Lifecycle Timing Corrections | Align drain/client timing, close smoke false negatives, and add the manual dev-daemon smoke protocol/script used to validate AN/AO/AP/AQ end-to-end behavior | COMPLETE |
-| AS | GitHub API Access Limiting | Add a hard `gh` execution firewall, two-layer GitHub observability, bounded poller budgeting, and calibrated smoke thresholds for multi-monitor runs | PLANNED |
+| AQ | Codebase Cleanup + Rogue Daemon Spawn Elimination | Remove cleanup debt from AN/AO/AP reviews, consolidate constants/dead code, and eliminate non-canonical test daemon spawn paths | COMPLETE |
+| AR | Smoke Follow-Up + Lifecycle Timing Corrections | Fix daemon harness flake, drain timeout regression, and EnvGuard::unset gap identified during smoke testing | COMPLETE (PR #795) |
+| AS | Backlog Gap-Filling + GH API Governance | 14 backlog bug/gap fixes + GH API hard firewall, ledgers, and explicit GitHub ownership requirements | ACTIVE |
+| AT | GitHub Boundary Elimination | Remove all remaining audited GitHub-boundary violations so only the gh plugin/provider layer owns GitHub behavior | PLANNED |
 
 ---
 
@@ -1778,47 +1779,98 @@ Before Phase AR is considered complete:
 
 ---
 
-## 17.27 Phase AS: GitHub API Access Limiting
+## 17.27 Phase AS: Backlog Gap-Filling + GH API Governance
 
-**Goal**: add a hard GitHub execution firewall, complete two-layer
-observability, bounded shared-poller budgeting, and calibrated smoke
-thresholds for single-monitor vs multi-monitor runs.
+**Goal**: Address 14 backlog bug/gap items and implement GH API hard firewall
+with two-layer observability to eliminate runaway token consumption.
 
 **Integration branch**: `integrate/phase-AS`
 
-**Planning doc**: `docs/phase-as-planning.md`
+**Planning docs**:
+- `docs/phase-as-backlog-planning.md` — backlog sprints (AS.1–AS.3, team-lead)
+- `docs/requirements.md` + `docs/ci-monitoring/requirements.md` — GH governance
+  requirements and ownership rules hardened during AS.4–AS.7
 
-### Planned Sprint Map
-| Sprint | Focus | Primary Branch | Status |
+**Status**: PLANNED
+
+### Sprint Map
+| Sprint | Focus | Branch | Status |
 |---|---|---|---|
-| AS.0 | Planning and requirements lock | `planning/gh-access-limiting` | COMPLETE (docs-only planning branch) |
-| AS.1 | Hard `gh` execution firewall | `feature/pAS-s1-gh-firewall` | PLANNED |
-| AS.2 | Execution ledger + freshness ledger | `feature/pAS-s2-gh-observability` | PLANNED |
-| AS.3 | Budgeting, headroom, and lifecycle suppression | `feature/pAS-s3-budget-lifecycle` | PLANNED |
-| AS.4 | Smoke threshold calibration + verification | `feature/pAS-s4-smoke-thresholds` | PLANNED |
+| AS.1 | Quick wins: 8 bug fixes (#760,#759,#758,#726,#741,#708,#620,#626) | `feature/pAS-s1-quick-wins` | PLANNED |
+| AS.2 | Doctor polish + EnvGuard test migration (#688,#681,#701,#784) | `feature/pAS-s2-observability` | PLANNED |
+| AS.3 | Daemon-touch sidecar + teams status table (#700,#699) | `feature/pAS-s3-sidecar` | PLANNED |
+| AS.4 | GH API hard firewall (GH-CI-FR-46) | TBD | PLANNED |
+| AS.5 | Execution ledger (GH-CI-FR-47) | TBD | PLANNED |
+| AS.6 | Freshness ledger + budget constants (GH-CI-FR-48–50) | TBD | PLANNED |
+| AS.7 | Requirements hardening + repo-wide violation search/audit/gate + Phase AT handoff | `feature/pAS-s7-smoke-thresholds` | COMPLETE |
 
 ### Exit Criteria
-1. All in-scope `gh_monitor` / `atm gh` GitHub execution flows pass through one
-   mandatory execution firewall.
-2. Every real `gh` subprocess call is represented in a token-correlated
-   execution ledger.
-3. Every GH-backed info request is represented in a separate cache/freshness
-   ledger with clear degraded/denied reasons.
-4. Shared pollers do not continue issuing GitHub calls after lifecycle enters
-   `stopped` or `draining`.
-5. Smoke guidance distinguishes single-monitor and multi-monitor budget
-   envelopes as documented in `docs/smoke-test-an-ao-ap-aq.md` (updated by
-   AS.4) and remains explainable from local logs.
+1. All 14 backlog items closed with targeted changes; no new abstractions.
+2. `cargo test --all-targets` passes on all 3 platforms.
+3. No in-scope GitHub monitor/status path can launch `gh` outside the firewall (GH-CI-FR-46).
+4. Token ledger and freshness ledger emit structured events for all GH interactions (GH-CI-FR-47/48).
+5. GH budget constants locked in `crates/atm-ci-monitor` with documented defaults (GH-CI-FR-50).
+6. Smoke guidance distinguishes single-monitor and multi-monitor budget envelopes as documented in `docs/smoke-test-an-ao-ap-aq.md` (updated by AS.7).
+7. Requirements explicitly state that non-plugin crates must not own GitHub behavior.
+8. AS.7 performs a repository-wide search for live boundary violations across crates, scripts, CI helpers, and support tooling.
+9. Every live violation found by the AS.7 search is either removed in AS or mapped to a named AT sprint with file-level ownership; no silent allowlist remains.
 
-**Dependency graph**: Phase AR completion → AS.1; AS.1 is foundational; AS.2
-depends on AS.1; AS.3 depends on AS.1 + AS.2; AS.4 depends on AS.2 + AS.3.
+**Dependency graph**: AS.1 is foundational; AS.2 depends on AS.1; AS.3 depends on AS.2;
+AS.4–AS.7 GH governance track may proceed in parallel with AS.1–AS.3.
 
-### Release Gate
-Before Phase AS is considered complete:
-1. Verify the GH execution ledger explains token movement for a bounded smoke run.
-2. Verify the freshness ledger explains cache-hit, live-refresh, and degraded
-   responses without guessing.
-3. Verify lifecycle `stop` leaves no active shared-poller GitHub traffic.
+---
+
+## 17.28 Phase AT: GitHub Boundary Elimination
+
+**Goal**: eliminate every audited GitHub-boundary exception so only the owning
+gh plugin/provider layer contains GitHub-specific behavior, raw `gh`
+execution, and `atm gh` command processing.
+
+**Integration branch**: `integrate/phase-AT`
+
+**Status**: PLANNED
+
+### Sprint Map
+| Sprint | Focus | Branch | Status |
+|---|---|---|---|
+| AT.1 | Remove `atm-core -> atm-ci-monitor` non-dev dependency and remove raw `gh` execution from `crates/atm-core/src/gh_monitor_observability.rs` so `atm-core` has zero provider knowledge | TBD | PLANNED |
+| AT.2 | Move GitHub-specific provider execution out of `crates/atm-ci-monitor/src/github_provider.rs` into the gh plugin/provider layer, leaving `atm-ci-monitor` provider-agnostic only | TBD | PLANNED |
+| AT.3 | Route all GitHub command semantics through the gh plugin/provider layer; `crates/atm/src/commands/gh.rs` becomes CLI bootstrap/routing/capability UX only and stops owning raw `gh` probes or GitHub behavior | TBD | PLANNED |
+| AT.4 | Remove non-gh-plugin raw `gh` execution paths in `crates/atm-daemon/src/plugins/issues/github.rs`, smoke harnesses, and any additional script/helper violations found by the AS.7 search | TBD | PLANNED |
+| AT.5 | Run the final repo-wide illegal-reference audit, delete the allowlist, and close the remaining tracked boundary violations with zero tolerated exceptions | TBD | PLANNED |
+
+### Planned Inputs
+- audited exceptions and issue set from AS.7:
+  - `#808`
+  - `#809`
+  - `#811`
+  - `#812`
+  - `#813`
+- `ARCH-BOUNDARY-001` requirements and CI grep gate from AS.7
+- current live violations found by the AS.7 repository-wide search:
+  - `crates/atm-core/Cargo.toml` non-dev dependency on `agent-team-mail-ci-monitor`
+  - `crates/atm-core/src/gh_monitor_observability.rs` raw `gh` execution in core
+  - `crates/atm-ci-monitor/src/github_provider.rs` GitHub-specific provider implementation in shared crate
+  - `crates/atm/src/commands/gh.rs` GitHub semantics and raw `gh` bootstrap/query behavior in CLI routing layer
+  - `crates/atm-daemon/src/plugins/issues/github.rs` raw `gh` execution outside the gh plugin/provider layer
+  - script/helper violations captured by the AS.7 audit and CI boundary gate
+
+### Exit Criteria
+1. `atm-core` has zero plugin/provider knowledge and no non-dev dependency on
+   `atm-ci-monitor`.
+2. `atm-ci-monitor` contains only provider-agnostic abstractions; no
+   GitHub-specific provider execution remains.
+3. All GitHub-specific behavior, including raw `gh` execution, lives only in
+   the owning gh plugin/provider layer.
+4. `atm gh` namespace routing remains available only when the plugin is
+   present, and non-plugin crates do not implement GitHub semantics.
+5. `scripts/ci/gh_boundary_check.sh` passes with no allowlisted exceptions.
+6. The final AT audit confirms there are no remaining illegal GitHub boundary references anywhere in the repository.
+
+### Dependency Notes
+- AT begins after AS.7 requirement hardening and audit are accepted by QA.
+- AT is the implementation/removal phase; AS.7 was the rule-setting,
+  enforcement, repository-wide search, and audit handoff phase.
 
 ---
 

@@ -2535,6 +2535,18 @@ operators and teammates.
 Detailed GitHub CI monitor requirements are defined in:
 - `docs/ci-monitoring/requirements.md`
 
+Ownership and presence contract:
+- All GitHub-specific behavior behind `atm gh` is owned by the `gh_monitor`
+  plugin/provider layer.
+- Non-plugin crates may parse arguments, advertise capability state, and route
+  requests, but must not implement GitHub semantics, execute raw `gh`, or own
+  GitHub provider logic.
+- If the gh plugin/provider is not present in the build, the `atm gh`
+  namespace must not be advertised in normal help/capability UX.
+- If the gh plugin/provider is present in the build but not enabled/loaded for
+  the current runtime/team, only the bootstrap/management surface may be
+  advertised and accepted.
+
 Core command contract:
 - `atm gh init` validates prerequisites (`gh` CLI presence/auth where required),
   writes/updates `[plugins.gh_monitor]` config, and enables the plugin.
@@ -2566,13 +2578,19 @@ Operator status UX contract:
   - the minimum config keys required (team/agent/repo/monitor recipients) and
     the config file path where those keys are expected.
 - JSON output must expose the same status fields without lossy conversion.
-- When `gh_monitor` is disabled/unconfigured, only the following command paths
-  are allowed:
+- When `gh_monitor` is present in the build but disabled/unconfigured, only the
+  following command paths are allowed:
   - `atm gh`
+  - `atm gh status`
   - `atm gh init`
   - help output (`atm gh --help`, `atm gh init --help`)
   Other `atm gh ...` operations must fail fast with an actionable message to run
   `atm gh init`.
+- If the gh plugin/provider is not present in the build at all:
+  - `atm gh` must not appear in normal help/capability listings,
+  - daemon capability advertisement must omit the namespace entirely,
+  - explicit invocation may fail with a stable "feature not installed" error,
+    but must not pretend the plugin is merely disabled.
 - When `gh_monitor` is enabled, `atm gh` must show:
   - current configuration summary,
   - lifecycle/availability status,
@@ -2639,6 +2657,32 @@ Informed by analysis of the `coding_agent_session_search` connector system (14-p
 - Structured error reporting (not silent swallowing)
 - Stateful plugins (daemon plugins maintain connections, sync cursors, watch handles)
 - Plugin metadata with versioning
+
+### 5.1.1 Plugin Ownership and Dependency Boundaries
+
+Plugin extraction into a separate crate is not sufficient by itself to define
+ownership. The requirements must explicitly assign ownership of plugin behavior.
+
+Required rules:
+- Plugin implementation code is owned by the plugin/provider layer, not by
+  `atm-core` or unrelated shared crates.
+- Shared crates may define generic interfaces and data contracts only; they
+  must not depend on plugin implementations.
+- `atm-core` must not import plugin/provider crates or own provider-specific
+  behavior.
+- A shared support crate such as `atm-ci-monitor` may exist only for
+  provider-agnostic abstractions; it must not become a second home for
+  provider-specific GitHub execution or command semantics.
+- All plugin-owned commands are processed by the owning plugin/provider layer.
+  CLI command modules may route requests, but they must not implement the
+  plugin's external-system behavior themselves.
+- Any raw `gh` execution outside the owning gh plugin/provider layer is a
+  boundary violation.
+- Boundary-enforcement work must include a repository-wide search for current
+  violations across Rust crates, shell/Python scripts, CI helpers, and support
+  tooling. Any surviving violation found by that search must be either removed
+  in the active implementation phase or explicitly mapped to a named follow-up
+  sprint with file-level ownership; silent allowlisting is not sufficient.
 
 ### 5.2 Plugin Trait
 
@@ -2794,13 +2838,19 @@ temp/atm/<plugin-name>/
 
 - Each plugin may own one top-level CLI namespace.
 - The namespace owner is exclusive; no other plugin or core command may claim it.
+- The owning plugin/provider layer must process the namespace's external-system
+  behavior. Non-plugin crates may route/bootstrap, but must not implement that
+  behavior directly.
 - Each plugin namespace must provide:
   - `<namespace>` status entrypoint (no subcommand),
   - `<namespace> init` setup/enable command,
   - help output.
-- If a plugin is not configured/enabled for the current team, only the three
-  surfaces above are available. All other namespace operations must fail fast
-  with a stable, actionable init guidance error.
+- If a plugin is compiled in but not configured/enabled for the current team,
+  only the bootstrap/management surfaces above are available. All other
+  namespace operations must fail fast with a stable, actionable init guidance
+  error.
+- If a plugin is not compiled in/present, its namespace must not be advertised
+  in normal help or capability-discovery UX.
 - `<namespace>` status output must always make disabled/unconfigured state
   explicit and list only currently available actions.
 - If plugin is enabled, `<namespace>` status output must include current
