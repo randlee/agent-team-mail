@@ -6,7 +6,7 @@ use agent_team_mail_ci_monitor::{
     new_gh_execution_call_id, new_gh_info_request_id, read_gh_repo_state,
     update_gh_repo_state_rate_limit,
 };
-use agent_team_mail_daemon::plugins::ci_monitor::run_attributed_gh_command_with_ids;
+use agent_team_mail_daemon::plugins::ci_monitor::gh_execution::run_attributed_gh_command_with_ids;
 use anyhow::{Context, Result};
 use clap::Args;
 use std::collections::{BTreeSet, HashMap, HashSet};

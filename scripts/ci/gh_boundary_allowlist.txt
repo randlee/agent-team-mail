@@ -1,5 +1,7 @@
 # Temporary audited exceptions for ARCH-BOUNDARY-001.
 # Format: path:line
+# AT.2 removed the old #809 exception from crates/atm-ci-monitor/src/github_provider.rs:173
+# by moving provider-owned GitHub execution into the gh plugin/provider layer.
 crates/atm-daemon/src/plugins/issues/github.rs:31
 crates/atm/src/commands/gh.rs:2155
 crates/atm/src/commands/gh.rs:2168

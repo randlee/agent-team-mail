@@ -18,7 +18,7 @@ use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
 use agent_team_mail_core::team_config_store::TeamConfigStore;
-use agent_team_mail_daemon::plugins::ci_monitor::run_attributed_gh_command_with_ids;
+use agent_team_mail_daemon::plugins::ci_monitor::gh_execution::run_attributed_gh_command_with_ids;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use minijinja::Environment;
