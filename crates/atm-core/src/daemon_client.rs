@@ -36,8 +36,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::consts::{
-    DAEMON_QUERY_TIMEOUT_MS, DAEMON_TIMEOUT_MAX_SECS, DAEMON_TIMEOUT_MIN_SECS, RETRY_SLEEP_MS,
-    SOCKET_IO_TIMEOUT_MS, STARTUP_DEADLINE_SECS,
+    DAEMON_METADATA_SETTLE_MS, DAEMON_QUERY_TIMEOUT_MS, DAEMON_TIMEOUT_MAX_SECS,
+    DAEMON_TIMEOUT_MIN_SECS, RETRY_SLEEP_MS, SOCKET_IO_TIMEOUT_MS, STARTUP_DEADLINE_SECS,
 };
 
 /// Protocol version for the socket JSON protocol.
@@ -2456,8 +2456,7 @@ fn detect_daemon_identity_mismatch(
         && let Some(candidate_pid) = pid_from_file.or(pid_from_status)
         && pid_alive(candidate_pid as i32)
     {
-        // Retry backoff: daemon may not have flushed lock metadata yet; wait once before re-reading.
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        std::thread::sleep(std::time::Duration::from_millis(DAEMON_METADATA_SETTLE_MS));
         metadata = std::fs::read_to_string(&metadata_path)
             .ok()
             .and_then(|s| serde_json::from_str::<DaemonLockMetadata>(&s).ok());

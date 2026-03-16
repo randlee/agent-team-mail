@@ -5,7 +5,10 @@
 //! for translating wire payloads into these CI monitor request/status types before
 //! calling into the service layer.
 
-use crate::daemon::consts::{DEFAULT_DRAIN_TIMEOUT_SECS, DRAIN_SLEEP_MS};
+use crate::daemon::consts::{
+    DEFAULT_DRAIN_TIMEOUT_SECS, DRAIN_SLEEP_MS, SHARED_POLLER_ACTIVE_SLEEP_SECS,
+    SHARED_POLLER_ERROR_BACKOFF_SECS, SHARED_POLLER_IDLE_SLEEP_SECS,
+};
 
 #[cfg(unix)]
 use super::gh_monitor::{
@@ -263,7 +266,10 @@ async fn run_shared_repo_poller(home: std::path::PathBuf, team: String, owner_re
             Ok(records) => records,
             Err(err) => {
                 warn!(team = %team, repo = %owner_repo, "failed to load gh monitor state: {err}");
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    SHARED_POLLER_ERROR_BACKOFF_SECS,
+                ))
+                .await;
                 continue;
             }
         };
@@ -302,7 +308,11 @@ async fn run_shared_repo_poller(home: std::path::PathBuf, team: String, owner_re
         }
 
         let _ = update_gh_repo_state_in_flight(&home, &team, &owner_repo, 0, "atm-daemon");
-        let sleep_secs = if active_records.is_empty() { 300 } else { 60 };
+        let sleep_secs = if active_records.is_empty() {
+            SHARED_POLLER_IDLE_SLEEP_SECS
+        } else {
+            SHARED_POLLER_ACTIVE_SLEEP_SECS
+        };
         tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
     }
 }
