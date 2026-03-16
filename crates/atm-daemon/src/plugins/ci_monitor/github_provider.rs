@@ -212,9 +212,6 @@ pub fn run_attributed_gh_command_with_ids(
         .map_err(|err| anyhow::anyhow!(err.to_string()))
 }
 
-pub(crate) fn run_plugin_owned_gh_subprocess(args: &[String]) -> Result<String, CiProviderError> {
-    run_gh_subprocess(args)
-}
 fn run_gh_subprocess(args: &[String]) -> Result<String, CiProviderError> {
     #[cfg(test)]
     GH_SUBPROCESS_COUNT.fetch_add(1, Ordering::SeqCst);
