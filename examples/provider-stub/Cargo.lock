@@ -6,17 +6,21 @@ version = 4
 name = "agent-team-mail-ci-monitor"
 version = "0.44.9"
 dependencies = [
+ "agent-team-mail-core",
+ "anyhow",
+ "chrono",
+ "libc",
  "serde",
  "serde_json",
  "tokio",
  "toml",
+ "uuid",
 ]
 
 [[package]]
 name = "agent-team-mail-core"
 version = "0.44.9"
 dependencies = [
- "agent-team-mail-ci-monitor",
  "anyhow",
  "blake3",
  "chrono",
