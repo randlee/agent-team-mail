@@ -1392,6 +1392,7 @@ pub(crate) fn status_request(
 #[cfg(test)]
 mod tests {
     use super::{build_shared_poller_plan, health_request, sync_headroom_suppression_state};
+    use crate::plugins::ci_monitor::{health, helpers};
     use agent_team_mail_ci_monitor::{
         CiMonitorHealth, CiMonitorStatus, CiMonitorTargetKind, GhObservedCall, GhRateLimitSnapshot,
         GhRepoStateFile, GhRepoStateRecord, GhRuntimeOwner,
@@ -1604,9 +1605,9 @@ poll_interval_secs = 60
     #[test]
     fn shared_poller_plan_suppresses_when_lifecycle_is_draining() {
         let temp = TempDir::new().unwrap();
-        super::health::upsert_gh_monitor_health(temp.path(), running_health("atm-dev", "draining"))
+        health::upsert_gh_monitor_health(temp.path(), running_health("atm-dev", "draining"))
             .unwrap();
-        super::helpers::upsert_gh_monitor_status_for_repo(
+        helpers::upsert_gh_monitor_status_for_repo(
             temp.path(),
             active_monitor_status("atm-dev"),
             Some("acme/agent-team-mail"),
@@ -1628,9 +1629,9 @@ poll_interval_secs = 60
     #[test]
     fn shared_poller_plan_suppresses_when_headroom_hits_floor() {
         let temp = TempDir::new().unwrap();
-        super::health::upsert_gh_monitor_health(temp.path(), running_health("atm-dev", "running"))
+        health::upsert_gh_monitor_health(temp.path(), running_health("atm-dev", "running"))
             .unwrap();
-        super::helpers::upsert_gh_monitor_status_for_repo(
+        helpers::upsert_gh_monitor_status_for_repo(
             temp.path(),
             active_monitor_status("atm-dev"),
             Some("acme/agent-team-mail"),
@@ -1665,7 +1666,7 @@ poll_interval_secs = 60
             "acme/agent-team-mail",
             &plan.suppression,
         );
-        let health = super::health::read_gh_monitor_health(temp.path(), "atm-dev").unwrap();
+        let health = health::read_gh_monitor_health(temp.path(), "atm-dev").unwrap();
         assert_eq!(health.availability_state, "degraded");
         assert!(
             health
@@ -1679,9 +1680,9 @@ poll_interval_secs = 60
     #[test]
     fn shared_poller_plan_only_recovers_after_headroom_recovery_floor() {
         let temp = TempDir::new().unwrap();
-        super::health::upsert_gh_monitor_health(temp.path(), running_health("atm-dev", "running"))
+        health::upsert_gh_monitor_health(temp.path(), running_health("atm-dev", "running"))
             .unwrap();
-        super::helpers::upsert_gh_monitor_status_for_repo(
+        helpers::upsert_gh_monitor_status_for_repo(
             temp.path(),
             active_monitor_status("atm-dev"),
             Some("acme/agent-team-mail"),
