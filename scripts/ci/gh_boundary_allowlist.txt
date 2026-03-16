@@ -1,8 +1,5 @@
 # Temporary audited exceptions for ARCH-BOUNDARY-001.
 # Format: path:line
-# AT.2 removed the old #809 exception from crates/atm-ci-monitor/src/github_provider.rs:173
-# by moving provider-owned GitHub execution into the gh plugin/provider layer.
-crates/atm-daemon/src/plugins/issues/github.rs:31
-scripts/dev-daemon-smoke.py:117
-scripts/dev-daemon-smoke.py:131
-scripts/dev-daemon-smoke.py:145
+# AT.4 removed the old #812 and #813 exceptions by routing issues-plugin GitHub
+# execution through the gh plugin/provider layer and replacing smoke harness raw
+# `gh` shell calls with ATM-owned surfaces.

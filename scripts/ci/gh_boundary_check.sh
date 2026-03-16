@@ -28,7 +28,8 @@ while IFS= read -r match; do
 done < <(grep -nH -E '^[[:space:]]*agent-team-mail-ci-monitor(\.workspace|[[:space:]]*=)' "$ROOT/crates/atm-core/Cargo.toml" | cut -d: -f1,2 | sed "s#^$ROOT/##" || true)
 
 fail=0
-for match in "${matches[@]}"; do
+for match in "${matches[@]-}"; do
+  [[ -z "$match" ]] && continue
   if grep -Fxq "$match" "$ALLOWLIST"; then
     echo "allowlisted ARCH-BOUNDARY-001 exception: $match"
     continue

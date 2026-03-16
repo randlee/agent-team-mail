@@ -35,6 +35,7 @@ pub use gh_command_routing::{
     normalize_report_review_decision, normalize_review_status, summarize_ci_rollup,
     validate_gh_cli_prerequisites,
 };
+pub(crate) use github_provider::run_plugin_owned_gh_subprocess;
 pub use github_provider::{
     GitHubActionsProvider, run_attributed_gh_command, run_attributed_gh_command_with_ids,
 };
