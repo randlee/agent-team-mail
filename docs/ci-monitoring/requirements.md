@@ -519,3 +519,91 @@ implementation are prohibited for `gh_monitor` behavior because they bypass:
 
 Existing bypass helpers must be eliminated or rerouted through the attributed
 provider path during Phase AO.
+
+### GH-CI-FR-46 Hard GitHub execution firewall
+
+ATM must enforce one mandatory execution firewall between a requested GitHub
+operation and the actual `gh` subprocess call.
+
+Requirements:
+- every real `gh` subprocess invocation for `gh_monitor`, `atm gh ...` command
+  paths, repo-state refresh, and GitHub budget/rate auditing must pass through
+  one canonical adapter
+- that adapter must make the allow/deny decision before launching `gh`
+- direct `Command::new("gh")` execution outside the canonical adapter is a
+  blocking violation for these flows
+- blocked requests must fail loudly with a machine-readable reason rather than
+  silently degrading into an untracked subprocess path
+
+### GH-CI-FR-47 GitHub execution ledger
+
+ATM must emit a complete local execution ledger for real `gh` subprocess calls.
+
+The execution ledger is the token-correlated source of truth and must record
+every allowed and blocked GitHub call attempt with at least:
+- `call_id`
+- timestamp
+- team
+- repo
+- runtime kind
+- daemon PID
+- executable path
+- caller/subsystem
+- poller key when applicable
+- exact argv / subcommand
+- lifecycle state
+- `in_flight`
+- budget/rate snapshot before and after when available
+- duration
+- success/failure or block reason
+
+If GitHub token consumption moves, a matching execution-ledger record must
+exist or the call path is considered a firewall bypass defect.
+
+### GH-CI-FR-48 GitHub info/freshness ledger
+
+ATM must also emit a separate information/freshness ledger for GitHub-backed
+status requests.
+
+Purpose:
+- show what info the caller requested
+- show whether ATM answered from cache or required a live refresh
+- show how stale the returned data was
+- show when policy/budget/lifecycle prevented a live refresh
+
+Required fields:
+- `request_id`
+- caller/subsystem
+- requested info type
+- team/repo/ref scope
+- cache hit vs live refresh
+- cache age / staleness
+- degraded/denied reason when a live refresh is blocked
+- linked `call_id` values for any real `gh` subprocesses triggered by that
+  request
+
+### GH-CI-FR-49 Lifecycle suppression of GitHub polling
+
+The shared repo poller must not continue issuing GitHub calls when monitor
+lifecycle state is not actively running.
+
+Requirements:
+- lifecycle `stopped` forbids new shared-poller `gh` calls
+- lifecycle `draining` forbids starting new poll cycles while existing in-flight
+  work drains
+- stop/restart control paths must suspend, clear, or otherwise prevent
+  lingering active monitor records from keeping the shared poller alive
+- `in_flight` accounting must reflect only work that is still permitted to poll
+
+### GH-CI-FR-50 Per-monitor cap and global headroom policy
+
+GitHub monitor budgeting must include both per-monitor pacing and global token
+headroom protection.
+
+Requirements:
+- define a per-active-monitor maximum call cadence or budget envelope
+- define a global headroom floor below which shared polling pauses or degrades
+  instead of continuing at normal cadence
+- the policy must distinguish single-monitor smoke expectations from
+  multi-monitor/shared-poller expectations
+- the chosen thresholds and constants must be documented and testable
