@@ -13,7 +13,9 @@ use agent_team_mail_core::gh_monitor_observability::{GhCliObserverContext, build
 use anyhow::Result;
 use tracing::warn;
 
+#[cfg(all(test, unix))]
 const INITIAL_POLL_INTERVAL_SECS: u64 = 5;
+#[cfg(all(test, unix))]
 const SUBSEQUENT_POLL_INTERVAL_SECS: u64 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
