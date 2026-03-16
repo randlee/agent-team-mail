@@ -96,6 +96,8 @@ struct Summary {
     has_critical: bool,
     counts: FindingCounts,
     #[serde(skip_serializing_if = "Option::is_none")]
+    uptime_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     daemon_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     install_milestone: Option<String>,
@@ -322,6 +324,7 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
 
     // Check 1: daemon health (lock/socket/PID/status coherence)
     findings.extend(check_daemon_health(home_dir));
+    findings.extend(check_daemon_ownership_mismatch(home_dir));
     findings.extend(check_plugin_init_failures(home_dir));
 
     // Check 2 + 3 + 4: session/roster/mailbox integrity
@@ -365,6 +368,7 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
         generated_at: now.to_rfc3339(),
         has_critical: counts.critical > 0,
         counts,
+        uptime_secs: read_daemon_status_uptime_secs(home_dir),
         daemon_version: None,
         install_milestone: read_active_install_milestone(),
     };
@@ -1132,6 +1136,47 @@ fn check_plugin_init_failures(home_dir: &Path) -> Vec<Finding> {
     findings
 }
 
+fn check_daemon_ownership_mismatch(home_dir: &Path) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let Some(metadata) = read_daemon_lock_metadata(home_dir) else {
+        return findings;
+    };
+
+    let expected_home = fs::canonicalize(home_dir)
+        .unwrap_or_else(|_| home_dir.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    if !metadata.owner.home_scope.trim().is_empty() && metadata.owner.home_scope != expected_home {
+        findings.push(finding(
+            Severity::Warn,
+            "daemon_health",
+            "DAEMON_OWNERSHIP_MISMATCH",
+            format!(
+                "Daemon ownership mismatch: lock metadata home_scope='{}' expected='{}'",
+                metadata.owner.home_scope, expected_home
+            ),
+        ));
+    }
+
+    let pid_path = home_dir.join(".atm/daemon/atm-daemon.pid");
+    if let Ok(raw_pid) = fs::read_to_string(&pid_path)
+        && let Ok(pid_from_file) = raw_pid.trim().parse::<u32>()
+        && pid_from_file != metadata.pid
+    {
+        findings.push(finding(
+            Severity::Warn,
+            "daemon_health",
+            "DAEMON_OWNERSHIP_MISMATCH",
+            format!(
+                "Daemon ownership mismatch: pid file ({pid_from_file}) != lock metadata ({})",
+                metadata.pid
+            ),
+        ));
+    }
+
+    findings
+}
+
 fn read_daemon_status(home_dir: &Path) -> DaemonStatusSnapshot {
     let status_path = daemon_status_path_for(home_dir);
     let Ok(raw) = fs::read_to_string(&status_path) else {
@@ -1146,6 +1191,13 @@ fn read_daemon_status(home_dir: &Path) -> DaemonStatusSnapshot {
         plugins: Vec::new(),
         logging: LoggingHealthSnapshot::default(),
     })
+}
+
+fn read_daemon_status_uptime_secs(home_dir: &Path) -> Option<u64> {
+    let status_path = daemon_status_path_for(home_dir);
+    let raw = fs::read_to_string(status_path).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+    value.get("uptime_secs").and_then(serde_json::Value::as_u64)
 }
 
 fn read_active_install_milestone() -> Option<String> {
@@ -1173,9 +1225,8 @@ where
     F: Fn(&str) -> anyhow::Result<Option<Vec<CanonicalMemberState>>>,
 {
     let mut findings = Vec::new();
-    let (daemon_states, query_unreachable, unreachable_reason): (
+    let (daemon_states, unreachable_reason): (
         HashMap<String, CanonicalMemberState>,
-        bool,
         Option<String>,
     ) = match query_states(team) {
         Ok(Some(states)) => (
@@ -1183,19 +1234,16 @@ where
                 .into_iter()
                 .map(|s| (s.agent.clone(), s))
                 .collect::<HashMap<_, _>>(),
-            false,
             None,
         ),
         Ok(None) => (
             HashMap::new(),
-            true,
             Some(format!(
                 "Daemon team-scoped state query unavailable for team '{team}'"
             )),
         ),
         Err(err) => (
             HashMap::new(),
-            true,
             Some(format!(
                 "Daemon team-scoped state query failed for team '{team}': {err}"
             )),
@@ -1271,24 +1319,6 @@ where
                     ),
                 ))
             }
-            _ if member.is_active == Some(true) && query_unreachable => findings.push(finding(
-                Severity::Warn,
-                "pid_session_reconciliation",
-                "ACTIVE_WITHOUT_SESSION",
-                format!(
-                    "Member '{}' has activity hint isActive=true but daemon state query unavailable",
-                    member.name
-                ),
-            )),
-            _ if member.is_active == Some(true) && daemon_state.is_none() => findings.push(finding(
-                Severity::Warn,
-                "pid_session_reconciliation",
-                "ACTIVE_WITHOUT_SESSION",
-                format!(
-                    "Member '{}' has activity hint isActive=true but no daemon state record found",
-                    member.name
-                ),
-            )),
             _ => {}
         }
     }
@@ -1759,6 +1789,9 @@ fn render_human(report: &DoctorReport) -> String {
     ));
     if let Some(version) = &report.summary.daemon_version {
         out.push_str(&format!("Daemon version: {version}\n"));
+    }
+    if let Some(uptime_secs) = report.summary.uptime_secs {
+        out.push_str(&format!("Daemon uptime: {uptime_secs}s\n"));
     }
     if let Some(milestone) = &report.summary.install_milestone {
         out.push_str(&format!("Install milestone: {milestone}\n"));
@@ -2529,7 +2562,7 @@ mod tests {
     }
 
     #[test]
-    fn check_pid_session_reconciliation_query_error_maps_to_active_without_session() {
+    fn check_pid_session_reconciliation_query_error_only_reports_daemon_unreachable() {
         let cfg = TeamConfig {
             name: "atm-dev".to_string(),
             description: None,
@@ -2543,14 +2576,12 @@ mod tests {
         let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
             Err(anyhow::anyhow!("daemon unavailable"))
         });
-        assert!(findings.iter().any(|f| {
-            f.code == "ACTIVE_WITHOUT_SESSION" && f.message.contains("query unavailable")
-        }));
         assert!(findings.iter().any(|f| f.code == "DAEMON_UNREACHABLE"));
+        assert!(!findings.iter().any(|f| f.code == "ACTIVE_WITHOUT_SESSION"));
     }
 
     #[test]
-    fn check_pid_session_reconciliation_query_none_maps_to_daemon_unreachable() {
+    fn check_pid_session_reconciliation_query_none_only_reports_daemon_unreachable() {
         let cfg = TeamConfig {
             name: "atm-dev".to_string(),
             description: None,
@@ -2568,7 +2599,7 @@ mod tests {
                 .iter()
                 .any(|f| f.code == "DAEMON_UNREACHABLE" && f.message.contains("unavailable"))
         );
-        assert!(findings.iter().any(|f| f.code == "ACTIVE_WITHOUT_SESSION"));
+        assert!(!findings.iter().any(|f| f.code == "ACTIVE_WITHOUT_SESSION"));
     }
 
     #[test]
@@ -2843,6 +2874,48 @@ mod tests {
     }
 
     #[test]
+    fn read_daemon_status_uptime_secs_reads_existing_status_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon_dir = tmp.path().join(".atm/daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+        fs::write(
+            daemon_dir.join("status.json"),
+            r#"{"timestamp":"2026-03-02T00:00:00Z","pid":42,"version":"0.44.1","uptime_secs":123,"plugins":[],"teams":[]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(read_daemon_status_uptime_secs(tmp.path()), Some(123));
+    }
+
+    #[test]
+    fn check_daemon_ownership_mismatch_reports_home_scope_drift() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon_dir = tmp.path().join(".atm/daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+        fs::write(
+            daemon_dir.join("daemon.lock.meta.json"),
+            r#"{
+  "pid": 42,
+  "runtime_kind": "dev",
+  "build_profile": "release",
+  "executable_path": "/tmp/atm-daemon",
+  "home_scope": "/tmp/other-home",
+  "version": "0.44.1",
+  "written_at": "2026-03-02T00:00:00Z"
+}"#,
+        )
+        .unwrap();
+
+        let findings = check_daemon_ownership_mismatch(tmp.path());
+        assert!(
+            findings.iter().any(|f| {
+                f.code == "DAEMON_OWNERSHIP_MISMATCH" && f.message.contains("/tmp/other-home")
+            }),
+            "expected home-scope mismatch finding, got: {findings:?}"
+        );
+    }
+
+    #[test]
     #[serial]
     fn check_daemon_health_reports_competing_live_pid_from_touch_sidecar() {
         let _guard = EnvGuard::isolate(OVERRIDE_ENV_KEYS);
@@ -3109,6 +3182,7 @@ mod tests {
                     warn: 1,
                     info: 0,
                 },
+                uptime_secs: Some(42),
                 daemon_version: Some("0.44.1".to_string()),
                 install_milestone: Some("0.44.2".to_string()),
             },
@@ -3149,6 +3223,7 @@ mod tests {
         };
         let rendered = render_human(&report);
         assert!(rendered.contains("Model"));
+        assert!(rendered.contains("Daemon uptime: 42s"));
         let members_idx = rendered.find("Members:").unwrap();
         let findings_idx = rendered.find("Findings (ordered by severity):").unwrap();
         assert!(members_idx < findings_idx);
@@ -3205,6 +3280,7 @@ mod tests {
                     warn: 0,
                     info: 0,
                 },
+                uptime_secs: Some(42),
                 daemon_version: Some("0.44.1".to_string()),
                 install_milestone: Some("0.44.2".to_string()),
             },
@@ -3268,6 +3344,10 @@ mod tests {
         assert_eq!(
             value["log_window"]["elapsed_secs"],
             serde_json::Value::Number(60u64.into())
+        );
+        assert_eq!(
+            value["summary"]["uptime_secs"],
+            serde_json::Value::Number(42u64.into())
         );
         assert!(
             value.get("logging").is_none(),
@@ -3334,6 +3414,7 @@ mod tests {
                     warn: 0,
                     info: 0,
                 },
+                uptime_secs: None,
                 daemon_version: Some("0.44.1".to_string()),
                 install_milestone: Some("0.44.2".to_string()),
             },
@@ -3385,6 +3466,7 @@ mod tests {
                     warn: 0,
                     info: 0,
                 },
+                uptime_secs: None,
                 daemon_version: Some("0.44.1".to_string()),
                 install_milestone: Some("0.44.2".to_string()),
             },
@@ -3445,6 +3527,7 @@ mod tests {
                     warn: 0,
                     info: 0,
                 },
+                uptime_secs: None,
                 daemon_version: Some("0.44.5".to_string()),
                 install_milestone: Some("0.44.5-dev.1".to_string()),
             },
