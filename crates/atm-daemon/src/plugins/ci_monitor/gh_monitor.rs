@@ -9,7 +9,7 @@ use super::helpers::upsert_gh_monitor_status_for_repo;
 use super::provider::CiProvider;
 use super::routing::{notify_merge_conflict, resolve_ci_alert_routing};
 use super::types::{CiMonitorRequest, CiMonitorStatus, CiMonitorTargetKind, GhAlertTargets};
-use agent_team_mail_core::gh_monitor_observability::{GhCliObserverContext, build_gh_cli_observer};
+use agent_team_mail_ci_monitor::{GhCliObserverContext, build_gh_cli_observer};
 use anyhow::Result;
 use tracing::warn;
 
@@ -285,10 +285,13 @@ fn provider_for_repo(
         .split_once('/')
         .ok_or_else(|| anyhow::anyhow!("invalid owner/repo scope for gh command: {owner_repo}"))?;
     let observer = build_gh_cli_observer(GhCliObserverContext {
-        home: home.to_path_buf(),
-        team: team.to_string(),
-        repo: owner_repo.to_string(),
-        runtime: "atm-daemon".to_string(),
+        lifecycle_state: Some("running".to_string()),
+        ..GhCliObserverContext::new(
+            home.to_path_buf(),
+            team.to_string(),
+            owner_repo.to_string(),
+            "atm-daemon".to_string(),
+        )
     });
     Ok(GitHubActionsProvider::new(owner.to_string(), repo.to_string()).with_observer(observer))
 }

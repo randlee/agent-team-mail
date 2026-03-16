@@ -342,6 +342,7 @@ impl CiProvider for GitHubActionsProvider {
             ledger_home: None,
             team: None,
             runtime: None,
+            poller_key: None,
         };
         self.run_gh_with_metadata(metadata).await
     }
@@ -447,6 +448,7 @@ mod tests {
             ledger_home: None,
             team: None,
             runtime: None,
+            poller_key: None,
         };
 
         let err = GitHubActionsProvider::run_gh_with_metadata_blocking(

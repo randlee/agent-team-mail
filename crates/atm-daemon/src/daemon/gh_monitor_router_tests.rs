@@ -16,8 +16,8 @@ use crate::plugins::ci_monitor::types::{
     CiMonitorRequest, CiMonitorStatus, CiMonitorTargetKind, GhAlertTargets, GhMonitorHealthUpdate,
 };
 use agent_team_mail_ci_monitor::repo_state::write_repo_state;
+use agent_team_mail_ci_monitor::update_gh_repo_state_in_flight;
 use agent_team_mail_ci_monitor::{GhRepoStateFile, GhRepoStateRecord, GhRuntimeOwner};
-use agent_team_mail_core::gh_monitor_observability::update_gh_repo_state_in_flight;
 // These router tests still serialize because EnvGuard mutates process-wide
 // ATM_HOME/PATH while fake gh scripts and repo-state files are exercised.
 use serial_test::serial;

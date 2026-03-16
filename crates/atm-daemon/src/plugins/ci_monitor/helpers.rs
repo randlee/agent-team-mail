@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use agent_team_mail_ci_monitor::consts::{
     GH_MONITOR_HEADROOM_FLOOR, GH_MONITOR_HEADROOM_RECOVERY_FLOOR,
 };
-use agent_team_mail_core::daemon_client::isolated_runtime_allows_live_github;
 #[cfg(unix)]
-use agent_team_mail_core::gh_monitor_observability::read_gh_repo_state_record;
+use agent_team_mail_ci_monitor::read_gh_repo_state_record;
+use agent_team_mail_core::daemon_client::isolated_runtime_allows_live_github;
 #[cfg(unix)]
 use anyhow::Result;
 

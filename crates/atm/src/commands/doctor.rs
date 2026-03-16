@@ -1,5 +1,11 @@
 //! `atm doctor` — daemon/team health diagnostics.
 
+use agent_team_mail_ci_monitor::{
+    GhCliObserverContext, RateLimitUpdate, emit_gh_info_denied, emit_gh_info_live_refresh,
+    emit_gh_info_requested, emit_gh_info_served_from_cache, gh_repo_state_cache_age_secs,
+    new_gh_execution_call_id, new_gh_info_request_id, read_gh_repo_state,
+    run_attributed_gh_command_with_ids, update_gh_repo_state_rate_limit,
+};
 use anyhow::{Context, Result};
 use clap::Args;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -14,12 +20,6 @@ use agent_team_mail_core::daemon_client::{
     query_team_member_states, read_daemon_lock_metadata,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
-use agent_team_mail_core::gh_monitor_observability::{
-    GhCliObserverContext, RateLimitUpdate, emit_gh_info_denied, emit_gh_info_live_refresh,
-    emit_gh_info_requested, emit_gh_info_served_from_cache, gh_repo_state_cache_age_secs,
-    new_gh_execution_call_id, new_gh_info_request_id, read_gh_repo_state,
-    run_attributed_gh_command_with_ids, update_gh_repo_state_rate_limit,
-};
 use agent_team_mail_core::log_reader::{LogFilter, LogReader};
 use agent_team_mail_core::pid::is_pid_alive;
 use agent_team_mail_core::schema::TeamConfig;
@@ -419,15 +419,15 @@ fn build_gh_rate_limit_audit(home_dir: &Path, team: &str) -> Result<Option<GhRat
     if !repo_scope.contains('/') {
         anyhow::bail!("invalid owner/repo scope in gh repo-state: {repo_scope}");
     }
-    let observer_ctx = GhCliObserverContext {
-        home: home_dir.to_path_buf(),
-        team: team.to_string(),
-        repo: repo_scope.to_string(),
-        runtime: "atm".to_string(),
-    };
+    let observer_ctx = GhCliObserverContext::new(
+        home_dir.to_path_buf(),
+        team.to_string(),
+        repo_scope.to_string(),
+        "atm".to_string(),
+    );
     let request_id = new_gh_info_request_id();
     let call_id = new_gh_execution_call_id();
-    emit_gh_info_requested(&observer_ctx, &request_id, "gh_api_rate_limit");
+    emit_gh_info_requested(&observer_ctx, &request_id, "gh_api_rate_limit", None, None);
     if let Some(cached_rate_limit) = team_records
         .iter()
         .filter_map(|record| record.rate_limit.as_ref().map(|_| record))
@@ -438,6 +438,8 @@ fn build_gh_rate_limit_audit(home_dir: &Path, team: &str) -> Result<Option<GhRat
             &request_id,
             "gh_api_rate_limit",
             gh_repo_state_cache_age_secs(cached_rate_limit),
+            None,
+            None,
         );
     }
     let output = match run_attributed_gh_command_with_ids(
@@ -450,7 +452,14 @@ fn build_gh_rate_limit_audit(home_dir: &Path, team: &str) -> Result<Option<GhRat
         call_id.clone(),
     ) {
         Ok(output) => {
-            emit_gh_info_live_refresh(&observer_ctx, &request_id, "gh_api_rate_limit", &call_id);
+            emit_gh_info_live_refresh(
+                &observer_ctx,
+                &request_id,
+                "gh_api_rate_limit",
+                &call_id,
+                None,
+                None,
+            );
             output
         }
         Err(err) => {
@@ -459,6 +468,8 @@ fn build_gh_rate_limit_audit(home_dir: &Path, team: &str) -> Result<Option<GhRat
                 &request_id,
                 "gh_api_rate_limit",
                 &err.to_string(),
+                None,
+                None,
             );
             return Err(err).context("gh api rate_limit failed via attributed provider path");
         }

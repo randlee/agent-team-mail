@@ -32,6 +32,10 @@ pub struct GhLedgerRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executable_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub caller: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub info_type: Option<String>,
@@ -41,6 +45,8 @@ pub struct GhLedgerRecord {
     pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub poller_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lifecycle_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -57,6 +63,12 @@ pub struct GhLedgerRecord {
     pub rate_limit_reset_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_age_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_hit: Option<bool>,
+    #[serde(default)]
+    pub degraded: bool,
+    #[serde(default)]
+    pub denied: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub linked_call_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -82,11 +94,14 @@ impl GhLedgerRecord {
             team: None,
             repo: None,
             runtime: None,
+            daemon_pid: None,
+            executable_path: None,
             caller: None,
             info_type: None,
             argv: None,
             branch: None,
             reference: None,
+            poller_key: None,
             lifecycle_state: None,
             in_flight: None,
             budget_used_in_window: None,
@@ -95,6 +110,9 @@ impl GhLedgerRecord {
             rate_limit_limit: None,
             rate_limit_reset_at: None,
             cache_age_secs: None,
+            cache_hit: None,
+            degraded: false,
+            denied: false,
             linked_call_ids: None,
             duration_ms: None,
             result: None,

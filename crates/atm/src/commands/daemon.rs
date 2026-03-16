@@ -823,14 +823,7 @@ fn execute_status(args: StatusArgs) -> Result<()> {
 
     let status: DaemonStatus =
         serde_json::from_str(&content).context("Failed to parse daemon status file")?;
-    let mut status = status;
     let touch_rows = read_daemon_touch_rows(&home_dir);
-    if !touch_rows.is_empty() {
-        status.teams = touch_rows
-            .into_iter()
-            .map(StatusTeamEntry::Row)
-            .collect::<Vec<_>>();
-    }
 
     // Check if status is stale (timestamp older than 2x poll interval = 60 seconds)
     let stale_threshold_secs = 60;
@@ -875,47 +868,35 @@ fn execute_status(args: StatusArgs) -> Result<()> {
             println!("         The daemon may not be running.");
         }
 
-        if !status.teams.is_empty() {
+        if !touch_rows.is_empty() {
             println!();
-            println!("Teams ({}):", status.teams.len());
-            if status
-                .teams
+            println!("Teams ({}):", touch_rows.len());
+            let team_width = touch_rows
                 .iter()
-                .all(|team| matches!(team, StatusTeamEntry::Row(_)))
-            {
-                let team_width = status
-                    .teams
-                    .iter()
-                    .filter_map(|team| match team {
-                        StatusTeamEntry::Row(row) => Some(row.team.len()),
-                        StatusTeamEntry::Name(_) => None,
-                    })
-                    .max()
-                    .unwrap_or(4)
-                    .max(4);
+                .map(|row| row.team.len())
+                .max()
+                .unwrap_or(4)
+                .max(4);
+            println!(
+                "  {team:<team_width$}  {pid:<7}  STARTED_AT",
+                team = "TEAM",
+                pid = "PID",
+                team_width = team_width
+            );
+            for row in &touch_rows {
                 println!(
-                    "  {team:<team_width$}  {pid:<7}  STARTED_AT",
-                    team = "TEAM",
-                    pid = "PID",
+                    "  {team:<team_width$}  {pid:<7}  {started_at}",
+                    team = row.team,
+                    pid = row.pid,
+                    started_at = row.started_at,
                     team_width = team_width
                 );
-                for team in &status.teams {
-                    if let StatusTeamEntry::Row(row) = team {
-                        println!(
-                            "  {team:<team_width$}  {pid:<7}  {started_at}",
-                            team = row.team,
-                            pid = row.pid,
-                            started_at = row.started_at,
-                            team_width = team_width
-                        );
-                    }
-                }
-            } else {
-                for team in &status.teams {
-                    if let StatusTeamEntry::Name(name) = team {
-                        println!("  - {}", name);
-                    }
-                }
+            }
+        } else if !status.teams.is_empty() {
+            println!();
+            println!("Teams ({}):", status.teams.len());
+            for team in &status.teams {
+                println!("  - {}", team);
             }
         }
 
@@ -1063,16 +1044,9 @@ struct DaemonStatus {
     #[serde(default)]
     owner: RuntimeOwnerMetadata,
     plugins: Vec<PluginStatus>,
-    teams: Vec<StatusTeamEntry>,
+    teams: Vec<String>,
     #[serde(default)]
     logging: LoggingHealthSnapshot,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-enum StatusTeamEntry {
-    Name(String),
-    Row(DaemonTouchRow),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
