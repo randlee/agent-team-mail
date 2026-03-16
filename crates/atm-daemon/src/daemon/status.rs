@@ -189,7 +189,8 @@ impl StatusWriter {
                 .context("Failed to fsync daemon touch placeholder")?;
         }
 
-        atomic_swap(&self.touch_path, &tmp_path).context("Failed to atomically swap daemon touch snapshot")?;
+        atomic_swap(&self.touch_path, &tmp_path)
+            .context("Failed to atomically swap daemon touch snapshot")?;
         if tmp_path.exists() {
             std::fs::remove_file(&tmp_path).context("Failed to remove daemon touch temp file")?;
         }
@@ -357,7 +358,10 @@ mod tests {
             snapshot["atm-dev"].binary,
             temp_dir.path().join("atm-daemon").to_string_lossy()
         );
-        assert_eq!(snapshot["qa-team"].started_at, snapshot["atm-dev"].started_at);
+        assert_eq!(
+            snapshot["qa-team"].started_at,
+            snapshot["atm-dev"].started_at
+        );
     }
 
     #[test]

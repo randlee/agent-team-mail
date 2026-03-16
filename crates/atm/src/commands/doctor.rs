@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    AgentSummary, CanonicalMemberState, DaemonTouchSnapshot, SessionQueryResult,
-    daemon_is_running, daemon_lock_path, daemon_pid_path, daemon_socket_path,
-    daemon_status_path_for, daemon_touch_path_for, query_list_agents, query_list_agents_for_team,
-    query_session_for_team, query_team_member_states, read_daemon_lock_metadata,
+    AgentSummary, CanonicalMemberState, DaemonTouchSnapshot, SessionQueryResult, daemon_is_running,
+    daemon_lock_path, daemon_pid_path, daemon_socket_path, daemon_status_path_for,
+    daemon_touch_path_for, query_list_agents, query_list_agents_for_team, query_session_for_team,
+    query_team_member_states, read_daemon_lock_metadata,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::gh_monitor_observability::{
@@ -2867,9 +2867,11 @@ mod tests {
         unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
 
         let findings = check_daemon_health(tmp.path());
-        assert!(findings
-            .iter()
-            .any(|finding| finding.code == "COMPETING_DAEMON_DETECTED"));
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.code == "COMPETING_DAEMON_DETECTED")
+        );
     }
 
     #[test]
