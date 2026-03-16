@@ -1731,9 +1731,9 @@ real-daemon harness.
 5. `daemon-spawn-qa` blocks any non-canonical daemon launch vector, including
    Rust, shell, Python, CI, and helper scripts.
 
-**Dependency graph**: AQ.1 → AQ.2; AQ.3 and AQ.4 may run in parallel; AQ.5
-starts once the AP daemon-spawn findings are known and merge-forwards from
-`integrate/phase-AQ` as needed.
+**Dependency graph**: AQ.1 and AQ.2 may run in parallel; AQ.3 and AQ.4 may run
+in parallel; AQ.5 starts once the AP daemon-spawn findings are known and
+merge-forwards from `integrate/phase-AQ` as needed.
 
 ---
 

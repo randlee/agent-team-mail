@@ -43,6 +43,7 @@ Prioritize:
    - `**/tests/**/*.rs`
    - `**/*tests*.rs`
    - `**/src/**/*.rs`
+   - `crates/atm-agent-mcp/`
    - shell scripts under `scripts/`
    - helper scripts under `.claude/`, `qa/`, `.github/`, and test-support dirs
 2. Search for high-risk patterns including:
@@ -56,11 +57,14 @@ Prioritize:
    - `current_exe`
    - `ensure_daemon_running`
    - `spawn`
+   - `adopt_running_pid`
    - `exec`
    - `Popen`
    - `subprocess`
    - `kill`
    - `Drop`
+   - discarded adoption results such as `let _ = .*adopt`
+   - result-discard idioms such as `.ok()`
    - shell backgrounding (`&`)
    - launch wrappers that delegate to another script or binary
 3. Read the exact helper and caller code to determine whether the path affects:
@@ -74,6 +78,10 @@ Prioritize:
 If you find a non-Rust helper or script that launches `atm-daemon` directly or
 indirectly without delegating to the canonical tracked harness, treat it as the
 same blocking class of finding as a Rust-side rogue spawn.
+
+Discarded daemon-adoption results are also blocking-class findings. If a path
+uses `adopt_running_pid`, `adopt_registered_pid`, or a successor API and then
+throws away the result, report it as a teardown-gap or harness-bypass finding.
 
 ## Output
 
