@@ -31,11 +31,12 @@ use super::types::{
     CiMonitorStatus, CiMonitorStatusRequest, CiMonitorTargetKind, GhAlertTargets,
     GhMonitorConfigState, GhMonitorHealthUpdate,
 };
-use agent_team_mail_core::context::GitProvider as GitProviderType;
-use agent_team_mail_core::gh_monitor_observability::{
-    GhCliObserverContext, build_gh_cli_observer, read_gh_repo_state_record,
-    update_gh_repo_state_in_flight,
+use agent_team_mail_ci_monitor::{
+    GhCliObserverContext, build_gh_cli_observer, emit_gh_info_requested,
+    emit_gh_info_served_from_cache, gh_repo_state_cache_age_secs, new_gh_info_request_id,
+    read_gh_repo_state_record, update_gh_repo_state_in_flight,
 };
+use agent_team_mail_core::context::GitProvider as GitProviderType;
 use agent_team_mail_core::home::teams_root_dir_for;
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
@@ -132,10 +133,14 @@ async fn refresh_shared_repo_state(
         .split_once('/')
         .ok_or_else(|| anyhow::anyhow!("invalid owner/repo scope for gh command: {owner_repo}"))?;
     let observer = build_gh_cli_observer(GhCliObserverContext {
-        home: home.to_path_buf(),
-        team: team.to_string(),
-        repo: owner_repo.to_string(),
-        runtime: "atm-daemon".to_string(),
+        poller_key: Some(shared_poller_key(team, owner_repo)),
+        lifecycle_state: Some("running".to_string()),
+        ..GhCliObserverContext::new(
+            home.to_path_buf(),
+            team.to_string(),
+            owner_repo.to_string(),
+            "atm-daemon".to_string(),
+        )
     });
     let provider =
         GitHubActionsProvider::new(owner.to_string(), repo.to_string()).with_observer(observer);
@@ -393,10 +398,13 @@ pub(crate) fn create_provider_from_registry(
 
     if provider_name == "github" {
         let observer = build_gh_cli_observer(GhCliObserverContext {
-            home: home.to_path_buf(),
-            team: team.to_string(),
-            repo: format!("{owner}/{repo}"),
-            runtime: "atm-daemon".to_string(),
+            lifecycle_state: Some("running".to_string()),
+            ..GhCliObserverContext::new(
+                home.to_path_buf(),
+                team.to_string(),
+                format!("{owner}/{repo}"),
+                "atm-daemon".to_string(),
+            )
         });
         return Ok(Box::new(
             GitHubActionsProvider::new(owner, repo).with_observer(observer),
@@ -940,6 +948,28 @@ pub(crate) async fn control_request(
     if let Some(repo_scope) = repo_scope.as_deref()
         && let Ok(Some(repo_state)) = read_gh_repo_state_record(home, &control.team, repo_scope)
     {
+        let observer_ctx = GhCliObserverContext::new(
+            home.to_path_buf(),
+            control.team.clone(),
+            repo_scope.to_string(),
+            "atm-daemon".to_string(),
+        );
+        let request_id = new_gh_info_request_id();
+        emit_gh_info_requested(
+            &observer_ctx,
+            &request_id,
+            "gh_monitor_control_health",
+            None,
+            None,
+        );
+        emit_gh_info_served_from_cache(
+            &observer_ctx,
+            &request_id,
+            "gh_monitor_control_health",
+            gh_repo_state_cache_age_secs(&repo_state),
+            None,
+            None,
+        );
         apply_repo_state_to_health(&mut health, &repo_state);
     }
     Ok(health)
@@ -975,6 +1005,22 @@ pub(crate) fn health_request(
     if let Some(repo_scope) = repo_scope.or(config_state.owner_repo.as_deref())
         && let Ok(Some(repo_state)) = read_gh_repo_state_record(home, team, repo_scope)
     {
+        let observer_ctx = GhCliObserverContext::new(
+            home.to_path_buf(),
+            team.to_string(),
+            repo_scope.to_string(),
+            "atm-daemon".to_string(),
+        );
+        let request_id = new_gh_info_request_id();
+        emit_gh_info_requested(&observer_ctx, &request_id, "gh_monitor_health", None, None);
+        emit_gh_info_served_from_cache(
+            &observer_ctx,
+            &request_id,
+            "gh_monitor_health",
+            gh_repo_state_cache_age_secs(&repo_state),
+            None,
+            None,
+        );
         apply_repo_state_to_health(&mut health, &repo_state);
     }
     Ok(health)
@@ -1035,4 +1081,121 @@ pub(crate) fn status_request(
         "MONITOR_NOT_FOUND",
         "No gh monitor state found for requested target",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::health_request;
+    use agent_team_mail_ci_monitor::{
+        GhObservedCall, GhRateLimitSnapshot, GhRepoStateFile, GhRepoStateRecord, GhRuntimeOwner,
+        read_gh_observability_records, repo_state::write_repo_state,
+    };
+    use chrono::{Duration, Utc};
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn write_plugin_config(workdir: &std::path::Path, team: &str) {
+        fs::create_dir_all(workdir).unwrap();
+        fs::write(
+            workdir.join(".atm.toml"),
+            format!(
+                r#"[core]
+default_team = "{team}"
+identity = "team-lead"
+
+[plugins.gh_monitor]
+enabled = true
+provider = "github"
+team = "{team}"
+agent = "gh-monitor"
+owner = "acme"
+repo = "agent-team-mail"
+poll_interval_secs = 60
+"#
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn health_request_emits_cache_freshness_without_live_gh_call() {
+        let temp = TempDir::new().unwrap();
+        let workdir = temp.path().join("workdir");
+        write_plugin_config(&workdir, "atm-dev");
+        let now = Utc::now();
+        write_repo_state(
+            temp.path(),
+            &GhRepoStateFile {
+                records: vec![GhRepoStateRecord {
+                    team: "atm-dev".to_string(),
+                    repo: "acme/agent-team-mail".to_string(),
+                    updated_at: now.to_rfc3339(),
+                    cache_expires_at: (now + Duration::minutes(5)).to_rfc3339(),
+                    last_refresh_at: Some((now - Duration::seconds(30)).to_rfc3339()),
+                    budget_limit_per_hour: 100,
+                    budget_used_in_window: 3,
+                    budget_window_started_at: now.to_rfc3339(),
+                    budget_warning_threshold: 75,
+                    warning_emitted_at: None,
+                    blocked: false,
+                    in_flight: 0,
+                    idle_poll_interval_secs: 300,
+                    active_poll_interval_secs: 60,
+                    branch_ref_counts: Vec::new(),
+                    last_call: Some(GhObservedCall {
+                        action: "gh_pr_list".to_string(),
+                        branch: None,
+                        reference: None,
+                        duration_ms: 12,
+                        success: true,
+                        error: None,
+                        at: now.to_rfc3339(),
+                    }),
+                    rate_limit: Some(GhRateLimitSnapshot {
+                        remaining: 4990,
+                        limit: 5000,
+                        updated_at: now.to_rfc3339(),
+                        reset_at: None,
+                        source: "cache".to_string(),
+                    }),
+                    owner: Some(GhRuntimeOwner {
+                        runtime: "dev".to_string(),
+                        executable_path: "fake-atm-daemon".to_string(),
+                        home_scope: temp.path().display().to_string(),
+                        pid: std::process::id(),
+                    }),
+                }],
+            },
+        )
+        .unwrap();
+
+        let health = health_request(
+            temp.path(),
+            "atm-dev",
+            Some(workdir.to_string_lossy().as_ref()),
+            Some("acme/agent-team-mail"),
+        )
+        .unwrap();
+        assert_eq!(health.owner_repo.as_deref(), Some("acme/agent-team-mail"));
+
+        let records = read_gh_observability_records(temp.path()).unwrap();
+        assert!(
+            records
+                .iter()
+                .any(|record| record.action == "gh_info_requested"),
+            "health requests must emit gh_info_requested"
+        );
+        assert!(
+            records
+                .iter()
+                .any(|record| record.action == "gh_info_served_from_cache"),
+            "health requests with cached repo-state must emit gh_info_served_from_cache"
+        );
+        assert!(
+            !records
+                .iter()
+                .any(|record| record.action == "gh_call_started"),
+            "cache-only health requests must not emit gh_call_started"
+        );
+    }
 }

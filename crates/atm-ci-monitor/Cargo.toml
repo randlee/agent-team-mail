@@ -16,14 +16,22 @@ name = "agent_team_mail_ci_monitor"
 path = "src/lib.rs"
 
 [dependencies]
+agent-team-mail-core.workspace = true
+anyhow.workspace = true
+chrono = "0.4"
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4"] }
 
 [features]
 default = []
 test-support = []
 
 [dev-dependencies]
+tempfile = "3.13"
 tokio = { version = "1", features = ["full", "test-util"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
