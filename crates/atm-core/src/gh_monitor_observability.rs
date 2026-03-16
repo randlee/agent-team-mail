@@ -266,10 +266,6 @@ fn emit_call_event(
         "gh_subcommand".to_string(),
         json!(format_gh_subcommand(&outcome.metadata)),
     );
-    extra.insert(
-        "action_subcommand".to_string(),
-        json!(format_gh_subcommand(&outcome.metadata)),
-    );
     if let Some(owner) = record.owner.as_ref() {
         extra.insert("binary_path".to_string(), json!(owner.executable_path));
         extra.insert("pid".to_string(), json!(owner.pid));
@@ -351,10 +347,6 @@ fn emit_rate_limit_event(
     );
     extra.insert(
         "gh_subcommand".to_string(),
-        json!(format_gh_subcommand(metadata)),
-    );
-    extra.insert(
-        "action_subcommand".to_string(),
         json!(format_gh_subcommand(metadata)),
     );
     if let Some(owner) = record.owner.as_ref() {

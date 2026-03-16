@@ -36,6 +36,9 @@ pub const SHORT_DEADLINE_SECS: u64 = 2;
 /// Brief settle delay before re-reading daemon metadata written asynchronously after startup.
 pub const DAEMON_METADATA_SETTLE_MS: u64 = 150;
 
+/// Default TTL for explicitly created isolated runtimes.
+pub const ISOLATED_RUNTIME_DEFAULT_TTL_SECS: u64 = 600;
+
 /// Default graceful drain timeout for gh monitor stop/restart operations.
 ///
 /// Keep this below common interactive command timeouts so lifecycle control

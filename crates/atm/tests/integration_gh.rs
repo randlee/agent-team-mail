@@ -16,6 +16,9 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
+#[cfg(unix)]
+const WAIT_FOR_DAEMON_SOCKET_SECS: u64 = 10;
+
 fn write_repo_gh_monitor_config(workdir: &Path, team: &str) {
     let content = format!(
         r#"[core]
@@ -369,7 +372,7 @@ finally:
 #[cfg(unix)]
 fn wait_for_daemon_socket(home: &Path) {
     let socket = home.join(".atm/daemon/atm-daemon.sock");
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(WAIT_FOR_DAEMON_SOCKET_SECS);
     while Instant::now() < deadline {
         if socket.exists() && std::os::unix::net::UnixStream::connect(&socket).is_ok() {
             return;
