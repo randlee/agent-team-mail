@@ -894,10 +894,9 @@ fn execute_status(args: StatusArgs) -> Result<()> {
                     .unwrap_or(4)
                     .max(4);
                 println!(
-                    "  {team:<team_width$}  {pid:<7}  {started_at}",
+                    "  {team:<team_width$}  {pid:<7}  STARTED_AT",
                     team = "TEAM",
                     pid = "PID",
-                    started_at = "STARTED_AT",
                     team_width = team_width
                 );
                 for team in &status.teams {
