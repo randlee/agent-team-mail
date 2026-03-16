@@ -112,6 +112,8 @@ def kill_dev_daemons():
 
 
 def gh_rate():
+    # TODO(ARCH-BOUNDARY-001, #813): replace direct gh shell calls in this
+    # manual smoke harness with ATM-owned surfaces or an explicit reviewed helper.
     result = run("gh api rate_limit", env=os.environ.copy(), timeout=20)
     data = parse_json(result["stdout"]) or {}
     core = ((data.get("resources") or {}).get("core") or {}) if isinstance(data, dict) else {}
@@ -123,6 +125,8 @@ def gh_rate():
 
 
 def latest_pr():
+    # TODO(ARCH-BOUNDARY-001, #813): replace direct gh shell calls in this
+    # manual smoke harness with ATM-owned surfaces or an explicit reviewed helper.
     result = run(
         "gh pr list --state open --limit 10 --json number,state",
         env=os.environ.copy(),
@@ -135,6 +139,8 @@ def latest_pr():
 
 
 def latest_run():
+    # TODO(ARCH-BOUNDARY-001, #813): replace direct gh shell calls in this
+    # manual smoke harness with ATM-owned surfaces or an explicit reviewed helper.
     result = run(
         "gh run list --limit 10 --json databaseId,status,headBranch",
         env=os.environ.copy(),

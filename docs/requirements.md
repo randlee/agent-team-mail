@@ -2535,6 +2535,18 @@ operators and teammates.
 Detailed GitHub CI monitor requirements are defined in:
 - `docs/ci-monitoring/requirements.md`
 
+Ownership and presence contract:
+- All GitHub-specific behavior behind `atm gh` is owned by the `gh_monitor`
+  plugin/provider layer.
+- Non-plugin crates may parse arguments, advertise capability state, and route
+  requests, but must not implement GitHub semantics, execute raw `gh`, or own
+  GitHub provider logic.
+- If the gh plugin/provider is not present in the build, the `atm gh`
+  namespace must not be advertised in normal help/capability UX.
+- If the gh plugin/provider is present in the build but not enabled/loaded for
+  the current runtime/team, only the bootstrap/management surface may be
+  advertised and accepted.
+
 Core command contract:
 - `atm gh init` validates prerequisites (`gh` CLI presence/auth where required),
   writes/updates `[plugins.gh_monitor]` config, and enables the plugin.
@@ -2566,13 +2578,19 @@ Operator status UX contract:
   - the minimum config keys required (team/agent/repo/monitor recipients) and
     the config file path where those keys are expected.
 - JSON output must expose the same status fields without lossy conversion.
-- When `gh_monitor` is disabled/unconfigured, only the following command paths
-  are allowed:
+- When `gh_monitor` is present in the build but disabled/unconfigured, only the
+  following command paths are allowed:
   - `atm gh`
+  - `atm gh status`
   - `atm gh init`
   - help output (`atm gh --help`, `atm gh init --help`)
   Other `atm gh ...` operations must fail fast with an actionable message to run
   `atm gh init`.
+- If the gh plugin/provider is not present in the build at all:
+  - `atm gh` must not appear in normal help/capability listings,
+  - daemon capability advertisement must omit the namespace entirely,
+  - explicit invocation may fail with a stable "feature not installed" error,
+    but must not pretend the plugin is merely disabled.
 - When `gh_monitor` is enabled, `atm gh` must show:
   - current configuration summary,
   - lifecycle/availability status,
@@ -2639,6 +2657,50 @@ Informed by analysis of the `coding_agent_session_search` connector system (14-p
 - Structured error reporting (not silent swallowing)
 - Stateful plugins (daemon plugins maintain connections, sync cursors, watch handles)
 - Plugin metadata with versioning
+
+### 5.1.1 ARCH-BOUNDARY-001 GitHub Boundary Enforcement
+
+`ARCH-BOUNDARY-001` is a hard crate-boundary rule for all GitHub-specific code.
+
+Required rules:
+- All GitHub-specific code must live exclusively in the gh-monitor provider
+  layer (`crates/atm-daemon/src/plugins/ci_monitor/` or a successor provider
+  crate that is explicitly documented as the gh-monitor provider layer).
+- `atm-ci-monitor` must contain only provider-agnostic CI-monitor abstractions:
+  observer traits, firewall traits, ledger interfaces, and budget/freshness
+  policy that is not GitHub-specific.
+- `atm-core` must contain zero provider knowledge:
+  - no imports of plugin/provider crates,
+  - no GitHub-specific types,
+  - no raw `gh` subprocess invocations.
+- Dependency direction is one-way:
+  - providers/plugins -> `atm-core`
+  - providers/plugins -> `atm-ci-monitor`
+  - never `atm-core` -> providers/plugins
+- Any `Command::new("gh")` call outside the gh-monitor provider layer is a hard
+  boundary violation.
+- CI must enforce `ARCH-BOUNDARY-001` with a grep gate that fails on new or
+  untracked violations.
+- Boundary-enforcement work must include a repository-wide search for live
+  violations across crates, shell/Python scripts, CI helpers, and support
+  tooling.
+- Boundary-elimination implementation sprints must leave the repository
+  buildable and testable at the end of each sprint; no sprint may rely on a
+  temporary broken intermediate state being merged first.
+- Any surviving violation found by the repository-wide search must be either
+  removed in the active implementation sprint or mapped to a named follow-up
+  sprint with file-level ownership and explicit QA review scope.
+- Boundary enforcement work must run a repository-wide violation search and map
+  every live violation to a named removal sprint.
+
+Temporary audited exceptions are permitted only when:
+- the violating line is explicitly annotated with
+  `TODO(ARCH-BOUNDARY-001)`,
+- the migration is tracked by a GitHub issue, and
+- the location is listed in the audited allowlist used by the CI grep gate.
+
+See [docs/arch-boundary.md](./arch-boundary.md) for the crate-boundary map,
+allowed import matrix, audited exceptions, and migration checklist.
 
 ### 5.2 Plugin Trait
 
@@ -2794,13 +2856,19 @@ temp/atm/<plugin-name>/
 
 - Each plugin may own one top-level CLI namespace.
 - The namespace owner is exclusive; no other plugin or core command may claim it.
+- The owning plugin/provider layer must process the namespace's external-system
+  behavior. Non-plugin crates may route/bootstrap, but must not implement that
+  behavior directly.
 - Each plugin namespace must provide:
   - `<namespace>` status entrypoint (no subcommand),
   - `<namespace> init` setup/enable command,
   - help output.
-- If a plugin is not configured/enabled for the current team, only the three
-  surfaces above are available. All other namespace operations must fail fast
-  with a stable, actionable init guidance error.
+- If a plugin is compiled in but not configured/enabled for the current team,
+  only the bootstrap/management surfaces above are available. All other
+  namespace operations must fail fast with a stable, actionable init guidance
+  error.
+- If a plugin is not compiled in/present, its namespace must not be advertised
+  in normal help or capability-discovery UX.
 - `<namespace>` status output must always make disabled/unconfigured state
   explicit and list only currently available actions.
 - If plugin is enabled, `<namespace>` status output must include current

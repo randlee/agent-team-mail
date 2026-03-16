@@ -167,6 +167,9 @@ fn run_gh_subprocess(args: &[String]) -> Result<String, CiProviderError> {
     #[cfg(test)]
     GH_SUBPROCESS_COUNT.fetch_add(1, Ordering::SeqCst);
 
+    // TODO(ARCH-BOUNDARY-001, #809): move GitHubActionsProvider subprocess
+    // execution into the gh-monitor provider layer so atm-ci-monitor remains
+    // provider-agnostic.
     let output = Command::new("gh").args(args).output().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             CiProviderError::provider("gh CLI not found. Install from https://cli.github.com/")
