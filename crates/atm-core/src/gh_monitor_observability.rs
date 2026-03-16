@@ -14,16 +14,14 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::consts::{
+    GH_ACTIVE_POLL_INTERVAL_SECS, GH_BUDGET_LIMIT_PER_HOUR, GH_IDLE_POLL_INTERVAL_SECS,
+    GH_REPO_STATE_TTL_SECS, GH_WARNING_THRESHOLD,
+};
 use crate::event_log::{EventFields, emit_event_best_effort};
 use crate::io::inbox::inbox_append;
 use crate::schema::InboxMessage;
 use crate::team_config_store::TeamConfigStore;
-
-const GH_BUDGET_LIMIT_PER_HOUR: u64 = 100;
-const GH_WARNING_THRESHOLD: u64 = 50;
-const GH_REPO_STATE_TTL_SECS: i64 = 300;
-const GH_ACTIVE_POLL_INTERVAL_SECS: u64 = 60;
-const GH_IDLE_POLL_INTERVAL_SECS: u64 = 300;
 #[cfg(test)]
 const FAKE_FOREIGN_DAEMON_BINARY: &str = "fake-daemon-binary";
 

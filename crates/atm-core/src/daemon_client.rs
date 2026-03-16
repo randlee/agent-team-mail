@@ -2755,6 +2755,15 @@ mod tests {
             }
             Self { key, old }
         }
+
+        fn unset(key: &'static str) -> Self {
+            let old = std::env::var(key).ok();
+            // SAFETY: test-scoped env mutation guarded by RAII restore in Drop.
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, old }
+        }
     }
 
     impl Drop for EnvGuard {
@@ -2926,9 +2935,7 @@ mod tests {
     fn test_daemon_autostart_flag_parsing() {
         // Unset => enabled (opt-out model).
         {
-            let _guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "");
-            // SAFETY: serialized env mutation in test; guard restores previous value.
-            unsafe { std::env::remove_var("ATM_DAEMON_AUTOSTART") };
+            let _guard = EnvGuard::unset("ATM_DAEMON_AUTOSTART");
             assert!(daemon_autostart_enabled());
         }
 
@@ -3141,15 +3148,35 @@ sleep 10
         let home = tmp.path().to_path_buf();
         let script_path = home.join("fake-daemon.sh");
 
-        let script = r#"#!/bin/sh
+        let script = format!(
+            r#"#!/bin/sh
 set -eu
-home="${ATM_HOME:?}"
+home="${{ATM_HOME:?}}"
 mkdir -p "$home/.atm/daemon"
 mkdir -p "$home/spawn-markers"
 touch "$home/spawn-markers/spawn.$$"
 echo $$ > "$home/.atm/daemon/atm-daemon.pid"
+cat > "$home/.atm/daemon/status.json" <<'EOF'
+{{"pid":$$,"version":"{}"}}
+EOF
+cat > "$home/.atm/daemon/daemon.lock.meta.json" <<'EOF'
+{{
+  "pid": $$,
+  "runtime_kind": "isolated",
+  "build_profile": "release",
+  "executable_path": "{}",
+  "home_scope": "{}",
+  "version": "{}",
+  "written_at": "2026-03-16T00:00:00Z"
+}}
+EOF
 sleep 2
-"#;
+"#,
+            env!("CARGO_PKG_VERSION"),
+            script_path.display(),
+            home.display(),
+            env!("CARGO_PKG_VERSION"),
+        );
         fs::write(&script_path, script).unwrap();
         let mut perms = fs::metadata(&script_path).unwrap().permissions();
         perms.set_mode(0o755);

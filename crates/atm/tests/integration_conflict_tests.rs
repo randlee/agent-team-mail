@@ -71,21 +71,9 @@ impl RuntimeDaemonCleanupGuard {
         }
 
         let pid_path = self.home.join(".atm/daemon/atm-daemon.pid");
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            if let Ok(raw) = fs::read_to_string(&pid_path)
-                && let Ok(pid) = raw.trim().parse::<u32>()
-                && pid > 1
-                && pid_alive(pid as i32)
-            {
-                self.daemon_guard = Some(DaemonProcessGuard::adopt_registered_pid(
-                    pid, daemon_bin, &self.home,
-                ));
-                return Some(pid);
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        None
+        self.daemon_guard =
+            DaemonProcessGuard::adopt_from_pid_file(&pid_path, daemon_bin, &self.home, timeout);
+        self.daemon_guard.as_ref().map(DaemonProcessGuard::pid)
     }
 }
 

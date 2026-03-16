@@ -1,10 +1,14 @@
 //! Shared daemon runtime constants.
 
+use agent_team_mail_core::consts::{
+    GH_ACTIVE_POLL_INTERVAL_SECS, GH_IDLE_POLL_INTERVAL_SECS, GH_MONITOR_DEFAULT_DRAIN_TIMEOUT_SECS,
+};
+
 /// Interval between spool drain passes in the daemon event loop.
 pub const SPOOL_DRAIN_INTERVAL_SECS: u64 = 10;
 
 /// Default drain timeout used when control requests omit an explicit value.
-pub const DEFAULT_DRAIN_TIMEOUT_SECS: u64 = 30;
+pub const DEFAULT_DRAIN_TIMEOUT_SECS: u64 = GH_MONITOR_DEFAULT_DRAIN_TIMEOUT_SECS;
 
 /// Capacity of the watcher-to-dispatch inbox event channel.
 pub const EVENT_CHANNEL_CAPACITY: usize = 100;
@@ -31,10 +35,10 @@ pub const DRAIN_SLEEP_MS: u64 = 250;
 pub const SHARED_POLLER_ERROR_BACKOFF_SECS: u64 = 60;
 
 /// Active shared-poller cadence while at least one monitor is subscribed.
-pub const SHARED_POLLER_ACTIVE_SLEEP_SECS: u64 = 60;
+pub const SHARED_POLLER_ACTIVE_SLEEP_SECS: u64 = GH_ACTIVE_POLL_INTERVAL_SECS;
 
 /// Idle shared-poller cadence when no active monitor subscriptions exist.
-pub const SHARED_POLLER_IDLE_SLEEP_SECS: u64 = 300;
+pub const SHARED_POLLER_IDLE_SLEEP_SECS: u64 = GH_IDLE_POLL_INTERVAL_SECS;
 
 /// Threshold used for elapsed timestamp assertions in hook dedupe tests.
 pub const MIN_ELAPSED_CHECK_MS: u64 = 20;
