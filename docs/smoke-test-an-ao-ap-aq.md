@@ -207,26 +207,36 @@
 
 ---
 
-## CI Token Verification — **Critical**
+## CI Token Verification — Critical
 
-**Purpose**: verify the pre-AQ runaway GH token-consumption regression is eliminated.
+**Purpose**: verify GH token usage stays bounded and explainable.
 **Preconditions**: repo/PR that can be monitored; GH auth available; not already rate-limited.
 
 **Steps**:
-1. Record initial quota:
-   ```bash
-   gh api rate_limit | python3 -c "import json,sys; d=json.load(sys.stdin); c=d['resources']['core']; print('before:', c['remaining'], '/', c['limit'])"
-   ```
-2. Start one monitor: `atm gh --team atm-dev monitor pr <pr-number> --json`
-3. Let it poll for 2–3 cycles (~2–3 minutes at active cadence)
-4. Record quota again with the same command
-5. Stop the monitor and record a short-window quota sample (~5 seconds later)
-6. Confirm no extra dev/test daemons remain
+1. Record initial quota.
+2. Start the monitor sequence under test.
+3. Let it poll for the intended active window.
+4. Record quota again.
+5. Stop the monitor and record a short post-stop sample.
+6. Confirm no extra dev/test daemons remain.
 
-**Expected**: quota decreases by a small bounded amount consistent with one shared poller.
+**Threshold guidance**:
+- **Single fresh monitor smoke**:
+  - the old `2–6` token expectation applies only when one fresh monitor is
+    started and measured in isolation
+  - short post-stop delta should stay near zero (`0–2`)
+- **Full multi-monitor smoke**:
+  - a full AN/AO/AP/AQ smoke can reuse or accumulate multiple in-flight monitor
+    records behind one shared poller
+  - use a broader active-window threshold such as `<= 30` tokens for a
+    five-monitor/full-smoke scenario
+  - short post-stop delta should still remain small and bounded (roughly `<= 5`)
 
-**Pass threshold**: for a 2–3 cycle manual smoke, active-window consumption stays bounded (roughly one shared poller plus startup probes, and no more than about 10 core requests total), and the short post-stop delta stays near zero (0–2 requests).
-**Fail**: quota drops materially faster than one shared poller can explain, or continues falling in the short window after the monitor is stopped.
+**Fail**:
+- active-window usage materially exceeds the calibrated threshold for the
+  scenario under test
+- short post-stop usage continues to fall faster than the bounded threshold
+- token movement cannot be explained by the local GH execution ledger
 
 ---
 
@@ -236,7 +246,7 @@
 - All preflight checks clean
 - Every phase area has at least one representative command path that succeeds end-to-end
 - No rogue dev/test daemons remain after stop/cleanup
-- GH token consumption stays bounded and explainable
+- GH token consumption stays bounded and explainable for the scenario under test
 
 ### FAIL if any of:
 - Any duplicate/rogue daemon appears
@@ -245,4 +255,5 @@
 - Autostart chooses wrong binary or leaves stale lock state
 - GH core quota drops at a runaway rate or continues dropping after monitors stop
 
-> If any FAIL condition triggers: do not publish. Capture the failing command, the process list, and the before/after GH quota numbers.
+> If any FAIL condition triggers: do not publish. Capture the failing command,
+> the process list, and the before/after GH quota numbers.

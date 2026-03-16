@@ -181,6 +181,8 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AJ | Session-ID SSoT Normalization | Canonical `session_id` naming, shared caller resolver, runtime session resolution closure, doctor/session consistency | PLANNED |
 | AK | Mandatory OTel Rollout | Non-optional OTel across in-scope tools with canonical correlation and health/reporting contracts | PLANNED |
 | AQ | Codebase Cleanup + Rogue Daemon Spawn Elimination | Remove cleanup debt from AN/AO/AP reviews, consolidate constants/dead code, and eliminate non-canonical test daemon spawn paths | ACTIVE |
+| AR | Smoke Follow-Up + Lifecycle Timing Corrections | Align drain/client timing, close smoke false negatives, and add the manual dev-daemon smoke protocol/script used to validate AN/AO/AP/AQ end-to-end behavior | COMPLETE |
+| AS | GitHub API Access Limiting | Add a hard `gh` execution firewall, two-layer GitHub observability, bounded poller budgeting, and calibrated smoke thresholds for multi-monitor runs | PLANNED |
 
 ---
 
@@ -1741,6 +1743,82 @@ merge-forwards from `integrate/phase-AQ` as needed.
 Before version bump and publish:
 1. Dogfood on `develop` via `dev-install`.
 2. Publish as the next version bump only after dogfood passes.
+
+---
+
+## 17.26 Phase AR: Smoke Follow-Up + Lifecycle Timing Corrections
+
+**Goal**: Close the smoke-run failures discovered after AQ by aligning lifecycle
+timers, removing smoke false negatives, and adding the canonical manual
+dev-daemon smoke protocol/script used to validate AN/AO/AP/AQ behavior.
+
+**Integration branch**: `integrate/phase-AR`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Branch | Status |
+|---|---|---|---|
+| AR.1 | Drain timeout alignment, const consolidation, daemon harness cleanup, EnvGuard closure | `feature/pAR-s1-code-fixes` | COMPLETE |
+| AR.2 | Smoke script/protocol delivery and AO.2/AP.2 smoke correction | `feature/pAR-s2-smoke-investigation` | COMPLETE |
+
+### Exit Criteria
+1. Client-side stop/restart/drain timeouts no longer fail before the daemon's
+   own bounded drain window.
+2. Smoke failures caused by return-code/readiness mismatches are corrected or
+   reclassified with explicit evidence.
+3. The canonical manual dev-daemon smoke protocol and executable smoke script
+   exist in-repo for AN/AO/AP/AQ verification.
+
+**Dependency graph**: AR.1 → AR.2
+
+### Release Gate
+Before Phase AR is considered complete:
+1. Run the canonical dev-daemon smoke protocol on `develop`.
+2. Verify smoke results identify real lifecycle defects rather than protocol
+   false negatives.
+
+---
+
+## 17.27 Phase AS: GitHub API Access Limiting
+
+**Goal**: add a hard GitHub execution firewall, complete two-layer
+observability, bounded shared-poller budgeting, and calibrated smoke
+thresholds for single-monitor vs multi-monitor runs.
+
+**Integration branch**: `integrate/phase-AS`
+
+**Planning doc**: `docs/phase-as-planning.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Branch | Status |
+|---|---|---|---|
+| AS.0 | Planning and requirements lock | `planning/gh-access-limiting` | COMPLETE (docs-only planning branch) |
+| AS.1 | Hard `gh` execution firewall | `feature/pAS-s1-gh-firewall` | PLANNED |
+| AS.2 | Execution ledger + freshness ledger | `feature/pAS-s2-gh-observability` | PLANNED |
+| AS.3 | Budgeting, headroom, and lifecycle suppression | `feature/pAS-s3-budget-lifecycle` | PLANNED |
+| AS.4 | Smoke threshold calibration + verification | `feature/pAS-s4-smoke-thresholds` | PLANNED |
+
+### Exit Criteria
+1. All in-scope `gh_monitor` / `atm gh` GitHub execution flows pass through one
+   mandatory execution firewall.
+2. Every real `gh` subprocess call is represented in a token-correlated
+   execution ledger.
+3. Every GH-backed info request is represented in a separate cache/freshness
+   ledger with clear degraded/denied reasons.
+4. Shared pollers do not continue issuing GitHub calls after lifecycle enters
+   `stopped` or `draining`.
+5. Smoke guidance distinguishes single-monitor and multi-monitor budget
+   envelopes as documented in `docs/smoke-test-an-ao-ap-aq.md` (updated by
+   AS.4) and remains explainable from local logs.
+
+**Dependency graph**: Phase AR completion → AS.1; AS.1 is foundational; AS.2
+depends on AS.1; AS.3 depends on AS.1 + AS.2; AS.4 depends on AS.2 + AS.3.
+
+### Release Gate
+Before Phase AS is considered complete:
+1. Verify the GH execution ledger explains token movement for a bounded smoke run.
+2. Verify the freshness ledger explains cache-hit, live-refresh, and degraded
+   responses without guessing.
+3. Verify lifecycle `stop` leaves no active shared-poller GitHub traffic.
 
 ---
 
