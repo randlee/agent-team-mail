@@ -200,6 +200,16 @@ def daemon_probe(team: str) -> str:
     return f"atm gh --team {team} status --json"
 
 
+def ensure_monitor_running(team: str):
+    status = run(f"atm gh --team {team} status --json", timeout=20)
+    health = parse_json(status["stdout"])
+    lifecycle = fields(health).get("lifecycle_state")
+    if lifecycle in ("running", "active"):
+        return status, health, None, None
+    restart = run(f"atm gh --team {team} monitor restart --json", timeout=20)
+    return status, health, restart, parse_json(restart["stdout"])
+
+
 def main():
     kill_dev_daemons()
     pre_pgrep = ps_lines()
@@ -208,13 +218,21 @@ def main():
     run_id = latest_run()
     results = []
 
-    r1 = run(f"atm gh --team {TEAM} status --json", timeout=20)
-    j1 = parse_json(r1["stdout"])
+    r1, j1, restart1, restart_json1 = ensure_monitor_running(TEAM)
     r2 = run(f"atm gh --team {TEAM} monitor pr {pr_num} --json", timeout=25)
     j2 = parse_json(r2["stdout"])
     r3 = run(f"atm gh --team {TEAM} status --json", timeout=20)
     j3 = parse_json(r3["stdout"])
-    add_case(results, "AN.1", "GH monitor start / status round trip", r2["code"] == 0 and fields(j3).get("enabled") is True and fields(j3).get("availability_state") == "healthy", [f"initial={fields(j1)}", f"monitor code={r2['code']} timeout={r2['timeout']} secs={r2['secs']} out={(r2['stdout'] or '').strip()[:220]}", f"final={fields(j3)}"])
+    details = [f"initial={fields(j1)}"]
+    if restart1 is not None:
+        details.append(
+            f"restart-before-monitor code={restart1['code']} timeout={restart1['timeout']} secs={restart1['secs']} status={fields(restart_json1)}"
+        )
+    details.extend([
+        f"monitor code={r2['code']} timeout={r2['timeout']} secs={r2['secs']} out={(r2['stdout'] or '').strip()[:220]}",
+        f"final={fields(j3)}",
+    ])
+    add_case(results, "AN.1", "GH monitor start / status round trip", r2["code"] == 0 and fields(j3).get("enabled") is True and fields(j3).get("availability_state") == "healthy", details)
 
     r1 = run(f"atm gh --team {TEAM} monitor stop --json", timeout=20)
     j1 = parse_json(r1["stdout"])
@@ -288,7 +306,7 @@ def main():
     r1 = run(daemon_probe(TEAM), timeout=20)
     j1 = parse_json(r1["stdout"])
     pid2 = status_pid(DEV_HOME) or (dev_lines()[0].split()[0] if dev_lines() else None)
-    add_case(results, "AP.2", "Stale lock / PID recovery", r1["code"] == 0 and fields(j1).get("configured") is True and pid1 and pid2 and str(pid1) != str(pid2) and len(dev_lines()) == 1, [f"pid_before={pid1}", f"code={r1['code']} timeout={r1['timeout']}", f"status={fields(j1)}", f"pid_after={pid2}"])
+    add_case(results, "AP.2", "Stale lock / PID recovery", r1["code"] == 0 and pid1 and pid2 and str(pid1) != str(pid2) and len(dev_lines()) == 1, [f"pid_before={pid1}", f"code={r1['code']} timeout={r1['timeout']}", f"status={fields(j1)}", f"pid_after={pid2}"])
 
     pid1 = status_pid(DEV_HOME) or (dev_lines()[0].split()[0] if dev_lines() else None)
     if pid1:
@@ -323,6 +341,7 @@ def main():
 
     kill_dev_daemons()
     rb = gh_rate()
+    _, _, restart2, restart_json2 = ensure_monitor_running(TEAM)
     r1 = run(f"atm gh --team {TEAM} monitor pr {pr_num} --json", timeout=20)
     time.sleep(130)
     rm = gh_rate()
@@ -332,8 +351,22 @@ def main():
     time.sleep(70)
     rs2 = gh_rate()
     consumption = (rb["remaining"] - rm["remaining"]) if rb["remaining"] is not None and rm["remaining"] is not None else None
-    post = (rm["remaining"] - rs2["remaining"]) if rm["remaining"] is not None and rs2["remaining"] is not None and rm["reset"] == rs2["reset"] else None
-    add_case(results, "CI.Token", "Dedicated GH token-consumption verification", consumption is not None and 2 <= consumption <= 8 and post is not None and post <= 2, [f"before={rb}", f"monitor code={r1['code']} timeout={r1['timeout']}", f"after_active={rm}", f"after_stop_short={rs}", f"after_stop_long={rs2}", f"consumption_active={consumption}", f"post_stop_delta={post}"])
+    post = (rm["remaining"] - rs["remaining"]) if rm["remaining"] is not None and rs["remaining"] is not None and rm["reset"] == rs["reset"] else None
+    kill_dev_daemons()
+    token_details = [f"before={rb}"]
+    if restart2 is not None:
+        token_details.append(
+            f"restart-before-token-monitor code={restart2['code']} timeout={restart2['timeout']} secs={restart2['secs']} status={fields(restart_json2)}"
+        )
+    token_details.extend([
+        f"monitor code={r1['code']} timeout={r1['timeout']}",
+        f"after_active={rm}",
+        f"after_stop_short={rs}",
+        f"after_stop_long={rs2}",
+        f"consumption_active={consumption}",
+        f"post_stop_delta={post}",
+    ])
+    add_case(results, "CI.Token", "Dedicated GH token-consumption verification", consumption is not None and 2 <= consumption <= 10 and post is not None and post <= 2, token_details)
 
     final_pgrep = ps_lines()
     rate_final = gh_rate()

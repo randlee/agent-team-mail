@@ -38,8 +38,9 @@
 **Preconditions**: clean `ATM_HOME`, repo with GH monitor config.
 **Steps**:
 1. `atm gh --team atm-dev status --json`
-2. `atm gh --team atm-dev monitor pr <pr-number> --json`
-3. `atm gh --team atm-dev status --json` again
+2. If lifecycle state is `stopped` from prior cleanup, run `atm gh --team atm-dev monitor restart --json` first.
+3. `atm gh --team atm-dev monitor pr <pr-number> --json`
+4. `atm gh --team atm-dev status --json` again
 
 **Expected**: initial status is idle/untracked, monitor command succeeds, final status shows active monitor state with repo/team metadata.
 **Pass**: monitor starts and status becomes actionable JSON without fallback errors.
@@ -219,12 +220,13 @@
 2. Start one monitor: `atm gh --team atm-dev monitor pr <pr-number> --json`
 3. Let it poll for 2–3 cycles (~2–3 minutes at active cadence)
 4. Record quota again with the same command
-5. Stop the monitor; confirm no extra dev/test daemons remain
+5. Stop the monitor and record a short-window quota sample (~5 seconds later)
+6. Confirm no extra dev/test daemons remain
 
 **Expected**: quota decreases by a small bounded amount consistent with one shared poller.
 
-**Pass threshold**: for a 2–3 cycle manual smoke, expected consumption stays in the low single digits. Token use should be approximately one GH request per active poll cycle plus any explicit startup/status probes.
-**Fail**: quota drops materially faster than one shared poller can explain, or quota continues falling after the monitor is stopped.
+**Pass threshold**: for a 2–3 cycle manual smoke, active-window consumption stays bounded (roughly one shared poller plus startup probes, and no more than about 10 core requests total), and the short post-stop delta stays near zero (0–2 requests).
+**Fail**: quota drops materially faster than one shared poller can explain, or continues falling in the short window after the monitor is stopped.
 
 ---
 
