@@ -375,7 +375,7 @@ pub(crate) fn repo_scope_matches(configured: &str, expected: &str) -> bool {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{emit_merge_conflict_alert, resolve_ci_alert_routing};
+    use super::emit_merge_conflict_alert;
     use crate::plugins::ci_monitor::types::{CiMonitorStatus, CiMonitorTargetKind, GhAlertTargets};
     use agent_team_mail_core::schema::InboxMessage;
     use tempfile::TempDir;
