@@ -15,11 +15,14 @@ use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
 use agent_team_mail_core::team_config_store::TeamConfigStore;
 use agent_team_mail_daemon::plugins::ci_monitor::{
-    GH_MONITOR_REPORT_SCHEMA_VERSION, GhCiRollup, GhMergeReport, GhMonitorReportPr,
-    GhMonitorReviewReport, GhPrListSummary, GhPrReportSummary, build_merge_report,
-    build_pr_list_summary, build_pr_report_summary, extract_check_reports, extract_review_reports,
-    normalize_merge_status, normalize_report_review_decision, summarize_ci_rollup,
-    validate_gh_cli_prerequisites,
+    GH_MONITOR_REPORT_SCHEMA_VERSION, GhCiRollup, GhPrListSummary, GhPrReportSummary,
+    build_pr_list_summary, build_pr_report_summary, validate_gh_cli_prerequisites,
+};
+#[cfg(test)]
+use agent_team_mail_daemon::plugins::ci_monitor::{
+    GhMergeReport, GhMonitorReportPr, GhMonitorReviewReport, build_merge_report,
+    extract_check_reports, extract_review_reports, normalize_merge_status,
+    normalize_report_review_decision, summarize_ci_rollup,
 };
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};

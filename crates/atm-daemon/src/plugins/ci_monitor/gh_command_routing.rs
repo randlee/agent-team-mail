@@ -412,7 +412,7 @@ pub fn validate_gh_cli_prerequisites() -> Result<()> {
 }
 
 pub fn extract_check_reports(entries: &[serde_json::Value]) -> Vec<GhMonitorCheckReport> {
-    entries
+    let mut checks: Vec<GhMonitorCheckReport> = entries
         .iter()
         .map(|entry| GhMonitorCheckReport {
             name: extract_check_name(entry),
@@ -420,36 +420,62 @@ pub fn extract_check_reports(entries: &[serde_json::Value]) -> Vec<GhMonitorChec
             conclusion: extract_string_field(entry, &["conclusion"]),
             started_at: extract_string_field(entry, &["startedAt", "started_at"]),
             completed_at: extract_string_field(entry, &["completedAt", "completed_at"]),
-            run_url: extract_string_field(entry, &["detailsUrl", "details_url"]),
+            run_url: extract_string_field(entry, &["detailsUrl", "targetUrl", "url", "htmlUrl"]),
         })
-        .collect()
+        .collect();
+    checks.sort_by(|a, b| a.name.cmp(&b.name));
+    checks
 }
 
 pub fn extract_review_reports(entries: &[serde_json::Value]) -> Vec<GhMonitorReviewReport> {
-    entries
+    let mut reviews: Vec<GhMonitorReviewReport> = entries
         .iter()
-        .map(|entry| GhMonitorReviewReport {
-            reviewer: entry
+        .map(|entry| {
+            let reviewer = entry
                 .get("author")
                 .and_then(|author| author.get("login"))
-                .and_then(|login| login.as_str())
-                .unwrap_or("unknown")
-                .to_string(),
-            state: normalize_review_status(entry.get("state").and_then(|state| state.as_str())),
-            submitted_at: extract_string_field(entry, &["submittedAt", "submitted_at"]),
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .or_else(|| {
+                    entry
+                        .get("authorLogin")
+                        .and_then(|value| value.as_str())
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                })
+                .unwrap_or("unknown-reviewer")
+                .to_string();
+            let state = extract_string_field(entry, &["state"])
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_else(|| "unknown".to_string());
+            GhMonitorReviewReport {
+                reviewer,
+                state,
+                submitted_at: extract_string_field(entry, &["submittedAt", "submitted_at"]),
+            }
         })
-        .collect()
+        .collect();
+    reviews.sort_by(|a, b| a.reviewer.cmp(&b.reviewer));
+    reviews
 }
 
 fn extract_check_name(entry: &serde_json::Value) -> String {
-    extract_string_field(entry, &["name", "context", "workflowName"])
-        .unwrap_or_else(|| "unknown".to_string())
+    extract_string_field(entry, &["name", "context"])
+        .or_else(|| extract_string_field(entry, &["displayTitle"]))
+        .unwrap_or_else(|| "unknown-check".to_string())
 }
 
 fn extract_check_status(entry: &serde_json::Value) -> String {
-    extract_string_field(entry, &["status"])
-        .or_else(|| extract_string_field(entry, &["state"]))
-        .unwrap_or_else(|| "unknown".to_string())
+    extract_string_field(entry, &["status", "state"])
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_else(|| {
+            if extract_string_field(entry, &["conclusion"]).is_some() {
+                "completed".to_string()
+            } else {
+                "unknown".to_string()
+            }
+        })
 }
 
 fn extract_string_field(entry: &serde_json::Value, keys: &[&str]) -> Option<String> {
@@ -470,40 +496,53 @@ pub fn build_merge_report(
 ) -> GhMergeReport {
     let mergeable_normalized = normalize_mergeable(mergeable);
     let merge_state_status_normalized = normalize_merge_status(merge_state_status);
-
-    let mut blocking_reasons = Vec::new();
-    let mut advisory_reasons = Vec::new();
-
+    let mut blocking_reasons: Vec<String> = Vec::new();
+    let mut advisory_reasons: Vec<String> = Vec::new();
     if draft {
-        advisory_reasons.push("pull request is still a draft".to_string());
+        blocking_reasons.push("PR is draft".to_string());
     }
-
-    if review_decision.eq_ignore_ascii_case("changes_requested") {
-        blocking_reasons.push("changes requested".to_string());
-    } else if review_decision.eq_ignore_ascii_case("review_required") {
-        advisory_reasons.push("review required".to_string());
+    if mergeable_normalized == "unknown" {
+        advisory_reasons.push("mergeability is UNKNOWN (transient)".to_string());
+    } else if mergeable_normalized == "conflicting" {
+        blocking_reasons.push("mergeability is CONFLICTING".to_string());
     }
-
+    if matches!(
+        merge_state_status_normalized.as_str(),
+        "dirty" | "blocked" | "behind"
+    ) {
+        blocking_reasons.push(format!(
+            "mergeStateStatus={}",
+            merge_state_status_normalized.to_ascii_uppercase()
+        ));
+    } else if matches!(
+        merge_state_status_normalized.as_str(),
+        "pending" | "unknown"
+    ) {
+        advisory_reasons.push(format!(
+            "mergeStateStatus={}",
+            merge_state_status_normalized.to_ascii_uppercase()
+        ));
+    }
     if ci.fail > 0 {
-        blocking_reasons.push("failing required checks".to_string());
+        blocking_reasons.push("CI has failing checks".to_string());
     } else if ci.pending > 0 {
-        advisory_reasons.push("checks still pending".to_string());
+        blocking_reasons.push("CI checks still pending".to_string());
     }
-
-    if merge_state_status_normalized == "dirty" {
-        blocking_reasons.push("merge conflict".to_string());
-    } else if merge_state_status_normalized == "blocked" {
-        blocking_reasons.push("merge blocked by branch protection".to_string());
-    } else if merge_state_status_normalized == "behind" {
-        advisory_reasons.push("branch is behind target".to_string());
+    if review_decision == "changes_requested" {
+        blocking_reasons.push("review decision is CHANGES_REQUESTED".to_string());
+    } else if review_decision == "review_required" {
+        advisory_reasons.push("review approval still required".to_string());
+    } else if review_decision == "unknown" {
+        advisory_reasons.push("review decision unavailable".to_string());
+    } else if review_decision == "none" {
+        advisory_reasons.push("no explicit review decision".to_string());
     }
-
-    let status = if mergeable_normalized == "mergeable" && blocking_reasons.is_empty() {
-        "mergeable"
-    } else if !blocking_reasons.is_empty() {
+    let status = if !blocking_reasons.is_empty() {
         "blocked"
-    } else {
+    } else if mergeable_normalized == "unknown" {
         "indeterminate"
+    } else {
+        "ready"
     };
 
     GhMergeReport {
@@ -516,39 +555,45 @@ pub fn build_merge_report(
 }
 
 pub fn summarize_ci_rollup(entries: &[serde_json::Value]) -> GhCiRollup {
-    let mut rollup = GhCiRollup {
-        state: "pass".to_string(),
-        total: 0,
-        pass: 0,
-        fail: 0,
-        pending: 0,
-        skip: 0,
-        neutral: 0,
-    };
+    let mut total = 0_u64;
+    let mut pass = 0_u64;
+    let mut fail = 0_u64;
+    let mut pending = 0_u64;
+    let mut skip = 0_u64;
+    let mut neutral = 0_u64;
 
     for entry in entries {
-        let Some(outcome) = classify_check_outcome(entry) else {
-            continue;
-        };
-        rollup.total += 1;
-        match outcome {
-            GhCheckOutcome::Pass => rollup.pass += 1,
-            GhCheckOutcome::Fail => rollup.fail += 1,
-            GhCheckOutcome::Pending => rollup.pending += 1,
-            GhCheckOutcome::Skip => rollup.skip += 1,
-            GhCheckOutcome::Neutral => rollup.neutral += 1,
+        if let Some(outcome) = classify_check_outcome(entry) {
+            total += 1;
+            match outcome {
+                GhCheckOutcome::Pass => pass += 1,
+                GhCheckOutcome::Fail => fail += 1,
+                GhCheckOutcome::Pending => pending += 1,
+                GhCheckOutcome::Skip => skip += 1,
+                GhCheckOutcome::Neutral => neutral += 1,
+            }
         }
     }
-
-    rollup.state = if rollup.fail > 0 {
-        "fail".to_string()
-    } else if rollup.pending > 0 {
-        "pending".to_string()
+    let state = if total == 0 {
+        "none"
+    } else if fail > 0 {
+        "fail"
+    } else if pending > 0 {
+        "pending"
+    } else if pass + skip + neutral == total {
+        "pass"
     } else {
-        "pass".to_string()
+        "mixed"
     };
-
-    rollup
+    GhCiRollup {
+        state: state.to_string(),
+        total,
+        pass,
+        fail,
+        pending,
+        skip,
+        neutral,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -561,40 +606,55 @@ enum GhCheckOutcome {
 }
 
 fn classify_check_outcome(entry: &serde_json::Value) -> Option<GhCheckOutcome> {
-    let status =
-        extract_string_field(entry, &["status", "state"]).unwrap_or_else(|| "unknown".to_string());
-    let conclusion = extract_string_field(entry, &["conclusion"]);
-
-    if status.eq_ignore_ascii_case("queued")
-        || status.eq_ignore_ascii_case("in_progress")
-        || status.eq_ignore_ascii_case("pending")
-    {
-        return Some(GhCheckOutcome::Pending);
+    let conclusion = entry
+        .get("conclusion")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty());
+    if let Some(conclusion) = conclusion.as_deref() {
+        return Some(match conclusion {
+            "success" => GhCheckOutcome::Pass,
+            "failure" | "timed_out" | "startup_failure" | "action_required" => GhCheckOutcome::Fail,
+            "skipped" => GhCheckOutcome::Skip,
+            "cancelled" | "neutral" => GhCheckOutcome::Neutral,
+            _ => GhCheckOutcome::Neutral,
+        });
     }
-
-    match conclusion
-        .as_deref()
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("success") => Some(GhCheckOutcome::Pass),
-        Some("failure") | Some("timed_out") | Some("cancelled") | Some("action_required") => {
-            Some(GhCheckOutcome::Fail)
+    let status = entry
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            entry
+                .get("state")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+        });
+    status.as_deref().map(|status| match status {
+        "success" => GhCheckOutcome::Pass,
+        "failure" | "error" | "timed_out" | "startup_failure" | "action_required" => {
+            GhCheckOutcome::Fail
         }
-        Some("neutral") => Some(GhCheckOutcome::Neutral),
-        Some("skipped") | Some("stale") => Some(GhCheckOutcome::Skip),
-        Some(_) => Some(GhCheckOutcome::Neutral),
-        None => Some(GhCheckOutcome::Pending),
-    }
+        "queued" | "in_progress" | "pending" | "requested" | "waiting" => GhCheckOutcome::Pending,
+        "skipped" => GhCheckOutcome::Skip,
+        "completed" => GhCheckOutcome::Neutral,
+        "cancelled" | "neutral" => GhCheckOutcome::Neutral,
+        _ => GhCheckOutcome::Neutral,
+    })
 }
 
 pub fn normalize_review_status(value: Option<&str>) -> String {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_ascii_lowercase())
-        .map(|value| value.replace('_', " "))
-        .unwrap_or_else(|| "unknown".to_string())
+    match value.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(raw) => match raw.to_ascii_uppercase().as_str() {
+            "APPROVED" => "approved".to_string(),
+            "CHANGES_REQUESTED" => "changes_requested".to_string(),
+            "REVIEW_REQUIRED" => "review_required".to_string(),
+            _ => raw.to_ascii_lowercase(),
+        },
+        None => "unknown".to_string(),
+    }
 }
 
 pub fn normalize_report_review_decision(
@@ -610,29 +670,21 @@ pub fn normalize_report_review_decision(
 }
 
 fn normalize_mergeable(value: Option<&str>) -> String {
-    match value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("mergeable") => "mergeable".to_string(),
-        Some("conflicting") => "conflicting".to_string(),
-        Some("unknown") => "unknown".to_string(),
-        Some(other) => other.to_string(),
+    match value.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(raw) => match raw.to_ascii_uppercase().as_str() {
+            "MERGEABLE" => "mergeable".to_string(),
+            "CONFLICTING" => "conflicting".to_string(),
+            "UNKNOWN" => "unknown".to_string(),
+            _ => raw.to_ascii_lowercase(),
+        },
         None => "unknown".to_string(),
     }
 }
 
 pub fn normalize_merge_status(value: Option<&str>) -> String {
-    match value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("unknown") => "pending".to_string(),
-        Some(other) => other.to_string(),
-        None => "pending".to_string(),
+    match value.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(raw) if raw.eq_ignore_ascii_case("unknown") => "pending".to_string(),
+        Some(raw) => raw.to_ascii_lowercase(),
+        None => "unknown".to_string(),
     }
 }
