@@ -1,7 +1,8 @@
 # Phase AU — Daemon Spawn Authorization
 
 **Integration branch**: `integrate/phase-AU` off `develop`
-**Prerequisites**: Phase AT merged to `develop`
+**Prerequisites**: Phase AT merged to `develop` AND `docs/arch-boundary.md`
+records the zero-violation audit state
 **Status**: PLANNED
 
 ## Overview
@@ -60,7 +61,8 @@ teardown. Clean shutdown by the owning test fixture remains mandatory.
 - review can point to one launcher implementation as the only valid path, and
   that implementation lives in the dedicated launcher crate (or explicitly
   approved temporary `agent_team_mail_daemon::spawn_auth` fallback), with zero
-  launcher ownership in `atm-core`
+  launcher ownership in `atm-core` and zero launcher ownership in
+  `atm-ci-monitor`
 - token schema is documented and stable enough for daemon-side validation
 - every known daemon launch site is mapped to migrate to the canonical launcher
 

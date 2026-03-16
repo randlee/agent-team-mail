@@ -3169,7 +3169,9 @@ The core has no awareness of whether a team member is local or remote.
   `agent_team_mail_daemon::spawn_auth` module in `atm-daemon`. Private
   `ensure_daemon_running` copies, helper-local `Command::new("atm-daemon")`,
   shell wrappers, or other direct spawn paths are forbidden unless they
-  delegate to that launcher.
+  delegate to that launcher. `atm-core` and `atm-ci-monitor` are explicitly
+  forbidden from owning launcher code, launch-token issuance, or daemon
+  lifecycle authority.
 - **Mandatory launch-token firewall**: the daemon MUST reject startup unless
   the caller presents a valid launch token issued by the canonical launcher.
   Missing, invalid, expired, replayed, or mismatched launch tokens MUST cause
