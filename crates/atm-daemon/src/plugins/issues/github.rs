@@ -3,8 +3,8 @@
 use super::provider::IssueProvider;
 use super::types::{Issue, IssueComment, IssueFilter, IssueLabel, IssueState};
 use crate::plugin::PluginError;
+use crate::plugins::ci_monitor::run_plugin_owned_gh_subprocess;
 use serde::Deserialize;
-use std::process::Command;
 
 /// GitHub issue provider that uses the `gh` CLI
 #[derive(Debug)]
@@ -21,42 +21,14 @@ impl GitHubProvider {
 
     /// Execute a `gh` command and return stdout
     async fn run_gh(&self, args: &[&str]) -> Result<String, PluginError> {
-        // NOT_MONITORED_PATH / TODO(ARCH-BOUNDARY-001, #812): the issues plugin
-        // still executes raw `gh` outside the gh-monitor provider layer. Keep
-        // this audited exception until the shared GitHub execution abstraction
-        // is applied here.
-        // Run gh command in a blocking task
+        // Delegate to the gh plugin/provider layer so the issues plugin does
+        // not own raw GitHub CLI execution.
         let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         tokio::task::spawn_blocking(move || {
-            let output = Command::new("gh").args(&args_owned).output().map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    PluginError::Provider {
-                        message: "gh CLI not found. Install from https://cli.github.com/"
-                            .to_string(),
-                        source: Some(Box::new(e)),
-                    }
-                } else {
-                    PluginError::Provider {
-                        message: format!("Failed to execute gh: {e}"),
-                        source: Some(Box::new(e)),
-                    }
-                }
-            })?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(PluginError::Provider {
-                    message: format!("gh command failed: {stderr}"),
-                    source: None,
-                });
-            }
-
-            let stdout = String::from_utf8(output.stdout).map_err(|e| PluginError::Provider {
-                message: format!("Invalid UTF-8 in gh output: {e}"),
-                source: Some(Box::new(e)),
-            })?;
-
-            Ok(stdout)
+            run_plugin_owned_gh_subprocess(&args_owned).map_err(|e| PluginError::Provider {
+                message: e.to_string(),
+                source: None,
+            })
         })
         .await
         .map_err(|e| PluginError::Runtime {
