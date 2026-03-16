@@ -9,6 +9,10 @@ use crate::daemon::consts::{
     DEFAULT_DRAIN_TIMEOUT_SECS, DRAIN_SLEEP_MS, SHARED_POLLER_ACTIVE_SLEEP_SECS,
     SHARED_POLLER_ERROR_BACKOFF_SECS, SHARED_POLLER_IDLE_SLEEP_SECS,
 };
+use agent_team_mail_ci_monitor::consts::{
+    GH_MONITOR_HEADROOM_FLOOR, GH_MONITOR_HEADROOM_RECOVERY_FLOOR,
+    GH_MONITOR_PER_ACTIVE_MONITOR_MAX_CALLS,
+};
 
 #[cfg(unix)]
 use super::gh_monitor::{
@@ -20,7 +24,8 @@ use super::github_provider::GitHubActionsProvider;
 use super::health::{apply_repo_state_to_health, set_gh_monitor_health_state};
 use super::helpers::{
     apply_config_state_to_status, count_in_flight_monitors, evaluate_gh_monitor_config,
-    gh_monitor_key, load_gh_monitor_state_map, load_gh_monitor_state_records,
+    gh_monitor_key, lifecycle_state_allows_polling, load_gh_monitor_state_map,
+    load_gh_monitor_state_records, repo_state_polling_suppressed,
 };
 use super::provider::ErasedCiProvider;
 use super::registry::CiProviderRegistryPort;
@@ -29,18 +34,20 @@ use super::routing::{notify_ci_not_started, notify_merge_conflict};
 use super::types::{
     CiMonitorControlRequest, CiMonitorHealth, CiMonitorLifecycleAction, CiMonitorRequest,
     CiMonitorStatus, CiMonitorStatusRequest, CiMonitorTargetKind, GhAlertTargets,
-    GhMonitorConfigState, GhMonitorHealthUpdate,
+    GhMonitorConfigState, GhMonitorHealthUpdate, GhMonitorStateRecord,
 };
 use agent_team_mail_ci_monitor::{
     GhCliObserverContext, build_gh_cli_observer, emit_gh_info_requested,
     emit_gh_info_served_from_cache, gh_repo_state_cache_age_secs, new_gh_info_request_id,
-    read_gh_repo_state_record, update_gh_repo_state_in_flight,
+    read_gh_repo_state_record, update_gh_repo_state_blocked, update_gh_repo_state_in_flight,
 };
 use agent_team_mail_core::context::GitProvider as GitProviderType;
+use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::home::teams_root_dir_for;
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
 use agent_team_mail_core::team_config_store::TeamConfigStore;
+use serde_json::json;
 #[cfg(unix)]
 use std::collections::HashMap;
 #[cfg(unix)]
@@ -121,6 +128,226 @@ fn status_is_terminal(state: &str) -> bool {
 #[cfg(unix)]
 fn status_has_active_subscription(status: &CiMonitorStatus) -> bool {
     !status_is_terminal(&status.state) && status.state != "ci_not_started"
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SharedPollerSuppression {
+    Lifecycle { state: String },
+    Headroom { remaining: u64 },
+    BudgetExhausted { used: u64, limit: u64 },
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+struct SharedPollerPlan {
+    active_records: Vec<GhMonitorStateRecord>,
+    in_flight: u64,
+    sleep_secs: u64,
+    suppression: Option<SharedPollerSuppression>,
+}
+
+#[cfg(unix)]
+fn read_monitor_lifecycle_state(home: &std::path::Path, team: &str) -> String {
+    super::health::read_gh_monitor_health(home, team)
+        .map(|health| health.lifecycle_state)
+        .unwrap_or_else(|_| "running".to_string())
+}
+
+#[cfg(unix)]
+fn shared_poller_suppression(
+    lifecycle_state: &str,
+    repo_state: Option<&agent_team_mail_ci_monitor::GhRepoStateRecord>,
+) -> Option<SharedPollerSuppression> {
+    if !lifecycle_state_allows_polling(lifecycle_state) {
+        return Some(SharedPollerSuppression::Lifecycle {
+            state: lifecycle_state.to_string(),
+        });
+    }
+    let record = repo_state?;
+    if record.budget_used_in_window >= record.budget_limit_per_hour {
+        return Some(SharedPollerSuppression::BudgetExhausted {
+            used: record.budget_used_in_window,
+            limit: record.budget_limit_per_hour,
+        });
+    }
+    if repo_state_polling_suppressed(record) {
+        return Some(SharedPollerSuppression::Headroom {
+            remaining: record
+                .rate_limit
+                .as_ref()
+                .map(|snapshot| snapshot.remaining)
+                .unwrap_or(0),
+        });
+    }
+    None
+}
+
+#[cfg(unix)]
+fn build_shared_poller_plan(
+    home: &std::path::Path,
+    team: &str,
+    owner_repo: &str,
+    scoped_records: Vec<GhMonitorStateRecord>,
+) -> SharedPollerPlan {
+    let active_records: Vec<_> = scoped_records
+        .into_iter()
+        .filter(|record| status_has_active_subscription(&record.status))
+        .collect();
+    let repo_state = read_gh_repo_state_record(home, team, owner_repo)
+        .ok()
+        .flatten();
+    let lifecycle_state = read_monitor_lifecycle_state(home, team);
+    let suppression = shared_poller_suppression(&lifecycle_state, repo_state.as_ref());
+    let sleep_secs = if active_records.is_empty() {
+        SHARED_POLLER_IDLE_SLEEP_SECS
+    } else {
+        SHARED_POLLER_ACTIVE_SLEEP_SECS
+    };
+    if suppression.is_some() {
+        return SharedPollerPlan {
+            active_records: Vec::new(),
+            in_flight: 0,
+            sleep_secs,
+            suppression,
+        };
+    }
+    SharedPollerPlan {
+        in_flight: active_records.len() as u64,
+        active_records,
+        sleep_secs,
+        suppression: None,
+    }
+}
+
+#[cfg(unix)]
+fn headroom_suppression_message(remaining: u64) -> String {
+    format!(
+        "shared gh polling paused: remaining GitHub quota {remaining} is at/below floor {}; resume requires at least {} remaining",
+        GH_MONITOR_HEADROOM_FLOOR, GH_MONITOR_HEADROOM_RECOVERY_FLOOR
+    )
+}
+
+#[cfg(unix)]
+fn emit_shared_poller_suppression_event(
+    team: &str,
+    owner_repo: &str,
+    action: &'static str,
+    message: &str,
+    remaining: Option<u64>,
+) {
+    let mut extra_fields = serde_json::Map::new();
+    extra_fields.insert("repo".to_string(), json!(owner_repo));
+    extra_fields.insert(
+        "headroom_floor".to_string(),
+        json!(GH_MONITOR_HEADROOM_FLOOR),
+    );
+    extra_fields.insert(
+        "headroom_recovery_floor".to_string(),
+        json!(GH_MONITOR_HEADROOM_RECOVERY_FLOOR),
+    );
+    if let Some(remaining) = remaining {
+        extra_fields.insert("remaining".to_string(), json!(remaining));
+    }
+    emit_event_best_effort(EventFields {
+        level: if action == "gh_poll_suppressed_headroom" {
+            "warn"
+        } else {
+            "info"
+        },
+        source: "atm",
+        action,
+        team: Some(team.to_string()),
+        target: Some(owner_repo.to_string()),
+        runtime: Some("atm-daemon".to_string()),
+        result: Some(action.to_string()),
+        error: Some(message.to_string()),
+        extra_fields,
+        ..Default::default()
+    });
+}
+
+#[cfg(unix)]
+fn sync_headroom_suppression_state(
+    home: &std::path::Path,
+    team: &str,
+    owner_repo: &str,
+    suppression: &Option<SharedPollerSuppression>,
+) {
+    let current = read_gh_repo_state_record(home, team, owner_repo)
+        .ok()
+        .flatten();
+    let currently_blocked = current.as_ref().is_some_and(|record| record.blocked);
+    let should_block = matches!(
+        suppression,
+        Some(
+            SharedPollerSuppression::Headroom { .. }
+                | SharedPollerSuppression::BudgetExhausted { .. }
+        )
+    );
+    if should_block == currently_blocked {
+        return;
+    }
+
+    let _ = update_gh_repo_state_blocked(home, team, owner_repo, should_block, "atm-daemon");
+
+    match suppression {
+        Some(SharedPollerSuppression::Headroom { remaining }) => {
+            let message = headroom_suppression_message(*remaining);
+            emit_shared_poller_suppression_event(
+                team,
+                owner_repo,
+                "gh_poll_suppressed_headroom",
+                &message,
+                Some(*remaining),
+            );
+            let _ = set_gh_monitor_health_state(
+                home,
+                team,
+                GhMonitorHealthUpdate {
+                    availability_state: Some("degraded"),
+                    in_flight: Some(0),
+                    message: Some(message),
+                    ..Default::default()
+                },
+            );
+        }
+        Some(SharedPollerSuppression::BudgetExhausted { used, limit }) => {
+            let message = format!(
+                "shared gh polling paused: budget exhausted at {used}/{limit} calls in the current window"
+            );
+            let _ = set_gh_monitor_health_state(
+                home,
+                team,
+                GhMonitorHealthUpdate {
+                    availability_state: Some("degraded"),
+                    in_flight: Some(0),
+                    message: Some(message),
+                    ..Default::default()
+                },
+            );
+        }
+        _ => {
+            emit_shared_poller_suppression_event(
+                team,
+                owner_repo,
+                "gh_poll_resumed_headroom",
+                "shared gh polling resumed after headroom recovery",
+                current
+                    .as_ref()
+                    .and_then(|record| record.rate_limit.as_ref().map(|rate| rate.remaining)),
+            );
+            let _ = set_gh_monitor_health_state(
+                home,
+                team,
+                GhMonitorHealthUpdate {
+                    availability_state: Some("healthy"),
+                    message: Some("shared gh polling resumed after headroom recovery".to_string()),
+                    ..Default::default()
+                },
+            );
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -289,19 +516,99 @@ async fn run_shared_repo_poller(home: std::path::PathBuf, team: String, owner_re
                         .unwrap_or(false)
             })
             .collect();
-        let active_records: Vec<_> = scoped_records
-            .iter()
-            .filter(|record| status_has_active_subscription(&record.status))
-            .cloned()
-            .collect();
+        let mut plan = build_shared_poller_plan(&home, &team, &owner_repo, scoped_records);
+        sync_headroom_suppression_state(&home, &team, &owner_repo, &plan.suppression);
 
-        let in_flight = active_records.len() as u64;
-        let _ = update_gh_repo_state_in_flight(&home, &team, &owner_repo, in_flight, "atm-daemon");
+        let _ =
+            update_gh_repo_state_in_flight(&home, &team, &owner_repo, plan.in_flight, "atm-daemon");
+        if plan.suppression.is_some() {
+            tokio::time::sleep(std::time::Duration::from_secs(plan.sleep_secs)).await;
+            continue;
+        }
+
         if let Err(err) = refresh_shared_repo_state(&home, &team, &owner_repo).await {
             warn!(team = %team, repo = %owner_repo, "shared repo-state refresh failed: {err}");
         }
 
-        for record in &active_records {
+        plan = build_shared_poller_plan(
+            &home,
+            &team,
+            &owner_repo,
+            load_gh_monitor_state_records(&home)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|record| {
+                    record.status.team == team
+                        && record
+                            .repo_scope
+                            .as_deref()
+                            .map(|value| value.eq_ignore_ascii_case(&owner_repo))
+                            .unwrap_or(false)
+                })
+                .collect(),
+        );
+        sync_headroom_suppression_state(&home, &team, &owner_repo, &plan.suppression);
+        let _ =
+            update_gh_repo_state_in_flight(&home, &team, &owner_repo, plan.in_flight, "atm-daemon");
+        if plan.suppression.is_some() {
+            tokio::time::sleep(std::time::Duration::from_secs(plan.sleep_secs)).await;
+            continue;
+        }
+
+        let start_budget_used = read_gh_repo_state_record(&home, &team, &owner_repo)
+            .ok()
+            .flatten()
+            .map(|record| record.budget_used_in_window)
+            .unwrap_or(0);
+        let cycle_call_cap = plan
+            .in_flight
+            .saturating_mul(GH_MONITOR_PER_ACTIVE_MONITOR_MAX_CALLS);
+
+        for record in &plan.active_records {
+            let current_budget_used = read_gh_repo_state_record(&home, &team, &owner_repo)
+                .ok()
+                .flatten()
+                .map(|repo_state| repo_state.budget_used_in_window)
+                .unwrap_or(start_budget_used);
+            if current_budget_used.saturating_sub(start_budget_used) >= cycle_call_cap {
+                let message = format!(
+                    "shared gh polling backed off after reaching cycle cap of {cycle_call_cap} calls for {} active monitor(s)",
+                    plan.in_flight
+                );
+                emit_event_best_effort(EventFields {
+                    level: "warn",
+                    source: "atm",
+                    action: "gh_poll_suppressed_budget_cap",
+                    team: Some(team.clone()),
+                    target: Some(owner_repo.clone()),
+                    runtime: Some("atm-daemon".to_string()),
+                    result: Some("gh_poll_suppressed_budget_cap".to_string()),
+                    error: Some(message.clone()),
+                    extra_fields: serde_json::Map::from_iter([
+                        ("repo".to_string(), json!(owner_repo)),
+                        ("cycle_call_cap".to_string(), json!(cycle_call_cap)),
+                        ("active_monitor_count".to_string(), json!(plan.in_flight)),
+                    ]),
+                    ..Default::default()
+                });
+                let _ = set_gh_monitor_health_state(
+                    &home,
+                    &team,
+                    GhMonitorHealthUpdate {
+                        availability_state: Some("degraded"),
+                        in_flight: Some(plan.in_flight),
+                        message: Some(message),
+                        ..Default::default()
+                    },
+                );
+                warn!(
+                    team = %team,
+                    repo = %owner_repo,
+                    cycle_call_cap,
+                    "shared gh monitor poll cycle reached per-active-monitor budget cap"
+                );
+                break;
+            }
             if let Err(err) = poll_status_once(&home, &owner_repo, repo_scope, record).await {
                 warn!(
                     team = %record.status.team,
@@ -310,15 +617,31 @@ async fn run_shared_repo_poller(home: std::path::PathBuf, team: String, owner_re
                     "shared gh monitor poll failed: {err}"
                 );
             }
+            let refreshed_plan = build_shared_poller_plan(
+                &home,
+                &team,
+                &owner_repo,
+                load_gh_monitor_state_records(&home)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|record| {
+                        record.status.team == team
+                            && record
+                                .repo_scope
+                                .as_deref()
+                                .map(|value| value.eq_ignore_ascii_case(&owner_repo))
+                                .unwrap_or(false)
+                    })
+                    .collect(),
+            );
+            sync_headroom_suppression_state(&home, &team, &owner_repo, &refreshed_plan.suppression);
+            if refreshed_plan.suppression.is_some() {
+                break;
+            }
         }
 
         let _ = update_gh_repo_state_in_flight(&home, &team, &owner_repo, 0, "atm-daemon");
-        let sleep_secs = if active_records.is_empty() {
-            SHARED_POLLER_IDLE_SLEEP_SECS
-        } else {
-            SHARED_POLLER_ACTIVE_SLEEP_SECS
-        };
-        tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(plan.sleep_secs)).await;
     }
 }
 
@@ -1085,10 +1408,14 @@ pub(crate) fn status_request(
 
 #[cfg(test)]
 mod tests {
-    use super::health_request;
+    use super::{build_shared_poller_plan, health_request, sync_headroom_suppression_state};
+    use crate::plugins::ci_monitor::{health, helpers};
     use agent_team_mail_ci_monitor::{
-        GhObservedCall, GhRateLimitSnapshot, GhRepoStateFile, GhRepoStateRecord, GhRuntimeOwner,
-        read_gh_observability_records, repo_state::write_repo_state,
+        CiMonitorHealth, CiMonitorStatus, CiMonitorTargetKind, GhObservedCall, GhRateLimitSnapshot,
+        GhRepoStateFile, GhRepoStateRecord, GhRuntimeOwner,
+        consts::{GH_MONITOR_HEADROOM_FLOOR, GH_MONITOR_HEADROOM_RECOVERY_FLOOR},
+        read_gh_observability_records,
+        repo_state::write_repo_state,
     };
     use chrono::{Duration, Utc};
     use std::fs;
@@ -1197,5 +1524,229 @@ poll_interval_secs = 60
                 .any(|record| record.action == "gh_call_started"),
             "cache-only health requests must not emit gh_call_started"
         );
+    }
+
+    fn active_monitor_status(team: &str) -> CiMonitorStatus {
+        CiMonitorStatus {
+            team: team.to_string(),
+            configured: true,
+            enabled: true,
+            config_source: None,
+            config_path: None,
+            target_kind: CiMonitorTargetKind::Pr,
+            target: "101".to_string(),
+            state: "monitoring".to_string(),
+            run_id: Some(42),
+            reference: Some("main".to_string()),
+            updated_at: Utc::now().to_rfc3339(),
+            message: None,
+            repo_state_updated_at: None,
+        }
+    }
+
+    fn running_health(team: &str, lifecycle_state: &str) -> CiMonitorHealth {
+        CiMonitorHealth {
+            team: team.to_string(),
+            configured: true,
+            enabled: true,
+            config_source: None,
+            config_path: None,
+            lifecycle_state: lifecycle_state.to_string(),
+            availability_state: "healthy".to_string(),
+            in_flight: 0,
+            updated_at: Utc::now().to_rfc3339(),
+            message: None,
+            repo_state_updated_at: None,
+            budget_limit_per_hour: None,
+            budget_used_in_window: None,
+            rate_limit_remaining: None,
+            rate_limit_limit: None,
+            rate_limit_reset_at: None,
+            poll_owner: None,
+            owner_runtime_kind: None,
+            owner_pid: None,
+            owner_binary_path: None,
+            owner_atm_home: None,
+            owner_repo: None,
+            owner_poll_interval_secs: None,
+        }
+    }
+
+    fn repo_state_record(
+        home: &std::path::Path,
+        remaining: u64,
+        blocked: bool,
+    ) -> GhRepoStateRecord {
+        let now = Utc::now();
+        GhRepoStateRecord {
+            team: "atm-dev".to_string(),
+            repo: "acme/agent-team-mail".to_string(),
+            updated_at: now.to_rfc3339(),
+            cache_expires_at: (now + Duration::minutes(5)).to_rfc3339(),
+            last_refresh_at: Some((now - Duration::seconds(10)).to_rfc3339()),
+            budget_limit_per_hour: 100,
+            budget_used_in_window: 3,
+            budget_window_started_at: now.to_rfc3339(),
+            budget_warning_threshold: 75,
+            warning_emitted_at: None,
+            blocked,
+            in_flight: 0,
+            idle_poll_interval_secs: 300,
+            active_poll_interval_secs: 60,
+            branch_ref_counts: Vec::new(),
+            last_call: Some(GhObservedCall {
+                action: "gh_pr_list".to_string(),
+                branch: None,
+                reference: None,
+                duration_ms: 12,
+                success: true,
+                error: None,
+                at: now.to_rfc3339(),
+            }),
+            rate_limit: Some(GhRateLimitSnapshot {
+                remaining,
+                limit: 5000,
+                updated_at: now.to_rfc3339(),
+                reset_at: None,
+                source: "cache".to_string(),
+            }),
+            owner: Some(GhRuntimeOwner {
+                runtime: "dev".to_string(),
+                executable_path: "/tmp/fake-atm-daemon".to_string(),
+                home_scope: home.display().to_string(),
+                pid: std::process::id(),
+            }),
+        }
+    }
+
+    #[test]
+    fn shared_poller_plan_suppresses_when_lifecycle_is_draining() {
+        let temp = TempDir::new().unwrap();
+        health::upsert_gh_monitor_health(temp.path(), running_health("atm-dev", "draining"))
+            .unwrap();
+        helpers::upsert_gh_monitor_status_for_repo(
+            temp.path(),
+            active_monitor_status("atm-dev"),
+            Some("acme/agent-team-mail"),
+        )
+        .unwrap();
+
+        let records = super::load_gh_monitor_state_records(temp.path()).unwrap();
+        let plan =
+            build_shared_poller_plan(temp.path(), "atm-dev", "acme/agent-team-mail", records);
+        assert_eq!(plan.in_flight, 0);
+        assert!(plan.active_records.is_empty());
+        assert!(matches!(
+            plan.suppression,
+            Some(super::SharedPollerSuppression::Lifecycle { ref state }) if state == "draining"
+        ));
+        assert_eq!(super::count_in_flight_monitors(temp.path(), "atm-dev"), 0);
+    }
+
+    #[test]
+    fn shared_poller_plan_suppresses_when_headroom_hits_floor() {
+        let temp = TempDir::new().unwrap();
+        health::upsert_gh_monitor_health(temp.path(), running_health("atm-dev", "running"))
+            .unwrap();
+        helpers::upsert_gh_monitor_status_for_repo(
+            temp.path(),
+            active_monitor_status("atm-dev"),
+            Some("acme/agent-team-mail"),
+        )
+        .unwrap();
+        write_repo_state(
+            temp.path(),
+            &GhRepoStateFile {
+                records: vec![repo_state_record(
+                    temp.path(),
+                    GH_MONITOR_HEADROOM_FLOOR,
+                    false,
+                )],
+            },
+        )
+        .unwrap();
+
+        let records = super::load_gh_monitor_state_records(temp.path()).unwrap();
+        let plan =
+            build_shared_poller_plan(temp.path(), "atm-dev", "acme/agent-team-mail", records);
+        assert_eq!(plan.in_flight, 0);
+        assert!(plan.active_records.is_empty());
+        assert!(matches!(
+            plan.suppression,
+            Some(super::SharedPollerSuppression::Headroom { remaining })
+                if remaining == GH_MONITOR_HEADROOM_FLOOR
+        ));
+
+        sync_headroom_suppression_state(
+            temp.path(),
+            "atm-dev",
+            "acme/agent-team-mail",
+            &plan.suppression,
+        );
+        let health = health::read_gh_monitor_health(temp.path(), "atm-dev").unwrap();
+        assert_eq!(health.availability_state, "degraded");
+        assert!(
+            health
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("shared gh polling paused")),
+        );
+        assert_eq!(super::count_in_flight_monitors(temp.path(), "atm-dev"), 0);
+    }
+
+    #[test]
+    fn shared_poller_plan_only_recovers_after_headroom_recovery_floor() {
+        let temp = TempDir::new().unwrap();
+        health::upsert_gh_monitor_health(temp.path(), running_health("atm-dev", "running"))
+            .unwrap();
+        helpers::upsert_gh_monitor_status_for_repo(
+            temp.path(),
+            active_monitor_status("atm-dev"),
+            Some("acme/agent-team-mail"),
+        )
+        .unwrap();
+        write_repo_state(
+            temp.path(),
+            &GhRepoStateFile {
+                records: vec![repo_state_record(
+                    temp.path(),
+                    GH_MONITOR_HEADROOM_RECOVERY_FLOOR - 1,
+                    true,
+                )],
+            },
+        )
+        .unwrap();
+
+        let suppressed = build_shared_poller_plan(
+            temp.path(),
+            "atm-dev",
+            "acme/agent-team-mail",
+            super::load_gh_monitor_state_records(temp.path()).unwrap(),
+        );
+        assert!(matches!(
+            suppressed.suppression,
+            Some(super::SharedPollerSuppression::Headroom { remaining })
+                if remaining == GH_MONITOR_HEADROOM_RECOVERY_FLOOR - 1
+        ));
+
+        write_repo_state(
+            temp.path(),
+            &GhRepoStateFile {
+                records: vec![repo_state_record(
+                    temp.path(),
+                    GH_MONITOR_HEADROOM_RECOVERY_FLOOR,
+                    true,
+                )],
+            },
+        )
+        .unwrap();
+        let resumed = build_shared_poller_plan(
+            temp.path(),
+            "atm-dev",
+            "acme/agent-team-mail",
+            super::load_gh_monitor_state_records(temp.path()).unwrap(),
+        );
+        assert!(resumed.suppression.is_none());
+        assert_eq!(resumed.in_flight, 1);
     }
 }

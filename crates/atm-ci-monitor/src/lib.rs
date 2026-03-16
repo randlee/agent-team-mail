@@ -3,6 +3,7 @@
 //! This crate owns the CI-monitor production surface that can be reused without
 //! depending on ATM daemon bootstrap, plugin lifecycle, or socket transport code.
 
+pub mod consts;
 mod gh_ledger;
 mod github_provider;
 #[cfg(any(test, feature = "test-support"))]
@@ -14,7 +15,6 @@ pub mod repo_state;
 pub mod service;
 mod types;
 
-#[cfg(any(test, feature = "test-support"))]
 pub use gh_ledger::read_gh_observability_records;
 pub use gh_ledger::{
     GhLedgerKind, GhLedgerRecord, append_gh_observability_record, flush_gh_observability_records,
