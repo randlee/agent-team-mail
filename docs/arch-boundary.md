@@ -18,8 +18,8 @@ Supporting layers:
 | Crate / Area | Responsibility | Boundary note |
 |---|---|---|
 | `atm` | CLI command surface | may call daemon/provider abstractions, must not execute raw `gh` |
-| `atm-daemon` issues plugin | non-monitor plugin behavior | currently audited exception; must migrate off raw `gh` |
-| `scripts/dev-daemon-smoke.py` | manual smoke harness | currently audited exception; must migrate off direct `gh` shell calls |
+| `atm-daemon` issues plugin | non-monitor plugin behavior | may call gh plugin/provider helpers, must not execute raw `gh` |
+| `scripts/dev-daemon-smoke.py` | manual smoke harness | must use ATM-owned surfaces only; no direct `gh` shell calls |
 
 ## Allowed Dependency Direction
 
@@ -38,15 +38,9 @@ Examples of blocking violations:
 - GitHub-specific provider types or API parsing in `atm-core`
 - plugin/provider imports flowing back into `atm-core`
 
-Examples of temporary audited exceptions:
-- legacy bootstrap probes in `atm gh init`
-- legacy direct `gh` usage in the issues plugin
-- manual smoke harness shell calls used only for operator verification
-
-Audited exceptions must carry:
-- `TODO(ARCH-BOUNDARY-001)` source annotation
-- a linked GitHub issue
-- an entry in `scripts/ci/gh_boundary_allowlist.txt`
+Temporary audited exceptions were allowed only during AS/AT transition work.
+AT.5 removes the final exception file and returns the repository to a
+zero-exception state.
 
 ## New Provider Checklist
 
@@ -55,32 +49,30 @@ When adding or refactoring a provider:
 2. Put provider-specific API execution and translation in the provider layer.
 3. Keep `atm-core` free of provider-specific types and subprocess execution.
 4. Do not add `Command::new("gh")` outside the provider layer.
-5. If an exception is unavoidable temporarily, add:
-   - `TODO(ARCH-BOUNDARY-001)` in source
-   - a GitHub issue
-   - an allowlist entry
+5. If transition work temporarily introduces a violation, it must be captured in
+   the active phase plan with file-level ownership and removed before the final
+   phase audit lands.
 6. Run `scripts/ci/gh_boundary_check.sh` before pushing.
 
 ## Audit Results
 
-Current direct `gh` execution / boundary exceptions:
+Final AT.5 audit result: zero remaining GitHub boundary violations.
 
-| Violation | Crate / Area | File:Line | Issue | Status |
+| Violation | Crate / Area | Former File:Line | Issue | Final status |
 |---|---|---|---|---|
 | Root tracking issue for GitHub boundary elimination plan and enforcement follow-up | planning / governance | `docs/requirements.md` | [#807](https://github.com/randlee/agent-team-mail/issues/807) | root tracking issue |
+| Remove `atm-core` non-dev dependency on `agent-team-mail-ci-monitor` and core-owned GH observability path | `atm-core` | `crates/atm-core/Cargo.toml`, `crates/atm-core/src/gh_monitor_observability.rs` | [#808](https://github.com/randlee/agent-team-mail/issues/808) | removed in AT.1 (`feature/pAT-s1-atm-core-isolation`) |
 | Raw `gh` subprocess in provider-agnostic crate | `atm-ci-monitor` | `crates/atm-ci-monitor/src/github_provider.rs:173` | [#809](https://github.com/randlee/agent-team-mail/issues/809) | removed in AT.2 (`feature/pAT-s2-ci-monitor-provider-extraction`) |
-| Raw `gh --version` bootstrap probe | `atm` CLI | `crates/atm/src/commands/gh.rs:2154` | [#811](https://github.com/randlee/agent-team-mail/issues/811) | removed in AT.3 (`feature/pAT-s3-gh-command-routing`) |
-| Raw `gh auth status` bootstrap probe | `atm` CLI | `crates/atm/src/commands/gh.rs:2167` | [#811](https://github.com/randlee/agent-team-mail/issues/811) | removed in AT.3 (`feature/pAT-s3-gh-command-routing`) |
+| Raw `gh --version` and `gh auth status` bootstrap probes plus CLI-owned GitHub command semantics | `atm` CLI | `crates/atm/src/commands/gh.rs:2154`, `crates/atm/src/commands/gh.rs:2167` | [#811](https://github.com/randlee/agent-team-mail/issues/811) | removed in AT.3 (`feature/pAT-s3-gh-command-routing`) |
 | Raw `gh` subprocess in issues plugin | `atm-daemon` issues plugin | `crates/atm-daemon/src/plugins/issues/github.rs:31` | [#812](https://github.com/randlee/agent-team-mail/issues/812) | removed in AT.4 (`feature/pAT-s4-daemon-issues-boundary`) |
-| Direct `gh api rate_limit` shell call | manual smoke harness | `scripts/dev-daemon-smoke.py:117` | [#813](https://github.com/randlee/agent-team-mail/issues/813) | removed in AT.4 (`feature/pAT-s4-daemon-issues-boundary`) |
-| Direct `gh pr list` shell call | manual smoke harness | `scripts/dev-daemon-smoke.py:131` | [#813](https://github.com/randlee/agent-team-mail/issues/813) | removed in AT.4 (`feature/pAT-s4-daemon-issues-boundary`) |
-| Direct `gh run list` shell call | manual smoke harness | `scripts/dev-daemon-smoke.py:145` | [#813](https://github.com/randlee/agent-team-mail/issues/813) | removed in AT.4 (`feature/pAT-s4-daemon-issues-boundary`) |
+| Direct `gh` shell calls in smoke harness | manual smoke harness | `scripts/dev-daemon-smoke.py:117`, `scripts/dev-daemon-smoke.py:131`, `scripts/dev-daemon-smoke.py:145` | [#813](https://github.com/randlee/agent-team-mail/issues/813) | removed in AT.4 (`feature/pAT-s4-daemon-issues-boundary`) |
 
 Additional notes:
-- `atm-core` non-dev dependency on `agent-team-mail-ci-monitor` was removed by
-  AS5-ARCH-001 and is no longer a live violation.
-- The current audit found no `Command::new("gh")` call already living in the
-  gh-monitor provider layer.
+- The final `scripts/ci/gh_boundary_check.sh` acceptance gate now runs without
+  any exception file.
+- The only remaining `Command::new("gh")` callsites live inside the owning gh
+  plugin/provider layer (`github_provider.rs`, `gh_command_routing.rs`), which
+  is allowed by `ARCH-BOUNDARY-001`.
 - `crates/atm-daemon/src/plugins/ci_monitor/test_support.rs` writes fake `gh`
   scripts for tests but does not launch the real GitHub CLI; it is not counted
   as a boundary violation.
@@ -92,5 +84,5 @@ Additional notes:
 It must:
 - fail on any new raw `gh` subprocess path outside the provider layer
 - fail on any new non-dev `atm-core -> atm-ci-monitor` dependency
-- permit only the audited exceptions listed in the allowlist
 - print file, line, and `ARCH-BOUNDARY-001` in failure output
+- run with zero exception entries in the repository

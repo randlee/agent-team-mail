@@ -2,7 +2,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-ALLOWLIST="$ROOT/scripts/ci/gh_boundary_allowlist.txt"
 
 declare -a matches=()
 
@@ -30,11 +29,6 @@ done < <(grep -nH -E '^[[:space:]]*agent-team-mail-ci-monitor(\.workspace|[[:spa
 fail=0
 for match in "${matches[@]-}"; do
   [[ -z "$match" ]] && continue
-  if grep -Fxq "$match" "$ALLOWLIST"; then
-    echo "allowlisted ARCH-BOUNDARY-001 exception: $match"
-    continue
-  fi
-
   file="${match%%:*}"
   rest="${match#*:}"
   line="${rest%%:*}"
@@ -46,4 +40,4 @@ if [[ "$fail" -ne 0 ]]; then
   exit 1
 fi
 
-echo "ARCH-BOUNDARY-001 check passed (only audited exceptions remain)."
+echo "ARCH-BOUNDARY-001 check passed (zero remaining violations)."
