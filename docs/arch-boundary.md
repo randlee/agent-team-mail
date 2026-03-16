@@ -67,16 +67,18 @@ Current direct `gh` execution / boundary exceptions:
 
 | Violation | Crate / Area | File:Line | Issue | Status |
 |---|---|---|---|---|
-| Non-dev dependency from `atm-core` to `agent-team-mail-ci-monitor` | `atm-core` | `crates/atm-core/Cargo.toml:17` | [#808](https://github.com/randlee/agent-team-mail/issues/808) | audited temporary exception |
-| Raw `gh` subprocess in provider-agnostic crate | `atm-ci-monitor` | `crates/atm-ci-monitor/src/github_provider.rs:172` | [#809](https://github.com/randlee/agent-team-mail/issues/809) | audited temporary exception |
-| Raw `gh --version` bootstrap probe | `atm` CLI | `crates/atm/src/commands/gh.rs:2119` | [#811](https://github.com/randlee/agent-team-mail/issues/811) | audited temporary exception |
-| Raw `gh auth status` bootstrap probe | `atm` CLI | `crates/atm/src/commands/gh.rs:2132` | [#811](https://github.com/randlee/agent-team-mail/issues/811) | audited temporary exception |
+| Root tracking issue for GitHub boundary elimination plan and enforcement follow-up | planning / governance | `docs/requirements.md` | [#807](https://github.com/randlee/agent-team-mail/issues/807) | root tracking issue |
+| Raw `gh` subprocess in provider-agnostic crate | `atm-ci-monitor` | `crates/atm-ci-monitor/src/github_provider.rs:173` | [#809](https://github.com/randlee/agent-team-mail/issues/809) | audited temporary exception |
+| Raw `gh --version` bootstrap probe | `atm` CLI | `crates/atm/src/commands/gh.rs:2154` | [#811](https://github.com/randlee/agent-team-mail/issues/811) | audited temporary exception |
+| Raw `gh auth status` bootstrap probe | `atm` CLI | `crates/atm/src/commands/gh.rs:2167` | [#811](https://github.com/randlee/agent-team-mail/issues/811) | audited temporary exception |
 | Raw `gh` subprocess in issues plugin | `atm-daemon` issues plugin | `crates/atm-daemon/src/plugins/issues/github.rs:31` | [#812](https://github.com/randlee/agent-team-mail/issues/812) | audited temporary exception |
 | Direct `gh api rate_limit` shell call | manual smoke harness | `scripts/dev-daemon-smoke.py:117` | [#813](https://github.com/randlee/agent-team-mail/issues/813) | audited temporary exception |
 | Direct `gh pr list` shell call | manual smoke harness | `scripts/dev-daemon-smoke.py:131` | [#813](https://github.com/randlee/agent-team-mail/issues/813) | audited temporary exception |
 | Direct `gh run list` shell call | manual smoke harness | `scripts/dev-daemon-smoke.py:145` | [#813](https://github.com/randlee/agent-team-mail/issues/813) | audited temporary exception |
 
 Additional notes:
+- `atm-core` non-dev dependency on `agent-team-mail-ci-monitor` was removed by
+  AS5-ARCH-001 and is no longer a live violation.
 - The current audit found no `Command::new("gh")` call already living in the
   gh-monitor provider layer.
 - `crates/atm-daemon/src/plugins/ci_monitor/test_support.rs` writes fake `gh`

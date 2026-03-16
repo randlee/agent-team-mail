@@ -9,17 +9,17 @@ declare -a matches=()
 while IFS= read -r match; do
   [[ -z "$match" ]] && continue
   matches+=("$match")
-done < <(rg -n 'Command::new\("gh"\)' "$ROOT/crates" --glob '!**/*.md' | cut -d: -f1,2 | sed "s#^$ROOT/##" || true)
+done < <(grep -RInE 'Command::new\("gh"\)' "$ROOT/crates" --exclude='*.md' | cut -d: -f1,2 | sed "s#^$ROOT/##" || true)
 
 while IFS= read -r match; do
   [[ -z "$match" ]] && continue
   matches+=("$match")
-done < <(rg -n --with-filename 'gh api rate_limit|gh pr list --state open|gh run list --limit' "$ROOT/scripts/dev-daemon-smoke.py" | cut -d: -f1,2 | sed "s#^$ROOT/##" || true)
+done < <(grep -nH -E 'gh api rate_limit|gh pr list --state open|gh run list --limit' "$ROOT/scripts/dev-daemon-smoke.py" | cut -d: -f1,2 | sed "s#^$ROOT/##" || true)
 
 while IFS= read -r match; do
   [[ -z "$match" ]] && continue
   matches+=("$match")
-done < <(rg -n --with-filename '^[[:space:]]*agent-team-mail-ci-monitor(\.workspace|[[:space:]]*=)' "$ROOT/crates/atm-core/Cargo.toml" | cut -d: -f1,2 | sed "s#^$ROOT/##" || true)
+done < <(grep -nH -E '^[[:space:]]*agent-team-mail-ci-monitor(\.workspace|[[:space:]]*=)' "$ROOT/crates/atm-core/Cargo.toml" | cut -d: -f1,2 | sed "s#^$ROOT/##" || true)
 
 fail=0
 for match in "${matches[@]}"; do

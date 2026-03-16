@@ -1832,7 +1832,7 @@ execution, and `atm gh` command processing.
 ### Sprint Map
 | Sprint | Focus | Branch | Status |
 |---|---|---|---|
-| AT.1 | Establish the provider-agnostic seam that lets `atm-core` drop provider knowledge, migrate `atm-core` to it, remove raw `gh` execution from `crates/atm-core/src/gh_monitor_observability.rs`, then remove the non-dev `atm-core -> atm-ci-monitor` dependency | TBD | PLANNED |
+| AT.1 | Baseline `atm-core` isolation: verify AS.5 (AS5-ARCH-001) closed the non-dev dep and relocated `gh_monitor_observability.rs`; add per-package isolation CI job (#808); confirm `cargo test --package agent-team-mail-core` passes in isolation with zero provider imports | TBD | PLANNED |
 | AT.2 | Move GitHub-specific provider execution out of `crates/atm-ci-monitor/src/github_provider.rs` into the gh plugin/provider layer, leaving `atm-ci-monitor` provider-agnostic only | TBD | PLANNED |
 | AT.3 | Route all GitHub command semantics through the gh plugin/provider layer; `crates/atm/src/commands/gh.rs` becomes CLI bootstrap/routing/capability UX only and stops owning raw `gh` probes or GitHub behavior | TBD | PLANNED |
 | AT.4 | Remove non-gh-plugin raw `gh` execution paths in `crates/atm-daemon/src/plugins/issues/github.rs`, smoke harnesses, and any additional script/helper violations found by the AS.7 search | TBD | PLANNED |
@@ -1847,8 +1847,6 @@ execution, and `atm gh` command processing.
   - `#813`
 - `ARCH-BOUNDARY-001` requirements and CI grep gate from AS.7
 - current live violations found by the AS.7 repository-wide search:
-  - `crates/atm-core/Cargo.toml` non-dev dependency on `agent-team-mail-ci-monitor`
-  - `crates/atm-core/src/gh_monitor_observability.rs` raw `gh` execution in core
   - `crates/atm-ci-monitor/src/github_provider.rs` GitHub-specific provider implementation in shared crate
   - `crates/atm/src/commands/gh.rs` GitHub semantics and raw `gh` bootstrap/query behavior in CLI routing layer
   - `crates/atm-daemon/src/plugins/issues/github.rs` raw `gh` execution outside the gh plugin/provider layer
@@ -1865,9 +1863,11 @@ execution, and `atm gh` command processing.
 - A sprint is not complete if it only adds abstractions while leaving the named
   illegal references untouched.
 
+
 ### Exit Criteria
 1. `atm-core` has zero plugin/provider knowledge and no non-dev dependency on
-   `atm-ci-monitor`.
+   `atm-ci-monitor`, and that isolation is verified by CI and package-scoped
+   validation.
 2. `atm-ci-monitor` contains only provider-agnostic abstractions; no
    GitHub-specific provider execution remains.
 3. All GitHub-specific behavior, including raw `gh` execution, lives only in

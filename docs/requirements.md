@@ -2535,6 +2535,18 @@ operators and teammates.
 Detailed GitHub CI monitor requirements are defined in:
 - `docs/ci-monitoring/requirements.md`
 
+Ownership and presence contract:
+- All GitHub-specific behavior behind `atm gh` is owned by the `gh_monitor`
+  plugin/provider layer.
+- Non-plugin crates may parse arguments, advertise capability state, and route
+  requests, but must not implement GitHub semantics, execute raw `gh`, or own
+  GitHub provider logic.
+- If the gh plugin/provider is not present in the build, the `atm gh`
+  namespace must not be advertised in normal help/capability UX.
+- If the gh plugin/provider is present in the build but not enabled/loaded for
+  the current runtime/team, only the bootstrap/management surface may be
+  advertised and accepted.
+
 Core command contract:
 - `atm gh init` validates prerequisites (`gh` CLI presence/auth where required),
   writes/updates `[plugins.gh_monitor]` config, and enables the plugin.
@@ -2566,13 +2578,19 @@ Operator status UX contract:
   - the minimum config keys required (team/agent/repo/monitor recipients) and
     the config file path where those keys are expected.
 - JSON output must expose the same status fields without lossy conversion.
-- When `gh_monitor` is disabled/unconfigured, only the following command paths
-  are allowed:
+- When `gh_monitor` is present in the build but disabled/unconfigured, only the
+  following command paths are allowed:
   - `atm gh`
+  - `atm gh status`
   - `atm gh init`
   - help output (`atm gh --help`, `atm gh init --help`)
   Other `atm gh ...` operations must fail fast with an actionable message to run
   `atm gh init`.
+- If the gh plugin/provider is not present in the build at all:
+  - `atm gh` must not appear in normal help/capability listings,
+  - daemon capability advertisement must omit the namespace entirely,
+  - explicit invocation may fail with a stable "feature not installed" error,
+    but must not pretend the plugin is merely disabled.
 - When `gh_monitor` is enabled, `atm gh` must show:
   - current configuration summary,
   - lifecycle/availability status,
@@ -2672,6 +2690,8 @@ Required rules:
 - Any surviving violation found by the repository-wide search must be either
   removed in the active implementation sprint or mapped to a named follow-up
   sprint with file-level ownership and explicit QA review scope.
+- Boundary enforcement work must run a repository-wide violation search and map
+  every live violation to a named removal sprint.
 
 Temporary audited exceptions are permitted only when:
 - the violating line is explicitly annotated with
