@@ -17,7 +17,7 @@ mod daemon_process_guard;
 mod daemon_test_registry;
 #[path = "support/env_guard.rs"]
 mod env_guard;
-use daemon_process_guard::{DaemonProcessGuard, daemon_binary_path};
+use daemon_process_guard::{DaemonProcessGuard, daemon_binary_path, pid_alive, wait_for_pid_exit};
 use env_guard::EnvGuard;
 
 /// Helper to set home directory for cross-platform test compatibility.
@@ -199,27 +199,6 @@ fn write_lock_metadata(temp_dir: &TempDir, pid: u32, home_scope: String, executa
         serde_json::to_string_pretty(&payload).expect("serialize metadata"),
     )
     .expect("write metadata");
-}
-
-#[cfg(unix)]
-fn pid_alive(pid: i32) -> bool {
-    unsafe extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
-    // SAFETY: signal 0 checks process existence.
-    unsafe { kill(pid, 0) == 0 }
-}
-
-#[cfg(unix)]
-fn wait_for_pid_exit(pid: i32, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if !pid_alive(pid) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    panic!("pid {pid} stayed alive beyond {timeout:?}");
 }
 
 // ============================================================================
@@ -450,8 +429,12 @@ fn test_concurrent_cli_and_direct_write_no_loss() {
 
     handle1.join().unwrap();
     handle2.join().unwrap();
+    // Best-effort adoption: daemon may not have auto-started for these file-based operations.
+    // adopt_running_pid returns None if no PID file was written; RuntimeDaemonCleanupGuard's
+    // Drop sweep still attempts cleanup of any leaked daemon processes.
     #[cfg(unix)]
-    let _ = daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
+    let _adopted =
+        daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
 
     // Verify all messages are present
     let content = fs::read_to_string(&inbox_path).unwrap();
@@ -928,7 +911,11 @@ fn test_permission_denied_inboxes_dir() {
         !output.status.success(),
         "Send should fail when directory is read-only"
     );
-    let _ = daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
+    // Best-effort adoption: daemon may not have auto-started for this error-path test.
+    // adopt_running_pid returns None if no PID file was written; RuntimeDaemonCleanupGuard's
+    // Drop sweep still attempts cleanup of any leaked daemon processes.
+    let _adopted =
+        daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
 
     // Restore permissions for cleanup
     fs::set_permissions(&inboxes_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -975,8 +962,12 @@ fn test_no_duplicate_message_ids_under_concurrent_sends() {
     for handle in handles {
         handle.join().unwrap();
     }
+    // Best-effort adoption: daemon may not have auto-started for these file-based concurrent sends.
+    // adopt_running_pid returns None if no PID file was written; RuntimeDaemonCleanupGuard's
+    // Drop sweep still attempts cleanup of any leaked daemon processes.
     #[cfg(unix)]
-    let _ = daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
+    let _adopted =
+        daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
 
     // Check inbox for duplicates
     let inbox_path = temp_dir
