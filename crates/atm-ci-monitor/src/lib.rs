@@ -14,7 +14,6 @@ pub mod repo_state;
 pub mod service;
 mod types;
 
-#[cfg(any(test, feature = "test-support"))]
 pub use gh_ledger::read_gh_observability_records;
 pub use gh_ledger::{
     GhLedgerKind, GhLedgerRecord, append_gh_observability_record, flush_gh_observability_records,
