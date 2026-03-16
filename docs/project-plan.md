@@ -1874,6 +1874,51 @@ execution, and `atm gh` command processing.
 
 ---
 
+## 17.29 Phase AU: Daemon Spawn Authorization
+
+**Goal**: make daemon spawning impossible outside the authorized launcher path,
+bind test daemons to explicit lease metadata, and make rogue daemon retention a
+blocking CI/QA failure.
+
+**Integration branch**: `integrate/phase-AU`
+
+**Status**: PLANNED
+
+### Sprint Map
+| Sprint | Focus | Branch | Status |
+|---|---|---|---|
+| AU.1 | Canonical daemon launcher plus launch-token issuance surface and launch-class schema (`prod-shared`, `dev-shared`, `isolated-test`) | TBD | PLANNED |
+| AU.2 | Daemon startup firewall: reject missing/invalid/replayed launch tokens and hard-fail duplicate shared-runtime starts | TBD | PLANNED |
+| AU.3 | `isolated-test` lease model: `test_identifier`, `owner_pid`, bounded TTL, owner/TTL self-termination, and janitor sweep behavior | TBD | PLANNED |
+| AU.4 | Lifecycle logging + QA enforcement: launch/termination ledgers, `daemon-spawn-qa` log-driven root cause, and CI/QA blocking on TTL/dead-owner exits | TBD | PLANNED |
+| AU.5 | Remove remaining bypass spawn paths and run final repo-wide audit proving the canonical launcher is the only daemon spawn path left | TBD | PLANNED |
+
+### Planned Inputs
+- DSQ-001 through DSQ-005 daemon leak findings from Phase AT
+- rogue-daemon containment requirements in `docs/requirements.md`
+- Phase AQ/AP daemon harness constraints and `daemon-spawn-qa` policy
+
+### Exit Criteria
+1. `atm-daemon` rejects startup without a valid authorized launch token.
+2. `prod-shared` and `dev-shared` launches hard-fail when a live daemon already
+   owns that runtime.
+3. Every `isolated-test` daemon carries `test_identifier`, `owner_pid`, and
+   TTL lease metadata.
+4. Test fixtures remain responsible for clean daemon shutdown; TTL/dead-owner
+   exits are fail-safe signals and block QA.
+5. `daemon-spawn-qa` can explain forgotten daemons using lifecycle logs rather
+   than code inspection alone.
+6. CI/QA fails on any non-canonical daemon spawn path or rogue daemon without
+   valid launch metadata.
+
+### Dependency Notes
+- AU begins after Phase AT merge stabilization and uses DSQ root-cause findings
+  as the primary design input.
+- AU.1 is the mandatory first sprint; AU.2 depends on AU.1, AU.3 depends on
+  AU.1/AU.2, AU.4 depends on AU.2/AU.3, and AU.5 is the final removal/audit sprint.
+
+---
+
 ## 17.11 Phase Z: Daemon SSoT + Observability Hardening
 
 **Goal**: Close daemon single-source-of-truth gaps for member/session state and make
