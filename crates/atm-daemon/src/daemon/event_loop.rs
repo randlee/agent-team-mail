@@ -149,13 +149,44 @@ pub async fn run(
         );
     }
 
+    let reconcile_cycle_state = new_reconcile_cycle_state();
+
+    // Run one startup reconcile immediately before any handler task is active
+    // so PID-dead session records cannot leak into plugin/socket/watcher state.
+    {
+        let claude_root = ctx.system.claude_root.clone();
+        let startup_registry = session_registry.clone();
+        let startup_state_store = state_store.clone();
+        let startup_cycle_state = reconcile_cycle_state.clone();
+        let startup_result = tokio::task::spawn_blocking(move || {
+            let pruned = {
+                let mut reg = startup_registry.lock().unwrap();
+                reg.prune_pid_dead_sessions_on_startup()
+            };
+            if pruned > 0 {
+                debug!("startup session prune removed {pruned} dead session record(s)");
+            }
+            reconcile_team_member_activity(
+                &claude_root,
+                &startup_registry,
+                &startup_state_store,
+                &startup_cycle_state,
+            )
+        })
+        .await;
+        match startup_result {
+            Ok(Ok(())) => debug!("startup reconcile pass completed"),
+            Ok(Err(e)) => warn!("startup reconcile pass failed: {e}"),
+            Err(e) => warn!("startup reconcile task panicked: {e}"),
+        }
+    }
+
     // Take plugins out of the registry for task spawning
     let plugins = registry.take_plugins();
     info!("Starting {} plugin task(s)", plugins.len());
 
     // Spawn a task for each plugin's run() method
     let mut plugin_tasks: Vec<(String, JoinHandle<()>)> = Vec::new();
-    let reconcile_cycle_state = new_reconcile_cycle_state();
 
     for (metadata, plugin_arc) in plugins.clone() {
         let plugin_name = metadata.name.to_string();
@@ -442,29 +473,6 @@ pub async fn run(
     let reconcile_registry = session_registry.clone();
     let reconcile_state_store = state_store.clone();
     let reconcile_cycle_state_for_loop = reconcile_cycle_state.clone();
-
-    // Run one startup reconcile immediately so roster/state is available
-    // without waiting for the periodic interval tick.
-    {
-        let claude_root = ctx.system.claude_root.clone();
-        let startup_registry = session_registry.clone();
-        let startup_state_store = state_store.clone();
-        let startup_cycle_state = reconcile_cycle_state.clone();
-        let startup_result = tokio::task::spawn_blocking(move || {
-            reconcile_team_member_activity(
-                &claude_root,
-                &startup_registry,
-                &startup_state_store,
-                &startup_cycle_state,
-            )
-        })
-        .await;
-        match startup_result {
-            Ok(Ok(())) => debug!("startup reconcile pass completed"),
-            Ok(Err(e)) => warn!("startup reconcile pass failed: {e}"),
-            Err(e) => warn!("startup reconcile task panicked: {e}"),
-        }
-    }
 
     let reconcile_task = tokio::spawn(async move {
         reconcile_loop(
