@@ -2042,11 +2042,11 @@ fn daemon_autostart_enabled() -> bool {
 }
 
 #[cfg(unix)]
-fn resolve_daemon_binary() -> std::ffi::OsString {
+fn resolve_daemon_binary() -> anyhow::Result<std::ffi::OsString> {
     if let Some(override_bin) = std::env::var_os("ATM_DAEMON_BIN")
         && !override_bin.is_empty()
     {
-        return override_bin;
+        return Ok(override_bin);
     }
 
     let name = std::ffi::OsString::from("atm-daemon");
@@ -2056,11 +2056,17 @@ fn resolve_daemon_binary() -> std::ffi::OsString {
     {
         let sibling = dir.join(std::path::Path::new(&name));
         if sibling.exists() {
-            return sibling.into_os_string();
+            return Ok(sibling.into_os_string());
         }
+        anyhow::bail!(
+            "failed to resolve atm-daemon binary: ATM_DAEMON_BIN is unset and sibling binary '{}' is missing",
+            sibling.display()
+        );
     }
 
-    name
+    anyhow::bail!(
+        "failed to resolve atm-daemon binary: ATM_DAEMON_BIN is unset and current executable path is unavailable"
+    )
 }
 
 #[cfg(unix)]
@@ -2133,7 +2139,18 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         }
     }
 
-    let daemon_bin = resolve_daemon_binary();
+    let daemon_bin = resolve_daemon_binary().map_err(|e| {
+        let error = e.to_string();
+        emit_event_best_effort(EventFields {
+            level: "error",
+            source: "atm",
+            action: "daemon_autostart_failure",
+            result: Some("binary_resolution_error".to_string()),
+            error: Some(error.clone()),
+            ..Default::default()
+        });
+        anyhow::anyhow!("{error}")
+    })?;
     let daemon_bin_path = PathBuf::from(&daemon_bin);
     let runtime_owner = validate_runtime_admission(&home, &daemon_bin_path).map_err(|e| {
         let error = e.to_string();
@@ -2177,7 +2194,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         Err(e) => {
             let error = if e.kind() == ErrorKind::NotFound {
                 format!(
-                    "failed to auto-start daemon: binary '{}' not found in PATH (or ATM_DAEMON_BIN override)",
+                    "failed to auto-start daemon: binary '{}' is missing or not executable",
                     std::path::PathBuf::from(&daemon_bin).display()
                 )
             } else {
@@ -2281,6 +2298,10 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         error: Some(timeout_error.clone()),
         ..Default::default()
     });
+    if child.try_wait()?.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
     anyhow::bail!("{timeout_error}")
 }
 
@@ -2466,7 +2487,7 @@ fn detect_daemon_identity_mismatch(
         .unwrap_or_else(|_| home.to_path_buf())
         .to_string_lossy()
         .to_string();
-    let expected_bin = resolve_daemon_binary();
+    let expected_bin = resolve_daemon_binary().ok();
     let snapshot = DaemonIdentitySnapshot {
         pid_from_file,
         pid_from_status,
@@ -2478,7 +2499,9 @@ fn detect_daemon_identity_mismatch(
     evaluate_daemon_identity_mismatch(
         &snapshot,
         &expected_home,
-        expected_bin.as_os_str(),
+        expected_bin
+            .as_deref()
+            .unwrap_or_else(|| std::ffi::OsStr::new("")),
         env!("CARGO_PKG_VERSION"),
         pid_alive,
         pid_command_line,
@@ -2960,7 +2983,7 @@ mod tests {
         std::fs::write(&custom, "#!/bin/sh\nexit 0\n").unwrap();
         // SAFETY: serialized env mutation in test.
         unsafe { std::env::set_var("ATM_DAEMON_BIN", &custom) };
-        let resolved = resolve_daemon_binary();
+        let resolved = resolve_daemon_binary().expect("override should resolve");
         assert_eq!(std::path::PathBuf::from(resolved), custom);
         // SAFETY: serialized env mutation in test.
         unsafe {

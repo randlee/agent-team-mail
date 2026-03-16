@@ -64,6 +64,32 @@ impl DaemonProcessGuard {
         }
     }
 
+    /// Adopt a daemon PID written to `pid_path` into a guard.
+    ///
+    /// This registers the PID with the daemon test registry as soon as it is
+    /// observed, closing the race where a delayed PID file write can panic a
+    /// test before cleanup is registered.
+    #[allow(dead_code)]
+    pub fn adopt_from_pid_file(
+        pid_path: &Path,
+        daemon_bin: &Path,
+        atm_home: &Path,
+        timeout: Duration,
+    ) -> Option<Self> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if let Ok(raw) = fs::read_to_string(pid_path)
+                && let Ok(pid) = raw.trim().parse::<u32>()
+                && pid > 1
+                && pid_alive(pid as i32)
+            {
+                return Some(Self::adopt_registered_pid(pid, daemon_bin, atm_home));
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        None
+    }
+
     /// Adopt an already-spawned `Child` into a guard.
     ///
     /// Use this instead of a hand-rolled kill+wait struct. Registers the child
@@ -160,7 +186,14 @@ impl Drop for DaemonProcessGuard {
             }
             if pid_alive(self.pid as i32) {
                 send_signal(self.pid as i32, 9);
+                for _ in 0..20 {
+                    if !pid_alive(self.pid as i32) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
             }
+            reap_child_pid_best_effort(self.pid as i32);
         }
         let lock_path = self.daemon_dir.join("daemon.lock");
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -193,6 +226,23 @@ fn send_signal(pid: i32, sig: i32) {
     let _ = unsafe { kill(pid, sig) };
 }
 
+#[cfg(unix)]
+fn reap_child_pid_best_effort(pid: i32) {
+    unsafe extern "C" {
+        fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+    }
+    const WNOHANG: i32 = 1;
+    for _ in 0..20 {
+        let mut status = 0;
+        // SAFETY: best-effort reap for test child processes; WNOHANG avoids blocking.
+        let waited = unsafe { waitpid(pid, &mut status, WNOHANG) };
+        if waited == pid || waited == -1 || !pid_alive(pid) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 #[cfg(not(unix))]
 fn pid_alive(_pid: i32) -> bool {
     false
@@ -200,6 +250,9 @@ fn pid_alive(_pid: i32) -> bool {
 
 #[cfg(not(unix))]
 fn send_signal(_pid: i32, _sig: i32) {}
+
+#[cfg(not(unix))]
+fn reap_child_pid_best_effort(_pid: i32) {}
 
 pub(crate) fn daemon_binary_path() -> PathBuf {
     // Locate the build output directory from the current test binary path.
