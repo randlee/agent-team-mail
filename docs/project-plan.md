@@ -1737,7 +1737,6 @@ real-daemon harness.
 **Dependency graph**: AQ.1 and AQ.2 may run in parallel; AQ.3 and AQ.4 may run
 in parallel; AQ.5 starts once the AP daemon-spawn findings are known and
 merge-forwards from `integrate/phase-AQ` as needed.
-
 ### Release Gate
 Before version bump and publish:
 1. Dogfood on `develop` via `dev-install`.
