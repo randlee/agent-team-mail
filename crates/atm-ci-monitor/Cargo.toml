@@ -16,10 +16,12 @@ name = "agent_team_mail_ci_monitor"
 path = "src/lib.rs"
 
 [dependencies]
+chrono = "0.4"
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4"] }
 
 [features]
 default = []
