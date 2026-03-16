@@ -193,6 +193,11 @@ impl Drop for DaemonProcessGuard {
                     std::thread::sleep(Duration::from_millis(25));
                 }
             }
+            // On the adopt path (`child` is None), `self.pid` is not a direct child of
+            // this process. `waitpid` will return ECHILD, which is expected and harmless.
+            // We call reap_child_pid_best_effort here to handle the uncommon case where
+            // the adopted daemon was originally spawned as a child of a prior test process
+            // that has since exited, leaving the daemon as a re-parented orphan.
             reap_child_pid_best_effort(self.pid as i32);
         }
         let lock_path = self.daemon_dir.join("daemon.lock");
@@ -209,12 +214,26 @@ impl Drop for DaemonProcessGuard {
 }
 
 #[cfg(unix)]
-fn pid_alive(pid: i32) -> bool {
+#[allow(dead_code)]
+pub fn pid_alive(pid: i32) -> bool {
     unsafe extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;
     }
     // SAFETY: signal 0 checks process existence without signaling the process.
     unsafe { kill(pid, 0) == 0 }
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+pub fn wait_for_pid_exit(pid: i32, timeout: std::time::Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if !pid_alive(pid) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("pid {pid} stayed alive beyond {timeout:?}");
 }
 
 #[cfg(unix)]
@@ -244,8 +263,15 @@ fn reap_child_pid_best_effort(pid: i32) {
 }
 
 #[cfg(not(unix))]
-fn pid_alive(_pid: i32) -> bool {
+#[allow(dead_code)]
+pub fn pid_alive(_pid: i32) -> bool {
     false
+}
+
+#[cfg(not(unix))]
+#[allow(dead_code)]
+pub fn wait_for_pid_exit(_pid: i32, _timeout: std::time::Duration) {
+    // No-op on non-unix: process probing is not supported.
 }
 
 #[cfg(not(unix))]
