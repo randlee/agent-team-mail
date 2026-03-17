@@ -9,7 +9,6 @@ use agent_team_mail_daemon_launch::{
 };
 use anyhow::Result;
 use chrono::Utc;
-use serde_json::json;
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -107,28 +106,12 @@ fn emit_lifecycle_event(
     atm_home: &Path,
     detail: Option<&str>,
 ) {
-    let launch_class = token.map(|value| value.launch_class.as_str().to_string());
     let token_id = token.map(|value| value.token_id.clone());
     let test_identifier = token.and_then(|value| value.test_identifier.clone());
     let owner_pid = token.and_then(|value| value.owner_pid);
     let atm_home_text = canonicalize_lossy(atm_home).display().to_string();
     let lifecycle_phase = lifecycle_phase(event_name);
     let termination_reason = termination_reason(event_name);
-    let payload = json!({
-        "source": "atm-daemon",
-        "event_name": event_name,
-        "lifecycle_phase": lifecycle_phase,
-        "termination_reason": termination_reason,
-        "launch_class": launch_class,
-        "token_id": token_id,
-        "test_identifier": test_identifier,
-        "owner_pid": owner_pid,
-        "atm_home": atm_home_text,
-        "timestamp": Utc::now().to_rfc3339(),
-        "detail": detail,
-    });
-    eprintln!("{payload}");
-
     let mut extra = serde_json::Map::new();
     extra.insert(
         "event_name".to_string(),
@@ -208,21 +191,8 @@ fn emit_startup_rejection(
     atm_home: &Path,
     detail: Option<&str>,
 ) {
-    let launch_class = token.map(|token| token.launch_class.as_str().to_string());
     let token_id = token.map(|token| token.token_id.clone());
     let atm_home_text = canonicalize_lossy(atm_home).display().to_string();
-    let payload = json!({
-        "source": "atm-daemon",
-        "action": "daemon_start_rejected",
-        "rejection_reason": reason.as_str(),
-        "launch_class": launch_class,
-        "token_id": token_id,
-        "atm_home": atm_home_text,
-        "timestamp": Utc::now().to_rfc3339(),
-        "detail": detail,
-    });
-    eprintln!("{payload}");
-
     let mut extra = serde_json::Map::new();
     extra.insert(
         "rejection_reason".to_string(),
@@ -453,11 +423,87 @@ pub(crate) fn clear_seen_tokens_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_team_mail_core::daemon_client::{
+        RuntimeKind, RuntimeMetadata, write_runtime_metadata,
+    };
+    use agent_team_mail_core::logging::{RotationConfig, UnifiedLogMode, init_unified};
+    use agent_team_mail_core::logging_event::{LogEventV1, spool_dir};
     use agent_team_mail_daemon_launch::{
         encode_launch_token, issue_isolated_test_launch_token, issue_launch_token,
     };
+    use serial_test::serial;
+    use std::fs;
+    use std::path::PathBuf;
     use std::time::Duration;
+    use std::time::Instant;
     use tempfile::TempDir;
+
+    struct EnvGuard {
+        key: &'static str,
+        old: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+            let old = std::env::var(key).ok();
+            // SAFETY: test-scoped env mutation guarded by RAII restore in Drop.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, old }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: test-scoped env restore.
+            unsafe {
+                if let Some(old) = &self.old {
+                    std::env::set_var(self.key, old);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    fn read_jsonl_events(path: &std::path::Path) -> Vec<LogEventV1> {
+        if !path.exists() {
+            return Vec::new();
+        }
+        let mut events = Vec::new();
+        let paths = if path.is_file() {
+            vec![path.to_path_buf()]
+        } else {
+            match fs::read_dir(path) {
+                Ok(entries) => entries.flatten().map(|entry| entry.path()).collect(),
+                Err(_) => return Vec::new(),
+            }
+        };
+        for path in paths {
+            if path
+                .extension()
+                .and_then(|x| x.to_str())
+                .map(|x| x == "jsonl")
+                != Some(true)
+            {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            for line in content.lines().filter(|line| !line.trim().is_empty()) {
+                if let Ok(event) = serde_json::from_str::<LogEventV1>(line) {
+                    events.push(event);
+                }
+            }
+        }
+        events
+    }
+
+    fn isolated_runtime_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join("atm-isolated").join(name)
+    }
 
     fn token_for(home: &Path, class: LaunchClass, ttl_secs: i64) -> DaemonLaunchToken {
         let now = Utc::now();
@@ -587,5 +633,71 @@ mod tests {
         let raw = encode_launch_token(&token).unwrap();
         let accepted = validate_token_inner(&temp, Some(&raw)).unwrap();
         assert_eq!(accepted.launch_class, LaunchClass::ProdShared);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn sweep_stale_isolated_runtimes_emits_janitor_reap_event() {
+        clear_seen_tokens_for_tests();
+        let temp = TempDir::new().unwrap();
+        let _home_guard = EnvGuard::set_path("ATM_HOME", temp.path());
+        let log_path = temp.path().join("logs/atm-daemon.jsonl");
+        let _guards = init_unified(
+            "atm-daemon",
+            UnifiedLogMode::DaemonWriter {
+                file_path: log_path.clone(),
+                rotation: RotationConfig::default(),
+            },
+        )
+        .expect("init daemon-writer logging");
+
+        let runtime_home =
+            isolated_runtime_root(&format!("startup-auth-janitor-{}", uuid::Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&runtime_home);
+        fs::create_dir_all(runtime_home.join(".atm").join("daemon")).unwrap();
+        let metadata = RuntimeMetadata {
+            runtime_kind: RuntimeKind::Isolated,
+            created_at: "2026-03-14T00:00:00Z".to_string(),
+            expires_at: Some("2026-03-14T00:10:00Z".to_string()),
+            test_identifier: Some("startup-auth::janitor".to_string()),
+            owner_pid: Some(999_999),
+            token_id: Some("token-janitor".to_string()),
+            allow_live_github_polling: false,
+        };
+        write_runtime_metadata(&runtime_home, &metadata).unwrap();
+
+        let reaped = sweep_stale_isolated_runtimes().unwrap();
+        assert!(
+            reaped.contains(&runtime_home),
+            "expected janitor sweep to reap test runtime; saw {reaped:?}"
+        );
+        assert!(!runtime_home.exists(), "stale runtime should be removed");
+
+        let spool = spool_dir(temp.path());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            let events = read_jsonl_events(&spool);
+            if events.iter().any(|event| {
+                event.action == "janitor_reap"
+                    && event
+                        .fields
+                        .get("event_name")
+                        .and_then(|value| value.as_str())
+                        == Some("janitor_reap")
+            }) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        let events = read_jsonl_events(&spool);
+        panic!(
+            "expected janitor_reap event in daemon spool; saw actions: {:?}",
+            events
+                .iter()
+                .map(|event| event.action.as_str())
+                .collect::<Vec<_>>()
+        );
     }
 }
