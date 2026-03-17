@@ -9,7 +9,6 @@ use agent_team_mail_daemon_launch::{
 };
 use anyhow::Result;
 use chrono::Utc;
-use serde_json::json;
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -114,19 +113,6 @@ fn emit_lifecycle_event(
     let atm_home_text = canonicalize_lossy(atm_home).display().to_string();
     let lifecycle_phase = lifecycle_phase(event_name);
     let termination_reason = termination_reason(event_name);
-    let payload = json!({
-        "source": "atm-daemon",
-        "event_name": event_name,
-        "lifecycle_phase": lifecycle_phase,
-        "termination_reason": termination_reason,
-        "launch_class": launch_class,
-        "token_id": token_id,
-        "test_identifier": test_identifier,
-        "owner_pid": owner_pid,
-        "atm_home": atm_home_text,
-        "timestamp": Utc::now().to_rfc3339(),
-        "detail": detail,
-    });
     let mut extra = serde_json::Map::new();
     extra.insert(
         "event_name".to_string(),
@@ -209,16 +195,6 @@ fn emit_startup_rejection(
     let launch_class = token.map(|token| token.launch_class.as_str().to_string());
     let token_id = token.map(|token| token.token_id.clone());
     let atm_home_text = canonicalize_lossy(atm_home).display().to_string();
-    let payload = json!({
-        "source": "atm-daemon",
-        "action": "daemon_start_rejected",
-        "rejection_reason": reason.as_str(),
-        "launch_class": launch_class,
-        "token_id": token_id,
-        "atm_home": atm_home_text,
-        "timestamp": Utc::now().to_rfc3339(),
-        "detail": detail,
-    });
     let mut extra = serde_json::Map::new();
     extra.insert(
         "rejection_reason".to_string(),
