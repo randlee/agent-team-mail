@@ -1292,6 +1292,7 @@ fn test_daemon_exits_when_isolated_test_ttl_expires() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 #[serial]
 fn test_isolated_test_clean_shutdown_emits_lifecycle_events() {
