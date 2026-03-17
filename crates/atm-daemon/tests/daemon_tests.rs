@@ -13,6 +13,9 @@ use agent_team_mail_daemon::plugin::{
     Capability, MailService, Plugin, PluginContext, PluginError, PluginMetadata, PluginRegistry,
 };
 use agent_team_mail_daemon::roster::RosterService;
+use agent_team_mail_daemon_launch::{
+    DaemonLaunchToken, LaunchClass, attach_launch_token, issue_launch_token,
+};
 #[path = "../../atm/tests/support/daemon_process_guard.rs"]
 #[allow(dead_code)]
 mod daemon_process_guard;
@@ -31,6 +34,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
+
+fn issue_isolated_test_launch_token(home: &Path, issuer: &str) -> DaemonLaunchToken {
+    issue_launch_token(
+        LaunchClass::IsolatedTest,
+        home,
+        env!("CARGO_BIN_EXE_atm-daemon"),
+        issuer,
+        Duration::from_secs(600),
+    )
+}
 
 /// Mock plugin that tracks lifecycle calls
 struct MockPlugin {
@@ -1097,14 +1110,16 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
     let temp_dir = TempDir::new().unwrap();
     let bin = env!("CARGO_BIN_EXE_atm-daemon");
 
-    let first_child = std::process::Command::new(bin)
+    let mut first_cmd = std::process::Command::new(bin);
+    first_cmd
         .env("ATM_HOME", temp_dir.path())
         .env_remove("ATM_DAEMON_BIN")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("failed to spawn first daemon");
+        .stderr(Stdio::null());
+    let first_token = issue_isolated_test_launch_token(temp_dir.path(), "daemon_tests::first");
+    attach_launch_token(&mut first_cmd, &first_token).expect("encode first daemon token");
+    let first_child = first_cmd.spawn().expect("failed to spawn first daemon");
     let mut first = daemon_process_guard::DaemonProcessGuard::from_child(
         first_child,
         Path::new(bin),
@@ -1130,10 +1145,11 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
         "first daemon should acquire daemon.lock within 8s: elapsed={lock_elapsed:?}"
     );
 
-    let second = std::process::Command::new(bin)
-        .env("ATM_HOME", temp_dir.path())
-        .output()
-        .expect("failed to spawn second daemon");
+    let mut second_cmd = std::process::Command::new(bin);
+    second_cmd.env("ATM_HOME", temp_dir.path());
+    let second_token = issue_isolated_test_launch_token(temp_dir.path(), "daemon_tests::second");
+    attach_launch_token(&mut second_cmd, &second_token).expect("encode second daemon token");
+    let second = second_cmd.output().expect("failed to spawn second daemon");
 
     assert!(
         !second.status.success(),
@@ -1145,4 +1161,26 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
         "second daemon error should indicate lock contention, got: {stderr}"
     );
     drop(first);
+}
+
+#[test]
+#[serial]
+fn test_daemon_start_requires_launch_token() {
+    let temp_dir = TempDir::new().unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"))
+        .env("ATM_HOME", temp_dir.path())
+        .env_remove("ATM_LAUNCH_TOKEN")
+        .output()
+        .expect("spawn daemon without launch token");
+
+    assert!(
+        !output.status.success(),
+        "daemon start without launch token must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("\"rejection_reason\":\"missing_token\"")
+            || stderr.contains("missing launch token"),
+        "stderr should contain structured missing_token rejection, got: {stderr}"
+    );
 }

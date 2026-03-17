@@ -5,11 +5,15 @@
 //! issue new launch tokens themselves.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+pub const ATM_LAUNCH_TOKEN_ENV: &str = "ATM_LAUNCH_TOKEN";
+pub const DEFAULT_LAUNCH_TOKEN_TTL_SECS: u64 = 15;
 
 /// Authorized daemon launch classes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +71,22 @@ pub fn issue_launch_token(
     }
 }
 
+pub fn encode_launch_token(token: &DaemonLaunchToken) -> serde_json::Result<String> {
+    serde_json::to_string(token)
+}
+
+pub fn decode_launch_token(raw: &str) -> serde_json::Result<DaemonLaunchToken> {
+    serde_json::from_str(raw)
+}
+
+pub fn attach_launch_token(
+    command: &mut Command,
+    token: &DaemonLaunchToken,
+) -> serde_json::Result<()> {
+    command.env(ATM_LAUNCH_TOKEN_ENV, encode_launch_token(token)?);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,5 +114,19 @@ mod tests {
     fn launch_class_serializes_as_kebab_case() {
         let encoded = serde_json::to_string(&LaunchClass::IsolatedTest).unwrap();
         assert_eq!(encoded, "\"isolated-test\"");
+    }
+
+    #[test]
+    fn encode_decode_roundtrip_preserves_token() {
+        let token = issue_launch_token(
+            LaunchClass::ProdShared,
+            Path::new("/tmp/prod-home"),
+            "/opt/homebrew/bin/atm-daemon",
+            "launcher-test",
+            Duration::from_secs(15),
+        );
+        let raw = encode_launch_token(&token).unwrap();
+        let decoded = decode_launch_token(&raw).unwrap();
+        assert_eq!(decoded, token);
     }
 }

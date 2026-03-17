@@ -38,6 +38,9 @@ use std::{
     process::Stdio,
 };
 
+use agent_team_mail_daemon_launch::{
+    DEFAULT_LAUNCH_TOKEN_TTL_SECS, LaunchClass, attach_launch_token, issue_launch_token,
+};
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
@@ -497,13 +500,32 @@ fn ensure_daemon_running(team: &str) -> Option<String> {
         return None;
     }
 
-    let spawn = std::process::Command::new("atm-daemon")
+    let home = get_home_dir().ok()?;
+    let launch_class =
+        match agent_team_mail_core::daemon_client::runtime_kind_for_home(&home).ok()? {
+            agent_team_mail_core::daemon_client::RuntimeKind::Release => LaunchClass::ProdShared,
+            agent_team_mail_core::daemon_client::RuntimeKind::Dev => LaunchClass::DevShared,
+            agent_team_mail_core::daemon_client::RuntimeKind::Isolated => LaunchClass::IsolatedTest,
+        };
+    let token = issue_launch_token(
+        launch_class,
+        &home,
+        "atm-daemon",
+        "agent-team-mail-tui::ensure_daemon_running",
+        Duration::from_secs(DEFAULT_LAUNCH_TOKEN_TTL_SECS),
+    );
+    let mut command = std::process::Command::new("atm-daemon");
+    command
         .arg("--team")
         .arg(team)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+        .stderr(Stdio::null());
+    if attach_launch_token(&mut command, &token).is_err() {
+        return Some("daemon unavailable: failed to encode launch token".to_string());
+    }
+
+    let spawn = command.spawn();
 
     if spawn.is_err() {
         return Some(format!(

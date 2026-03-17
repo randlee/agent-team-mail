@@ -53,6 +53,8 @@ async fn main() -> Result<()> {
     // Determine home directory early for lock/log path resolution.
     let home_dir =
         agent_team_mail_core::home::get_home_dir().context("Failed to determine home directory")?;
+    let launch_token = daemon::startup_auth::validate_startup_token(&home_dir)
+        .context("Daemon launch authorization failed")?;
     let runtime_owner =
         agent_team_mail_core::daemon_client::validate_runtime_admission_for_current_process(
             &home_dir,
@@ -75,6 +77,27 @@ async fn main() -> Result<()> {
     let daemon_lock = agent_team_mail_core::io::lock::acquire_lock(&daemon_lock_path, 0).map_err(
         |e| match e {
             agent_team_mail_core::io::InboxError::LockTimeout { .. } => {
+                let detail = if let Some(existing) =
+                    agent_team_mail_core::daemon_client::read_daemon_lock_metadata(&home_dir)
+                {
+                    format!(
+                        "atm-daemon already running for this shared runtime (lock held at {}). Existing owner: pid={} version={} {}. Refusing second instance.",
+                        daemon_lock_path.display(),
+                        existing.pid,
+                        existing.version,
+                        agent_team_mail_core::daemon_client::format_runtime_owner_summary(&existing.owner)
+                    )
+                } else {
+                    format!(
+                        "atm-daemon already running (lock held at {}). Refusing second instance.",
+                        daemon_lock_path.display()
+                    )
+                };
+                daemon::startup_auth::log_shared_runtime_rejection(
+                    &home_dir,
+                    &launch_token,
+                    &detail,
+                );
                 if let Some(existing) =
                     agent_team_mail_core::daemon_client::read_daemon_lock_metadata(&home_dir)
                 {
