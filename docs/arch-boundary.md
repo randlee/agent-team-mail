@@ -52,6 +52,10 @@ Examples of blocking violations:
 
 - AV.0 is the mandatory cleanup sprint for the currently known direct
   `sc-observability` import violations.
+- Crate-local facades are allowed only if they are transport-neutral shims
+  (for example, storing an injected hook or trait object). A crate-local daemon
+  facade must not import `sc-observability` itself; the real exporter wiring
+  belongs in the entry-point binary.
 - AV.1 must deliver `scripts/ci/observability_boundary_check.sh` plus a CI
   workflow step that runs it before AV.2 begins.
 - QA/CI should use this section as the enforcement reference for the

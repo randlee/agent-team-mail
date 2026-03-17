@@ -5,7 +5,9 @@ mod env_guard;
 
 use agent_team_mail_core::logging_event::{LogEventV1, new_log_event};
 use agent_team_mail_daemon::daemon::{
-    LogWriterConfig, new_log_event_queue, run_log_writer_task, spool_merge::merge_spool_on_startup,
+    LogWriterConfig, new_log_event_queue, observability::clear_otel_export_hook,
+    observability::install_otel_export_hook, run_log_writer_task,
+    spool_merge::merge_spool_on_startup,
 };
 use env_guard::EnvGuard;
 use sc_observability::OtelRecord;
@@ -34,6 +36,9 @@ async fn start_writer(
     CancellationToken,
     tokio::task::JoinHandle<()>,
 ) {
+    install_otel_export_hook(std::sync::Arc::new(|log_path, event| {
+        sc_observability::export_otel_best_effort_from_path(log_path, event);
+    }));
     let queue = new_log_event_queue();
     let cancel = CancellationToken::new();
     let handle = tokio::spawn(run_log_writer_task(
@@ -70,6 +75,7 @@ async fn stop_writer(cancel: CancellationToken, handle: tokio::task::JoinHandle<
         .await
         .expect("writer task should stop")
         .expect("writer join should succeed");
+    clear_otel_export_hook();
 }
 
 #[tokio::test]
