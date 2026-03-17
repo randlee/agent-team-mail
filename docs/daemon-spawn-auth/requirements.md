@@ -91,27 +91,36 @@ No other crate may define or issue a competing launch token schema.
 
 ## Isolated-Test Lease
 
-- Every isolated test daemon MUST carry:
+- When `launch_class == isolated-test`, every launch token and persisted runtime
+  lease MUST carry:
   - `test_identifier`
   - `owner_pid`
   - `issued_at`
   - `expires_at`
   - `atm_home`
   - token id / nonce
+- Clean fixture-owned shutdown is the normative success path for test daemons.
 - TTL expiry and dead-owner shutdown are fail-safe conditions only.
-- The owning fixture remains responsible for clean shutdown before TTL expiry or
-  owner loss.
+- If an isolated-test daemon reaches TTL expiry or dead-owner shutdown, QA MUST
+  treat that as a blocking harness gap rather than an acceptable cleanup path.
+- Janitor/sweep cleanup may remove stale isolated-test runtimes only after the
+  lease has expired and the recorded `owner_pid` is no longer alive.
 
 ## Lifecycle Logging
 
 - The system MUST log:
-  - launch accepted
-  - launch rejected
-  - clean owner shutdown
-  - TTL-expiry shutdown
-  - dead-owner shutdown
-  - janitor/stale-runtime reap
+  - `launch_accepted`
+  - `daemon_start_rejected`
+  - `clean_owner_shutdown`
+  - `ttl_expiry_shutdown`
+  - `dead_owner_shutdown`
+  - `janitor_reap`
 - These logs are the primary evidence source for `daemon-spawn-qa`.
+- `clean_owner_shutdown` is the normative success terminal event for a
+  test-owned daemon.
+- `ttl_expiry_shutdown` and `dead_owner_shutdown` are fail-safe terminal events
+  and MUST be treated as harness-gap evidence when they replace clean fixture
+  shutdown.
 
 ## QA / CI Contract
 

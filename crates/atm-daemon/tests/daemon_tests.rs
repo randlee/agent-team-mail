@@ -14,7 +14,8 @@ use agent_team_mail_daemon::plugin::{
 };
 use agent_team_mail_daemon::roster::RosterService;
 use agent_team_mail_daemon_launch::{
-    DaemonLaunchToken, LaunchClass, attach_launch_token, issue_launch_token,
+    DaemonLaunchToken, attach_launch_token,
+    issue_isolated_test_launch_token as issue_isolated_test_launch_token_inner,
 };
 #[path = "../../atm/tests/support/daemon_process_guard.rs"]
 #[allow(dead_code)]
@@ -36,12 +37,30 @@ use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
 fn issue_isolated_test_launch_token(home: &Path, issuer: &str) -> DaemonLaunchToken {
-    issue_launch_token(
-        LaunchClass::IsolatedTest,
+    issue_isolated_test_launch_token_inner(
         home,
         env!("CARGO_BIN_EXE_atm-daemon"),
         issuer,
+        format!("{issuer}:{}", std::process::id()),
+        std::process::id(),
         Duration::from_secs(600),
+    )
+}
+
+fn issue_isolated_test_launch_token_with_lease(
+    home: &Path,
+    issuer: &str,
+    test_identifier: &str,
+    owner_pid: u32,
+    ttl: Duration,
+) -> DaemonLaunchToken {
+    issue_isolated_test_launch_token_inner(
+        home,
+        env!("CARGO_BIN_EXE_atm-daemon"),
+        issuer,
+        test_identifier.to_string(),
+        owner_pid,
+        ttl,
     )
 }
 
@@ -1182,5 +1201,118 @@ fn test_daemon_start_requires_launch_token() {
         stderr.contains("\"rejection_reason\":\"missing_token\"")
             || stderr.contains("missing launch token"),
         "stderr should contain structured missing_token rejection, got: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_daemon_exits_when_isolated_test_owner_pid_is_dead() {
+    let temp_dir = TempDir::new().unwrap();
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"));
+    cmd.env("ATM_HOME", temp_dir.path());
+    let token = issue_isolated_test_launch_token_with_lease(
+        temp_dir.path(),
+        "daemon_tests::dead_owner",
+        "daemon_tests::dead_owner",
+        999_999,
+        Duration::from_secs(30),
+    );
+    attach_launch_token(&mut cmd, &token).expect("encode dead-owner token");
+    let output = cmd.output().expect("spawn daemon with dead owner pid");
+
+    assert!(
+        !output.status.success(),
+        "daemon should terminate non-zero when owner_pid is dead"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("\"event_name\":\"dead_owner_shutdown\"")
+            || stderr.contains("dead_owner_shutdown"),
+        "stderr should contain dead_owner_shutdown event, got: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_daemon_exits_when_isolated_test_ttl_expires() {
+    let temp_dir = TempDir::new().unwrap();
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"));
+    cmd.env("ATM_HOME", temp_dir.path());
+    let token = issue_isolated_test_launch_token_with_lease(
+        temp_dir.path(),
+        "daemon_tests::ttl_expiry",
+        "daemon_tests::ttl_expiry",
+        std::process::id(),
+        Duration::from_secs(1),
+    );
+    attach_launch_token(&mut cmd, &token).expect("encode ttl-expiry token");
+    let output = cmd.output().expect("spawn daemon with short TTL");
+
+    assert!(
+        !output.status.success(),
+        "daemon should terminate non-zero when TTL expires"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("\"event_name\":\"ttl_expiry_shutdown\"")
+            || stderr.contains("ttl_expiry_shutdown"),
+        "stderr should contain ttl_expiry_shutdown event, got: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_isolated_test_clean_shutdown_emits_lifecycle_events() {
+    let temp_dir = TempDir::new().unwrap();
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"));
+    cmd.env("ATM_HOME", temp_dir.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let token = issue_isolated_test_launch_token_with_lease(
+        temp_dir.path(),
+        "daemon_tests::clean_shutdown",
+        "daemon_tests::clean_shutdown",
+        std::process::id(),
+        Duration::from_secs(30),
+    );
+    attach_launch_token(&mut cmd, &token).expect("encode clean-shutdown token");
+    let mut child = cmd.spawn().expect("spawn daemon for clean shutdown");
+
+    let daemon_running = wait_for_child_running_elapsed(&mut child, 1_000)
+        .expect("daemon should still be running");
+    assert!(
+        daemon_running <= Duration::from_secs(1),
+        "daemon should still be running: elapsed={daemon_running:?}"
+    );
+    let lock_elapsed = wait_for_lock_file_acquired_elapsed(temp_dir.path(), 8_000)
+        .expect("daemon should acquire daemon.lock");
+    assert!(
+        lock_elapsed <= Duration::from_secs(8),
+        "daemon should acquire daemon.lock within 8s: elapsed={lock_elapsed:?}"
+    );
+    std::thread::sleep(Duration::from_millis(250));
+
+    let signal_result = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    assert_eq!(signal_result, 0, "SIGTERM should succeed");
+
+    let output = child
+        .wait_with_output()
+        .expect("wait for clean shutdown daemon output");
+    assert!(
+        output.status.success(),
+        "daemon should exit cleanly after SIGTERM: status={:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("\"event_name\":\"launch_accepted\"") || stderr.contains("launch_accepted"),
+        "stderr should contain launch_accepted event, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("\"event_name\":\"clean_owner_shutdown\"")
+            || stderr.contains("clean_owner_shutdown"),
+        "stderr should contain clean_owner_shutdown event, got: {stderr}"
     );
 }

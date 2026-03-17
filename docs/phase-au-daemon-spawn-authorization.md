@@ -98,6 +98,12 @@ teardown. Clean shutdown by the owning test fixture remains mandatory.
 
 ### AU.3 — Isolated-Test Lease + Clean Shutdown Contract
 
+**Status**: COMPLETE
+Implementation note: isolated-test launch tokens now carry `test_identifier` +
+`owner_pid`, runtime metadata persists the lease, the daemon self-terminates on
+TTL/dead-owner fail-safe conditions, and startup janitoring reaps stale
+isolated runtimes only after lease expiry plus dead-owner confirmation.
+
 **Scope**: give test daemons a real lease model and make clean fixture teardown
 the normative success path.
 
@@ -122,6 +128,8 @@ the normative success path.
 
 ### AU.4 — Lifecycle Logging + QA Enforcement
 
+**Status**: COMPLETE
+
 **Scope**: make launch/termination reasons observable and actionable.
 
 **Deliverables**:
@@ -135,6 +143,17 @@ the normative success path.
 - `daemon-spawn-qa` update to consume lifecycle logs for root cause analysis
 - QA rule: TTL/dead-owner shutdown in tests is a blocking harness-gap finding
 - CI/QA preflight/postflight rogue-daemon checks bound to launch metadata
+
+**Implementation Note**:
+- added structured lifecycle events for `launch_accepted`,
+  `clean_owner_shutdown`, `ttl_expiry_shutdown`, `dead_owner_shutdown`, and
+  `janitor_reap`, with `daemon_start_rejected` retained as the authoritative
+  firewall denial event
+- wired daemon startup and clean exit through those lifecycle records so
+  `daemon-spawn-qa` can treat them as the source of truth
+- updated `daemon-spawn-qa` to use lifecycle event names directly and to report
+  TTL/dead-owner terminations without `clean_owner_shutdown` as blocking
+  harness gaps
 
 **Acceptance Criteria**:
 - `daemon-spawn-qa` can explain forgotten daemons using logged facts

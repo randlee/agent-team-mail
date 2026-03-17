@@ -39,7 +39,8 @@ use std::{
 };
 
 use agent_team_mail_daemon_launch::{
-    DEFAULT_LAUNCH_TOKEN_TTL_SECS, LaunchClass, attach_launch_token, issue_launch_token,
+    DEFAULT_LAUNCH_TOKEN_TTL_SECS, LaunchClass, attach_launch_token,
+    issue_isolated_test_launch_token, issue_launch_token,
 };
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -507,13 +508,24 @@ fn ensure_daemon_running(team: &str) -> Option<String> {
             agent_team_mail_core::daemon_client::RuntimeKind::Dev => LaunchClass::DevShared,
             agent_team_mail_core::daemon_client::RuntimeKind::Isolated => LaunchClass::IsolatedTest,
         };
-    let token = issue_launch_token(
-        launch_class,
-        &home,
-        "atm-daemon",
-        "agent-team-mail-tui::ensure_daemon_running",
-        Duration::from_secs(DEFAULT_LAUNCH_TOKEN_TTL_SECS),
-    );
+    let token = if launch_class == LaunchClass::IsolatedTest {
+        issue_isolated_test_launch_token(
+            &home,
+            "atm-daemon",
+            "agent-team-mail-tui::ensure_daemon_running",
+            format!("atm-tui::ensure_daemon_running:{}", std::process::id()),
+            std::process::id(),
+            Duration::from_secs(DEFAULT_LAUNCH_TOKEN_TTL_SECS),
+        )
+    } else {
+        issue_launch_token(
+            launch_class,
+            &home,
+            "atm-daemon",
+            "agent-team-mail-tui::ensure_daemon_running",
+            Duration::from_secs(DEFAULT_LAUNCH_TOKEN_TTL_SECS),
+        )
+    };
     let mut command = std::process::Command::new("atm-daemon");
     command
         .arg("--team")
