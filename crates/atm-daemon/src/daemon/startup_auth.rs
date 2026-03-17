@@ -246,7 +246,16 @@ mod tests {
     fn expired_token_is_rejected() {
         clear_seen_tokens_for_tests();
         let temp = TempDir::new().unwrap();
-        let token = token_for(temp.path(), LaunchClass::IsolatedTest, -1);
+        let now = Utc::now();
+        let token = DaemonLaunchToken {
+            launch_class: LaunchClass::IsolatedTest,
+            atm_home: temp.path().to_path_buf(),
+            binary_identity: "test-binary".to_string(),
+            issuer: "startup-auth-test".to_string(),
+            token_id: uuid::Uuid::new_v4().to_string(),
+            issued_at: (now - chrono::Duration::seconds(10)).to_rfc3339(),
+            expires_at: (now - chrono::Duration::seconds(5)).to_rfc3339(),
+        };
         let err = validate_token_inner(temp.path(), Some(&encode_launch_token(&token).unwrap()))
             .unwrap_err();
         assert!(matches!(err, StartupAuthError::ExpiredToken));

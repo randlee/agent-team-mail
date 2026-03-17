@@ -9,6 +9,7 @@ dependencies = [
  "agent-team-mail-ci-monitor",
  "agent-team-mail-core",
  "agent-team-mail-daemon",
+ "agent-team-mail-daemon-launch",
  "anyhow",
  "assert_cmd",
  "chrono",

@@ -21,6 +21,7 @@ dependencies = [
 name = "agent-team-mail-core"
 version = "0.44.9"
 dependencies = [
+ "agent-team-mail-daemon-launch",
  "anyhow",
  "blake3",
  "chrono",
@@ -36,6 +37,16 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "agent-team-mail-daemon-launch"
+version = "0.44.9"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
