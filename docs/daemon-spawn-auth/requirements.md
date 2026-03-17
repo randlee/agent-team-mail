@@ -32,8 +32,9 @@ launch-token validation, isolated-test leases, and lifecycle logging.
   - string when available; the nonce / UUID from the presented token
 - `atm_home`
   - path bound to the rejected startup attempt
-- `timestamp`
-  - RFC3339 datetime when the rejection was emitted
+- `ts`
+  - RFC3339 datetime when the rejection was emitted (JSON key `"ts"` in
+    `LogEventV1`; not a separate `"timestamp"` key)
 
 ## Launch Classes
 
@@ -124,8 +125,22 @@ No other crate may define or issue a competing launch token schema.
 
 ### Lifecycle Event Field Schemas
 
+> **Serialization note**: All lifecycle events are stored as `LogEventV1` JSONL
+> records. The `event_name` value appears in two places: as the top-level
+> `"action"` key and inside the `"fields"` map as `"event_name"`. Consumers
+> should query `action` or `fields.event_name` — there is no separate top-level
+> `"event_name"` key. The emission timestamp is in the top-level `"ts"` key
+> (RFC3339 UTC); there is no separate `"timestamp"` key.
+
+> **Spool-fallback note**: `launch_accepted` is emitted before the unified log
+> writer is fully initialized. It is written to the spool directory via the
+> fail-open fallback path and folded into the canonical log during the
+> startup spool-merge that runs immediately after log-writer init. This is
+> intentional; daemon-spawn-qa consumers MUST treat spool-merged records as
+> equivalent evidence to directly-written records.
+
 - `launch_accepted`
-  - `event_name`
+  - `event_name` (in `fields` map; also mirrored as top-level `action`)
     - fixed string `launch_accepted`
   - `atm_home`
     - canonicalized runtime path for the accepted launch
@@ -133,21 +148,22 @@ No other crate may define or issue a competing launch token schema.
     - `prod-shared`, `dev-shared`, or `isolated-test`
   - `token_id`
     - launch token nonce / UUID for the accepted daemon start
-  - `timestamp`
+  - `ts` (top-level `LogEventV1` key)
     - RFC3339 UTC emission time
 - `clean_owner_shutdown`
-  - `event_name`
+  - `event_name` (in `fields` map; also mirrored as top-level `action`)
     - fixed string `clean_owner_shutdown`
   - `atm_home`
     - canonicalized runtime path for the terminated daemon
   - `launch_class`
-    - `isolated-test` for test-owned daemons
+    - emitted for all launch classes (`prod-shared`, `dev-shared`,
+      `isolated-test`); not restricted to test-owned daemons
   - `token_id`
     - launch token nonce / UUID when known
-  - `timestamp`
+  - `ts` (top-level `LogEventV1` key)
     - RFC3339 UTC emission time
 - `ttl_expiry_shutdown`
-  - `event_name`
+  - `event_name` (in `fields` map; also mirrored as top-level `action`)
     - fixed string `ttl_expiry_shutdown`
   - `atm_home`
     - canonicalized runtime path for the expired daemon
@@ -155,10 +171,10 @@ No other crate may define or issue a competing launch token schema.
     - `isolated-test`
   - `token_id`
     - launch token nonce / UUID when known
-  - `timestamp`
+  - `ts` (top-level `LogEventV1` key)
     - RFC3339 UTC emission time
 - `dead_owner_shutdown`
-  - `event_name`
+  - `event_name` (in `fields` map; also mirrored as top-level `action`)
     - fixed string `dead_owner_shutdown`
   - `atm_home`
     - canonicalized runtime path for the daemon whose owner disappeared
@@ -166,10 +182,10 @@ No other crate may define or issue a competing launch token schema.
     - `isolated-test`
   - `token_id`
     - launch token nonce / UUID when known
-  - `timestamp`
+  - `ts` (top-level `LogEventV1` key)
     - RFC3339 UTC emission time
 - `janitor_reap`
-  - `event_name`
+  - `event_name` (in `fields` map; also mirrored as top-level `action`)
     - fixed string `janitor_reap`
   - `atm_home`
     - canonicalized runtime path for the reaped isolated runtime
@@ -178,7 +194,7 @@ No other crate may define or issue a competing launch token schema.
       metadata
   - `token_id`
     - omitted when no launch token is present during janitor cleanup
-  - `timestamp`
+  - `ts` (top-level `LogEventV1` key)
     - RFC3339 UTC emission time
 
 ## QA / CI Contract

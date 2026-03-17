@@ -258,8 +258,14 @@ fn fields_to_log_event(fields: &EventFields) -> crate::logging_event::LogEventV1
 
 /// Emit a single structured event to the unified logging channel.
 ///
-/// This function is intentionally fail-open: if the unified channel is not
-/// initialised or the send fails, the event is silently dropped.
+/// This function is intentionally fail-open with a two-tier fallback:
+/// 1. If the unified producer channel is initialised, the event is sent there.
+/// 2. If the channel is not yet initialised (or the send fails), the event is
+///    spooled to `ATM_HOME/.config/atm/logs/atm-daemon/spool/` via
+///    `write_to_spool`. The daemon merges spool files into the canonical log
+///    during startup.
+/// 3. Only if both the channel and the spool path are unavailable (i.e.
+///    `ATM_HOME` is unresolvable) is the event silently dropped.
 ///
 /// The legacy `events.jsonl` dual-write path was removed in Phase M.1b.
 /// Events flow exclusively through the unified producer channel.
