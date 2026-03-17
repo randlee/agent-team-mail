@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_daemon_launch::{
@@ -10,6 +11,8 @@ use anyhow::Result;
 use chrono::Utc;
 use serde_json::json;
 use thiserror::Error;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Copy)]
 pub enum StartupRejectionReason {
@@ -50,7 +53,17 @@ pub enum StartupAuthError {
     WrongLaunchClass,
     #[error("launch token replayed")]
     ReplayedToken,
+    #[error("isolated-test launch token missing lease fields")]
+    MissingIsolatedLeaseFields,
 }
+
+#[derive(Debug, Clone)]
+pub struct LeaseViolation {
+    pub event_name: &'static str,
+    pub detail: String,
+}
+
+pub type SharedLeaseViolation = Arc<Mutex<Option<LeaseViolation>>>;
 
 fn seen_tokens() -> &'static Mutex<HashSet<String>> {
     static TOKENS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
@@ -69,6 +82,73 @@ fn expected_launch_class(home: &Path) -> Result<LaunchClass> {
             agent_team_mail_core::daemon_client::RuntimeKind::Isolated => LaunchClass::IsolatedTest,
         },
     )
+}
+
+fn emit_lifecycle_event(
+    event_name: &'static str,
+    token: Option<&DaemonLaunchToken>,
+    atm_home: &Path,
+    detail: Option<&str>,
+) {
+    let launch_class = token.map(|value| value.launch_class.as_str().to_string());
+    let token_id = token.map(|value| value.token_id.clone());
+    let test_identifier = token.and_then(|value| value.test_identifier.clone());
+    let owner_pid = token.and_then(|value| value.owner_pid);
+    let atm_home_text = canonicalize_lossy(atm_home).display().to_string();
+    let payload = json!({
+        "source": "atm-daemon",
+        "event_name": event_name,
+        "launch_class": launch_class,
+        "token_id": token_id,
+        "test_identifier": test_identifier,
+        "owner_pid": owner_pid,
+        "atm_home": atm_home_text,
+        "timestamp": Utc::now().to_rfc3339(),
+        "detail": detail,
+    });
+    eprintln!("{payload}");
+
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "event_name".to_string(),
+        serde_json::Value::String(event_name.to_string()),
+    );
+    if let Some(class) = token.map(|value| value.launch_class.as_str()) {
+        extra.insert(
+            "launch_class".to_string(),
+            serde_json::Value::String(class.to_string()),
+        );
+    }
+    if let Some(token_id) = token_id {
+        extra.insert("token_id".to_string(), serde_json::Value::String(token_id));
+    }
+    if let Some(test_identifier) = test_identifier {
+        extra.insert(
+            "test_identifier".to_string(),
+            serde_json::Value::String(test_identifier),
+        );
+    }
+    if let Some(owner_pid) = owner_pid {
+        extra.insert(
+            "owner_pid".to_string(),
+            serde_json::Value::Number(owner_pid.into()),
+        );
+    }
+    extra.insert(
+        "atm_home".to_string(),
+        serde_json::Value::String(atm_home_text.clone()),
+    );
+
+    emit_event_best_effort(EventFields {
+        level: "warn",
+        source: "atm-daemon",
+        action: event_name,
+        result: Some(event_name.to_string()),
+        target: Some(atm_home_text),
+        error: detail.map(str::to_string),
+        extra_fields: extra,
+        ..Default::default()
+    });
 }
 
 fn emit_startup_rejection(
@@ -164,6 +244,16 @@ fn validate_token_inner(
         return Err(StartupAuthError::WrongLaunchClass);
     }
 
+    if token.launch_class == LaunchClass::IsolatedTest
+        && (token
+            .test_identifier
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+            || token.owner_pid.unwrap_or_default() <= 1)
+    {
+        return Err(StartupAuthError::MissingIsolatedLeaseFields);
+    }
+
     let mut seen = seen_tokens().lock().unwrap();
     if !seen.insert(token.token_id.clone()) {
         return Err(StartupAuthError::ReplayedToken);
@@ -184,6 +274,9 @@ pub fn validate_startup_token(home: &Path) -> Result<DaemonLaunchToken> {
                 StartupAuthError::WrongAtmHome => StartupRejectionReason::WrongAtmHome,
                 StartupAuthError::WrongLaunchClass => StartupRejectionReason::WrongLaunchClass,
                 StartupAuthError::ReplayedToken => StartupRejectionReason::ReplayedToken,
+                StartupAuthError::MissingIsolatedLeaseFields => {
+                    StartupRejectionReason::InvalidToken
+                }
             };
             let parsed = raw.as_deref().and_then(|raw| decode_launch_token(raw).ok());
             emit_startup_rejection(reason, parsed.as_ref(), home, Some(&err.to_string()));
@@ -201,6 +294,100 @@ pub fn log_shared_runtime_rejection(home: &Path, token: &DaemonLaunchToken, deta
     );
 }
 
+pub fn persist_runtime_metadata_from_token(home: &Path, token: &DaemonLaunchToken) -> Result<()> {
+    let existing = agent_team_mail_core::daemon_client::read_runtime_metadata(home);
+    let runtime_kind = agent_team_mail_core::daemon_client::runtime_kind_for_home(home)?;
+    let metadata = agent_team_mail_core::daemon_client::RuntimeMetadata {
+        runtime_kind: runtime_kind.clone(),
+        created_at: existing
+            .as_ref()
+            .map(|value| value.created_at.clone())
+            .unwrap_or_else(|| Utc::now().to_rfc3339()),
+        expires_at: matches!(runtime_kind, agent_team_mail_core::daemon_client::RuntimeKind::Isolated)
+            .then(|| token.expires_at.clone()),
+        allow_live_github_polling: existing
+            .as_ref()
+            .map(|value| value.allow_live_github_polling)
+            .unwrap_or(false),
+        test_identifier: token.test_identifier.clone(),
+        owner_pid: token.owner_pid,
+        token_id: Some(token.token_id.clone()),
+    };
+    agent_team_mail_core::daemon_client::write_runtime_metadata(home, &metadata)
+}
+
+pub fn sweep_stale_isolated_runtimes() -> Result<Vec<PathBuf>> {
+    let reaped = agent_team_mail_core::daemon_client::reap_expired_isolated_runtime_roots()?;
+    for home in &reaped {
+        emit_lifecycle_event(
+            "janitor_reap",
+            None,
+            home,
+            Some("reaped stale isolated runtime after TTL expiry and dead owner"),
+        );
+    }
+    Ok(reaped)
+}
+
+pub fn new_shared_lease_violation() -> SharedLeaseViolation {
+    Arc::new(Mutex::new(None))
+}
+
+pub fn spawn_isolated_test_lease_monitor(
+    home: PathBuf,
+    token: DaemonLaunchToken,
+    cancel: CancellationToken,
+    lease_violation: SharedLeaseViolation,
+) -> Option<JoinHandle<()>> {
+    if token.launch_class != LaunchClass::IsolatedTest {
+        return None;
+    }
+
+    Some(tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = ticker.tick() => {
+                    if let Ok(expires_at) = chrono::DateTime::parse_from_rfc3339(&token.expires_at)
+                        && expires_at.with_timezone(&Utc) <= Utc::now()
+                    {
+                        emit_lifecycle_event(
+                            "ttl_expiry_shutdown",
+                            Some(&token),
+                            &home,
+                            Some("isolated-test daemon reached lease expiry"),
+                        );
+                        *lease_violation.lock().unwrap() = Some(LeaseViolation {
+                            event_name: "ttl_expiry_shutdown",
+                            detail: "isolated-test daemon reached lease expiry".to_string(),
+                        });
+                        cancel.cancel();
+                        break;
+                    }
+
+                    if let Some(owner_pid) = token.owner_pid
+                        && !crate::daemon::is_pid_alive(owner_pid)
+                    {
+                        emit_lifecycle_event(
+                            "dead_owner_shutdown",
+                            Some(&token),
+                            &home,
+                            Some("isolated-test daemon owner process is no longer alive"),
+                        );
+                        *lease_violation.lock().unwrap() = Some(LeaseViolation {
+                            event_name: "dead_owner_shutdown",
+                            detail: format!("owner_pid {owner_pid} is no longer alive"),
+                        });
+                        cancel.cancel();
+                        break;
+                    }
+                }
+            }
+        }
+    }))
+}
+
 #[cfg(test)]
 pub(crate) fn clear_seen_tokens_for_tests() {
     seen_tokens().lock().unwrap().clear();
@@ -209,7 +396,9 @@ pub(crate) fn clear_seen_tokens_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_team_mail_daemon_launch::{encode_launch_token, issue_launch_token};
+    use agent_team_mail_daemon_launch::{
+        encode_launch_token, issue_isolated_test_launch_token, issue_launch_token,
+    };
     use std::time::Duration;
     use tempfile::TempDir;
 
@@ -223,6 +412,9 @@ mod tests {
             token_id: uuid::Uuid::new_v4().to_string(),
             issued_at: now.to_rfc3339(),
             expires_at: (now + chrono::Duration::seconds(ttl_secs)).to_rfc3339(),
+            test_identifier: (class == LaunchClass::IsolatedTest)
+                .then(|| "startup-auth-test".to_string()),
+            owner_pid: (class == LaunchClass::IsolatedTest).then_some(4242),
         }
     }
 
@@ -255,10 +447,24 @@ mod tests {
             token_id: uuid::Uuid::new_v4().to_string(),
             issued_at: (now - chrono::Duration::seconds(10)).to_rfc3339(),
             expires_at: (now - chrono::Duration::seconds(5)).to_rfc3339(),
+            test_identifier: Some("expired-token-test".to_string()),
+            owner_pid: Some(4242),
         };
         let err = validate_token_inner(temp.path(), Some(&encode_launch_token(&token).unwrap()))
             .unwrap_err();
         assert!(matches!(err, StartupAuthError::ExpiredToken));
+    }
+
+    #[test]
+    fn isolated_test_token_missing_lease_is_rejected() {
+        clear_seen_tokens_for_tests();
+        let temp = TempDir::new().unwrap();
+        let mut token = token_for(temp.path(), LaunchClass::IsolatedTest, 30);
+        token.test_identifier = None;
+        token.owner_pid = None;
+        let err = validate_token_inner(temp.path(), Some(&encode_launch_token(&token).unwrap()))
+            .unwrap_err();
+        assert!(matches!(err, StartupAuthError::MissingIsolatedLeaseFields));
     }
 
     #[test]
@@ -297,8 +503,25 @@ mod tests {
     fn valid_token_is_accepted() {
         clear_seen_tokens_for_tests();
         let temp = TempDir::new().unwrap();
+        let token = issue_isolated_test_launch_token(
+            temp.path(),
+            "test-binary",
+            "startup-auth-test",
+            "startup-auth-test",
+            std::process::id(),
+            Duration::from_secs(30),
+        );
+        let raw = encode_launch_token(&token).unwrap();
+        let accepted = validate_token_inner(temp.path(), Some(&raw)).unwrap();
+        assert_eq!(accepted.launch_class, LaunchClass::IsolatedTest);
+    }
+
+    #[test]
+    fn non_isolated_tokens_may_omit_lease_fields() {
+        clear_seen_tokens_for_tests();
+        let temp = TempDir::new().unwrap();
         let token = issue_launch_token(
-            LaunchClass::IsolatedTest,
+            LaunchClass::ProdShared,
             temp.path(),
             "test-binary",
             "startup-auth-test",
@@ -306,6 +529,6 @@ mod tests {
         );
         let raw = encode_launch_token(&token).unwrap();
         let accepted = validate_token_inner(temp.path(), Some(&raw)).unwrap();
-        assert_eq!(accepted.launch_class, LaunchClass::IsolatedTest);
+        assert_eq!(accepted.launch_class, LaunchClass::ProdShared);
     }
 }

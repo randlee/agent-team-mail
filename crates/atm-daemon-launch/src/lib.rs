@@ -34,6 +34,13 @@ impl LaunchClass {
     }
 }
 
+/// Lease metadata required for isolated test daemons.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IsolatedTestLease {
+    pub test_identifier: String,
+    pub owner_pid: u32,
+}
+
 /// Serialized launch token carried from the canonical launcher to `atm-daemon`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonLaunchToken {
@@ -46,6 +53,12 @@ pub struct DaemonLaunchToken {
     pub issued_at: String,
     /// RFC3339 UTC timestamp after which startup must be rejected.
     pub expires_at: String,
+    /// Stable test identifier for isolated test daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_identifier: Option<String>,
+    /// Owning test-process PID for isolated test daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_pid: Option<u32>,
 }
 
 /// Issue a launch token from the canonical launcher surface.
@@ -68,7 +81,30 @@ pub fn issue_launch_token(
         token_id: Uuid::new_v4().to_string(),
         issued_at: issued_at.to_rfc3339_opts(SecondsFormat::Secs, true),
         expires_at: expires_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+        test_identifier: None,
+        owner_pid: None,
     }
+}
+
+/// Issue a launch token for an isolated-test daemon with explicit lease metadata.
+pub fn issue_isolated_test_launch_token(
+    atm_home: &Path,
+    binary_identity: impl Into<String>,
+    issuer: impl Into<String>,
+    test_identifier: impl Into<String>,
+    owner_pid: u32,
+    ttl: Duration,
+) -> DaemonLaunchToken {
+    let mut token = issue_launch_token(
+        LaunchClass::IsolatedTest,
+        atm_home,
+        binary_identity,
+        issuer,
+        ttl,
+    );
+    token.test_identifier = Some(test_identifier.into());
+    token.owner_pid = Some(owner_pid);
+    token
 }
 
 pub fn encode_launch_token(token: &DaemonLaunchToken) -> serde_json::Result<String> {
@@ -93,21 +129,24 @@ mod tests {
 
     #[test]
     fn issue_launch_token_populates_required_fields() {
+        let atm_home = std::env::temp_dir().join("atm-home");
         let token = issue_launch_token(
             LaunchClass::DevShared,
-            Path::new("/tmp/atm-home"),
+            &atm_home,
             "dev-channel",
             "au.1-test",
             Duration::from_secs(90),
         );
 
         assert_eq!(token.launch_class, LaunchClass::DevShared);
-        assert_eq!(token.atm_home, PathBuf::from("/tmp/atm-home"));
+        assert_eq!(token.atm_home, atm_home);
         assert_eq!(token.binary_identity, "dev-channel");
         assert_eq!(token.issuer, "au.1-test");
         assert!(!token.token_id.is_empty());
         assert!(chrono::DateTime::parse_from_rfc3339(&token.issued_at).is_ok());
         assert!(chrono::DateTime::parse_from_rfc3339(&token.expires_at).is_ok());
+        assert_eq!(token.test_identifier, None);
+        assert_eq!(token.owner_pid, None);
     }
 
     #[test]
@@ -120,7 +159,7 @@ mod tests {
     fn encode_decode_roundtrip_preserves_token() {
         let token = issue_launch_token(
             LaunchClass::ProdShared,
-            Path::new("/tmp/prod-home"),
+            &std::env::temp_dir().join("prod-home"),
             "/opt/homebrew/bin/atm-daemon",
             "launcher-test",
             Duration::from_secs(15),
@@ -128,5 +167,25 @@ mod tests {
         let raw = encode_launch_token(&token).unwrap();
         let decoded = decode_launch_token(&raw).unwrap();
         assert_eq!(decoded, token);
+    }
+
+    #[test]
+    fn issue_isolated_test_launch_token_sets_lease_fields() {
+        let atm_home = std::env::temp_dir().join("isolated-home");
+        let token = issue_isolated_test_launch_token(
+            &atm_home,
+            "target/debug/atm-daemon",
+            "launcher-test",
+            "daemon_tests::test_daemon_start_requires_launch_token",
+            4242,
+            Duration::from_secs(600),
+        );
+
+        assert_eq!(token.launch_class, LaunchClass::IsolatedTest);
+        assert_eq!(
+            token.test_identifier.as_deref(),
+            Some("daemon_tests::test_daemon_start_requires_launch_token")
+        );
+        assert_eq!(token.owner_pid, Some(4242));
     }
 }

@@ -53,6 +53,8 @@ async fn main() -> Result<()> {
     // Determine home directory early for lock/log path resolution.
     let home_dir =
         agent_team_mail_core::home::get_home_dir().context("Failed to determine home directory")?;
+    let _ = daemon::startup_auth::sweep_stale_isolated_runtimes()
+        .context("Failed to sweep stale isolated runtimes")?;
     let launch_token = daemon::startup_auth::validate_startup_token(&home_dir)
         .context("Daemon launch authorization failed")?;
     let runtime_owner =
@@ -128,6 +130,8 @@ async fn main() -> Result<()> {
         &runtime_owner,
     )
     .context("Failed to write daemon lock metadata")?;
+    daemon::startup_auth::persist_runtime_metadata_from_token(&home_dir, &launch_token)
+        .context("Failed to persist launch lease metadata")?;
 
     // Resolve canonical log writer config once and reuse for startup merge + writer task.
     let log_writer_config = LogWriterConfig::from_env(&home_dir);
@@ -328,6 +332,13 @@ async fn main() -> Result<()> {
 
     // Create cancellation token for graceful shutdown
     let cancel_token = CancellationToken::new();
+    let lease_violation = daemon::startup_auth::new_shared_lease_violation();
+    let lease_monitor_task = daemon::startup_auth::spawn_isolated_test_lease_monitor(
+        home_dir.clone(),
+        launch_token.clone(),
+        cancel_token.clone(),
+        lease_violation.clone(),
+    );
 
     // Set up signal handlers
     let cancel_for_signals = cancel_token.clone();
@@ -391,6 +402,9 @@ async fn main() -> Result<()> {
         log_event_queue,
     )
     .await;
+    if let Some(task) = lease_monitor_task {
+        let _ = task.await;
+    }
     match &run_result {
         Ok(_) => emit_event_best_effort(EventFields {
             level: "info",
@@ -415,6 +429,13 @@ async fn main() -> Result<()> {
             error: Some(e.to_string()),
             ..Default::default()
         }),
+    }
+    if let Some(violation) = lease_violation.lock().unwrap().clone() {
+        anyhow::bail!(
+            "daemon lease violation: {} ({})",
+            violation.event_name,
+            violation.detail
+        );
     }
     run_result.context("Daemon event loop failed")?;
 

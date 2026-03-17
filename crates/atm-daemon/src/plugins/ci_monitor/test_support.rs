@@ -9,6 +9,9 @@ fn allow_isolated_live_github(home: &Path) {
         runtime_kind: RuntimeKind::Isolated,
         created_at: chrono::Utc::now().to_rfc3339(),
         expires_at: Some((chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339()),
+        test_identifier: None,
+        owner_pid: None,
+        token_id: None,
         allow_live_github_polling: true,
     };
     write_runtime_metadata(home, &metadata).unwrap();

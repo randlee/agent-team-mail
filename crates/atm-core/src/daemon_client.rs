@@ -37,7 +37,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agent_team_mail_daemon_launch::{
-    DEFAULT_LAUNCH_TOKEN_TTL_SECS, LaunchClass, attach_launch_token, issue_launch_token,
+    DEFAULT_LAUNCH_TOKEN_TTL_SECS, LaunchClass, attach_launch_token,
+    issue_isolated_test_launch_token, issue_launch_token,
 };
 
 use crate::consts::{
@@ -117,6 +118,15 @@ pub struct RuntimeMetadata {
     /// RFC3339 UTC timestamp when the isolated runtime lease expires.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+    /// Stable test identifier for isolated-test runtime ownership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_identifier: Option<String>,
+    /// Owning test-process PID when this runtime was launched as `isolated-test`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_pid: Option<u32>,
+    /// Launch token id associated with this runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_id: Option<String>,
     /// Whether this runtime may perform live GitHub polling.
     #[serde(default)]
     pub allow_live_github_polling: bool,
@@ -847,6 +857,9 @@ fn create_isolated_runtime_root_with_base(
         runtime_kind: RuntimeKind::Isolated,
         created_at: now.to_rfc3339(),
         expires_at: Some(expires_at.to_rfc3339()),
+        test_identifier: None,
+        owner_pid: None,
+        token_id: None,
         allow_live_github_polling,
     };
     write_runtime_metadata(&home, &metadata)?;
@@ -906,6 +919,13 @@ fn reap_expired_isolated_runtime_roots_with_base(base_root: &Path) -> anyhow::Re
             continue;
         };
         if expires_at.with_timezone(&chrono::Utc) > now {
+            continue;
+        }
+
+        if metadata
+            .owner_pid
+            .is_some_and(crate::pid::is_pid_alive)
+        {
             continue;
         }
 
@@ -2231,6 +2251,21 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         "agent-team-mail-core::daemon_client::ensure_daemon_running_unix",
         Duration::from_secs(DEFAULT_LAUNCH_TOKEN_TTL_SECS),
     );
+    let launch_token = if runtime_owner.runtime_kind == RuntimeKind::Isolated {
+        issue_isolated_test_launch_token(
+            &home,
+            daemon_bin_path.display().to_string(),
+            "agent-team-mail-core::daemon_client::ensure_daemon_running_unix",
+            format!(
+                "daemon_client::ensure_daemon_running_unix:{}",
+                std::process::id()
+            ),
+            std::process::id(),
+            Duration::from_secs(DEFAULT_LAUNCH_TOKEN_TTL_SECS),
+        )
+    } else {
+        launch_token
+    };
     if let Err(e) = attach_launch_token(&mut command, &launch_token) {
         let error = format!("failed to encode daemon launch token: {e}");
         emit_event_best_effort(EventFields {
@@ -3403,12 +3438,18 @@ sleep 2
             runtime_kind: RuntimeKind::Dev,
             created_at: "2026-03-14T00:00:00Z".to_string(),
             expires_at: None,
+            test_identifier: None,
+            owner_pid: None,
+            token_id: None,
             allow_live_github_polling: true,
         };
         let replacement = RuntimeMetadata {
             runtime_kind: RuntimeKind::Isolated,
             created_at: "2026-03-15T00:00:00Z".to_string(),
             expires_at: Some("2026-03-15T00:10:00Z".to_string()),
+            test_identifier: Some("daemon-tests::replacement".to_string()),
+            owner_pid: Some(4242),
+            token_id: Some("token-123".to_string()),
             allow_live_github_polling: false,
         };
 
@@ -3430,6 +3471,9 @@ sleep 2
             runtime_kind: RuntimeKind::Isolated,
             created_at: "2026-03-14T00:00:00Z".to_string(),
             expires_at: Some("2026-03-14T00:10:00Z".to_string()),
+            test_identifier: Some("daemon-tests::expired".to_string()),
+            owner_pid: Some(999_999),
+            token_id: Some("token-expired".to_string()),
             allow_live_github_polling: false,
         };
         write_runtime_metadata(&home, &metadata).unwrap();

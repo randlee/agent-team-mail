@@ -88,6 +88,12 @@ teardown. Clean shutdown by the owning test fixture remains mandatory.
 
 ### AU.3 — Isolated-Test Lease + Clean Shutdown Contract
 
+**Status**: COMPLETE
+Implementation note: isolated-test launch tokens now carry `test_identifier` +
+`owner_pid`, runtime metadata persists the lease, the daemon self-terminates on
+TTL/dead-owner fail-safe conditions, and startup janitoring reaps stale
+isolated runtimes only after lease expiry plus dead-owner confirmation.
+
 **Scope**: give test daemons a real lease model and make clean fixture teardown
 the normative success path.
 
