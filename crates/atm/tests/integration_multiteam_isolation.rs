@@ -13,7 +13,10 @@ use tempfile::TempDir;
 mod daemon_process_guard;
 #[path = "support/daemon_test_registry.rs"]
 mod daemon_test_registry;
+#[path = "support/env_guard.rs"]
+mod env_guard;
 use daemon_process_guard::DaemonProcessGuard;
+use env_guard::EnvGuard;
 
 /// Helper to set home directory for cross-platform test compatibility.
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
@@ -83,32 +86,6 @@ fn setup_test_team(
     team_dir
 }
 
-struct EnvVarGuard {
-    key: &'static str,
-    prev: Option<String>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let prev = std::env::var(key).ok();
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, prev }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.prev {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
-
 fn assert_member_presence_and_isolation(
     json: &Value,
     present_member: &str,
@@ -152,8 +129,8 @@ fn test_cli_team_scoped_commands_do_not_bleed_members_across_teams() {
     let mut daemon = DaemonProcessGuard::spawn(&temp_dir, team_a);
     daemon.wait_ready(&temp_dir);
 
-    let _atm_home = EnvVarGuard::set("ATM_HOME", temp_dir.path().to_str().unwrap());
-    let _identity_alpha = EnvVarGuard::set("ATM_IDENTITY", alpha_member);
+    let _atm_home = EnvGuard::set("ATM_HOME", temp_dir.path());
+    let _identity_alpha = EnvGuard::set("ATM_IDENTITY", alpha_member);
     let hint_alpha = register_hint(
         team_a,
         alpha_member,
@@ -168,7 +145,7 @@ fn test_cli_team_scoped_commands_do_not_bleed_members_across_teams() {
     assert_eq!(hint_alpha, RegisterHintOutcome::Registered);
     drop(_identity_alpha);
 
-    let _identity_beta = EnvVarGuard::set("ATM_IDENTITY", beta_member);
+    let _identity_beta = EnvGuard::set("ATM_IDENTITY", beta_member);
     let hint_beta = register_hint(
         team_b,
         beta_member,
@@ -246,8 +223,8 @@ fn test_status_and_members_preserve_registered_member_state_after_daemon_restart
     let mut daemon = DaemonProcessGuard::spawn(&temp_dir, team);
     daemon.wait_ready(&temp_dir);
 
-    let _atm_home = EnvVarGuard::set("ATM_HOME", temp_dir.path().to_str().unwrap());
-    let _identity = EnvVarGuard::set("ATM_IDENTITY", member);
+    let _atm_home = EnvGuard::set("ATM_HOME", temp_dir.path());
+    let _identity = EnvGuard::set("ATM_IDENTITY", member);
     let outcome = register_hint(
         team,
         member,

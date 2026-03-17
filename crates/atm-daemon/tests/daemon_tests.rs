@@ -2,6 +2,8 @@
 
 use agent_team_mail_core::config::Config;
 use agent_team_mail_core::context::SystemContext;
+use agent_team_mail_core::daemon_client::{BuildProfile, RuntimeKind, RuntimeOwnerMetadata};
+use agent_team_mail_core::logging_event::{LogEventV1, spool_dir};
 use agent_team_mail_daemon::daemon;
 use agent_team_mail_daemon::daemon::{
     SessionRegistry, StatusWriter, new_dedup_store, new_launch_sender, new_log_event_queue,
@@ -12,11 +14,87 @@ use agent_team_mail_daemon::plugin::{
     Capability, MailService, Plugin, PluginContext, PluginError, PluginMetadata, PluginRegistry,
 };
 use agent_team_mail_daemon::roster::RosterService;
+use agent_team_mail_daemon_launch::{
+    DaemonLaunchToken, attach_launch_token,
+    issue_isolated_test_launch_token as issue_isolated_test_launch_token_inner,
+};
+#[path = "../../atm/tests/support/daemon_process_guard.rs"]
+#[allow(dead_code)]
+mod daemon_process_guard;
+#[path = "../../atm/tests/support/daemon_test_registry.rs"]
+#[allow(dead_code)]
+mod daemon_test_registry;
+#[path = "../../atm/tests/support/env_guard.rs"]
+#[allow(dead_code)]
+mod env_guard;
+// These daemon integration tests still serialize because the helper contexts
+// mutate ATM_HOME process-wide before constructing shared daemon state.
 use serial_test::serial;
+use std::path::Path;
+use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
+
+fn read_spool_events(spool: &std::path::Path) -> Vec<LogEventV1> {
+    if !spool.exists() {
+        return Vec::new();
+    }
+    let mut events = Vec::new();
+    let entries = match std::fs::read_dir(spool) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .extension()
+            .and_then(|x| x.to_str())
+            .map(|x| x == "jsonl")
+            != Some(true)
+        {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in content.lines().filter(|line| !line.trim().is_empty()) {
+            if let Ok(event) = serde_json::from_str::<LogEventV1>(line) {
+                events.push(event);
+            }
+        }
+    }
+    events
+}
+
+fn issue_isolated_test_launch_token(home: &Path, issuer: &str) -> DaemonLaunchToken {
+    issue_isolated_test_launch_token_inner(
+        home,
+        env!("CARGO_BIN_EXE_atm-daemon"),
+        issuer,
+        format!("{issuer}:{}", std::process::id()),
+        std::process::id(),
+        Duration::from_secs(600),
+    )
+}
+
+fn issue_isolated_test_launch_token_with_lease(
+    home: &Path,
+    issuer: &str,
+    test_identifier: &str,
+    owner_pid: u32,
+    ttl: Duration,
+) -> DaemonLaunchToken {
+    issue_isolated_test_launch_token_inner(
+        home,
+        env!("CARGO_BIN_EXE_atm-daemon"),
+        issuer,
+        test_identifier.to_string(),
+        owner_pid,
+        ttl,
+    )
+}
 
 /// Mock plugin that tracks lifecycle calls
 struct MockPlugin {
@@ -142,17 +220,17 @@ impl Plugin for MockPlugin {
     }
 }
 
-/// Create a test plugin context with temporary directories
-fn create_test_context() -> (PluginContext, TempDir) {
+/// Create a test plugin context with temporary directories.
+///
+/// Returns `(ctx, temp_dir, _atm_home_guard)`. The caller must hold the guard
+/// for the lifetime of the test — when it drops, `ATM_HOME` is restored.
+fn create_test_context() -> (PluginContext, TempDir, env_guard::EnvGuard) {
     let temp_dir = tempfile::tempdir().unwrap();
     let teams_root = temp_dir.path().join("teams");
     std::fs::create_dir_all(&teams_root).unwrap();
 
-    // Set ATM_HOME for cross-platform testing
-    // SAFETY: Tests are serialized via #[serial], so no parallel mutation
-    unsafe {
-        std::env::set_var("ATM_HOME", temp_dir.path());
-    }
+    // F-6: use EnvGuard so ATM_HOME is restored even if the test panics.
+    let atm_home_guard = env_guard::EnvGuard::set("ATM_HOME", temp_dir.path());
 
     let claude_root = temp_dir.path().join(".claude");
     std::fs::create_dir_all(&claude_root).unwrap();
@@ -176,17 +254,18 @@ fn create_test_context() -> (PluginContext, TempDir) {
         Arc::new(roster_service),
     );
 
-    (ctx, temp_dir)
+    (ctx, temp_dir, atm_home_guard)
 }
 
 /// Create a test context where mail teams root matches `${ATM_HOME}/.claude/teams`.
-fn create_reconcile_test_context() -> (PluginContext, TempDir) {
+///
+/// Returns `(ctx, temp_dir, _atm_home_guard)`. The caller must hold the guard
+/// for the lifetime of the test — when it drops, `ATM_HOME` is restored.
+fn create_reconcile_test_context() -> (PluginContext, TempDir, env_guard::EnvGuard) {
     let temp_dir = tempfile::tempdir().unwrap();
 
-    // SAFETY: Tests are serialized via #[serial], so no parallel mutation
-    unsafe {
-        std::env::set_var("ATM_HOME", temp_dir.path());
-    }
+    // F-6: use EnvGuard so ATM_HOME is restored even if the test panics.
+    let atm_home_guard = env_guard::EnvGuard::set("ATM_HOME", temp_dir.path());
 
     let claude_root = temp_dir.path().join(".claude");
     let teams_root = claude_root.join("teams");
@@ -211,7 +290,7 @@ fn create_reconcile_test_context() -> (PluginContext, TempDir) {
         Arc::new(roster_service),
     );
 
-    (ctx, temp_dir)
+    (ctx, temp_dir, atm_home_guard)
 }
 
 fn write_team_config(teams_root: &std::path::Path, team: &str, members: serde_json::Value) {
@@ -231,15 +310,100 @@ fn write_team_config(teams_root: &std::path::Path, team: &str, members: serde_js
     .unwrap();
 }
 
-async fn wait_until(timeout_ms: u64, mut pred: impl FnMut() -> bool) -> bool {
-    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+async fn wait_until_elapsed(
+    timeout_ms: u64,
+    mut pred: impl FnMut() -> bool,
+) -> Option<std::time::Duration> {
+    let start = std::time::Instant::now();
+    let deadline = start + Duration::from_millis(timeout_ms);
     while std::time::Instant::now() < deadline {
         if pred() {
-            return true;
+            return Some(start.elapsed());
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    pred()
+    pred().then(|| start.elapsed())
+}
+
+async fn wait_for_task_running_elapsed<T>(
+    task: &tokio::task::JoinHandle<T>,
+    timeout_ms: u64,
+) -> Option<std::time::Duration> {
+    wait_until_elapsed(timeout_ms, || !task.is_finished()).await
+}
+
+async fn wait_for_recorded_event_elapsed(
+    events: &Arc<Mutex<Vec<String>>>,
+    expected: &str,
+    timeout_ms: u64,
+) -> Option<std::time::Duration> {
+    wait_until_elapsed(timeout_ms, || {
+        events.lock().unwrap().iter().any(|event| event == expected)
+    })
+    .await
+}
+
+fn wait_for_child_running_elapsed(
+    child: &mut Child,
+    timeout_ms: u64,
+) -> Option<std::time::Duration> {
+    let start = std::time::Instant::now();
+    let deadline = start + Duration::from_millis(timeout_ms);
+    while std::time::Instant::now() < deadline {
+        if child
+            .try_wait()
+            .expect("failed to poll child process")
+            .is_none()
+        {
+            return Some(start.elapsed());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    child
+        .try_wait()
+        .expect("failed to poll child process at timeout")
+        .is_none()
+        .then(|| start.elapsed())
+}
+
+fn wait_for_lock_file_acquired_elapsed(
+    home: &std::path::Path,
+    timeout_ms: u64,
+) -> Option<std::time::Duration> {
+    let lock_path = home.join(".atm/daemon/daemon.lock");
+    let pid_path = home.join(".atm/daemon/atm-daemon.pid");
+    let status_path = home.join(".atm/daemon/status.json");
+    let start = std::time::Instant::now();
+    let deadline = start + Duration::from_millis(timeout_ms);
+    while std::time::Instant::now() < deadline {
+        let pid_ready = std::fs::read_to_string(&pid_path)
+            .ok()
+            .and_then(|content| content.trim().parse::<u32>().ok())
+            .is_some();
+        let status_ready = std::fs::read_to_string(&status_path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+            .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
+            .is_some();
+        let lock_contended = lock_path.exists()
+            && agent_team_mail_core::io::lock::acquire_lock(&lock_path, 0).is_err();
+        if lock_contended || pid_ready || status_ready {
+            return Some(start.elapsed());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let pid_ready = std::fs::read_to_string(&pid_path)
+        .ok()
+        .and_then(|content| content.trim().parse::<u32>().ok())
+        .is_some();
+    let status_ready = std::fs::read_to_string(&status_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
+        .is_some();
+    let lock_contended =
+        lock_path.exists() && agent_team_mail_core::io::lock::acquire_lock(&lock_path, 0).is_err();
+    (lock_contended || pid_ready || status_ready).then(|| start.elapsed())
 }
 
 /// Create a test status writer
@@ -247,6 +411,16 @@ fn create_test_status_writer(temp_dir: &TempDir) -> Arc<StatusWriter> {
     Arc::new(StatusWriter::new(
         temp_dir.path().to_path_buf(),
         "test-version".to_string(),
+        RuntimeOwnerMetadata {
+            runtime_kind: RuntimeKind::Isolated,
+            build_profile: BuildProfile::Release,
+            executable_path: temp_dir
+                .path()
+                .join("atm-daemon")
+                .to_string_lossy()
+                .into_owned(),
+            home_scope: temp_dir.path().to_string_lossy().into_owned(),
+        },
     ))
 }
 
@@ -259,7 +433,7 @@ fn create_test_daemon_lock(temp_dir: &TempDir) -> agent_team_mail_core::io::lock
 #[tokio::test]
 #[serial]
 async fn test_daemon_starts_and_loads_mock_plugin() {
-    let (ctx, temp_dir) = create_test_context();
+    let (ctx, temp_dir, _atm_home_guard) = create_test_context();
     let events = Arc::new(Mutex::new(Vec::new()));
     let status_writer = create_test_status_writer(&temp_dir);
 
@@ -291,8 +465,13 @@ async fn test_daemon_starts_and_loads_mock_plugin() {
         .await
     });
 
-    // Wait a bit for daemon to start
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let observed_run = wait_for_recorded_event_elapsed(&events, "test-plugin:run", 1_000)
+        .await
+        .expect("daemon should reach plugin run state before cancellation");
+    assert!(
+        observed_run <= Duration::from_secs(1),
+        "daemon should reach plugin run state before cancellation"
+    );
 
     // Cancel the daemon
     cancel.cancel();
@@ -324,7 +503,7 @@ async fn test_daemon_starts_and_loads_mock_plugin() {
 #[tokio::test]
 #[serial]
 async fn test_signal_triggers_graceful_shutdown() {
-    let (ctx, temp_dir) = create_test_context();
+    let (ctx, temp_dir, _atm_home_guard) = create_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
     let events = Arc::new(Mutex::new(Vec::new()));
 
@@ -356,7 +535,20 @@ async fn test_signal_triggers_graceful_shutdown() {
         .await
     });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let plugin1_running = wait_for_recorded_event_elapsed(&events, "plugin1:run", 1_000)
+        .await
+        .expect("plugin1 should reach run state before cancellation");
+    assert!(
+        plugin1_running <= Duration::from_secs(1),
+        "plugin1 should reach run state before cancellation"
+    );
+    let plugin2_running = wait_for_recorded_event_elapsed(&events, "plugin2:run", 1_000)
+        .await
+        .expect("plugin2 should reach run state before cancellation");
+    assert!(
+        plugin2_running <= Duration::from_secs(1),
+        "plugin2 should reach run state before cancellation"
+    );
 
     // Simulate signal by cancelling the token
     cancel.cancel();
@@ -373,7 +565,7 @@ async fn test_signal_triggers_graceful_shutdown() {
 #[tokio::test]
 #[serial]
 async fn test_plugin_lifecycle_order() {
-    let (ctx, temp_dir) = create_test_context();
+    let (ctx, temp_dir, _atm_home_guard) = create_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
     let events = Arc::new(Mutex::new(Vec::new()));
 
@@ -404,7 +596,13 @@ async fn test_plugin_lifecycle_order() {
         .await
     });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let plugin_running = wait_for_recorded_event_elapsed(&events, "plugin:run", 1_000)
+        .await
+        .expect("plugin should reach run state before cancellation");
+    assert!(
+        plugin_running <= Duration::from_secs(1),
+        "plugin should reach run state before cancellation"
+    );
     cancel.cancel();
 
     daemon_task.await.unwrap().unwrap();
@@ -426,7 +624,7 @@ async fn test_plugin_lifecycle_order() {
 #[tokio::test]
 #[serial]
 async fn test_spool_drain_runs_on_interval() {
-    let (ctx, temp_dir) = create_test_context();
+    let (ctx, temp_dir, _atm_home_guard) = create_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
     let mut registry = PluginRegistry::new();
 
@@ -454,8 +652,13 @@ async fn test_spool_drain_runs_on_interval() {
         .await
     });
 
-    // Let the daemon run for a bit to allow spool drain to run
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let daemon_running = wait_for_task_running_elapsed(&daemon_task, 1_000)
+        .await
+        .expect("daemon task should remain running long enough to service background loops");
+    assert!(
+        daemon_running <= Duration::from_secs(1),
+        "daemon task should remain running long enough to service background loops"
+    );
 
     cancel.cancel();
 
@@ -469,7 +672,7 @@ async fn test_spool_drain_runs_on_interval() {
 #[tokio::test]
 #[serial]
 async fn test_startup_reconcile_seeds_roster_without_interval_delay() {
-    let (ctx, temp_dir) = create_reconcile_test_context();
+    let (ctx, temp_dir, _atm_home_guard) = create_reconcile_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
     let teams_root = temp_dir.path().join(".claude/teams");
     let cwd = temp_dir.path().display().to_string();
@@ -493,7 +696,7 @@ async fn test_startup_reconcile_seeds_roster_without_interval_delay() {
                 "agentType": "general-purpose",
                 "model": "unknown",
                 "joinedAt": 1,
-                "cwd": "/tmp",
+                "cwd": cwd,
                 "subscriptions": [],
                 "isActive": false
             }
@@ -527,16 +730,17 @@ async fn test_startup_reconcile_seeds_roster_without_interval_delay() {
         .await
     });
 
-    let seeded = wait_until(1000, || {
+    let seeded = wait_until_elapsed(1000, || {
         state_store_probe
             .lock()
             .unwrap()
             .get_state("worker")
             .is_some()
     })
-    .await;
+    .await
+    .expect("startup reconcile should seed worker state promptly (<1s)");
     assert!(
-        seeded,
+        seeded <= Duration::from_secs(1),
         "startup reconcile should seed worker state promptly (<1s)"
     );
 
@@ -555,7 +759,7 @@ async fn test_startup_reconcile_seeds_roster_without_interval_delay() {
     ignore = "notify watcher timing flaky on macOS CI"
 )]
 async fn test_config_watch_event_updates_and_removes_members() {
-    let (ctx, temp_dir) = create_reconcile_test_context();
+    let (ctx, temp_dir, _atm_home_guard) = create_reconcile_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
     let teams_root = temp_dir.path().join(".claude/teams");
     let cwd = temp_dir.path().display().to_string();
@@ -614,16 +818,17 @@ async fn test_config_watch_event_updates_and_removes_members() {
         .await
     });
 
-    let initial_seeded = wait_until(1500, || {
+    let initial_seeded = wait_until_elapsed(1500, || {
         state_store_probe
             .lock()
             .unwrap()
             .get_state("worker-a")
             .is_some()
     })
-    .await;
+    .await
+    .expect("worker-a should be tracked after daemon startup");
     assert!(
-        initial_seeded,
+        initial_seeded <= Duration::from_millis(1500),
         "worker-a should be tracked after daemon startup"
     );
 
@@ -648,36 +853,38 @@ async fn test_config_watch_event_updates_and_removes_members() {
                 "agentType": "general-purpose",
                 "model": "unknown",
                 "joinedAt": 1,
-                "cwd": "/tmp",
+                "cwd": temp_dir.path().display().to_string(),
                 "subscriptions": [],
                 "isActive": true
             }
         ]),
     );
 
-    let added = wait_until(8000, || {
+    let added = wait_until_elapsed(8000, || {
         state_store_probe
             .lock()
             .unwrap()
             .get_state("worker-b")
             .is_some()
     })
-    .await;
+    .await
+    .expect("worker-b should be added via live config watcher reconcile");
     assert!(
-        added,
+        added <= Duration::from_secs(8),
         "worker-b should be added via live config watcher reconcile"
     );
 
-    let removed = wait_until(8000, || {
+    let removed = wait_until_elapsed(8000, || {
         state_store_probe
             .lock()
             .unwrap()
             .get_state("worker-a")
             .is_none()
     })
-    .await;
+    .await
+    .expect("worker-a should be removed from tracked state after config update");
     assert!(
-        removed,
+        removed <= Duration::from_secs(8),
         "worker-a should be removed from tracked state after config update"
     );
 
@@ -688,7 +895,7 @@ async fn test_config_watch_event_updates_and_removes_members() {
 #[tokio::test]
 #[serial]
 async fn test_graceful_shutdown_with_timeout() {
-    let (ctx, temp_dir) = create_test_context();
+    let (ctx, temp_dir, _atm_home_guard) = create_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
     let events = Arc::new(Mutex::new(Vec::new()));
 
@@ -724,12 +931,18 @@ async fn test_graceful_shutdown_with_timeout() {
         .await
     });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let run_observed = wait_for_recorded_event_elapsed(&events, "slow-shutdown:run", 1_000)
+        .await
+        .expect("slow-shutdown plugin should enter run before cancellation");
+    assert!(
+        run_observed <= Duration::from_secs(1),
+        "slow-shutdown plugin should enter run before cancellation"
+    );
     cancel.cancel();
 
     // The daemon should complete even though the plugin shutdown is slow
     // (the shutdown timeout will kick in)
-    let result = tokio::time::timeout(Duration::from_secs(10), daemon_task)
+    let result = tokio::time::timeout(Duration::from_secs(20), daemon_task)
         .await
         .expect("Daemon should complete within timeout");
 
@@ -754,7 +967,7 @@ async fn test_graceful_shutdown_with_timeout() {
 #[tokio::test]
 #[serial]
 async fn test_empty_registry_runs_successfully() {
-    let (ctx, temp_dir) = create_test_context();
+    let (ctx, temp_dir, _atm_home_guard) = create_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
     let mut registry = PluginRegistry::new();
 
@@ -782,7 +995,13 @@ async fn test_empty_registry_runs_successfully() {
         .await
     });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let daemon_running = wait_for_task_running_elapsed(&daemon_task, 1_000)
+        .await
+        .expect("daemon task should remain live before cancellation");
+    assert!(
+        daemon_running <= Duration::from_secs(1),
+        "daemon task should remain live before cancellation"
+    );
     cancel.cancel();
 
     let result = daemon_task.await.unwrap();
@@ -792,7 +1011,7 @@ async fn test_empty_registry_runs_successfully() {
 #[tokio::test]
 #[serial]
 async fn test_multiple_plugins_run_concurrently() {
-    let (ctx, temp_dir) = create_test_context();
+    let (ctx, temp_dir, _atm_home_guard) = create_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
     let events = Arc::new(Mutex::new(Vec::new()));
 
@@ -825,7 +1044,27 @@ async fn test_multiple_plugins_run_concurrently() {
         .await
     });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let plugin1_running = wait_for_recorded_event_elapsed(&events, "plugin1:run", 1_000)
+        .await
+        .expect("plugin1 should reach run state before cancellation");
+    assert!(
+        plugin1_running <= Duration::from_secs(1),
+        "plugin1 should reach run state before cancellation"
+    );
+    let plugin2_running = wait_for_recorded_event_elapsed(&events, "plugin2:run", 1_000)
+        .await
+        .expect("plugin2 should reach run state before cancellation");
+    assert!(
+        plugin2_running <= Duration::from_secs(1),
+        "plugin2 should reach run state before cancellation"
+    );
+    let plugin3_running = wait_for_recorded_event_elapsed(&events, "plugin3:run", 1_000)
+        .await
+        .expect("plugin3 should reach run state before cancellation");
+    assert!(
+        plugin3_running <= Duration::from_secs(1),
+        "plugin3 should reach run state before cancellation"
+    );
     cancel.cancel();
 
     let result = daemon_task.await.unwrap();
@@ -846,7 +1085,7 @@ async fn test_multiple_plugins_run_concurrently() {
 #[tokio::test]
 #[serial]
 async fn test_plugin_run_failure_isolated_from_sibling_plugins() {
-    let (ctx, temp_dir) = create_test_context();
+    let (ctx, temp_dir, _atm_home_guard) = create_test_context();
     let status_writer = create_test_status_writer(&temp_dir);
     let events = Arc::new(Mutex::new(Vec::new()));
 
@@ -878,7 +1117,17 @@ async fn test_plugin_run_failure_isolated_from_sibling_plugins() {
         .await
     });
 
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    let sibling_running = wait_until_elapsed(1_000, || {
+        let recorded_events = events.lock().unwrap();
+        recorded_events.contains(&"gh-monitor:run_failed".to_string())
+            && recorded_events.contains(&"worker-adapter:run".to_string())
+    })
+    .await
+    .expect("expected failing and sibling plugin states before cancellation");
+    assert!(
+        sibling_running <= Duration::from_secs(1),
+        "expected failing and sibling plugin states before cancellation"
+    );
 
     {
         let recorded_events = events.lock().unwrap();
@@ -912,25 +1161,46 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
     let temp_dir = TempDir::new().unwrap();
     let bin = env!("CARGO_BIN_EXE_atm-daemon");
 
-    let mut first = std::process::Command::new(bin)
+    let mut first_cmd = std::process::Command::new(bin);
+    first_cmd
         .env("ATM_HOME", temp_dir.path())
-        .spawn()
-        .expect("failed to spawn first daemon");
-
-    // Give the first daemon a brief moment to acquire lock and bind socket.
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(
-        first
-            .try_wait()
-            .expect("failed to poll first daemon")
-            .is_none(),
-        "first daemon should still be running"
+        .env_remove("ATM_DAEMON_BIN")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let first_token = issue_isolated_test_launch_token(temp_dir.path(), "daemon_tests::first");
+    attach_launch_token(&mut first_cmd, &first_token).expect("encode first daemon token");
+    let first_child = first_cmd.spawn().expect("failed to spawn first daemon");
+    let mut first = daemon_process_guard::DaemonProcessGuard::from_child(
+        first_child,
+        Path::new(bin),
+        temp_dir.path(),
     );
 
-    let second = std::process::Command::new(bin)
-        .env("ATM_HOME", temp_dir.path())
-        .output()
-        .expect("failed to spawn second daemon");
+    let daemon_running = wait_for_child_running_elapsed(first.child_mut(), 1_000)
+        .expect("first daemon should still be running");
+    assert!(
+        daemon_running <= Duration::from_secs(1),
+        "first daemon should still be running: elapsed={daemon_running:?}"
+    );
+    let lock_elapsed = wait_for_lock_file_acquired_elapsed(temp_dir.path(), 2_000)
+        .expect("first daemon should acquire daemon.lock");
+    assert!(
+        lock_elapsed <= Duration::from_secs(2),
+        "first daemon should acquire daemon.lock within 2s: elapsed={lock_elapsed:?}"
+    );
+    let lock_elapsed = wait_for_lock_file_acquired_elapsed(temp_dir.path(), 8_000)
+        .expect("first daemon should acquire daemon.lock within 8s");
+    assert!(
+        lock_elapsed <= Duration::from_secs(8),
+        "first daemon should acquire daemon.lock within 8s: elapsed={lock_elapsed:?}"
+    );
+
+    let mut second_cmd = std::process::Command::new(bin);
+    second_cmd.env("ATM_HOME", temp_dir.path());
+    let second_token = issue_isolated_test_launch_token(temp_dir.path(), "daemon_tests::second");
+    attach_launch_token(&mut second_cmd, &second_token).expect("encode second daemon token");
+    let second = second_cmd.output().expect("failed to spawn second daemon");
 
     assert!(
         !second.status.success(),
@@ -941,7 +1211,170 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
         stderr.contains("already running") || stderr.contains("Refusing second instance"),
         "second daemon error should indicate lock contention, got: {stderr}"
     );
+    drop(first);
+}
 
-    let _ = first.kill();
-    let _ = first.wait();
+#[test]
+#[serial]
+fn test_daemon_start_requires_launch_token() {
+    let temp_dir = TempDir::new().unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"))
+        .env("ATM_HOME", temp_dir.path())
+        .env_remove("ATM_LAUNCH_TOKEN")
+        .output()
+        .expect("spawn daemon without launch token");
+
+    assert!(
+        !output.status.success(),
+        "daemon start without launch token must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("\"rejection_reason\":\"missing_token\"")
+            || stderr.contains("missing launch token"),
+        "stderr should contain structured missing_token rejection, got: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_daemon_exits_when_isolated_test_owner_pid_is_dead() {
+    let temp_dir = TempDir::new().unwrap();
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"));
+    cmd.env("ATM_HOME", temp_dir.path());
+    let token = issue_isolated_test_launch_token_with_lease(
+        temp_dir.path(),
+        "daemon_tests::dead_owner",
+        "daemon_tests::dead_owner",
+        999_999,
+        Duration::from_secs(30),
+    );
+    attach_launch_token(&mut cmd, &token).expect("encode dead-owner token");
+    let output = cmd.output().expect("spawn daemon with dead owner pid");
+
+    assert!(
+        !output.status.success(),
+        "daemon should terminate non-zero when owner_pid is dead"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("\"event_name\":\"dead_owner_shutdown\"")
+            || stderr.contains("dead_owner_shutdown"),
+        "stderr should contain dead_owner_shutdown event, got: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_daemon_exits_when_isolated_test_ttl_expires() {
+    let temp_dir = TempDir::new().unwrap();
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"));
+    cmd.env("ATM_HOME", temp_dir.path());
+    let token = issue_isolated_test_launch_token_with_lease(
+        temp_dir.path(),
+        "daemon_tests::ttl_expiry",
+        "daemon_tests::ttl_expiry",
+        std::process::id(),
+        Duration::from_secs(1),
+    );
+    attach_launch_token(&mut cmd, &token).expect("encode ttl-expiry token");
+    let output = cmd.output().expect("spawn daemon with short TTL");
+
+    assert!(
+        !output.status.success(),
+        "daemon should terminate non-zero when TTL expires"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("\"event_name\":\"ttl_expiry_shutdown\"")
+            || stderr.contains("ttl_expiry_shutdown"),
+        "stderr should contain ttl_expiry_shutdown event, got: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_isolated_test_clean_shutdown_emits_lifecycle_events() {
+    let temp_dir = TempDir::new().unwrap();
+    let daemon_bin = Path::new(env!("CARGO_BIN_EXE_atm-daemon"));
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"));
+    cmd.env("ATM_HOME", temp_dir.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let token = issue_isolated_test_launch_token_with_lease(
+        temp_dir.path(),
+        "daemon_tests::clean_shutdown",
+        "daemon_tests::clean_shutdown",
+        std::process::id(),
+        Duration::from_secs(30),
+    );
+    attach_launch_token(&mut cmd, &token).expect("encode clean-shutdown token");
+    let child = cmd.spawn().expect("spawn daemon for clean shutdown");
+    let mut guard =
+        daemon_process_guard::DaemonProcessGuard::from_child(child, daemon_bin, temp_dir.path());
+
+    let daemon_running = wait_for_child_running_elapsed(guard.child_mut(), 1_000)
+        .expect("daemon should still be running");
+    assert!(
+        daemon_running <= Duration::from_secs(1),
+        "daemon should still be running: elapsed={daemon_running:?}"
+    );
+    let lock_elapsed = wait_for_lock_file_acquired_elapsed(temp_dir.path(), 8_000)
+        .expect("daemon should acquire daemon.lock");
+    assert!(
+        lock_elapsed <= Duration::from_secs(8),
+        "daemon should acquire daemon.lock within 8s: elapsed={lock_elapsed:?}"
+    );
+    std::thread::sleep(Duration::from_millis(250));
+
+    #[cfg(unix)]
+    {
+        let signal_result = unsafe { libc::kill(guard.pid() as i32, libc::SIGTERM) };
+        assert_eq!(signal_result, 0, "SIGTERM should succeed");
+    }
+    #[cfg(windows)]
+    {
+        guard
+            .child_mut()
+            .kill()
+            .expect("terminate daemon on windows");
+    }
+
+    let output = guard
+        .wait_with_output()
+        .expect("wait for clean shutdown daemon output");
+    assert!(
+        output.status.success(),
+        "daemon should exit cleanly after SIGTERM: status={:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let spool = spool_dir(temp_dir.path());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        let events = read_spool_events(&spool);
+        let saw_clean_shutdown = events.iter().any(|event| {
+            event.action == "clean_owner_shutdown"
+                && event
+                    .fields
+                    .get("event_name")
+                    .and_then(|value| value.as_str())
+                    == Some("clean_owner_shutdown")
+        });
+        if saw_clean_shutdown {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let events = read_spool_events(&spool);
+    panic!(
+        "expected clean_owner_shutdown event in spool, got events: {:?}",
+        events
+            .iter()
+            .map(|event| (&event.action, event.fields.get("event_name")))
+            .collect::<Vec<_>>()
+    );
 }

@@ -8,6 +8,7 @@ use agent_team_mail_core::logging;
 use clap::Parser;
 
 mod commands;
+mod consts;
 mod util;
 
 use commands::Cli;
@@ -34,7 +35,7 @@ fn main() {
 
     let cli = Cli::parse();
 
-    if let Err(e) = cli.execute() {
+    let exit_code = if let Err(e) = cli.execute() {
         let rendered = e.to_string();
         emit_event_best_effort(EventFields {
             level: "error",
@@ -51,6 +52,18 @@ fn main() {
         } else {
             eprintln!("Error: {rendered}");
         }
-        std::process::exit(1);
+        1
+    } else {
+        0
+    };
+
+    // Flush the gh observability ledger writer thread before process exit.
+    // The writer thread is fire-and-forget; without an explicit flush the OS
+    // may kill it before it has written all pending records.  This flush is
+    // synchronous and completes quickly (microseconds in practice).
+    let _ = agent_team_mail_ci_monitor::flush_gh_observability_records();
+
+    if exit_code != 0 {
+        std::process::exit(exit_code);
     }
 }

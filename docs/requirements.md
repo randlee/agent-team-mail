@@ -17,6 +17,7 @@ This primary requirements document registers secondary source-of-truth documents
 - CI monitoring requirements: `docs/ci-monitoring/requirements.md`
 - CI monitoring architecture: `docs/ci-monitoring/architecture.md`
 - CI monitoring ADR index: `docs/ci-monitoring/adr.md`
+- Daemon spawn authorization requirements: `docs/daemon-spawn-auth/requirements.md`
 
 All logging/OpenTelemetry requirements for ATM and companion tools are defined
 in the observability documents above. This file references that contract and
@@ -2535,6 +2536,18 @@ operators and teammates.
 Detailed GitHub CI monitor requirements are defined in:
 - `docs/ci-monitoring/requirements.md`
 
+Ownership and presence contract:
+- All GitHub-specific behavior behind `atm gh` is owned by the `gh_monitor`
+  plugin/provider layer.
+- Non-plugin crates may parse arguments, advertise capability state, and route
+  requests, but must not implement GitHub semantics, execute raw `gh`, or own
+  GitHub provider logic.
+- If the gh plugin/provider is not present in the build, the `atm gh`
+  namespace must not be advertised in normal help/capability UX.
+- If the gh plugin/provider is present in the build but not enabled/loaded for
+  the current runtime/team, only the bootstrap/management surface may be
+  advertised and accepted.
+
 Core command contract:
 - `atm gh init` validates prerequisites (`gh` CLI presence/auth where required),
   writes/updates `[plugins.gh_monitor]` config, and enables the plugin.
@@ -2566,13 +2579,19 @@ Operator status UX contract:
   - the minimum config keys required (team/agent/repo/monitor recipients) and
     the config file path where those keys are expected.
 - JSON output must expose the same status fields without lossy conversion.
-- When `gh_monitor` is disabled/unconfigured, only the following command paths
-  are allowed:
+- When `gh_monitor` is present in the build but disabled/unconfigured, only the
+  following command paths are allowed:
   - `atm gh`
+  - `atm gh status`
   - `atm gh init`
   - help output (`atm gh --help`, `atm gh init --help`)
   Other `atm gh ...` operations must fail fast with an actionable message to run
   `atm gh init`.
+- If the gh plugin/provider is not present in the build at all:
+  - `atm gh` must not appear in normal help/capability listings,
+  - daemon capability advertisement must omit the namespace entirely,
+  - explicit invocation may fail with a stable "feature not installed" error,
+    but must not pretend the plugin is merely disabled.
 - When `gh_monitor` is enabled, `atm gh` must show:
   - current configuration summary,
   - lifecycle/availability status,
@@ -2639,6 +2658,50 @@ Informed by analysis of the `coding_agent_session_search` connector system (14-p
 - Structured error reporting (not silent swallowing)
 - Stateful plugins (daemon plugins maintain connections, sync cursors, watch handles)
 - Plugin metadata with versioning
+
+### 5.1.1 ARCH-BOUNDARY-001 GitHub Boundary Enforcement
+
+`ARCH-BOUNDARY-001` is a hard crate-boundary rule for all GitHub-specific code.
+
+Required rules:
+- All GitHub-specific code must live exclusively in the gh-monitor provider
+  layer (`crates/atm-daemon/src/plugins/ci_monitor/` or a successor provider
+  crate that is explicitly documented as the gh-monitor provider layer).
+- `atm-ci-monitor` must contain only provider-agnostic CI-monitor abstractions:
+  observer traits, firewall traits, ledger interfaces, and budget/freshness
+  policy that is not GitHub-specific.
+- `atm-core` must contain zero provider knowledge:
+  - no imports of plugin/provider crates,
+  - no GitHub-specific types,
+  - no raw `gh` subprocess invocations.
+- Dependency direction is one-way:
+  - providers/plugins -> `atm-core`
+  - providers/plugins -> `atm-ci-monitor`
+  - never `atm-core` -> providers/plugins
+- Any `Command::new("gh")` call outside the gh-monitor provider layer is a hard
+  boundary violation.
+- CI must enforce `ARCH-BOUNDARY-001` with a grep gate that fails on new or
+  untracked violations.
+- Boundary-enforcement work must include a repository-wide search for live
+  violations across crates, shell/Python scripts, CI helpers, and support
+  tooling.
+- Boundary-elimination implementation sprints must leave the repository
+  buildable and testable at the end of each sprint; no sprint may rely on a
+  temporary broken intermediate state being merged first.
+- Any surviving violation found by the repository-wide search must be either
+  removed in the active implementation sprint or mapped to a named follow-up
+  sprint with file-level ownership and explicit QA review scope.
+- Boundary enforcement work must run a repository-wide violation search and map
+  every live violation to a named removal sprint.
+
+Temporary audited exceptions are permitted only when:
+- the violating line is explicitly annotated with
+  `TODO(ARCH-BOUNDARY-001)`,
+- the migration is tracked by a GitHub issue, and
+- the location is listed in the audited allowlist used by the CI grep gate.
+
+See [docs/arch-boundary.md](./arch-boundary.md) for the crate-boundary map,
+allowed import matrix, audited exceptions, and migration checklist.
 
 ### 5.2 Plugin Trait
 
@@ -2794,13 +2857,19 @@ temp/atm/<plugin-name>/
 
 - Each plugin may own one top-level CLI namespace.
 - The namespace owner is exclusive; no other plugin or core command may claim it.
+- The owning plugin/provider layer must process the namespace's external-system
+  behavior. Non-plugin crates may route/bootstrap, but must not implement that
+  behavior directly.
 - Each plugin namespace must provide:
   - `<namespace>` status entrypoint (no subcommand),
   - `<namespace> init` setup/enable command,
   - help output.
-- If a plugin is not configured/enabled for the current team, only the three
-  surfaces above are available. All other namespace operations must fail fast
-  with a stable, actionable init guidance error.
+- If a plugin is compiled in but not configured/enabled for the current team,
+  only the bootstrap/management surfaces above are available. All other
+  namespace operations must fail fast with a stable, actionable init guidance
+  error.
+- If a plugin is not compiled in/present, its namespace must not be advertised
+  in normal help or capability-discovery UX.
 - `<namespace>` status output must always make disabled/unconfigured state
   explicit and list only currently available actions.
 - If plugin is enabled, `<namespace>` status output must include current
@@ -2927,6 +2996,24 @@ All plugins are **provider-agnostic** where applicable. They read `ctx.system.re
 - CLI starts the daemon on first use of any daemon-backed feature if not already running.
 - Daemon should support hot-reload for config changes without restart.
 
+**Cache and budget separation**:
+- Cache TTL eviction for CI-monitor repo state (for example the 5-minute stale
+  threshold used by `gh_monitor` observability) MUST evict only the cached CI
+  state snapshot.
+- Cache eviction MUST NOT reset, clear, or otherwise mutate accumulated
+  rate-budget state.
+- Budget rollover uses a rolling 1-hour window from the oldest call still in
+  the current accounting period.
+- Explicit operator action currently means daemon restart. A future
+  `atm gh monitor reset-budget` command is planned but is not implemented yet.
+- GitHub access limiting MUST use a hard execution firewall plus two distinct
+  observability layers:
+  - an execution/token ledger for every real `gh` subprocess call
+  - an info/freshness ledger for GH-backed requests that may be served from
+    cache, live refresh, or degraded policy fallback
+- Shared pollers in lifecycle state `stopped` or `draining` MUST NOT continue
+  spending GitHub budget merely because stale active monitor records remain.
+
 **CI Monitor without repo**:
 - CI Monitor is only valid for repo contexts.
 - If repo is missing, CI Monitor should disable with a clear warning and prompt the CI agent to ask the team-lead/user for repo info.
@@ -3050,10 +3137,116 @@ The core has no awareness of whether a team member is local or remote.
 - **Long-run test guardrails**: daemon/concurrency integration tests MUST have
   explicit bounded timeouts and deterministic teardown guards that terminate
   spawned daemon processes on timeout/failure.
+- **Canonical real-daemon harness**: Tests or QA helpers that need a real
+  `atm-daemon` process MUST spawn or adopt it only through the canonical
+  tracked harness (`DaemonProcessGuard` plus `daemon_test_registry`, or the
+  direct successor designated by the same support module). Ad hoc guard types,
+  direct `Command::new("atm-daemon")`, shell wrappers, or helper-local launch
+  patterns are forbidden unless they delegate to that canonical harness.
+- **Immediate ownership and teardown**: A real test daemon MUST be owned by the
+  test fixture that created or adopted it, registered immediately on
+  detection/spawn, and terminated plus reaped in fixture teardown even on panic
+  or timeout. Discarding adoption/registration results is forbidden.
+- **No shared-runtime test daemons**: Test, QA, smoke-test, and helper code
+  MUST NOT launch or adopt the shared `release` or `dev` daemons. Such flows
+  MUST use isolated runtime state only and MUST fail closed when the canonical
+  test binary cannot be resolved.
+- **No ambient spawn fallbacks**: Test daemon launch helpers MUST NOT fall back
+  to PATH lookup, inherited `ATM_DAEMON_BIN`, or ambient shared `ATM_HOME`
+  state. Environment mutation for daemon tests MUST use scoped RAII guards.
+- **QA daemon-spawn gate**: Any daemon launch vector outside the canonical
+  allowed test harness, including Rust, shell, Python, CI, or other helper
+  scripts, is a blocking QA failure and MUST be removed or rewritten to use the
+  canonical harness before merge.
 - **Platform mitigation policy**: when a test has a known platform-specific hang
   risk (for example macOS `test_concurrent_sends_no_data_loss`), temporary CI
   mitigation (`#[cfg_attr(target_os = "macos", ignore)]`) is allowed only while
   root-cause remediation remains tracked in an active sprint/issue.
+- **RAII daemon guards**: any test that spawns a daemon process MUST adopt it
+  into a `DaemonProcessGuard` before any suspension point, early-return path,
+  or panic-unwind-exposed path. Bare `Child` handles in test code are
+  prohibited once daemon lifecycle begins.
+- **No duplicate RAII daemon guards**: `DaemonProcessGuard` is the sole
+  canonical daemon lifecycle guard for tests. Parallel local guard types are
+  prohibited.
+- **Canonical env guard**: `EnvGuard`
+  (`crates/atm/tests/support/env_guard.rs`) is the sole canonical RAII guard
+  for environment-variable mutation in tests. Local redefinitions are
+  prohibited.
+- **Production daemon-spawn guard rule**: production code paths that spawn a
+  daemon process MUST adopt the child handle into a `DaemonProcessGuard` or
+  equivalent RAII guard before any suspension or early-return point.
+
+#### 8.3.1 Daemon Spawn Authorization
+
+- **Single authorized launcher**: all real `atm-daemon` launches MUST flow
+  through one canonical launcher owned by the product layer, not by shared
+  crates. The planned owning surface is a dedicated launcher crate (for
+  example `crates/atm-daemon-launch`); if that crate split is deliberately
+  deferred, the only acceptable temporary owner is a thin
+  `agent_team_mail_daemon::spawn_auth` module in `atm-daemon`. Private
+  `ensure_daemon_running` copies, helper-local `Command::new("atm-daemon")`,
+  shell wrappers, or other direct spawn paths are forbidden unless they
+  delegate to that launcher. `atm-core` and `atm-ci-monitor` are explicitly
+  forbidden from owning launcher code, launch-token issuance, or daemon
+  lifecycle authority.
+- **Mandatory launch-token firewall**: the daemon MUST reject startup unless
+  the caller presents a valid launch token issued by the canonical launcher.
+  Missing, invalid, expired, replayed, or mismatched launch tokens MUST cause
+  immediate daemon exit with a structured error record.
+- **Launch classes**: launch tokens MUST declare one of exactly three launch
+  classes:
+  - `prod-shared`
+  - `dev-shared`
+  - `isolated-test`
+  Each class MUST bind the token to the expected binary/channel, target
+  `ATM_HOME`, runtime kind, and singleton/lease policy for that class.
+- **No GitHub metadata in launch tokens**: launch-token fields and lifecycle
+  lease records MUST remain daemon/runtime scoped only. They MUST NOT include
+  GitHub-specific metadata such as runner IDs, GitHub Actions context, workflow
+  identifiers, PR numbers, or other GH provider payload.
+- **Shared-runtime hard fail**: `prod-shared` and `dev-shared` launches MUST
+  hard-fail when a live daemon already owns that shared runtime. No fallback or
+  best-effort second launch is allowed.
+- **Isolated-test lease contract**: `isolated-test` launches MUST carry and log
+  all of:
+  - `test_identifier`
+  - `owner_pid`
+  - `issued_at`
+  - `expires_at`
+  - `atm_home`
+  - launch-token identifier / nonce
+  The daemon MUST reject an `isolated-test` token if the runtime is not truly
+  isolated.
+- **Isolated-test TTL fail-safe**: test daemons MUST self-terminate when
+  `owner_pid` is dead or the token TTL expires. The default TTL MUST be short
+  and bounded; planning baseline is a hard maximum of `10 minutes`.
+- **Fixture-owned shutdown requirement**: TTL expiry or `owner_pid` death is a
+  fail-safe, not a success path. The test fixture or harness that launched the
+  daemon remains responsible for shutting it down cleanly before either condition
+  triggers. Any daemon that exits because `owner_pid` disappeared or TTL expired
+  is a harness-gap finding, not acceptable steady-state behavior.
+- **Lifecycle logging is mandatory**: every launch attempt and daemon lifetime
+  transition MUST be logged with enough context to reconstruct ownership and
+  cleanup. At minimum this includes:
+  - launch accepted / rejected
+  - launch class
+  - token / request identifier
+  - `ATM_HOME`
+  - `test_identifier` and `owner_pid` for `isolated-test`
+  - clean owner-initiated shutdown
+  - self-termination due to TTL expiry
+  - self-termination due to dead `owner_pid`
+  - janitor / stale-runtime reap
+- **QA/CI hard gates**: CI and QA MUST fail on:
+  - any daemon spawn path outside the canonical launcher
+  - any daemon process alive without canonical launch metadata
+  - any rogue shared-runtime daemon before or after a test/QA batch
+  - any test daemon whose termination reason is TTL expiry or dead `owner_pid`
+    instead of clean fixture teardown
+- **Canonical root-cause surface**: `daemon-spawn-qa` and related diagnostics
+  MUST use the lifecycle logs above as the primary root-cause source for
+  forgotten daemons, launch bypasses, and teardown gaps.
 
 ### 8.4 Performance
 
@@ -3100,6 +3293,24 @@ The core has no awareness of whether a team member is local or remote.
 - `SC_COMPOSE_LOG_FILE` overrides log file path for sc-compose.
 - Logging remains fail-open; composition/validation commands must not fail solely
   because the configured logging write path is unavailable.
+
+### 8.9 Code Quality
+
+- **No magic numbers in production code**: all significant numeric literals in
+  production code MUST be defined as named constants. Only `0` and `1` are
+  exempt.
+- **Significant numeric literal** means any literal whose meaning is not
+  self-evident from immediate context, including timeout durations, buffer
+  sizes, retry counts, and threshold values.
+- **Constant placement**: cross-module constants belong in crate-root
+  `consts.rs`; module-local constants belong in that module's `consts.rs`.
+- **Clippy cleanliness**: `cargo clippy -- -D warnings` MUST remain clean with
+  no `#[allow(...)]` workarounds in production code except documented false
+  positives with a clear justification.
+- **Test-code carve-out**: this rule applies to production code only. Test
+  modules and test-support files are not required to extract named constants,
+  but they MUST NOT use magic numbers as synchronization primitives (see
+  §8.3 timing rules).
 
 ---
 

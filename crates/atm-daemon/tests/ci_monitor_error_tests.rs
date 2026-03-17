@@ -3,7 +3,8 @@
 use agent_team_mail_core::config::Config;
 use agent_team_mail_core::context::{GitProvider, Platform, RepoContext, SystemContext};
 use agent_team_mail_daemon::plugin::{MailService, Plugin, PluginContext};
-use agent_team_mail_daemon::plugins::ci_monitor::{CiMonitorPlugin, MockCall, MockCiProvider};
+use agent_team_mail_daemon::plugins::ci_monitor::CiMonitorPlugin;
+use agent_team_mail_daemon::plugins::ci_monitor::mock_support::{MockCall, MockCiProvider};
 use agent_team_mail_daemon::roster::RosterService;
 use serial_test::serial;
 use std::path::Path;
@@ -78,6 +79,24 @@ fn read_health_record(temp_dir: &TempDir, team: &str) -> Option<serde_json::Valu
         .cloned()
 }
 
+async fn wait_for_condition(
+    timeout_ms: u64,
+    mut pred: impl FnMut() -> bool,
+) -> std::time::Duration {
+    let start = std::time::Instant::now();
+    let deadline = start + Duration::from_millis(timeout_ms);
+    loop {
+        if pred() {
+            return start.elapsed();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "condition not met within {timeout_ms}ms"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test]
 #[serial]
 async fn test_api_failure_continues_polling() {
@@ -93,6 +112,7 @@ async fn test_api_failure_continues_polling() {
 
     // Create mock provider that returns error
     let mock_provider = MockCiProvider::new().with_error("API rate limit exceeded".to_string());
+    let provider_clone = mock_provider.clone();
 
     // Add minimal plugin config
     let mut plugin_config = toml::Table::new();
@@ -122,15 +142,18 @@ async fn test_api_failure_continues_polling() {
 
     // Run plugin briefly - even with API errors it should continue
     let cancel = CancellationToken::new();
-    let cancel_clone = cancel.clone();
-
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        cancel_clone.cancel();
-    });
-
-    // Plugin should not crash even if CI API fails
-    let result = plugin.run(cancel).await;
+    let run_cancel = cancel.clone();
+    let run_task = tokio::spawn(async move { plugin.run(run_cancel).await });
+    let call_elapsed = wait_for_condition(1_000, || !provider_clone.get_calls().is_empty()).await;
+    assert!(
+        call_elapsed <= Duration::from_secs(1),
+        "API failure poll should be observed promptly"
+    );
+    cancel.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(1), run_task)
+        .await
+        .expect("plugin run should stop after cancellation")
+        .unwrap();
     assert!(
         result.is_ok(),
         "Plugin should handle API failures gracefully"
@@ -225,6 +248,7 @@ async fn test_auth_failure_simulation() {
     // Simulate authentication failure
     let mock_provider =
         MockCiProvider::new().with_error("Authentication failed: invalid token".to_string());
+    let provider_clone = mock_provider.clone();
 
     // Add minimal plugin config
     let mut plugin_config = toml::Table::new();
@@ -253,14 +277,18 @@ async fn test_auth_failure_simulation() {
     plugin.init(&ctx).await.unwrap();
 
     let cancel = CancellationToken::new();
-    let cancel_clone = cancel.clone();
-
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        cancel_clone.cancel();
-    });
-
-    let result = plugin.run(cancel).await;
+    let run_cancel = cancel.clone();
+    let run_task = tokio::spawn(async move { plugin.run(run_cancel).await });
+    let call_elapsed = wait_for_condition(1_000, || !provider_clone.get_calls().is_empty()).await;
+    assert!(
+        call_elapsed <= Duration::from_secs(1),
+        "auth failure poll should be observed promptly"
+    );
+    cancel.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(1), run_task)
+        .await
+        .expect("auth failure run should stop after cancellation")
+        .unwrap();
     assert!(
         result.is_ok(),
         "Plugin should handle auth failures gracefully"
@@ -341,6 +369,7 @@ async fn test_invalid_config_provider() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 #[serial]
 async fn test_invalid_config_sets_disabled_health_at_init() {
@@ -514,6 +543,7 @@ async fn test_timeout_error_simulation() {
 
     // Simulate timeout error
     let mock_provider = MockCiProvider::new().with_error("Request timed out".to_string());
+    let provider_clone = mock_provider.clone();
 
     // Add minimal plugin config
     let mut plugin_config = toml::Table::new();
@@ -542,14 +572,18 @@ async fn test_timeout_error_simulation() {
     plugin.init(&ctx).await.unwrap();
 
     let cancel = CancellationToken::new();
-    let cancel_clone = cancel.clone();
-
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        cancel_clone.cancel();
-    });
-
-    let result = plugin.run(cancel).await;
+    let run_cancel = cancel.clone();
+    let run_task = tokio::spawn(async move { plugin.run(run_cancel).await });
+    let call_elapsed = wait_for_condition(1_000, || !provider_clone.get_calls().is_empty()).await;
+    assert!(
+        call_elapsed <= Duration::from_secs(1),
+        "timeout error poll should be observed promptly"
+    );
+    cancel.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(1), run_task)
+        .await
+        .expect("timeout error run should stop after cancellation")
+        .unwrap();
     assert!(
         result.is_ok(),
         "Plugin should handle timeout errors gracefully"
@@ -571,6 +605,7 @@ async fn test_network_error_simulation() {
 
     // Simulate network error
     let mock_provider = MockCiProvider::new().with_error("Network unreachable".to_string());
+    let provider_clone = mock_provider.clone();
 
     // Add minimal plugin config
     let mut plugin_config = toml::Table::new();
@@ -599,14 +634,18 @@ async fn test_network_error_simulation() {
     plugin.init(&ctx).await.unwrap();
 
     let cancel = CancellationToken::new();
-    let cancel_clone = cancel.clone();
-
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        cancel_clone.cancel();
-    });
-
-    let result = plugin.run(cancel).await;
+    let run_cancel = cancel.clone();
+    let run_task = tokio::spawn(async move { plugin.run(run_cancel).await });
+    let call_elapsed = wait_for_condition(1_000, || !provider_clone.get_calls().is_empty()).await;
+    assert!(
+        call_elapsed <= Duration::from_secs(1),
+        "network error poll should be observed promptly"
+    );
+    cancel.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(1), run_task)
+        .await
+        .expect("network error run should stop after cancellation")
+        .unwrap();
     assert!(
         result.is_ok(),
         "Plugin should handle network errors gracefully"
@@ -629,6 +668,7 @@ async fn test_get_run_failure_continues() {
     // Mock provider that succeeds on list_runs but fails on get_run
     // This simulates a scenario where run details can't be fetched
     let mock_provider = MockCiProvider::new().with_error("Failed to fetch run details".to_string());
+    let provider_clone = mock_provider.clone();
 
     let mut plugin_config = toml::Table::new();
     plugin_config.insert("enabled".to_string(), toml::Value::Boolean(true));
@@ -657,15 +697,18 @@ async fn test_get_run_failure_continues() {
     plugin.init(&ctx).await.unwrap();
 
     let cancel = CancellationToken::new();
-    let cancel_clone = cancel.clone();
-
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        cancel_clone.cancel();
-    });
-
-    // Should handle get_run failures and continue polling
-    let result = plugin.run(cancel).await;
+    let run_cancel = cancel.clone();
+    let run_task = tokio::spawn(async move { plugin.run(run_cancel).await });
+    let call_elapsed = wait_for_condition(2_000, || !provider_clone.get_calls().is_empty()).await;
+    assert!(
+        call_elapsed <= Duration::from_secs(2),
+        "get_run failure poll should be observed promptly"
+    );
+    cancel.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(2), run_task)
+        .await
+        .expect("get_run failure run should stop after cancellation")
+        .unwrap();
     assert!(
         result.is_ok(),
         "Plugin should continue despite get_run failures"

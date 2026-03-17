@@ -1,13 +1,14 @@
+#![cfg(unix)]
 //! Integration tests for the CI Monitor plugin
 
 use agent_team_mail_core::config::Config;
 use agent_team_mail_core::context::{GitProvider, Platform, RepoContext, SystemContext};
 use agent_team_mail_core::schema::InboxMessage;
 use agent_team_mail_daemon::plugin::{MailService, Plugin, PluginContext};
-use agent_team_mail_daemon::plugins::ci_monitor::{
-    CiMonitorPlugin, CiRunConclusion, CiRunStatus, MockCall, MockCiProvider, create_test_job,
-    create_test_run,
+use agent_team_mail_daemon::plugins::ci_monitor::mock_support::{
+    MockCall, MockCiProvider, create_test_job, create_test_run,
 };
+use agent_team_mail_daemon::plugins::ci_monitor::{CiMonitorPlugin, CiRunConclusion, CiRunStatus};
 use agent_team_mail_daemon::roster::RosterService;
 use std::path::Path;
 use std::sync::Arc;
@@ -90,6 +91,24 @@ fn read_inbox(teams_root: &Path, team: &str, agent: &str) -> Vec<InboxMessage> {
     serde_json::from_slice(&content).unwrap()
 }
 
+async fn wait_for_condition(
+    timeout_ms: u64,
+    mut pred: impl FnMut() -> bool,
+) -> std::time::Duration {
+    let start = std::time::Instant::now();
+    let deadline = start + Duration::from_millis(timeout_ms);
+    loop {
+        if pred() {
+            return start.elapsed();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "condition not met within {timeout_ms}ms"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test]
 async fn test_ci_failure_delivers_inbox_message() {
     let temp_dir = TempDir::new().unwrap();
@@ -155,18 +174,24 @@ async fn test_ci_failure_delivers_inbox_message() {
 
     // Run plugin briefly (one poll cycle)
     let cancel = CancellationToken::new();
-    let cancel_clone = cancel.clone();
-
-    tokio::spawn(async move {
-        // Cancel after 1.5 seconds (enough for one poll)
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        cancel_clone.cancel();
-    });
-
-    let _ = plugin.run(cancel).await;
+    let run_cancel = cancel.clone();
+    let run_task = tokio::spawn(async move { plugin.run(run_cancel).await });
+    let observed_delivery = wait_for_condition(2_000, || {
+        !read_inbox(ctx.mail.teams_root(), "test-team", "team-lead").is_empty()
+    })
+    .await;
+    assert!(
+        observed_delivery <= Duration::from_secs(2),
+        "CI failure delivery should stay bounded: elapsed={observed_delivery:?}"
+    );
+    cancel.cancel();
+    let _ = timeout(Duration::from_secs(2), run_task)
+        .await
+        .expect("plugin run should exit after cancellation")
+        .unwrap();
 
     // Verify inbox message was delivered
-    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor");
+    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "team-lead");
     assert!(
         !messages.is_empty(),
         "Should have at least one message for CI failure"
@@ -308,7 +333,7 @@ async fn test_ci_deduplication() {
     assert!(list_calls >= 2, "Should poll at least twice");
 
     // But only ONE inbox message should be delivered (deduplication)
-    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor");
+    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "team-lead");
     assert_eq!(
         messages.len(),
         1,
@@ -323,6 +348,7 @@ async fn test_status_transition_notification() {
     // First poll: run is in progress
     let in_progress_run = create_test_run(103, "CI", "main", CiRunStatus::InProgress, None);
     let mock_provider_v1 = MockCiProvider::with_runs(vec![in_progress_run]);
+    let provider_v1_clone = mock_provider_v1.clone();
 
     // Second poll: run has failed
     let failed_run = create_test_run(
@@ -370,12 +396,24 @@ async fn test_status_transition_notification() {
     plugin1.init(&ctx).await.unwrap();
 
     let cancel1 = CancellationToken::new();
-    let cancel1_clone = cancel1.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(1200)).await;
-        cancel1_clone.cancel();
-    });
-    let _ = plugin1.run(cancel1).await;
+    let run_cancel1 = cancel1.clone();
+    let run_task1 = tokio::spawn(async move { plugin1.run(run_cancel1).await });
+    let first_poll_elapsed = wait_for_condition(2_000, || {
+        provider_v1_clone
+            .get_calls()
+            .iter()
+            .any(|call| matches!(call, MockCall::ListRuns(_)))
+    })
+    .await;
+    assert!(
+        first_poll_elapsed <= Duration::from_secs(2),
+        "in-progress poll should start promptly: elapsed={first_poll_elapsed:?}"
+    );
+    cancel1.cancel();
+    let _ = timeout(Duration::from_secs(2), run_task1)
+        .await
+        .expect("in-progress plugin run should exit after cancellation")
+        .unwrap();
 
     // No messages yet (in-progress doesn't trigger notification)
     let messages = read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor");
@@ -399,15 +437,24 @@ async fn test_status_transition_notification() {
     plugin2.init(&ctx).await.unwrap();
 
     let cancel2 = CancellationToken::new();
-    let cancel2_clone = cancel2.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(1200)).await;
-        cancel2_clone.cancel();
-    });
-    let _ = plugin2.run(cancel2).await;
+    let run_cancel2 = cancel2.clone();
+    let run_task2 = tokio::spawn(async move { plugin2.run(run_cancel2).await });
+    let failure_elapsed = wait_for_condition(2_000, || {
+        read_inbox(ctx.mail.teams_root(), "test-team", "team-lead").len() == 1
+    })
+    .await;
+    assert!(
+        failure_elapsed <= Duration::from_secs(2),
+        "failure transition notification should stay bounded: elapsed={failure_elapsed:?}"
+    );
+    cancel2.cancel();
+    let _ = timeout(Duration::from_secs(2), run_task2)
+        .await
+        .expect("failure plugin run should exit after cancellation")
+        .unwrap();
 
     // Now we should have exactly one notification for the failure
-    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor");
+    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "team-lead");
     assert_eq!(
         messages.len(),
         1,
@@ -540,7 +587,7 @@ async fn test_runtime_drift_alert_persisted_across_restart() {
     tokio::task::yield_now().await;
     let _ = run_task_v2.await.unwrap();
 
-    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor");
+    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "team-lead");
     let drift_messages: Vec<_> = messages
         .iter()
         .filter(|m| m.text.contains("[runtime-drift:"))
@@ -648,15 +695,24 @@ async fn test_multiple_failures() {
     plugin.init(&ctx).await.unwrap();
 
     let cancel = CancellationToken::new();
-    let cancel_clone = cancel.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        cancel_clone.cancel();
-    });
-    let _ = plugin.run(cancel).await;
+    let run_cancel = cancel.clone();
+    let run_task = tokio::spawn(async move { plugin.run(run_cancel).await });
+    let delivery_elapsed = wait_for_condition(2_000, || {
+        read_inbox(ctx.mail.teams_root(), "test-team", "team-lead").len() == 3
+    })
+    .await;
+    assert!(
+        delivery_elapsed <= Duration::from_secs(2),
+        "multiple-failure notifications should stay bounded: elapsed={delivery_elapsed:?}"
+    );
+    cancel.cancel();
+    let _ = timeout(Duration::from_secs(2), run_task)
+        .await
+        .expect("multi-failure plugin run should exit after cancellation")
+        .unwrap();
 
     // Should have one message per failure
-    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor");
+    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "team-lead");
     assert_eq!(messages.len(), 3, "Should deliver one message per failure");
 
     // Verify each run ID is present
@@ -740,12 +796,21 @@ async fn test_branch_filtering() {
     plugin.init(&ctx).await.unwrap();
 
     let cancel = CancellationToken::new();
-    let cancel_clone = cancel.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        cancel_clone.cancel();
-    });
-    let _ = plugin.run(cancel).await;
+    let run_cancel = cancel.clone();
+    let run_task = tokio::spawn(async move { plugin.run(run_cancel).await });
+    let filter_elapsed = wait_for_condition(2_000, || {
+        read_inbox(ctx.mail.teams_root(), "test-team", "team-lead").len() == 2
+    })
+    .await;
+    assert!(
+        filter_elapsed <= Duration::from_secs(2),
+        "branch filtering should produce bounded notifications: elapsed={filter_elapsed:?}"
+    );
+    cancel.cancel();
+    let _ = timeout(Duration::from_secs(2), run_task)
+        .await
+        .expect("branch filter plugin run should exit after cancellation")
+        .unwrap();
 
     // Verify list_runs was called (client-side filtering, so no branch filter in API call)
     let calls = provider_clone.get_calls();
@@ -769,7 +834,7 @@ async fn test_branch_filtering() {
 
     // Only two messages (main and develop, not feature-x)
     // Client-side glob matching filters out feature-x
-    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor");
+    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "team-lead");
     assert_eq!(messages.len(), 2, "Should only notify for watched branches");
     assert!(messages.iter().any(|m| m.text.contains("[ci:301]")));
     assert!(messages.iter().any(|m| m.text.contains("[ci:302]")));
@@ -843,15 +908,24 @@ async fn test_conclusion_filtering() {
     plugin.init(&ctx).await.unwrap();
 
     let cancel = CancellationToken::new();
-    let cancel_clone = cancel.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        cancel_clone.cancel();
-    });
-    let _ = plugin.run(cancel).await;
+    let run_cancel = cancel.clone();
+    let run_task = tokio::spawn(async move { plugin.run(run_cancel).await });
+    let filter_elapsed = wait_for_condition(2_000, || {
+        read_inbox(ctx.mail.teams_root(), "test-team", "team-lead").len() == 1
+    })
+    .await;
+    assert!(
+        filter_elapsed <= Duration::from_secs(2),
+        "conclusion filtering should produce bounded notifications: elapsed={filter_elapsed:?}"
+    );
+    cancel.cancel();
+    let _ = timeout(Duration::from_secs(2), run_task)
+        .await
+        .expect("conclusion filter plugin run should exit after cancellation")
+        .unwrap();
 
     // Only failure should be notified (not success or cancelled)
-    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "ci-monitor");
+    let messages = read_inbox(ctx.mail.teams_root(), "test-team", "team-lead");
     assert_eq!(
         messages.len(),
         1,
@@ -1032,16 +1106,15 @@ async fn test_full_lifecycle_init_run_shutdown() {
     // Run briefly with cancellation
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
-
-    let run_task = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    let cancel_task = tokio::spawn(async move {
+        tokio::task::yield_now().await;
         cancel_clone.cancel();
     });
-
-    let run_result = plugin.run(cancel).await;
+    let run_result = timeout(Duration::from_secs(1), plugin.run(cancel))
+        .await
+        .expect("plugin run should stop after cancellation");
     assert!(run_result.is_ok());
-
-    run_task.await.unwrap();
+    cancel_task.await.unwrap();
 
     // Shutdown
     let shutdown_result = plugin.shutdown().await;

@@ -1,7 +1,11 @@
 //! Integration tests for `atm gh ...` daemon-routed commands.
 
+#[cfg(unix)]
+use agent_team_mail_core::consts::WAIT_FOR_DAEMON_SOCKET_SECS;
 use assert_cmd::cargo;
 use predicates::prelude::PredicateBooleanExt;
+#[cfg(unix)]
+use serial_test::serial;
 use std::fs;
 #[cfg(unix)]
 use std::io::Write;
@@ -117,6 +121,25 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
 }
 
 #[cfg(unix)]
+fn read_gh_ledger_actions(home: &Path) -> Vec<String> {
+    let ledger_path = home.join(".atm/daemon/gh-observability.jsonl");
+    if !ledger_path.exists() {
+        return Vec::new();
+    }
+    fs::read_to_string(&ledger_path)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["action"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect()
+}
+
+#[cfg(unix)]
 fn write_fake_gh_daemon_script(home: &Path) -> PathBuf {
     let script = home.join("fake-gh-daemon.py");
     let body = r#"#!/usr/bin/env python3
@@ -132,6 +155,7 @@ daemon_dir = home / ".atm" / "daemon"
 daemon_dir.mkdir(parents=True, exist_ok=True)
 state_path = daemon_dir / "gh-state.json"
 health_path = daemon_dir / "gh-health.json"
+request_log_path = os.environ.get("ATM_FAKE_GH_REQUEST_LOG")
 configured = os.environ.get("ATM_FAKE_GH_CONFIGURED", "1") == "1"
 enabled = os.environ.get("ATM_FAKE_GH_ENABLED", "1") == "1"
 monitor_delay_ms = int(os.environ.get("ATM_FAKE_GH_MONITOR_DELAY_MS", "0") or "0")
@@ -194,6 +218,13 @@ while running:
         request_id = req.get("request_id", "req")
         command = req.get("command", "")
         payload = req.get("payload", {}) or {}
+        if request_log_path:
+            request_log_file = Path(request_log_path)
+            request_log_file.parent.mkdir(parents=True, exist_ok=True)
+            request_log_file.write_text(json.dumps({
+                "command": command,
+                "payload": payload,
+            }))
 
         if command == "gh-monitor":
             if monitor_delay_ms > 0:
@@ -359,9 +390,9 @@ finally:
 #[cfg(unix)]
 fn wait_for_daemon_socket(home: &Path) {
     let socket = home.join(".atm/daemon/atm-daemon.sock");
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(WAIT_FOR_DAEMON_SOCKET_SECS);
     while Instant::now() < deadline {
-        if socket.exists() {
+        if socket.exists() && std::os::unix::net::UnixStream::connect(&socket).is_ok() {
             return;
         }
         std::thread::sleep(Duration::from_millis(25));
@@ -374,12 +405,24 @@ fn wait_for_daemon_socket(home: &Path) {
 
 #[cfg(unix)]
 fn start_fake_gh_daemon(home: &Path) -> Child {
-    start_fake_gh_daemon_with_mode_and_delays(home, true, true, 0, 0)
+    start_fake_gh_daemon_with_mode_and_delays(home, true, true, 0, 0, None)
 }
 
 #[cfg(unix)]
 fn start_fake_gh_daemon_with_mode(home: &Path, configured: bool, enabled: bool) -> Child {
-    start_fake_gh_daemon_with_mode_and_delays(home, configured, enabled, 0, 0)
+    start_fake_gh_daemon_with_mode_and_delays(home, configured, enabled, 0, 0, None)
+}
+
+/// Start the fake daemon with an explicit request log path.
+///
+/// Use instead of `start_fake_gh_daemon` when the test needs to inspect the
+/// last socket request the daemon received. Passing the path here (rather than
+/// setting `ATM_FAKE_GH_REQUEST_LOG` in the test-process environment) prevents
+/// concurrently-started daemons from other tests from inheriting the env var
+/// and accidentally overwriting the log.
+#[cfg(unix)]
+fn start_fake_gh_daemon_with_request_log(home: &Path, request_log: &std::path::Path) -> Child {
+    start_fake_gh_daemon_with_mode_and_delays(home, true, true, 0, 0, Some(request_log))
 }
 
 #[cfg(unix)]
@@ -389,6 +432,7 @@ fn start_fake_gh_daemon_with_mode_and_delays(
     enabled: bool,
     monitor_delay_ms: u64,
     control_delay_ms: u64,
+    request_log: Option<&std::path::Path>,
 ) -> Child {
     let script = write_fake_gh_daemon_script(home);
     // Retry on ETXTBUSY (code 26): Linux can transiently block execution of a
@@ -396,15 +440,21 @@ fn start_fake_gh_daemon_with_mode_and_delays(
     let child = {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
-            match Command::new(&script)
-                .env("ATM_HOME", home)
+            let mut cmd = Command::new(&script);
+            cmd.env("ATM_HOME", home)
                 .env("ATM_FAKE_GH_CONFIGURED", if configured { "1" } else { "0" })
                 .env("ATM_FAKE_GH_ENABLED", if enabled { "1" } else { "0" })
                 .env("ATM_FAKE_GH_MONITOR_DELAY_MS", monitor_delay_ms.to_string())
                 .env("ATM_FAKE_GH_CONTROL_DELAY_MS", control_delay_ms.to_string())
-                .env("ATM_FAKE_DAEMON_VERSION", env!("CARGO_PKG_VERSION"))
-                .spawn()
-            {
+                .env("ATM_FAKE_DAEMON_VERSION", env!("CARGO_PKG_VERSION"));
+            // Explicitly control ATM_FAKE_GH_REQUEST_LOG: always override the
+            // inherited process-env value so that parallel serial/non-serial tests
+            // cannot write to each other's log files.
+            match request_log {
+                Some(path) => cmd.env("ATM_FAKE_GH_REQUEST_LOG", path),
+                None => cmd.env_remove("ATM_FAKE_GH_REQUEST_LOG"),
+            };
+            match cmd.spawn() {
                 Ok(child) => break child,
                 Err(e) if e.raw_os_error() == Some(26) && Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(50));
@@ -582,8 +632,11 @@ sys.exit(1)
 fn test_gh_monitor_and_control_allow_daemon_responses_over_500ms() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    std::fs::create_dir_all(&workdir).unwrap();
+    init_git_repo_with_origin(&workdir, "https://github.com/acme/agent-team-mail.git");
     let mut daemon =
-        start_fake_gh_daemon_with_mode_and_delays(temp_dir.path(), true, true, 750, 750);
+        start_fake_gh_daemon_with_mode_and_delays(temp_dir.path(), true, true, 750, 750, None);
 
     let mut monitor = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut monitor, &temp_dir, "test-team", true);
@@ -635,9 +688,13 @@ fn test_gh_monitor_and_control_allow_daemon_responses_over_500ms() {
 
 #[test]
 #[cfg(unix)]
+#[serial]
 fn test_gh_monitor_workflow_roundtrip_json() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    std::fs::create_dir_all(&workdir).unwrap();
+    init_git_repo_with_origin(&workdir, "https://github.com/acme/agent-team-mail.git");
     let mut daemon = start_fake_gh_daemon(temp_dir.path());
 
     let mut monitor = cargo::cargo_bin_cmd!("atm");
@@ -712,6 +769,9 @@ fn test_gh_command_surface_compiles_on_windows() {
 fn test_gh_monitor_lifecycle_status_roundtrip_json() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    std::fs::create_dir_all(&workdir).unwrap();
+    init_git_repo_with_origin(&workdir, "https://github.com/acme/agent-team-mail.git");
     let mut daemon = start_fake_gh_daemon(temp_dir.path());
 
     let mut start = cargo::cargo_bin_cmd!("atm");
@@ -760,6 +820,7 @@ fn test_gh_monitor_lifecycle_status_roundtrip_json() {
 
 #[test]
 #[cfg(unix)]
+#[serial]
 fn test_gh_status_preflight_disabled_config_shows_atm_gh_init_remediation() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
@@ -792,6 +853,7 @@ fn test_gh_status_preflight_disabled_config_shows_atm_gh_init_remediation() {
 
 #[test]
 #[cfg(unix)]
+#[serial]
 fn test_gh_monitor_status_accepts_json_flag_after_subcommand() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
@@ -822,6 +884,7 @@ fn test_gh_monitor_status_accepts_json_flag_after_subcommand() {
 
 #[test]
 #[cfg(unix)]
+#[serial]
 fn test_gh_monitor_status_human_output_is_single_block() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
@@ -892,6 +955,7 @@ fn init_git_repo_with_origin(workdir: &Path, origin_url: &str) {
 
 #[test]
 #[cfg(unix)]
+#[serial]
 fn test_gh_namespace_status_no_subcommand_returns_json_status() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
@@ -1075,6 +1139,138 @@ fn test_gh_init_auto_populates_repo_from_git_remote() {
 
 #[test]
 #[cfg(unix)]
+#[serial]
+fn test_gh_monitor_infers_repo_scope_from_git_remote() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let request_log = temp_dir.path().join("request-log.json");
+    // Pass the log path directly to the daemon rather than via process env so
+    // that concurrently-running non-serial tests cannot inherit ATM_FAKE_GH_REQUEST_LOG
+    // and accidentally overwrite this test's log with their own daemon requests.
+    let mut daemon = start_fake_gh_daemon_with_request_log(temp_dir.path(), &request_log);
+    let workdir = temp_dir.path().join("workdir");
+    std::fs::create_dir_all(&workdir).unwrap();
+    init_git_repo_with_origin(&workdir, "https://github.com/acme/agent-team-mail.git");
+    write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "config-owner", "config-repo");
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "arch-ctm")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .arg("monitor")
+        .arg("run")
+        .arg("42")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let _json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let request: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&request_log).unwrap()).unwrap();
+    assert_eq!(request["command"].as_str(), Some("gh-monitor"));
+    assert_eq!(
+        request["payload"]["repo"].as_str(),
+        Some("acme/agent-team-mail")
+    );
+    assert_eq!(
+        request["payload"]["caller_agent"].as_str(),
+        Some("arch-ctm")
+    );
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+}
+
+#[test]
+#[cfg(unix)]
+#[serial]
+fn test_gh_monitor_repo_override_accepts_github_url_and_cc() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let request_log = temp_dir.path().join("request-log.json");
+    // Pass the log path directly to the daemon rather than via process env so
+    // that concurrently-running non-serial tests cannot inherit ATM_FAKE_GH_REQUEST_LOG
+    // and accidentally overwrite this test's log with their own daemon requests.
+    let mut daemon = start_fake_gh_daemon_with_request_log(temp_dir.path(), &request_log);
+    let workdir = temp_dir.path().join("workdir");
+    std::fs::create_dir_all(&workdir).unwrap();
+    write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "config-owner", "config-repo");
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "arch-ctm")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--repo")
+        .arg("https://github.com/example/other-repo.git")
+        .arg("--cc")
+        .arg("qa-bot")
+        .arg("--cc")
+        .arg("obs@ops")
+        .arg("--json")
+        .arg("monitor")
+        .arg("run")
+        .arg("42")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let _json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let request: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&request_log).unwrap()).unwrap();
+    assert_eq!(
+        request["payload"]["repo"].as_str(),
+        Some("example/other-repo")
+    );
+    assert_eq!(
+        request["payload"]["caller_agent"].as_str(),
+        Some("arch-ctm")
+    );
+    assert_eq!(
+        request["payload"]["cc"],
+        serde_json::json!(["qa-bot", "obs@ops"])
+    );
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+}
+
+#[test]
+#[cfg(unix)]
+#[serial]
+fn test_gh_monitor_requires_repo_context_when_not_in_git_repo_and_no_override() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let mut daemon = start_fake_gh_daemon(temp_dir.path());
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", true);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("monitor")
+        .arg("run")
+        .arg("42")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "Could not determine GitHub repository from current directory",
+        ))
+        .stderr(predicates::str::contains("--repo <owner/repo>"));
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+}
+
+#[test]
+#[cfg(unix)]
+#[serial]
 fn test_gh_namespace_status_missing_repo_is_actionable() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
@@ -1178,6 +1374,7 @@ fn test_gh_status_surfaces_consistent_when_daemon_unreachable() {
 
 #[test]
 #[cfg(unix)]
+#[serial]
 fn test_gh_monitor_status_json_has_stable_schema() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
@@ -1283,6 +1480,29 @@ fn test_gh_monitor_list_json_reports_rollups_without_daemon() {
     assert_eq!(items[1]["number"].as_u64(), Some(102));
     assert_eq!(items[1]["ci"]["state"].as_str(), Some("fail"));
     assert_eq!(items[1]["draft"].as_bool(), Some(true));
+
+    // The `atm` binary flushes the gh observability ledger writer thread before
+    // process exit (see main.rs).  By the time `assert()` returns above, all
+    // records are guaranteed written — no deadline-based polling required.
+    let actions = read_gh_ledger_actions(temp_dir.path());
+    assert!(
+        actions.iter().any(|action| action == "gh_info_requested"),
+        "gh info request must be logged"
+    );
+    assert!(
+        actions.iter().any(|action| action == "gh_call_started"),
+        "gh execution start must be logged"
+    );
+    assert!(
+        actions.iter().any(|action| action == "gh_call_finished"),
+        "gh execution finish must be logged"
+    );
+    assert!(
+        actions
+            .iter()
+            .any(|action| action == "gh_info_live_refresh"),
+        "gh live refresh must be logged"
+    );
 }
 
 #[test]

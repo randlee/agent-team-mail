@@ -1,5 +1,7 @@
+pub mod consts;
 pub mod dedup;
 pub mod event_loop;
+pub mod gh_monitor_router;
 pub mod log_writer;
 pub mod pid_backend_validation;
 pub mod session_registry;
@@ -7,6 +9,7 @@ pub mod shutdown;
 pub mod socket;
 pub mod spool_merge;
 pub mod spool_task;
+pub mod startup_auth;
 pub mod status;
 pub mod watcher;
 

@@ -1,14 +1,19 @@
 //! CI Monitor plugin implementation
 
 use super::config::{CiMonitorConfig, DedupStrategy};
-use super::github::GitHubActionsProvider;
 use super::loader::CiProviderLoader;
 use super::provider::ErasedCiProvider;
-use super::registry::{CiProviderFactory, CiProviderRegistry};
-use super::types::{CiFilter, CiJob, CiRunConclusion, CiRunStatus};
+use super::registry::{CiProviderFactory, CiProviderRegistryPort};
+#[cfg(unix)]
+use super::service::{create_provider_from_registry, fetch_run_details, list_completed_runs};
+#[cfg(test)]
+use super::types::{CiFilter, CiRunStatus};
+use super::types::{CiJob, CiRunConclusion};
+#[cfg(unix)]
+use super::types::{CiMonitorHealth, GhMonitorHealthFile, GhMonitorStateFile};
 use crate::plugin::{Capability, Plugin, PluginContext, PluginError, PluginMetadata};
 use crate::roster::RosterError;
-use agent_team_mail_core::context::{GitProvider as GitProviderType, RepoContext};
+use agent_team_mail_core::context::RepoContext;
 use agent_team_mail_core::schema::{AgentMember, InboxMessage, TeamConfig};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -32,37 +37,6 @@ struct RuntimeHistory {
     drift_last_alert_epoch_secs: HashMap<String, i64>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
-struct GhMonitorHealthRecord {
-    team: String,
-    lifecycle_state: String,
-    availability_state: String,
-    in_flight: u64,
-    updated_at: String,
-    message: Option<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
-struct GhMonitorHealthFile {
-    records: Vec<GhMonitorHealthRecord>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
-struct GhMonitorStateRecord {
-    team: String,
-    state: String,
-    run_id: Option<u64>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(default)]
-struct GhMonitorStateFile {
-    records: Vec<GhMonitorStateRecord>,
-}
-
 #[derive(Debug, Clone)]
 struct RuntimeDriftEvent {
     alert_key: String,
@@ -79,7 +53,7 @@ pub struct CiMonitorPlugin {
     /// Plugin configuration from [plugins.gh_monitor]
     config: CiMonitorConfig,
     /// Provider registry for runtime provider selection
-    registry: Option<CiProviderRegistry>,
+    registry: Option<Box<dyn CiProviderRegistryPort>>,
     /// Provider loader (kept alive to hold dynamic libraries)
     loader: Option<CiProviderLoader>,
     /// Cached context for runtime use
@@ -96,6 +70,10 @@ pub struct CiMonitorPlugin {
     /// filesystem timing tricks.
     #[cfg(test)]
     list_members_error: Option<String>,
+    /// Test-only: force synthetic member joined_at timestamp generation to fail so init-path
+    /// error handling can be exercised without depending on wall-clock behavior.
+    #[cfg(test)]
+    joined_at_error: Option<String>,
 }
 
 impl CiMonitorPlugin {
@@ -112,6 +90,8 @@ impl CiMonitorPlugin {
             runtime_history_path: None,
             #[cfg(test)]
             list_members_error: None,
+            #[cfg(test)]
+            joined_at_error: None,
         }
     }
 
@@ -150,9 +130,42 @@ impl CiMonitorPlugin {
         self
     }
 
+    /// Inject a simulated synthetic-member joined_at failure for init-path coverage.
+    #[cfg(test)]
+    fn with_joined_at_error(mut self, msg: impl Into<String>) -> Self {
+        self.joined_at_error = Some(msg.into());
+        self
+    }
+
+    #[cfg(test)]
+    fn with_registry(mut self, registry: Box<dyn CiProviderRegistryPort>) -> Self {
+        self.registry = Some(registry);
+        self
+    }
+
+    fn synthetic_member_joined_at_ms(&self) -> Result<u64, PluginError> {
+        #[cfg(test)]
+        if let Some(ref err_msg) = self.joined_at_error {
+            return Err(PluginError::Init {
+                message: format!("Failed to determine synthetic member join timestamp: {err_msg}"),
+                source: None,
+            });
+        }
+
+        let duration =
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| PluginError::Init {
+                    message: format!("Failed to determine synthetic member join timestamp: {e}"),
+                    source: None,
+                })?;
+
+        Ok(duration.as_millis() as u64)
+    }
+
     /// Build the provider registry with built-in and external providers
-    fn build_registry(&mut self, atm_home: &std::path::Path) -> CiProviderRegistry {
-        let mut registry = CiProviderRegistry::new();
+    fn build_registry(&mut self, atm_home: &std::path::Path) -> Box<dyn CiProviderRegistryPort> {
+        let mut registry = super::registry::CiProviderRegistry::new();
 
         // Register built-in GitHub Actions provider
         registry.register(CiProviderFactory {
@@ -160,11 +173,9 @@ impl CiMonitorPlugin {
             description: "GitHub Actions provider (built-in)".to_string(),
             create: Arc::new(|_config| {
                 // GitHub provider requires owner/repo from git context
-                Err(PluginError::Provider {
-                    message: "GitHub Actions provider requires owner/repo from git context"
-                        .to_string(),
-                    source: None,
-                })
+                Err(super::types::CiProviderError::provider(
+                    "GitHub Actions provider requires owner/repo from git context",
+                ))
             }),
         });
 
@@ -195,73 +206,7 @@ impl CiMonitorPlugin {
         // Keep loader alive so dynamic libraries stay loaded
         self.loader = Some(loader);
 
-        registry
-    }
-
-    /// Select and create a provider from the registry
-    fn create_provider_from_registry(
-        &self,
-        registry: &CiProviderRegistry,
-        git_provider: Option<&GitProviderType>,
-        config_table: Option<&toml::Table>,
-    ) -> Result<Box<dyn ErasedCiProvider>, PluginError> {
-        // Prefer git auto-detection when available; only fall back to explicit
-        // plugin config owner/repo when repository context is unavailable.
-        let (owner, repo) = if let Some(git_provider) = git_provider {
-            match git_provider {
-                GitProviderType::GitHub { owner, repo } => (owner.clone(), repo.clone()),
-                GitProviderType::AzureDevOps { org, project, repo } => {
-                    return Err(PluginError::Provider {
-                        message: format!(
-                            "Azure DevOps not yet supported (org: {org}, project: {project}, repo: {repo})"
-                        ),
-                        source: None,
-                    });
-                }
-                GitProviderType::GitLab { namespace, repo } => {
-                    return Err(PluginError::Provider {
-                        message: format!(
-                            "GitLab not yet supported (namespace: {namespace}, repo: {repo})"
-                        ),
-                        source: None,
-                    });
-                }
-                GitProviderType::Bitbucket { workspace, repo } => {
-                    return Err(PluginError::Provider {
-                        message: format!(
-                            "Bitbucket not yet supported (workspace: {workspace}, repo: {repo})"
-                        ),
-                        source: None,
-                    });
-                }
-                GitProviderType::Unknown { host } => {
-                    return Err(PluginError::Provider {
-                        message: format!("No CI provider for unknown git host: {host}"),
-                        source: None,
-                    });
-                }
-            }
-        } else if let (Some(owner), Some(repo)) = (&self.config.owner, &self.config.repo) {
-            debug!(
-                "gh_monitor falling back to config-provided repo {}/{} because git auto-detection was unavailable",
-                owner, repo
-            );
-            (owner.clone(), repo.clone())
-        } else {
-            return Err(PluginError::Provider {
-                message: "No repository information available".to_string(),
-                source: None,
-            });
-        };
-
-        // For now, only GitHub is supported built-in
-        if self.config.provider == "github" {
-            debug!("Creating GitHub Actions provider for {}/{}", owner, repo);
-            Ok(Box::new(GitHubActionsProvider::new(owner, repo)))
-        } else {
-            // Try to create from registry (for external providers)
-            registry.create_provider(&self.config.provider, config_table)
-        }
+        Box::new(registry)
     }
 
     /// Generate a deduplication key for a run based on configured strategy
@@ -825,6 +770,7 @@ impl CiMonitorPlugin {
             .join("gh-monitor-state.json")
     }
 
+    #[cfg(unix)]
     fn is_terminal_monitor_state(state: &str) -> bool {
         matches!(
             state.to_ascii_lowercase().as_str(),
@@ -832,6 +778,7 @@ impl CiMonitorPlugin {
         )
     }
 
+    #[cfg(unix)]
     fn was_terminal_notified_by_command_path(&self, ctx: &PluginContext, run_id: u64) -> bool {
         let path = Self::gh_monitor_state_path(ctx);
         let raw = match std::fs::read_to_string(&path) {
@@ -850,10 +797,15 @@ impl CiMonitorPlugin {
             }
         };
         state_file.records.iter().any(|record| {
-            record.team == self.config.team
-                && record.run_id == Some(run_id)
-                && Self::is_terminal_monitor_state(&record.state)
+            record.status.team == self.config.team
+                && record.status.run_id == Some(run_id)
+                && Self::is_terminal_monitor_state(&record.status.state)
         })
+    }
+
+    #[cfg(not(unix))]
+    fn was_terminal_notified_by_command_path(&self, _ctx: &PluginContext, _run_id: u64) -> bool {
+        false
     }
 
     fn team_for_config_error(
@@ -868,6 +820,7 @@ impl CiMonitorPlugin {
             .unwrap_or_else(|| ctx.config.core.default_team.clone())
     }
 
+    #[cfg(unix)]
     fn write_health_record(
         ctx: &PluginContext,
         team: &str,
@@ -894,13 +847,30 @@ impl CiMonitorPlugin {
             Err(_) => GhMonitorHealthFile::default(),
         };
 
-        let updated_record = GhMonitorHealthRecord {
+        let updated_record = CiMonitorHealth {
             team: team.to_string(),
+            configured: false,
+            enabled: false,
+            config_source: None,
+            config_path: None,
             lifecycle_state: "running".to_string(),
             availability_state: availability_state.to_string(),
-            in_flight: 0,
+            in_flight: super::helpers::count_in_flight_monitors(home_dir, team),
             updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             message: Some(message.to_string()),
+            repo_state_updated_at: None,
+            budget_limit_per_hour: None,
+            budget_used_in_window: None,
+            rate_limit_remaining: None,
+            rate_limit_limit: None,
+            rate_limit_reset_at: None,
+            poll_owner: None,
+            owner_runtime_kind: None,
+            owner_pid: None,
+            owner_binary_path: None,
+            owner_atm_home: None,
+            owner_repo: None,
+            owner_poll_interval_secs: None,
         };
 
         if let Some(existing) = file.records.iter_mut().find(|record| record.team == team) {
@@ -934,6 +904,15 @@ impl CiMonitorPlugin {
                 warn!("CI Monitor: failed serializing health file: {}", e);
             }
         }
+    }
+
+    #[cfg(not(unix))]
+    fn write_health_record(
+        _ctx: &PluginContext,
+        _team: &str,
+        _availability_state: &str,
+        _message: &str,
+    ) {
     }
 
     fn notify_disabled_transition(&self, ctx: &PluginContext, team: &str, message: &str) {
@@ -1052,42 +1031,71 @@ impl Plugin for CiMonitorPlugin {
             self.runtime_history_path = None;
         }
 
-        // Determine ATM config root from canonical home resolution.
-        let atm_home = agent_team_mail_core::home::get_home_dir()
-            .map_err(|e| PluginError::Init {
-                message: format!("Could not determine home directory: {e}"),
-                source: None,
-            })?
-            .join(".config/atm");
+        // Determine ATM config root and create provider from registry.
+        // Provider creation depends on unix-only registry infrastructure.
+        #[cfg(unix)]
+        {
+            let atm_home = match agent_team_mail_core::home::get_home_dir() {
+                Ok(home_dir) => home_dir.join(".config/atm"),
+                Err(e) => {
+                    let err = PluginError::Init {
+                        message: format!("Could not determine home directory: {e}"),
+                        source: None,
+                    };
+                    self.project_disabled_config_error(ctx, config_table, &err.to_string());
+                    return Err(err);
+                }
+            };
 
-        // Build the provider registry
-        let registry = self.build_registry(&atm_home);
-        debug!(
-            "Provider registry initialized with {} providers: {:?}",
-            registry.len(),
-            registry.list_providers()
-        );
+            if self.registry.is_none() {
+                self.registry = Some(self.build_registry(&atm_home));
+            }
+            let registry = self
+                .registry
+                .as_ref()
+                .expect("registry must be initialized before provider creation");
+            debug!(
+                "Provider registry initialized with {} providers: {:?}",
+                registry.provider_count(),
+                registry.list_provider_names()
+            );
 
-        // Create provider if not already injected (for testing)
-        if self.provider.is_none() {
-            // Create the CI provider from the registry
-            // Pass provider_config for external providers
-            let provider_config = self.config.provider_config.as_ref();
-            self.provider = Some(self.create_provider_from_registry(
-                &registry,
-                repo.provider.as_ref(),
-                provider_config,
-            )?);
+            // Create provider if not already injected (for testing)
+            if self.provider.is_none() {
+                // Create the CI provider from the registry
+                // Pass provider_config for external providers
+                let provider_config = self.config.provider_config.as_ref();
+                let provider = match create_provider_from_registry(
+                    &atm_home,
+                    &self.config.team,
+                    registry.as_ref(),
+                    &self.config.provider,
+                    self.config.owner.as_deref(),
+                    self.config.repo.as_deref(),
+                    repo.provider.as_ref(),
+                    provider_config,
+                ) {
+                    Ok(provider) => provider,
+                    Err(err) => {
+                        self.project_disabled_config_error(ctx, config_table, &err.to_string());
+                        return Err(PluginError::Provider {
+                            message: err.to_string(),
+                            source: None,
+                        });
+                    }
+                };
+                self.provider = Some(provider);
+            }
         }
 
-        // Store registry for potential runtime use
-        self.registry = Some(registry);
-
         // Register synthetic member
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let now_ms = match self.synthetic_member_joined_at_ms() {
+            Ok(now_ms) => now_ms,
+            Err(err) => {
+                self.project_disabled_config_error(ctx, config_table, &err.to_string());
+                return Err(err);
+            }
+        };
 
         let member = AgentMember {
             agent_id: format!("{}@{}", self.config.agent, self.config.team),
@@ -1246,143 +1254,144 @@ impl Plugin for CiMonitorPlugin {
             return Ok(());
         }
 
-        // Clone context for use in loop (Arc, so cheap)
-        let ctx = self
-            .ctx
-            .as_ref()
-            .ok_or_else(|| PluginError::Runtime {
-                message: "Plugin not initialized".to_string(),
-                source: None,
-            })?
-            .clone();
+        #[cfg(not(unix))]
+        {
+            cancel.cancelled().await;
+            return Ok(());
+        }
 
-        let base_interval_secs = self.config.poll_interval_secs.max(10);
-        let max_backoff_secs = MAX_ERROR_BACKOFF_SECS.max(base_interval_secs);
-        let mut next_delay_secs: u64 = 0;
+        #[cfg(unix)]
+        {
+            // Clone context for use in loop (Arc, so cheap)
+            let ctx = self
+                .ctx
+                .as_ref()
+                .ok_or_else(|| PluginError::Runtime {
+                    message: "Plugin not initialized".to_string(),
+                    source: None,
+                })?
+                .clone();
 
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    break;
-                }
-                _ = sleep(Duration::from_secs(next_delay_secs)) => {
-                    // Evict old dedup cache entries
-                    self.evict_old_dedup_entries();
+            let base_interval_secs = self.config.poll_interval_secs.max(10);
+            let max_backoff_secs = MAX_ERROR_BACKOFF_SECS.max(base_interval_secs);
+            let mut next_delay_secs: u64 = 0;
 
-                    // Build filter from config (no branch filter - we'll filter client-side)
-                    let filter = CiFilter {
-                        status: Some(CiRunStatus::Completed),
-                        per_page: Some(20),
-                        ..Default::default()
-                    };
-
-                    // Fetch all completed runs
-                    let runs = match self.provider.as_ref() {
-                        Some(provider) => provider.list_runs(&filter).await,
-                        None => {
-                            warn!("CI Monitor: Provider disappeared during run");
-                            break;
-                        }
-                    };
-                    match runs {
-                        Ok(runs) => {
-                            next_delay_secs = base_interval_secs;
-                            // Process each run
-                            for run in runs {
-                                // Filter by branch using glob patterns (client-side)
-                                if !self.matches_branch(&run.head_branch) {
-                                    continue;
-                                }
-
-                                let should_notify_failure = run
-                                    .conclusion
-                                    .map(|c| self.config.notify_on.contains(&c))
-                                    .unwrap_or(false);
-                                let needs_full_run =
-                                    should_notify_failure || self.config.runtime_drift_enabled;
-                                if !needs_full_run {
-                                    continue;
-                                }
-
-                                // Fetch full run details with jobs
-                                let full_run_result = match self.provider.as_ref() {
-                                    Some(provider) => provider.get_run(run.id).await,
-                                    None => {
-                                        warn!("CI Monitor: Provider disappeared during run");
-                                        break;
-                                    }
-                                };
-                                let full_run = match full_run_result {
-                                    Ok(r) => r,
-                                    Err(e) => {
-                                        warn!("CI Monitor: Failed to fetch run details for #{}: {e}", run.id);
-                                        continue;
-                                    }
-                                };
-
-                                // Runtime drift alerts (optional enhancement): update persisted
-                                // baselines and notify on significant slowdowns.
-                                if let Some(drift_msg) =
-                                    self.update_runtime_history_and_build_alert(&full_run)
-                                {
-                                    if self.send_message_to_targets(&ctx, &drift_msg, run.id) {
-                                        debug!("CI Monitor: Runtime drift alert sent for run #{}", run.id);
-                                    }
-                                }
-
-                                if should_notify_failure {
-                                    // Generate dedup key
-                                    let key = self.dedup_key(&full_run);
-
-                                    // Skip if we've already seen this run+conclusion
-                                    if self.seen_runs.contains_key(&key) {
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        break;
+                    }
+                    _ = sleep(Duration::from_secs(next_delay_secs)) => {
+                        // Evict old dedup cache entries
+                        self.evict_old_dedup_entries();
+                        // Fetch all completed runs
+                        let runs = match self.provider.as_ref() {
+                            Some(provider) => list_completed_runs(provider.as_ref()).await,
+                            None => {
+                                warn!("CI Monitor: Provider disappeared during run");
+                                break;
+                            }
+                        };
+                        match runs {
+                            Ok(runs) => {
+                                next_delay_secs = base_interval_secs;
+                                // Process each run
+                                for run in runs {
+                                    // Filter by branch using glob patterns (client-side)
+                                    if !self.matches_branch(&run.head_branch) {
                                         continue;
                                     }
 
-                                    // Command-path terminal notifications (atm gh monitor) are
-                                    // authoritative for that run_id. Avoid duplicate alerts
-                                    // from polling path when terminal state is already recorded.
-                                    if self.was_terminal_notified_by_command_path(&ctx, full_run.id)
+                                    let should_notify_failure = run
+                                        .conclusion
+                                        .map(|c| self.config.notify_on.contains(&c))
+                                        .unwrap_or(false);
+                                    let needs_full_run =
+                                        should_notify_failure || self.config.runtime_drift_enabled;
+                                    if !needs_full_run {
+                                        continue;
+                                    }
+
+                                    // Fetch full run details with jobs
+                                    let full_run_result = match self.provider.as_ref() {
+                                        Some(provider) => fetch_run_details(provider.as_ref(), run.id).await,
+                                        None => {
+                                            warn!("CI Monitor: Provider disappeared during run");
+                                            break;
+                                        }
+                                    };
+                                    let full_run = match full_run_result {
+                                        Ok(r) => r,
+                                        Err(e) => {
+                                            warn!("CI Monitor: Failed to fetch run details for #{}: {e}", run.id);
+                                            continue;
+                                        }
+                                    };
+
+                                    // Runtime drift alerts (optional enhancement): update persisted
+                                    // baselines and notify on significant slowdowns.
+                                    if let Some(drift_msg) =
+                                        self.update_runtime_history_and_build_alert(&full_run)
                                     {
-                                        debug!(
-                                            "CI Monitor: Skipping duplicate polling notification for run #{} (command-path terminal state present)",
-                                            full_run.id
-                                        );
-                                        self.seen_runs.insert(key, Utc::now());
-                                        continue;
+                                        if self.send_message_to_targets(&ctx, &drift_msg, run.id) {
+                                            debug!("CI Monitor: Runtime drift alert sent for run #{}", run.id);
+                                        }
                                     }
 
-                                    // Generate failure reports
-                                    if let Err(e) = self.generate_reports(&full_run) {
-                                        warn!("CI Monitor: Failed to generate reports for run #{}: {e}", run.id);
-                                    }
+                                    if should_notify_failure {
+                                        // Generate dedup key
+                                        let key = self.dedup_key(&full_run);
 
-                                    // Create notification message
-                                    let msg = self.run_to_message(&full_run);
-                                    if self.send_message_to_targets(&ctx, &msg, run.id) {
-                                        debug!("CI Monitor: Notified about run #{}", run.id);
-                                        self.seen_runs.insert(key, Utc::now());
+                                        // Skip if we've already seen this run+conclusion
+                                        if self.seen_runs.contains_key(&key) {
+                                            continue;
+                                        }
+
+                                        // Command-path terminal notifications (atm gh monitor) are
+                                        // authoritative for that run_id. Avoid duplicate alerts
+                                        // from polling path when terminal state is already recorded.
+                                        if self.was_terminal_notified_by_command_path(&ctx, full_run.id)
+                                        {
+                                            debug!(
+                                                "CI Monitor: Skipping duplicate polling notification for run #{} (command-path terminal state present)",
+                                                full_run.id
+                                            );
+                                            self.seen_runs.insert(key, Utc::now());
+                                            continue;
+                                        }
+
+                                        // Generate failure reports
+                                        if let Err(e) = self.generate_reports(&full_run) {
+                                            warn!("CI Monitor: Failed to generate reports for run #{}: {e}", run.id);
+                                        }
+
+                                        // Create notification message
+                                        let msg = self.run_to_message(&full_run);
+                                        if self.send_message_to_targets(&ctx, &msg, run.id) {
+                                            debug!("CI Monitor: Notified about run #{}", run.id);
+                                            self.seen_runs.insert(key, Utc::now());
+                                        }
                                     }
                                 }
                             }
-                        }
-                        Err(e) => {
-                            warn!("CI Monitor: Failed to fetch runs: {e}");
-                            // Continue polling after error using bounded exponential backoff.
-                            next_delay_secs = if next_delay_secs == 0 {
-                                base_interval_secs
-                            } else {
-                                next_delay_secs
-                                    .saturating_mul(2)
-                                    .min(max_backoff_secs)
-                            };
+                            Err(e) => {
+                                warn!("CI Monitor: Failed to fetch runs: {e}");
+                                // Continue polling after error using bounded exponential backoff.
+                                next_delay_secs = if next_delay_secs == 0 {
+                                    base_interval_secs
+                                } else {
+                                    next_delay_secs
+                                        .saturating_mul(2)
+                                        .min(max_backoff_secs)
+                                };
+                            }
                         }
                     }
                 }
             }
-        }
 
-        Ok(())
+            Ok(())
+        }
     }
 
     async fn shutdown(&mut self) -> Result<(), PluginError> {
@@ -1421,6 +1430,43 @@ impl Plugin for CiMonitorPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_team_mail_core::context::GitProvider as GitProviderType;
+    use std::sync::Mutex;
+
+    #[derive(Debug)]
+    struct RecordingRegistry {
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl RecordingRegistry {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl CiProviderRegistryPort for RecordingRegistry {
+        fn create_provider(
+            &self,
+            name: &str,
+            _config: Option<&toml::Table>,
+        ) -> Result<Box<dyn ErasedCiProvider>, crate::plugins::ci_monitor::CiProviderError>
+        {
+            self.calls.lock().unwrap().push(name.to_string());
+            Ok(Box::new(
+                crate::plugins::ci_monitor::mock_support::MockCiProvider::new(),
+            ))
+        }
+
+        fn list_provider_names(&self) -> Vec<String> {
+            vec!["custom".to_string()]
+        }
+
+        fn provider_count(&self) -> usize {
+            1
+        }
+    }
 
     #[test]
     fn test_plugin_metadata() {
@@ -1449,22 +1495,26 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_create_provider_from_registry_prefers_git_repo_over_config_repo() {
-        let config = CiMonitorConfig {
-            owner: Some("config-owner".to_string()),
-            repo: Some("config-repo".to_string()),
-            ..Default::default()
-        };
-        let plugin = CiMonitorPlugin::new().with_config(config);
-        let registry = CiProviderRegistry::new();
+        let temp = tempfile::tempdir().unwrap();
+        let registry = RecordingRegistry::new();
         let git_provider = GitProviderType::GitHub {
             owner: "git-owner".to_string(),
             repo: "git-repo".to_string(),
         };
 
-        let provider = plugin
-            .create_provider_from_registry(&registry, Some(&git_provider), None)
-            .expect("provider");
+        let provider = create_provider_from_registry(
+            temp.path(),
+            "atm-dev",
+            &registry,
+            "github",
+            Some("config-owner"),
+            Some("config-repo"),
+            Some(&git_provider),
+            None,
+        )
+        .expect("provider");
         let debug = format!("{provider:?}");
         assert!(debug.contains("git-owner"));
         assert!(debug.contains("git-repo"));
@@ -1472,18 +1522,22 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_create_provider_from_registry_falls_back_to_config_repo_when_git_missing() {
-        let config = CiMonitorConfig {
-            owner: Some("config-owner".to_string()),
-            repo: Some("config-repo".to_string()),
-            ..Default::default()
-        };
-        let plugin = CiMonitorPlugin::new().with_config(config);
-        let registry = CiProviderRegistry::new();
+        let temp = tempfile::tempdir().unwrap();
+        let registry = RecordingRegistry::new();
 
-        let provider = plugin
-            .create_provider_from_registry(&registry, None, None)
-            .expect("provider");
+        let provider = create_provider_from_registry(
+            temp.path(),
+            "atm-dev",
+            &registry,
+            "github",
+            Some("config-owner"),
+            Some("config-repo"),
+            None,
+            None,
+        )
+        .expect("provider");
         let debug = format!("{provider:?}");
         assert!(debug.contains("config-owner"));
         assert!(debug.contains("config-repo"));
@@ -1491,7 +1545,8 @@ mod tests {
 
     #[test]
     fn test_dedup_key_per_commit() {
-        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus, create_test_run};
+        use crate::plugins::ci_monitor::mock_support::create_test_run;
+        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus};
         let plugin = CiMonitorPlugin::new(); // Default uses PerCommit
         let run = create_test_run(
             123456,
@@ -1506,7 +1561,8 @@ mod tests {
 
     #[test]
     fn test_dedup_key_per_run() {
-        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus, create_test_run};
+        use crate::plugins::ci_monitor::mock_support::create_test_run;
+        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus};
         let config = CiMonitorConfig {
             dedup_strategy: DedupStrategy::PerRun,
             ..Default::default()
@@ -1525,7 +1581,8 @@ mod tests {
 
     #[test]
     fn test_dedup_key_distinct_on_conclusion_change() {
-        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus, create_test_run};
+        use crate::plugins::ci_monitor::mock_support::create_test_run;
+        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus};
         let plugin = CiMonitorPlugin::new();
         let run1 = create_test_run(
             123,
@@ -1566,9 +1623,8 @@ mod tests {
 
     #[test]
     fn test_runtime_drift_alert_message_deterministic() {
-        use crate::plugins::ci_monitor::{
-            CiRunConclusion, CiRunStatus, create_test_job, create_test_run,
-        };
+        use crate::plugins::ci_monitor::mock_support::{create_test_job, create_test_run};
+        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus};
 
         let config = CiMonitorConfig {
             runtime_drift_enabled: true,
@@ -1624,7 +1680,8 @@ mod tests {
 
     #[test]
     fn test_runtime_drift_alert_respects_alert_cooldown() {
-        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus, create_test_run};
+        use crate::plugins::ci_monitor::mock_support::create_test_run;
+        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus};
 
         let config = CiMonitorConfig {
             runtime_drift_enabled: true,
@@ -1743,7 +1800,9 @@ mod tests {
     // E2E routing and filtering tests
     #[tokio::test]
     async fn test_e2e_branch_filter_and_routing() {
-        use crate::plugins::ci_monitor::{MockCiProvider, create_test_job, create_test_run};
+        use crate::plugins::ci_monitor::mock_support::{
+            MockCiProvider, create_test_job, create_test_run,
+        };
         use tempfile::TempDir;
 
         // Setup: Create temporary teams directory
@@ -1854,7 +1913,7 @@ notify_target = "team-lead"
 
     #[tokio::test]
     async fn test_e2e_branch_filter_excludes_non_matching() {
-        use crate::plugins::ci_monitor::{MockCiProvider, create_test_run};
+        use crate::plugins::ci_monitor::mock_support::{MockCiProvider, create_test_run};
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
@@ -1990,7 +2049,7 @@ notify_target = "team-lead"
 
     #[tokio::test]
     async fn test_notify_target_validation_warns_on_missing_agent() {
-        use crate::plugins::ci_monitor::MockCiProvider;
+        use crate::plugins::ci_monitor::mock_support::MockCiProvider;
         use agent_team_mail_core::schema::{AgentMember, TeamConfig};
         use tempfile::TempDir;
 
@@ -2057,7 +2116,7 @@ notify_target = "nonexistent-agent"
     #[tokio::test]
     #[serial_test::serial]
     async fn test_init_falls_back_to_config_repo_when_system_repo_missing() {
-        use crate::plugins::ci_monitor::MockCiProvider;
+        use crate::plugins::ci_monitor::mock_support::MockCiProvider;
         use agent_team_mail_core::schema::{AgentMember, TeamConfig};
         use tempfile::TempDir;
 
@@ -2155,10 +2214,11 @@ repo = "config-owner/config-repo"
         assert_eq!(member.cwd, temp_dir.path().to_string_lossy());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     #[serial_test::serial]
     async fn test_init_adopts_existing_ci_monitor_member_without_error() {
-        use crate::plugins::ci_monitor::MockCiProvider;
+        use crate::plugins::ci_monitor::mock_support::MockCiProvider;
         use agent_team_mail_core::schema::{AgentMember, TeamConfig};
         use tempfile::TempDir;
 
@@ -2261,10 +2321,11 @@ repo = "config-owner/config-repo"
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     #[serial_test::serial]
     async fn test_init_rejects_non_plugin_member_with_same_name() {
-        use crate::plugins::ci_monitor::MockCiProvider;
+        use crate::plugins::ci_monitor::mock_support::MockCiProvider;
         use agent_team_mail_core::schema::{AgentMember, TeamConfig};
         use tempfile::TempDir;
 
@@ -2382,9 +2443,10 @@ repo = "config-owner/config-repo"
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_init_without_git_or_config_repo_writes_disabled_init_health_record() {
-        use crate::plugins::ci_monitor::MockCiProvider;
+        use crate::plugins::ci_monitor::mock_support::MockCiProvider;
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
@@ -2421,9 +2483,163 @@ repo = "config-owner/config-repo"
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_init_joined_at_failure_writes_disabled_init_health_record() {
+        use crate::plugins::ci_monitor::mock_support::MockCiProvider;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let table: toml::Table = toml::from_str("team = \"dev-team\"").unwrap();
+        let ctx = create_mock_context_with_repo_config(teams_root.clone(), Some(table), true);
+        let mut plugin = CiMonitorPlugin::new()
+            .with_provider(Box::new(MockCiProvider::new()))
+            .with_joined_at_error("simulated time failure");
+
+        let err = plugin
+            .init(&ctx)
+            .await
+            .expect_err("init should fail when synthetic member joined_at cannot be determined");
+        assert!(
+            err.to_string()
+                .contains("Failed to determine synthetic member join timestamp"),
+            "unexpected init error: {err}"
+        );
+
+        let health_path =
+            agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(temp_dir.path());
+        let raw = std::fs::read_to_string(&health_path).expect("health record");
+        let health: GhMonitorHealthFile = serde_json::from_str(&raw).expect("health json");
+        let record = health
+            .records
+            .iter()
+            .find(|record| record.team == "dev-team")
+            .expect("dev-team health record");
+        assert_eq!(record.availability_state, "disabled_config_error");
+        assert!(record.message.as_deref().is_some_and(|message| {
+            message.contains("Failed to determine synthetic member join timestamp")
+        }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_init_provider_creation_failure_writes_disabled_init_health_record() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let table: toml::Table = toml::from_str(
+            r#"
+team = "dev-team"
+provider = "custom-missing"
+"#,
+        )
+        .unwrap();
+        let ctx = create_mock_context_with_repo_config(teams_root.clone(), Some(table), true);
+        let mut plugin = CiMonitorPlugin::new();
+
+        let err = plugin
+            .init(&ctx)
+            .await
+            .expect_err("init should fail when provider creation fails");
+        assert!(
+            err.to_string()
+                .contains("CI provider 'custom-missing' not registered"),
+            "unexpected init error: {err}"
+        );
+
+        let health_path =
+            agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(temp_dir.path());
+        let raw = std::fs::read_to_string(&health_path).expect("health record");
+        let health: GhMonitorHealthFile = serde_json::from_str(&raw).expect("health json");
+        let record = health
+            .records
+            .iter()
+            .find(|record| record.team == "dev-team")
+            .expect("dev-team health record");
+        assert_eq!(record.availability_state, "disabled_config_error");
+        assert!(record.message.as_deref().is_some_and(|message| {
+            message.contains("CI provider 'custom-missing' not registered")
+        }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_init_uses_injected_registry_through_plugin_init_path() {
+        use agent_team_mail_core::schema::{AgentMember, TeamConfig};
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let teams_root = temp_dir.path().to_path_buf();
+        let team_dir = teams_root.join("dev-team");
+        let inboxes_dir = team_dir.join("inboxes");
+        std::fs::create_dir_all(&inboxes_dir).unwrap();
+        std::fs::write(inboxes_dir.join("ci-monitor.json"), "[]").unwrap();
+
+        let team_config = TeamConfig {
+            name: "dev-team".to_string(),
+            description: None,
+            created_at: 1234567890,
+            lead_agent_id: "lead@dev-team".to_string(),
+            lead_session_id: "session-123".to_string(),
+            members: vec![AgentMember {
+                agent_id: "lead@dev-team".to_string(),
+                name: "lead".to_string(),
+                agent_type: "general-purpose".to_string(),
+                model: "claude-opus-4-6".to_string(),
+                prompt: None,
+                color: None,
+                plan_mode_required: None,
+                joined_at: 1234567890,
+                tmux_pane_id: None,
+                cwd: ".".to_string(),
+                subscriptions: Vec::new(),
+                backend_type: None,
+                is_active: None,
+                last_active: None,
+                session_id: None,
+                external_backend_type: None,
+                external_model: None,
+                unknown_fields: std::collections::HashMap::new(),
+            }],
+            unknown_fields: std::collections::HashMap::new(),
+        };
+        std::fs::create_dir_all(&team_dir).unwrap();
+        std::fs::write(
+            team_dir.join("config.json"),
+            serde_json::to_string_pretty(&team_config).unwrap(),
+        )
+        .unwrap();
+
+        let table: toml::Table = toml::from_str(
+            r#"
+team = "dev-team"
+provider = "custom"
+agent = "ci-monitor"
+"#,
+        )
+        .unwrap();
+        let ctx = create_mock_context_with_repo_config(teams_root, Some(table), true);
+        let mut plugin = CiMonitorPlugin::new().with_registry(Box::new(RecordingRegistry::new()));
+
+        plugin.init(&ctx).await.expect("init should succeed");
+
+        let provider = plugin
+            .provider
+            .as_ref()
+            .expect("provider should be created");
+        assert_eq!(provider.provider_name(), "MockCiProvider");
+        let registry = plugin
+            .registry
+            .as_ref()
+            .expect("registry should remain stored after init");
+        assert_eq!(registry.provider_count(), 1);
+        assert_eq!(registry.list_provider_names(), vec!["custom".to_string()]);
+    }
+
     #[tokio::test]
     async fn test_notify_target_validation_passes_on_existing_agent() {
-        use crate::plugins::ci_monitor::MockCiProvider;
+        use crate::plugins::ci_monitor::mock_support::MockCiProvider;
         use agent_team_mail_core::schema::{AgentMember, TeamConfig};
         use tempfile::TempDir;
 
@@ -2511,11 +2727,12 @@ notify_target = "team-lead"
         assert!(result.is_ok());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_polling_notification_suppressed_when_command_path_already_terminal() {
-        use crate::plugins::ci_monitor::{
-            CiRunConclusion, CiRunStatus, MockCiProvider, create_test_run,
-        };
+        use crate::plugins::ci_monitor::mock_support::{MockCiProvider, create_test_run};
+        use crate::plugins::ci_monitor::types::{CiMonitorStatus, CiMonitorTargetKind};
+        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus};
         use agent_team_mail_core::schema::{AgentMember, TeamConfig};
         use tempfile::TempDir;
 
@@ -2581,11 +2798,23 @@ poll_interval_secs = 10
         .unwrap();
         let ctx = create_mock_context_with_config(teams_root.clone(), Some(table));
 
-        let state_path = CiMonitorPlugin::gh_monitor_state_path(&ctx);
-        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &state_path,
-            r#"{"records":[{"team":"dev-team","state":"failure","run_id":42}]}"#,
+        crate::plugins::ci_monitor::helpers::upsert_gh_monitor_status(
+            teams_root.as_path(),
+            CiMonitorStatus {
+                team: "dev-team".to_string(),
+                configured: true,
+                enabled: true,
+                config_source: None,
+                config_path: None,
+                target_kind: CiMonitorTargetKind::Workflow,
+                target: "CI".to_string(),
+                state: "failure".to_string(),
+                run_id: Some(42),
+                reference: None,
+                updated_at: "2026-03-14T00:00:00Z".to_string(),
+                message: None,
+                repo_state_updated_at: None,
+            },
         )
         .unwrap();
 
@@ -2610,7 +2839,8 @@ poll_interval_secs = 10
 
     #[test]
     fn test_run_to_message_includes_multi_recipient_note() {
-        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus, create_test_run};
+        use crate::plugins::ci_monitor::mock_support::create_test_run;
+        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus};
 
         // Create plugin with multiple notify targets
         let toml_str = r#"
@@ -2643,7 +2873,7 @@ notify_target = ["lead", "qa-bot@qa-team"]
     #[tokio::test]
     #[serial_test::serial]
     async fn test_init_propagates_list_members_error_on_duplicate() {
-        use crate::plugins::ci_monitor::MockCiProvider;
+        use crate::plugins::ci_monitor::mock_support::MockCiProvider;
         use agent_team_mail_core::schema::{AgentMember, TeamConfig};
         use tempfile::TempDir;
 
@@ -2723,7 +2953,8 @@ agent = "ci-monitor"
 
     #[test]
     fn test_run_to_message_no_multi_recipient_note_for_single_target() {
-        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus, create_test_run};
+        use crate::plugins::ci_monitor::mock_support::create_test_run;
+        use crate::plugins::ci_monitor::{CiRunConclusion, CiRunStatus};
 
         // Create plugin with single notify target
         let toml_str = r#"

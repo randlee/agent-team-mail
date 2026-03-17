@@ -53,6 +53,15 @@ async fn main() -> Result<()> {
     // Determine home directory early for lock/log path resolution.
     let home_dir =
         agent_team_mail_core::home::get_home_dir().context("Failed to determine home directory")?;
+    let _ = daemon::startup_auth::sweep_stale_isolated_runtimes()
+        .context("Failed to sweep stale isolated runtimes")?;
+    let launch_token = daemon::startup_auth::validate_startup_token(&home_dir)
+        .context("Daemon launch authorization failed")?;
+    let runtime_owner =
+        agent_team_mail_core::daemon_client::validate_runtime_admission_for_current_process(
+            &home_dir,
+        )
+        .context("Shared runtime admission failed")?;
 
     // Enforce single-instance daemon ownership with an exclusive process lock.
     let daemon_lock_path = agent_team_mail_core::daemon_client::daemon_lock_path()?;
@@ -69,10 +78,45 @@ async fn main() -> Result<()> {
     })?;
     let daemon_lock = agent_team_mail_core::io::lock::acquire_lock(&daemon_lock_path, 0).map_err(
         |e| match e {
-            agent_team_mail_core::io::InboxError::LockTimeout { .. } => anyhow::anyhow!(
-                "atm-daemon already running (lock held at {}). Refusing second instance.",
-                daemon_lock_path.display()
-            ),
+            agent_team_mail_core::io::InboxError::LockTimeout { .. } => {
+                let detail = if let Some(existing) =
+                    agent_team_mail_core::daemon_client::read_daemon_lock_metadata(&home_dir)
+                {
+                    format!(
+                        "atm-daemon already running for this shared runtime (lock held at {}). Existing owner: pid={} version={} {}. Refusing second instance.",
+                        daemon_lock_path.display(),
+                        existing.pid,
+                        existing.version,
+                        agent_team_mail_core::daemon_client::format_runtime_owner_summary(&existing.owner)
+                    )
+                } else {
+                    format!(
+                        "atm-daemon already running (lock held at {}). Refusing second instance.",
+                        daemon_lock_path.display()
+                    )
+                };
+                daemon::startup_auth::log_shared_runtime_rejection(
+                    &home_dir,
+                    &launch_token,
+                    &detail,
+                );
+                if let Some(existing) =
+                    agent_team_mail_core::daemon_client::read_daemon_lock_metadata(&home_dir)
+                {
+                    anyhow::anyhow!(
+                        "atm-daemon already running for this shared runtime (lock held at {}). Existing owner: pid={} version={} {}. Refusing second instance.",
+                        daemon_lock_path.display(),
+                        existing.pid,
+                        existing.version,
+                        agent_team_mail_core::daemon_client::format_runtime_owner_summary(&existing.owner)
+                    )
+                } else {
+                    anyhow::anyhow!(
+                        "atm-daemon already running (lock held at {}). Refusing second instance.",
+                        daemon_lock_path.display()
+                    )
+                }
+            }
             other => anyhow::anyhow!(
                 "Failed to acquire daemon lock at {}: {}",
                 daemon_lock_path.display(),
@@ -83,8 +127,12 @@ async fn main() -> Result<()> {
     agent_team_mail_core::daemon_client::write_daemon_lock_metadata(
         &home_dir,
         env!("CARGO_PKG_VERSION"),
+        &runtime_owner,
     )
     .context("Failed to write daemon lock metadata")?;
+    daemon::startup_auth::persist_runtime_metadata_from_token(&home_dir, &launch_token)
+        .context("Failed to persist launch lease metadata")?;
+    daemon::startup_auth::log_launch_accepted(&home_dir, &launch_token);
 
     // Resolve canonical log writer config once and reuse for startup merge + writer task.
     let log_writer_config = LogWriterConfig::from_env(&home_dir);
@@ -276,6 +324,7 @@ async fn main() -> Result<()> {
     let status_writer = Arc::new(StatusWriter::new(
         home_dir.clone(),
         env!("CARGO_PKG_VERSION").to_string(),
+        runtime_owner.clone(),
     ));
     info!(
         "Status writer initialized: {}",
@@ -284,6 +333,13 @@ async fn main() -> Result<()> {
 
     // Create cancellation token for graceful shutdown
     let cancel_token = CancellationToken::new();
+    let lease_violation = daemon::startup_auth::new_shared_lease_violation();
+    let lease_monitor_task = daemon::startup_auth::spawn_isolated_test_lease_monitor(
+        home_dir.clone(),
+        launch_token.clone(),
+        cancel_token.clone(),
+        lease_violation.clone(),
+    );
 
     // Set up signal handlers
     let cancel_for_signals = cancel_token.clone();
@@ -347,8 +403,26 @@ async fn main() -> Result<()> {
         log_event_queue,
     )
     .await;
-    match &run_result {
-        Ok(_) => emit_event_best_effort(EventFields {
+    if let Some(task) = lease_monitor_task {
+        let _ = task.await;
+    }
+    let lease_violation = lease_violation.lock().unwrap().clone();
+    match (&run_result, &lease_violation) {
+        (Ok(_), None) => {
+            daemon::startup_auth::log_clean_owner_shutdown(&home_dir, &launch_token);
+            emit_event_best_effort(EventFields {
+                level: "info",
+                source: "atm-daemon",
+                action: "daemon_stop",
+                team: Some(plugin_ctx.config.core.default_team.clone()),
+                session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+                agent_id: std::env::var("ATM_IDENTITY").ok(),
+                agent_name: std::env::var("ATM_IDENTITY").ok(),
+                result: Some("ok".to_string()),
+                ..Default::default()
+            })
+        }
+        (Ok(_), Some(_)) => emit_event_best_effort(EventFields {
             level: "info",
             source: "atm-daemon",
             action: "daemon_stop",
@@ -359,7 +433,7 @@ async fn main() -> Result<()> {
             result: Some("ok".to_string()),
             ..Default::default()
         }),
-        Err(e) => emit_event_best_effort(EventFields {
+        (Err(e), _) => emit_event_best_effort(EventFields {
             level: "error",
             source: "atm-daemon",
             action: "daemon_stop",
@@ -371,6 +445,13 @@ async fn main() -> Result<()> {
             error: Some(e.to_string()),
             ..Default::default()
         }),
+    }
+    if let Some(violation) = lease_violation {
+        anyhow::bail!(
+            "daemon lease violation: {} ({})",
+            violation.event_name,
+            violation.detail
+        );
     }
     run_result.context("Daemon event loop failed")?;
 

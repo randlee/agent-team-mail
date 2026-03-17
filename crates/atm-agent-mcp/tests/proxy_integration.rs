@@ -6,7 +6,7 @@
 
 use serde_json::{Value, json};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
 
 /// Find the path to the `echo-mcp-server` test binary.
@@ -112,6 +112,22 @@ async fn read_all_responses(
         }
     }
     results
+}
+
+async fn wait_for_condition(
+    timeout: Duration,
+    poll_interval: Duration,
+    mut condition: impl FnMut() -> bool,
+) -> Duration {
+    let start = Instant::now();
+    let deadline = start + timeout;
+    while Instant::now() < deadline {
+        if condition() {
+            return start.elapsed();
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+    start.elapsed()
 }
 
 /// Read messages from the proxy, collecting all of them, until a response
@@ -225,8 +241,14 @@ async fn test_notifications_initialized_passes_through() {
     });
     send_newline(&mut writer, &notif).await;
 
-    // Small delay to let proxy process
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let elapsed = wait_for_condition(Duration::from_secs(1), Duration::from_millis(10), || {
+        !handle.is_finished()
+    })
+    .await;
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "proxy notification pass-through check did not stay healthy within 1s: elapsed={elapsed:?}"
+    );
 
     drop(writer);
     let _ = handle.await;
@@ -482,26 +504,36 @@ async fn test_child_crash_returns_error() {
     });
     send_newline(&mut writer, &crash_req).await;
 
-    // Wait for child to die
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let start = Instant::now();
+    let error_resp = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut probe_id = 3u64;
+        loop {
+            let codex_req2 = json!({
+                "jsonrpc": "2.0",
+                "id": probe_id,
+                "method": "tools/call",
+                "params": {"name": "codex", "arguments": {"prompt": "after crash"}}
+            });
+            send_newline(&mut writer, &codex_req2).await;
 
-    // Next request should return dead child error
-    let codex_req2 = json!({
-        "jsonrpc": "2.0",
-        "id": 3,
-        "method": "tools/call",
-        "params": {"name": "codex", "arguments": {"prompt": "after crash"}}
-    });
-    send_newline(&mut writer, &codex_req2).await;
-
-    let responses = read_all_responses(&mut reader, Duration::from_secs(5)).await;
-    let error_resp = responses.iter().find(|r| {
-        r.get("id") == Some(&json!(3))
-            && r.pointer("/error/code").and_then(|v| v.as_i64()) == Some(-32005)
-    });
+            let responses = read_all_responses(&mut reader, Duration::from_millis(250)).await;
+            if let Some(found) = responses.iter().find(|r| {
+                r.get("id") == Some(&json!(probe_id))
+                    && r.pointer("/error/code").and_then(|v| v.as_i64()) == Some(-32005)
+            }) {
+                return Some(found.clone());
+            }
+            probe_id += 1;
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .ok()
+    .flatten();
+    let elapsed = start.elapsed();
     assert!(
-        error_resp.is_some(),
-        "expected -32005 CHILD_PROCESS_DEAD error, got: {responses:?}"
+        error_resp.is_some() && elapsed < Duration::from_secs(2),
+        "expected -32005 CHILD_PROCESS_DEAD error within 2s: elapsed={elapsed:?}"
     );
 
     drop(writer);
@@ -539,34 +571,33 @@ async fn test_child_crash_includes_exit_code() {
     // exit code, which confirms exit_status is populated.  Bound the polling
     // loop with a 10-second deadline so the test fails fast on genuine bugs
     // rather than hanging indefinitely.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    let mut probe_id: u64 = 100;
-    loop {
-        if tokio::time::Instant::now() >= deadline {
-            panic!("timed out waiting for proxy to detect child crash (exit code 42)");
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut probe_id: u64 = 100;
+        loop {
+            // Send a probe request.
+            let probe = json!({
+                "jsonrpc": "2.0",
+                "id": probe_id,
+                "method": "tools/call",
+                "params": {"name": "codex", "arguments": {"prompt": "probe"}}
+            });
+            send_newline(&mut writer, &probe).await;
 
-        // Send a probe request.
-        let probe = json!({
-            "jsonrpc": "2.0",
-            "id": probe_id,
-            "method": "tools/call",
-            "params": {"name": "codex", "arguments": {"prompt": "probe"}}
-        });
-        send_newline(&mut writer, &probe).await;
-
-        // Collect all responses that arrive within a short window.
-        let got = read_all_responses(&mut reader, Duration::from_millis(200)).await;
-        let found = got.iter().find(|r| {
-            r.get("id") == Some(&json!(probe_id))
-                && r.pointer("/error/data/exit_code").and_then(|v| v.as_i64()) == Some(42)
-        });
-        if found.is_some() {
-            break;
+            // Collect all responses that arrive within a short window.
+            let got = read_all_responses(&mut reader, Duration::from_millis(200)).await;
+            let found = got.iter().find(|r| {
+                r.get("id") == Some(&json!(probe_id))
+                    && r.pointer("/error/data/exit_code").and_then(|v| v.as_i64()) == Some(42)
+            });
+            if found.is_some() {
+                break;
+            }
+            probe_id += 1;
+            tokio::task::yield_now().await;
         }
-        probe_id += 1;
-    }
+    })
+    .await
+    .expect("timed out waiting for proxy to detect child crash (exit code 42)");
 
     // Send another request
     let req = json!({
@@ -792,7 +823,7 @@ async fn test_codex_reply_passes_through() {
         "params": {"name": "codex", "arguments": {"prompt": "start session"}}
     });
     send_newline(&mut writer, &codex_req).await;
-    let _ = read_all_responses(&mut reader, Duration::from_secs(5)).await;
+    let _ = collect_until_id(&mut reader, json!(1), Duration::from_secs(5)).await;
 
     // Now send codex-reply
     let reply_req = json!({
@@ -806,7 +837,7 @@ async fn test_codex_reply_passes_through() {
     });
     send_newline(&mut writer, &reply_req).await;
 
-    let responses = read_all_responses(&mut reader, Duration::from_secs(5)).await;
+    let responses = collect_until_id(&mut reader, json!(2), Duration::from_secs(5)).await;
     let main_resp = responses.iter().find(|r| r.get("id") == Some(&json!(2)));
     assert!(main_resp.is_some(), "should get codex-reply response");
 

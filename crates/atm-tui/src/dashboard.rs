@@ -221,7 +221,6 @@ pub fn session_log_path(team: &str, agent: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
     use std::fs;
     use std::sync::Mutex;
     use tempfile::TempDir;
@@ -244,7 +243,6 @@ mod tests {
     // ── test_session_log_path ────────────────────────────────────────────────
 
     #[test]
-    #[serial]
     fn test_session_log_path() {
         with_tmp_home(|home| {
             let path = session_log_path("atm-dev", "arch-ctm").expect("session log path");
@@ -260,7 +258,6 @@ mod tests {
     // ── test_inbox_count_empty ───────────────────────────────────────────────
 
     #[test]
-    #[serial]
     fn test_inbox_count_empty() {
         with_tmp_home(|home| {
             // Inbox file does not exist yet.
@@ -280,7 +277,6 @@ mod tests {
     // ── test_inbox_count_with_messages ──────────────────────────────────────
 
     #[test]
-    #[serial]
     fn test_inbox_count_with_messages() {
         with_tmp_home(|home| {
             let inbox_dir = home.join(".claude/teams/atm-dev/inboxes");
@@ -297,7 +293,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_read_team_members_from_config() {
         with_tmp_home(|home| {
             let team_dir = home.join(".claude/teams/atm-dev");
@@ -314,7 +309,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_read_inbox_preview_returns_recent_messages() {
         with_tmp_home(|home| {
             let inbox_dir = home.join(".claude/teams/atm-dev/inboxes");
@@ -331,7 +325,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_read_inbox_messages_returns_recent_first() {
         with_tmp_home(|home| {
             let inbox_dir = home.join(".claude/teams/atm-dev/inboxes");
@@ -350,7 +343,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_mark_inbox_message_read_updates_file() {
         with_tmp_home(|home| {
             let inbox_dir = home.join(".claude/teams/atm-dev/inboxes");

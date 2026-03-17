@@ -67,10 +67,19 @@ fn generate_span_id(seed_parts: &[&str]) -> String {
 }
 
 /// Forward `event` to the unified producer channel if a sender is registered.
+fn fallback_home_dir() -> Option<std::path::PathBuf> {
+    crate::home::get_home_dir().ok()
+}
+
 fn forward_to_unified(event: crate::logging_event::LogEventV1) {
     if let Some(tx) = crate::logging::producer_sender() {
         // send returns Err if full or disconnected; we silently drop.
-        let _ = tx.try_send(event);
+        if tx.try_send(event.clone()).is_ok() {
+            return;
+        }
+    }
+    if let Some(home_dir) = fallback_home_dir() {
+        crate::logging_event::write_to_spool(&event, &home_dir);
     }
 }
 
@@ -249,8 +258,14 @@ fn fields_to_log_event(fields: &EventFields) -> crate::logging_event::LogEventV1
 
 /// Emit a single structured event to the unified logging channel.
 ///
-/// This function is intentionally fail-open: if the unified channel is not
-/// initialised or the send fails, the event is silently dropped.
+/// This function is intentionally fail-open with a two-tier fallback:
+/// 1. If the unified producer channel is initialised, the event is sent there.
+/// 2. If the channel is not yet initialised (or the send fails), the event is
+///    spooled to `ATM_HOME/.config/atm/logs/atm-daemon/spool/` via
+///    `write_to_spool`. The daemon merges spool files into the canonical log
+///    during startup.
+/// 3. Only if both the channel and the spool path are unavailable (i.e.
+///    `ATM_HOME` is unresolvable) is the event silently dropped.
 ///
 /// The legacy `events.jsonl` dual-write path was removed in Phase M.1b.
 /// Events flow exclusively through the unified producer channel.
@@ -300,7 +315,44 @@ fn message_preview(text: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logging_event::LogEventV1;
     use serial_test::serial;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn read_jsonl_events(path: &std::path::Path) -> Vec<LogEventV1> {
+        if !path.exists() {
+            return Vec::new();
+        }
+        let mut events = Vec::new();
+        let paths = if path.is_file() {
+            vec![path.to_path_buf()]
+        } else {
+            match fs::read_dir(path) {
+                Ok(entries) => entries.flatten().map(|entry| entry.path()).collect(),
+                Err(_) => return Vec::new(),
+            }
+        };
+        for path in paths {
+            if path
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| value == "jsonl")
+                != Some(true)
+            {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            for line in content.lines().filter(|line| !line.trim().is_empty()) {
+                if let Ok(event) = serde_json::from_str::<LogEventV1>(line) {
+                    events.push(event);
+                }
+            }
+        }
+        events
+    }
 
     /// Verify that `fields_to_log_event` does NOT set session_id to "unknown"
     /// when no session ID is available.  The LogEventV1 schema uses Option<String>
@@ -494,17 +546,33 @@ mod tests {
     /// Verify that `emit_event_best_effort` is fail-open: calling it without
     /// an initialised unified channel must not panic.
     #[test]
+    #[serial]
     fn test_emit_event_best_effort_is_fail_open() {
         // No unified channel is registered in unit-test context; the call
-        // should silently drop the event rather than panicking.
+        // should spool the event rather than panicking or dropping it.
+        let temp = TempDir::new().unwrap();
+        // SAFETY: test-scoped env mutation guarded by serial execution.
+        unsafe { std::env::set_var("ATM_HOME", temp.path()) };
         emit_event_best_effort(EventFields {
             level: "info",
-            source: "atm",
+            source: "atm-daemon",
             action: "test_fail_open",
             team: Some("atm-dev".to_string()),
             session_id: Some("sess-123".to_string()),
             ..Default::default()
         });
+        let spool = crate::logging_event::spool_dir_for_tool(temp.path(), "atm-daemon");
+        let events = read_jsonl_events(&spool);
+        assert!(
+            events.iter().any(|event| event.action == "test_fail_open"),
+            "expected fail-open event in fallback spool, got {:?}",
+            events
+                .iter()
+                .map(|event| event.action.as_str())
+                .collect::<Vec<_>>()
+        );
+        // SAFETY: test-scoped env cleanup guarded by serial execution.
+        unsafe { std::env::remove_var("ATM_HOME") };
     }
 
     /// Verify that `emit_event_best_effort` drops events with empty required fields.

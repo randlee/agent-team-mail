@@ -1070,6 +1070,8 @@ mod tests {
         .expect("resolve");
 
         unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("ATM_RUNTIME");
             std::env::remove_var("CODEX_THREAD_ID");
             std::env::remove_var("ATM_SESSION_ID");

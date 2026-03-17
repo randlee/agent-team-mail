@@ -34,10 +34,12 @@ required_variables:
   </references>
 
   <workflow>
-    <step id="a">Read this task. Ask questions if anything is unclear. Then ACK this message immediately.</step>
-    <step id="b">Before coding: run `git fetch origin && git merge origin/{{ pr_target }}` to include all prior sprint fixes. Then complete development work.</step>
-    <step id="c">Push your commit. Send me: branch name + commit hash. Do NOT wait — I will open the PR in parallel.</step>
-    <step id="d">Run cargo test. Report results (PASS or FAIL with details).</step>
-    <step id="e">Send task-complete announcement: commit hash, test summary, any notes.</step>
+    <step id="a">ACK this message immediately. Make reasonable assumptions and do not ask clarifying questions unless a real blocker prevents execution.</step>
+    <step id="b">Immediately after ACK, begin executing the task in the same work session. Do not pause to summarize the task to the user or wait for further confirmation.</step>
+    <step id="c">Before coding: run `git fetch origin && git merge origin/{{ pr_target }}` to include all prior sprint fixes. Then complete the assigned development work end-to-end.</step>
+    <step id="d">As soon as the development changes are complete and the branch is in a pushable state, commit and push immediately. Send me the branch name + commit hash right away so I can open the PR and prepare the next worktree in parallel.</step>
+    <step id="e">After the push report, run the required validation/tests. Do not wait for PR creation before starting validation.</step>
+    <step id="f">When validation completes, send a second report with PASS or FAIL, concrete failure details if any, and whether follow-up fixes are required.</step>
+    <step id="g">After the validation report, read ATM again for follow-up work.</step>
   </workflow>
 </atm-task>

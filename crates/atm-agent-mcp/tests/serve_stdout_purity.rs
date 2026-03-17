@@ -39,6 +39,7 @@ fn atm_agent_mcp_bin_path() -> PathBuf {
 fn write_team_config(home: &std::path::Path) {
     let team_dir = home.join(".claude").join("teams").join("atm-dev");
     std::fs::create_dir_all(&team_dir).expect("create team dir");
+    let cwd = home.display().to_string();
     let config = serde_json::json!({
         "name": "atm-dev",
         "createdAt": 1770765919076_u64,
@@ -52,7 +53,7 @@ fn write_team_config(home: &std::path::Path) {
                 "model": "claude-haiku-4-5-20251001",
                 "joinedAt": 1770765919076_u64,
                 "tmuxPaneId": "",
-                "cwd": "/tmp",
+                "cwd": cwd,
                 "subscriptions": []
             },
             {
@@ -62,7 +63,7 @@ fn write_team_config(home: &std::path::Path) {
                 "model": "gpt-5.2",
                 "joinedAt": 1770765919077_u64,
                 "tmuxPaneId": "",
-                "cwd": "/tmp",
+                "cwd": home.display().to_string(),
                 "subscriptions": []
             }
         ]

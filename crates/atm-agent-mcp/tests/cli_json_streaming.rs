@@ -31,6 +31,11 @@ use atm_agent_mcp::cli_json_test::{CliJsonEventKind, classify_event};
 use atm_agent_mcp::stdin_queue;
 use atm_agent_mcp::stream_norm::{TurnState, TurnStatus};
 
+#[path = "support/env_guard.rs"]
+mod env_guard;
+
+use env_guard::EnvGuard;
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /// A minimal in-memory `AsyncWrite` implementation used in place of real child
@@ -256,8 +261,7 @@ async fn all_event_types_forwarded_through_duplex() {
 #[serial]
 async fn mail_enqueued_before_idle_is_drained_on_idle() {
     let tmp = tempdir().unwrap();
-    // SAFETY: test-only env mutation, serialised by #[serial].
-    unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+    let _atm_home = EnvGuard::set("ATM_HOME", tmp.path());
 
     let team = "test-team-ac6";
     let agent = "test-agent-ac6";
@@ -282,8 +286,6 @@ async fn mail_enqueued_before_idle_is_drained_on_idle() {
     let drained = stdin_queue::drain(team, agent, &stdin, Duration::from_secs(600))
         .await
         .unwrap();
-
-    unsafe { std::env::remove_var("ATM_HOME") };
 
     assert_eq!(
         drained, 3,
@@ -311,7 +313,7 @@ async fn mail_enqueued_before_idle_is_drained_on_idle() {
 #[serial]
 async fn mail_enqueued_after_drain_waits_for_next_idle() {
     let tmp = tempdir().unwrap();
-    unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+    let _atm_home = EnvGuard::set("ATM_HOME", tmp.path());
 
     let team = "test-team-ac6b";
     let agent = "test-agent-ac6b";
@@ -345,8 +347,6 @@ async fn mail_enqueued_after_drain_waits_for_next_idle() {
     let count2 = stdin_queue::drain(team, agent, &stdin2, Duration::from_secs(600))
         .await
         .unwrap();
-
-    unsafe { std::env::remove_var("ATM_HOME") };
 
     assert_eq!(
         count2, 1,
@@ -409,8 +409,7 @@ async fn idle_followed_by_done_reaches_terminal() {
 #[serial]
 async fn mid_turn_steering_injection() {
     let tmp = tempdir().unwrap();
-    // SAFETY: test-only env mutation, serialised by #[serial].
-    unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+    let _atm_home = EnvGuard::set("ATM_HOME", tmp.path());
 
     let team = "test-team-steer";
     let agent = "test-agent-steer";
@@ -468,8 +467,6 @@ async fn mid_turn_steering_injection() {
     let drained = stdin_queue::drain(team, agent, &stdin, Duration::from_secs(600))
         .await
         .unwrap();
-
-    unsafe { std::env::remove_var("ATM_HOME") };
 
     assert_eq!(drained, 1, "steering message must be drained on idle event");
     let output = captured.lock().unwrap().clone();
@@ -581,8 +578,7 @@ fn fixture_file_all_events_parse_correctly() {
 #[serial]
 async fn no_idle_event_queue_can_be_drained_after_timeout() {
     let tmp = tempdir().unwrap();
-    // SAFETY: test-only env mutation, serialised by #[serial].
-    unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+    let _atm_home = EnvGuard::set("ATM_HOME", tmp.path());
 
     let team = "test-team-fallback";
     let agent = "test-agent-fallback";
@@ -606,8 +602,6 @@ async fn no_idle_event_queue_can_be_drained_after_timeout() {
     let drained = stdin_queue::drain(team, agent, &stdin, Duration::from_secs(600))
         .await
         .unwrap();
-
-    unsafe { std::env::remove_var("ATM_HOME") };
 
     assert_eq!(
         drained, 3,
@@ -678,8 +672,7 @@ async fn no_cli_json_event_produces_busy_turn_state() {
 #[serial]
 async fn multi_cycle_idle_windows_no_cross_contamination() {
     let tmp = tempdir().unwrap();
-    // SAFETY: test-only env mutation, serialised by #[serial].
-    unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+    let _atm_home = EnvGuard::set("ATM_HOME", tmp.path());
 
     let team = "test-team-multicycle";
     let agent = "test-agent-multicycle";
@@ -727,8 +720,6 @@ async fn multi_cycle_idle_windows_no_cross_contamination() {
     let count2 = stdin_queue::drain(team, agent, &stdin2, Duration::from_secs(600))
         .await
         .unwrap();
-
-    unsafe { std::env::remove_var("ATM_HOME") };
 
     assert_eq!(
         count2, 1,

@@ -1,9 +1,13 @@
 //! End-to-end OTel smoke tests for daemon log writer fail-open behavior.
 
+#[path = "../../atm/tests/support/env_guard.rs"]
+mod env_guard;
+
 use agent_team_mail_core::logging_event::{LogEventV1, new_log_event};
 use agent_team_mail_daemon::daemon::{
     LogWriterConfig, new_log_event_queue, run_log_writer_task, spool_merge::merge_spool_on_startup,
 };
+use env_guard::EnvGuard;
 use sc_observability::OtelRecord;
 use serial_test::serial;
 use std::time::Instant;
@@ -71,10 +75,7 @@ async fn stop_writer(cancel: CancellationToken, handle: tokio::task::JoinHandle<
 #[tokio::test]
 #[serial]
 async fn otel_smoke_writer_exports_reachable_with_runtime_and_subagent_id() {
-    // SAFETY: serial test; scoped env mutation.
-    unsafe {
-        std::env::set_var("ATM_OTEL_ENABLED", "true");
-    }
+    let _otel_guard = EnvGuard::set("ATM_OTEL_ENABLED", "true");
 
     let temp = TempDir::new().expect("temp dir");
     let log_path = temp.path().join("atm.log.jsonl");
@@ -132,20 +133,12 @@ async fn otel_smoke_writer_exports_reachable_with_runtime_and_subagent_id() {
         canonical.lines().any(|line| !line.trim().is_empty()),
         "canonical JSONL should contain at least one event"
     );
-
-    // SAFETY: cleanup after test.
-    unsafe {
-        std::env::remove_var("ATM_OTEL_ENABLED");
-    }
 }
 
 #[tokio::test]
 #[serial]
 async fn otel_smoke_writer_fail_open_when_export_path_unreachable() {
-    // SAFETY: serial test; scoped env mutation.
-    unsafe {
-        std::env::set_var("ATM_OTEL_ENABLED", "true");
-    }
+    let _otel_guard = EnvGuard::set("ATM_OTEL_ENABLED", "true");
 
     let temp = TempDir::new().expect("temp dir");
     let log_path = temp.path().join("atm.log.jsonl");
@@ -166,20 +159,12 @@ async fn otel_smoke_writer_fail_open_when_export_path_unreachable() {
         otel_path.is_dir(),
         "otel path should remain the blocking directory in outage simulation"
     );
-
-    // SAFETY: cleanup after test.
-    unsafe {
-        std::env::remove_var("ATM_OTEL_ENABLED");
-    }
 }
 
 #[tokio::test]
 #[serial]
 async fn otel_outage_rotation_and_spool_merge_smoke() {
-    // SAFETY: serial test; scoped env mutation.
-    unsafe {
-        std::env::set_var("ATM_OTEL_ENABLED", "true");
-    }
+    let _otel_guard = EnvGuard::set("ATM_OTEL_ENABLED", "true");
 
     let temp = TempDir::new().expect("temp dir");
     let log_path = temp.path().join("atm.log.jsonl");
@@ -220,9 +205,4 @@ async fn otel_outage_rotation_and_spool_merge_smoke() {
         !spool_file.exists(),
         "source spool file should be removed after successful merge"
     );
-
-    // SAFETY: cleanup after test.
-    unsafe {
-        std::env::remove_var("ATM_OTEL_ENABLED");
-    }
 }

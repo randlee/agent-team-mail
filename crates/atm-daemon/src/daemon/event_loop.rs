@@ -4,14 +4,18 @@ use crate::daemon::pid_backend_validation::{roster_process_id, validate_pid_back
 use crate::daemon::status::{LoggingHealth, PluginStatus, PluginStatusKind, StatusWriter};
 use crate::daemon::{
     InboxEvent, InboxEventKind, LogEventQueue, SharedDedupeStore, SharedPubSubStore,
-    SharedSessionRegistry, SharedStateStore, SharedStreamEventSender, graceful_shutdown,
-    spool_drain_loop, start_socket_server, watch_inboxes,
+    SharedSessionRegistry, SharedStateStore, SharedStreamEventSender,
+    consts::{
+        EVENT_CHANNEL_CAPACITY, GRACEFUL_SHUTDOWN_TIMEOUT_SECS, RECONCILE_INTERVAL_SECS,
+        SPOOL_DRAIN_INTERVAL_SECS, STATUS_WRITE_INTERVAL_SECS,
+    },
+    graceful_shutdown, spool_drain_loop, start_socket_server, watch_inboxes,
 };
 use crate::plugin::{Capability, FailedPluginInit, PluginContext, PluginRegistry};
 use crate::plugins::worker_adapter::AgentState;
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
-use agent_team_mail_core::io::{atomic::atomic_swap, lock::acquire_lock};
 use agent_team_mail_core::schema::TeamConfig;
+use agent_team_mail_core::team_config_store::TeamConfigStore;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -145,13 +149,44 @@ pub async fn run(
         );
     }
 
+    let reconcile_cycle_state = new_reconcile_cycle_state();
+
+    // Run one startup reconcile immediately before any handler task is active
+    // so PID-dead session records cannot leak into plugin/socket/watcher state.
+    {
+        let claude_root = ctx.system.claude_root.clone();
+        let startup_registry = session_registry.clone();
+        let startup_state_store = state_store.clone();
+        let startup_cycle_state = reconcile_cycle_state.clone();
+        let startup_result = tokio::task::spawn_blocking(move || {
+            let pruned = {
+                let mut reg = startup_registry.lock().unwrap();
+                reg.prune_pid_dead_sessions_on_startup()
+            };
+            if pruned > 0 {
+                debug!("startup session prune removed {pruned} dead session record(s)");
+            }
+            reconcile_team_member_activity(
+                &claude_root,
+                &startup_registry,
+                &startup_state_store,
+                &startup_cycle_state,
+            )
+        })
+        .await;
+        match startup_result {
+            Ok(Ok(())) => debug!("startup reconcile pass completed"),
+            Ok(Err(e)) => warn!("startup reconcile pass failed: {e}"),
+            Err(e) => warn!("startup reconcile task panicked: {e}"),
+        }
+    }
+
     // Take plugins out of the registry for task spawning
     let plugins = registry.take_plugins();
     info!("Starting {} plugin task(s)", plugins.len());
 
     // Spawn a task for each plugin's run() method
     let mut plugin_tasks: Vec<(String, JoinHandle<()>)> = Vec::new();
-    let reconcile_cycle_state = new_reconcile_cycle_state();
 
     for (metadata, plugin_arc) in plugins.clone() {
         let plugin_name = metadata.name.to_string();
@@ -229,7 +264,7 @@ pub async fn run(
     let spool_task = tokio::spawn(async move {
         if let Err(e) = spool_drain_loop(
             teams_root,
-            Duration::from_secs(10), // Drain every 10 seconds
+            Duration::from_secs(SPOOL_DRAIN_INTERVAL_SECS),
             spool_cancel,
         )
         .await
@@ -239,7 +274,7 @@ pub async fn run(
     });
 
     // Create event channel for watcher → dispatch communication
-    let (event_tx, mut event_rx) = mpsc::channel::<InboxEvent>(100);
+    let (event_tx, mut event_rx) = mpsc::channel::<InboxEvent>(EVENT_CHANNEL_CAPACITY);
 
     // Extract hostname registry from bridge config (if available)
     let hostname_registry = extract_hostname_registry(&ctx.config);
@@ -439,29 +474,6 @@ pub async fn run(
     let reconcile_state_store = state_store.clone();
     let reconcile_cycle_state_for_loop = reconcile_cycle_state.clone();
 
-    // Run one startup reconcile immediately so roster/state is available
-    // without waiting for the periodic interval tick.
-    {
-        let claude_root = ctx.system.claude_root.clone();
-        let startup_registry = session_registry.clone();
-        let startup_state_store = state_store.clone();
-        let startup_cycle_state = reconcile_cycle_state.clone();
-        let startup_result = tokio::task::spawn_blocking(move || {
-            reconcile_team_member_activity(
-                &claude_root,
-                &startup_registry,
-                &startup_state_store,
-                &startup_cycle_state,
-            )
-        })
-        .await;
-        match startup_result {
-            Ok(Ok(())) => debug!("startup reconcile pass completed"),
-            Ok(Err(e)) => warn!("startup reconcile pass failed: {e}"),
-            Err(e) => warn!("startup reconcile task panicked: {e}"),
-        }
-    }
-
     let reconcile_task = tokio::spawn(async move {
         reconcile_loop(
             reconcile_ctx,
@@ -480,26 +492,61 @@ pub async fn run(
     info!("Cancellation signal received. Beginning shutdown...");
 
     // Wait for background tasks to complete (they should respect cancellation)
-    wait_for_shutdown_task("Spool", spool_task, Duration::from_secs(5)).await;
-    wait_for_shutdown_task("Watcher", watcher_task, Duration::from_secs(5)).await;
-    wait_for_shutdown_task("Dispatch", dispatch_task, Duration::from_secs(5)).await;
+    wait_for_shutdown_task(
+        "Spool",
+        spool_task,
+        Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS),
+    )
+    .await;
+    wait_for_shutdown_task(
+        "Watcher",
+        watcher_task,
+        Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS),
+    )
+    .await;
+    wait_for_shutdown_task(
+        "Dispatch",
+        dispatch_task,
+        Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS),
+    )
+    .await;
 
     if let Some(task) = retention_task {
-        wait_for_shutdown_task("Retention", task, Duration::from_secs(5)).await;
+        wait_for_shutdown_task(
+            "Retention",
+            task,
+            Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS),
+        )
+        .await;
     }
 
-    wait_for_shutdown_task("Status writer", status_task, Duration::from_secs(5)).await;
-    wait_for_shutdown_task("Reconcile", reconcile_task, Duration::from_secs(5)).await;
+    wait_for_shutdown_task(
+        "Status writer",
+        status_task,
+        Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS),
+    )
+    .await;
+    wait_for_shutdown_task(
+        "Reconcile",
+        reconcile_task,
+        Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS),
+    )
+    .await;
 
     // Graceful shutdown of all plugins
-    graceful_shutdown(plugins, Duration::from_secs(5))
+    graceful_shutdown(plugins, Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS))
         .await
         .context("Plugin shutdown encountered errors")?;
 
     // Wait for plugin tasks to complete
     for (plugin_name, task) in plugin_tasks {
         let label = format!("Plugin {plugin_name}");
-        wait_for_shutdown_task(&label, task, Duration::from_secs(5)).await;
+        wait_for_shutdown_task(
+            &label,
+            task,
+            Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS),
+        )
+        .await;
     }
 
     info!("Daemon event loop shutdown complete");
@@ -513,7 +560,7 @@ async fn reconcile_loop(
     cycle_state: SharedCycleState,
     cancel: CancellationToken,
 ) {
-    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    let mut interval = tokio::time::interval(Duration::from_secs(RECONCILE_INTERVAL_SECS));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
@@ -583,11 +630,8 @@ fn reconcile_team_member_activity_with_mode(
             continue;
         }
 
-        let content = match std::fs::read_to_string(&config_path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let mut config: TeamConfig = match serde_json::from_str(&content) {
+        let store = TeamConfigStore::open(&team_dir);
+        let config: TeamConfig = match store.read() {
             Ok(c) => c,
             Err(_) => continue,
         };
@@ -599,8 +643,9 @@ fn reconcile_team_member_activity_with_mode(
 
         let team_name = config.name.clone();
         let mut changed = false;
+        let mut alive_members = std::collections::HashSet::new();
         let mut terminal_non_lead_members: Vec<String> = Vec::new();
-        for member in &mut config.members {
+        for member in &config.members {
             desired_agent_names.insert(member.name.clone());
             let mut record = {
                 let reg = session_registry.lock().unwrap();
@@ -715,7 +760,7 @@ fn reconcile_team_member_activity_with_mode(
                 false
             };
             if alive {
-                member.last_active = Some(now_ms);
+                alive_members.insert(member.name.clone());
                 state_store.lock().unwrap().set_state_with_context(
                     &member.name,
                     AgentState::Active,
@@ -773,18 +818,6 @@ fn reconcile_team_member_activity_with_mode(
         }
 
         if !terminal_non_lead_members.is_empty() {
-            for name in &terminal_non_lead_members {
-                delete_member_inbox(&team_dir, name)?;
-                session_registry
-                    .lock()
-                    .unwrap()
-                    .remove_for_team(&team_name, name);
-                state_store.lock().unwrap().unregister_agent(name);
-                desired_agent_names.remove(name);
-            }
-            config
-                .members
-                .retain(|m| !terminal_non_lead_members.contains(&m.name));
             changed = true;
         }
 
@@ -853,7 +886,32 @@ fn reconcile_team_member_activity_with_mode(
         }
 
         if changed {
-            write_team_config_atomic(&config_path, &config)?;
+            let terminal_set: std::collections::HashSet<_> =
+                terminal_non_lead_members.iter().cloned().collect();
+            let alive_members = alive_members.clone();
+            let _ = store.update(|mut config| {
+                for member in &mut config.members {
+                    if alive_members.contains(&member.name) {
+                        member.last_active = Some(now_ms);
+                    }
+                }
+                if !terminal_set.is_empty() {
+                    config.members.retain(|m| !terminal_set.contains(&m.name));
+                }
+                Ok(Some(config))
+            })?;
+        }
+
+        if !terminal_non_lead_members.is_empty() {
+            for name in &terminal_non_lead_members {
+                delete_member_inbox(&team_dir, name)?;
+                session_registry
+                    .lock()
+                    .unwrap()
+                    .remove_for_team(&team_name, name);
+                state_store.lock().unwrap().unregister_agent(name);
+                desired_agent_names.remove(name);
+            }
         }
     }
 
@@ -890,18 +948,6 @@ fn delete_member_inbox(team_dir: &std::path::Path, agent_name: &str) -> Result<(
         return Ok(());
     }
     std::fs::remove_file(&inbox_path)?;
-    Ok(())
-}
-
-fn write_team_config_atomic(path: &std::path::Path, config: &TeamConfig) -> Result<()> {
-    let lock_path = path.with_extension("lock");
-    let _lock = acquire_lock(&lock_path, 5)
-        .map_err(|e| anyhow::anyhow!("failed to acquire config lock: {e}"))?;
-
-    let tmp = path.with_extension("tmp");
-    let serialized = serde_json::to_string_pretty(config)?;
-    std::fs::write(&tmp, serialized)?;
-    atomic_swap(path, &tmp)?;
     Ok(())
 }
 
@@ -1311,7 +1357,7 @@ fn retention_work(
 
 /// Periodic status writer task
 ///
-/// Writes daemon status to status.json at regular intervals (every 30 seconds).
+/// Writes daemon status to status.json at regular intervals.
 /// Status includes plugin states, active teams, PID, and uptime.
 async fn status_writer_loop(
     status_writer: Arc<StatusWriter>,
@@ -1321,17 +1367,23 @@ async fn status_writer_loop(
     log_event_queue: LogEventQueue,
     cancel: CancellationToken,
 ) {
-    info!("Status writer loop started (interval: 30s)");
+    info!(
+        "Status writer loop started (interval: {}s)",
+        STATUS_WRITE_INTERVAL_SECS
+    );
 
     // Write initial status at startup
     let plugin_statuses = build_plugin_statuses(&plugins, &init_failed_plugins, &ctx).await;
     let teams = get_active_teams(&ctx).await;
     let logging = build_logging_health(&ctx, &log_event_queue).await;
+    if let Err(e) = status_writer.write_daemon_touch(&teams) {
+        error!("Failed to write daemon touch sidecar: {}", e);
+    }
     if let Err(e) = status_writer.write_status(plugin_statuses.clone(), teams.clone(), logging) {
         error!("Failed to write initial daemon status: {}", e);
     }
 
-    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    let mut interval = tokio::time::interval(Duration::from_secs(STATUS_WRITE_INTERVAL_SECS));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {

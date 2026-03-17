@@ -2,7 +2,7 @@
 
 **Version**: 0.7
 **Date**: 2026-03-10
-**Status**: Phase AJ planning in progress. Phase AK queued.
+**Status**: Phase AM refactor in progress. Phase AK queued.
 
 ---
 
@@ -174,8 +174,16 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AG | sc-composer Full Implementation + CLI | Deliver `sc-composer` library + `sc-compose` CLI and integrate with `atm teams spawn` via direct library APIs | COMPLETE |
 | AH | Observability Unification + AG Deferred Closure | Unified JSONL logging pipeline via `sc-observability` crate and baseline observability contracts (OTel/scmux/schook deferred) | COMPLETE |
 | AI | GH Monitor Dashboard + Detailed PR Reporting | `atm gh pr list`, `atm gh pr report`, `--template` rendering, `init-report`; CI rollup neutral/skipped fix | IN-PROGRESS |
+| AM | CI Monitor Subsystem Refactor | Extract CI-monitor subsystem boundaries out of `socket.rs`, split provider-neutral logic from GitHub-specific adapter logic, and stabilize routing/health/test support on `integrate/phase-AM` | IN-PROGRESS |
+| AN | CI Monitor Extraction Readiness | Prepare CI monitor for clean extraction: crate boundaries, multi-repo routing, shared type consolidation | COMPLETE ([#748](https://github.com/randlee/agent-team-mail/pull/748)) |
+| AO | GH Monitor Guardrails + Runtime Admission | Prevent accidental shared-runtime pollers, add isolated-runtime TTL policy, and make GH usage attributable/self-limiting with cached repo-state and operator controls | COMPLETE ([#751](https://github.com/randlee/agent-team-mail/pull/751)) |
+| AP | Test Stability and Harness Hardening | Eliminate hang-prone, flaky, and operationally unsafe test patterns; RAII guard consolidation; daemon lifecycle hardening | COMPLETE ([#756](https://github.com/randlee/agent-team-mail/pull/756), [#767](https://github.com/randlee/agent-team-mail/pull/767), [#768](https://github.com/randlee/agent-team-mail/pull/768)) |
 | AJ | Session-ID SSoT Normalization | Canonical `session_id` naming, shared caller resolver, runtime session resolution closure, doctor/session consistency | PLANNED |
 | AK | Mandatory OTel Rollout | Non-optional OTel across in-scope tools with canonical correlation and health/reporting contracts | PLANNED |
+| AQ | Codebase Cleanup + Rogue Daemon Spawn Elimination | Remove cleanup debt from AN/AO/AP reviews, consolidate constants/dead code, and eliminate non-canonical test daemon spawn paths | COMPLETE |
+| AR | Smoke Follow-Up + Lifecycle Timing Corrections | Fix daemon harness flake, drain timeout regression, and EnvGuard::unset gap identified during smoke testing | COMPLETE (PR #795) |
+| AS | Backlog Gap-Filling + GH API Governance | 14 backlog bug/gap fixes + GH API hard firewall, ledgers, and explicit GitHub ownership requirements | ACTIVE |
+| AT | GitHub Boundary Elimination | Remove all remaining audited GitHub-boundary violations so only the gh plugin/provider layer owns GitHub behavior | PLANNED |
 
 ---
 
@@ -1564,6 +1572,364 @@ local structured logging always-on and fail-open.
 | AK.3 | Producer integration (`atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `scmux`, `schook`, `sc-compose`, `sc-composer`) | OTel rollout | PLANNED |
 | AK.4 | Doctor/status observability health + runbook finalization | health/reporting | PLANNED |
 | AK.5 | End-to-end QA, release gates, and cross-platform validation | release confidence | PLANNED |
+
+---
+
+## 17.21 Phase AM: CI Monitor Subsystem Refactor
+
+**Goal**: Refactor CI monitoring into a dedicated daemon subsystem so
+`socket.rs` remains transport glue while provider-neutral orchestration,
+GitHub-specific adapter logic, routing, and health handling live under
+`plugins/ci_monitor`.
+**Prerequisites**: Phase AI baseline complete.
+
+**Integration branch**: `integrate/phase-AM`
+**Planning doc**: `docs/phase-am-planning.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Branch | Status |
+|---|---|---|---|
+| AM.1 | Extract CI domain types, helpers, and shared test support | `feature/pAM-s1-extract-ci-types` | MERGED |
+| AM.2 | Introduce CI monitor service layer and thin socket dispatch | `feature/pAM-s2-ci-monitor-service` | IN-PROGRESS |
+| AM.3 | Split provider-neutral logic from GitHub adapter | `feature/pAM-s3-provider-split` | IN-PROGRESS |
+| AM.4 | Extract routing and notification policy | `feature/pAM-s4-routing-split` | IN-PROGRESS |
+| AM.5 | Extract health and availability state handling | `feature/pAM-s5-health-state` | IN-PROGRESS |
+| AM.6 | Thin `socket.rs` and reorganize subsystem tests | `feature/pAM-s6-thin-socket` | IN-PROGRESS |
+
+### Exit Criteria
+1. `socket.rs` dispatches CI-monitor requests instead of owning CI-monitor policy.
+2. CI-monitor business logic lives under `crates/atm-daemon/src/plugins/ci_monitor/`.
+3. GitHub-specific logic is isolated behind one clear adapter boundary.
+4. Subsystem tests are organized around CI-monitor modules instead of socket-only entrypoints.
+
+---
+
+## 17.22 Phase AN: CI Monitor Extraction Readiness
+
+**Goal**: Prepare CI monitor code for clean extraction by tightening daemon/core
+boundaries, narrowing the production module surface, moving reusable logic into
+the extracted crate boundary, and landing the multi-repo `atm gh` contract.
+
+**Integration branch**: `integrate/phase-AN`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Branch | Status |
+|---|---|---|---|
+| AN.1 | CI core boundary cleanup | `feature/pAN-s1-ci-core-boundary` | COMPLETE |
+| AN.2 | Service split from daemon wire types | `feature/pAN-s2-service-split` | COMPLETE |
+| AN.3 | Trait injection for provider/registry seams | `feature/pAN-s3-trait-injection` | COMPLETE |
+| AN.4 | Narrow production `mod.rs` surface | `feature/pAN-s4-mod-narrowing` | COMPLETE ([#737](https://github.com/randlee/agent-team-mail/pull/737)) |
+| AN.5 | Transport adapter boundary in `gh_monitor_router` | `feature/pAN-s5-plugin-init-split` | COMPLETE ([#738](https://github.com/randlee/agent-team-mail/pull/738)) |
+| AN.6 | Extract `agent-team-mail-ci-monitor` crate | `feature/pAN-s6-crate-extraction` | COMPLETE ([#739](https://github.com/randlee/agent-team-mail/pull/739)) |
+| AN.7 | Multi-repo `atm gh` routing and repo inference | `feature/pAN-s7-multi-repo-gh` | COMPLETE ([#740](https://github.com/randlee/agent-team-mail/pull/740)) |
+| AN.8 | Phase AO guardrail planning and requirements closure | `feature/pAN-s8-gh-monitor-guardrails` | COMPLETE ([#745](https://github.com/randlee/agent-team-mail/pull/745)) |
+
+### Exit Criteria
+1. Reusable CI monitor logic is isolated behind crate-friendly boundaries.
+2. Daemon-only transport and lifecycle adapters remain in `atm-daemon`.
+3. The extracted `agent-team-mail-ci-monitor` crate owns the shared CI-monitor
+   core surface.
+4. Multi-repo `atm gh` routing is stable and Phase AO planning is ready to
+   begin.
+
+## 17.23 Phase AO: GH Monitor Guardrails + Runtime Admission
+
+**Goal**: Prevent accidental shared-runtime pollers, make isolated test runtimes
+explicit and short-lived, and make GitHub usage attributable, budgeted, and
+operator-controllable.
+
+**Prerequisites**: Phase AN merged to `develop`.
+**Integration branch**: `integrate/phase-AO`
+
+**Planning doc**: `docs/phase-ao-gh-monitor-guardrails.md`
+**Requirements authority**:
+- `docs/ci-monitoring/requirements.md`
+- `docs/ci-monitoring/architecture.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Branch | Status |
+|---|---|---|---|
+| AO.1 | Shared runtime admission guard (`release`/`dev` only, hard-stop invalid shared launches) | `feature/pAO-s1-runtime-admission` | COMPLETE ([#751](https://github.com/randlee/agent-team-mail/pull/751)) |
+| AO.2 | Explicit isolated runtime creation + 10-minute TTL cleanup policy | `feature/pAO-s2-isolated-runtime-ttl` | COMPLETE ([#751](https://github.com/randlee/agent-team-mail/pull/751)) |
+| AO.3 | Shared repo-state cache, single `(team, repo)` shared poller, PR-list primary poll surface, bounded poll cadence, team budgets (`100/hour`), attributed `run_gh()` path, merge-conflict checks, and config/init parity | `feature/pAO-s3-repo-state-budget-observability` | COMPLETE ([#751](https://github.com/randlee/agent-team-mail/pull/751)) |
+| AO.4 | Single `(team, repo)` lease ownership + hidden human-authorized cross-team stop/disable path with operator-facing owner metadata | `feature/pAO-s4-operator-control` | COMPLETE ([#751](https://github.com/randlee/agent-team-mail/pull/751)) |
+| AO.5 | Post-integration deletion sprint: simplify runtime/poller paths and narrow final contracts | `feature/pAO-s5-path-contract-simplification` | COMPLETE ([#751](https://github.com/randlee/agent-team-mail/pull/751)) |
+
+### Exit Criteria
+1. Shared `release` and `dev` runtimes reject invalid owners and duplicate daemon starts.
+2. Isolated runtimes are explicit, short-lived, and do not enable live GH polling by default.
+3. GitHub calls are budgeted per team, counted locally, and surfaced with freshness metadata in `atm gh status` and `atm doctor`; one shared `(team, repo)` poller uses the repo-wide PR list view as its primary poll surface, polling at most once per 5 minutes when idle and once per 1 minute when active (`GH-CI-FR-10a`, `GH-CI-FR-10b`, `GH-CI-FR-10c`); pre-run/post-completion merge-conflict checks plus config/init parity remain on the attributed `run_gh()` path.
+4. One active `gh_monitor` owner exists per `(team, repo)`, operator-facing status shows the active owner metadata, and operators can stop a runaway monitor with auditable cross-team controls.
+5. Transitional runtime, polling, and state paths preserved during AO are removed or narrowed so the post-AO implementation exposes only the canonical contracts.
+
+**Execution note**: AO.3, AO.4, and AO.5 were authorized to execute in parallel with merge-forwards between sprint branches as fixes landed. Phase exit still requires the combined AO surface plus AO.5 simplification criteria.
+
+**Dependency graph**: AO.1 → AO.2 → {AO.3, AO.4, AO.5 with merge-forward discipline}
+
+---
+
+## 17.24 Phase AP: Test Stability and Harness Hardening
+
+**Goal**: eliminate hang-prone, flaky, and operationally unsafe test patterns
+that can block CI without clearly identifying the failing test or resource.
+
+**Prerequisites**: Phase AN merged to `develop`; Phase AO may proceed in
+parallel, but AP.1 should start before new daemon-heavy test coverage expands.
+**Integration branch**: `integrate/phase-AP`
+
+**Planning doc**: `docs/phase-ap-test-hardening.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Branch | Status |
+|---|---|---|---|
+| AP.1 | Environment/process safety: scoped `ATM_HOME`, subprocess RAII, autostart diagnostics | `feature/pAP-s1-test-isolation-env-cleanup` | COMPLETE ([#756](https://github.com/randlee/agent-team-mail/pull/756)) |
+| AP.2 | Deterministic timing: replace wall-clock sleeps, bound loop/watcher waits, improve test attribution | `feature/pAP-s2-elapsed-time-upper-bound` | COMPLETE ([#768](https://github.com/randlee/agent-team-mail/pull/768)) |
+| AP.3 | Pathing/serialization cleanup and final audit | `feature/pAP-s3-serial-vs-raii` | COMPLETE ([#768](https://github.com/randlee/agent-team-mail/pull/768)) |
+| AP.4 | Daemon-spawn RAII hardening | `feature/pAP-s4-daemon-spawn-hardening` | COMPLETE ([#767](https://github.com/randlee/agent-team-mail/pull/767), [#768](https://github.com/randlee/agent-team-mail/pull/768)) |
+
+### Exit Criteria
+1. Blocking/high-priority tests no longer rely on raw wall-clock sleeps as their
+   sole synchronization mechanism.
+2. Test helpers and integration tests do not leak daemon/subprocess children on
+   panic.
+3. Shared mutable environment state (`ATM_HOME`, shared runtime paths) is scoped
+   safely or serialized explicitly.
+4. Cross-platform fixtures avoid hardcoded `/tmp`, and risky integration suites
+   fail with bounded, attributable diagnostics instead of hanging silently.
+5. Duplicate low-value tests and ad hoc helper paths are removed where they do
+   not provide unique coverage, leaving a smaller canonical harness.
+
+**Dependency graph**: AP.1 → AP.2 → AP.3 → AP.4
+
+---
+
+## 17.25 Phase AQ: Codebase Cleanup + Rogue Daemon Spawn Elimination
+
+**Goal**: Close remaining cleanup debt from AN/AO/AP and make rogue daemon
+spawns structurally impossible in test and QA code by enforcing one canonical
+real-daemon harness.
+
+**Integration branch**: `integrate/phase-AQ`
+
+**Planning doc**: `docs/phase-aq-planning.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Branch | Status |
+|---|---|---|---|
+| AQ.0 | Planning and Requirements | `develop` | COMPLETE (docs-only direct-to-develop; not via `integrate/phase-AQ`) |
+| AQ.1 | Const consolidation and magic-number elimination | `feature/pAQ-s1-const-consolidation` | ACTIVE |
+| AQ.2 | Dead code removal and duplicate elimination | `feature/pAQ-s2-dead-code` | COMPLETE |
+| AQ.3 | Deferred AO non-blocking GH observability fixes | `feature/pAQ-s3-gh-observability-cleanup` | COMPLETE |
+| AQ.4 | PID-file race and autostart observability hardening | `feature/pAQ-s4-pid-race` | COMPLETE |
+| AQ.5 | Rogue daemon spawn elimination and QA contract hardening | `feature/pAQ-s5-rogue-daemon-spawn-elimination` | ACTIVE |
+
+### Exit Criteria
+1. AQ cleanup findings from AN, AO, and AP are closed without introducing new
+   parallel helper or duplicate-type paths.
+2. Constants and dead-code cleanup land without behavior drift and with
+   workspace validation green.
+3. PID-file adoption and daemon observability tests use the canonical support
+   harness and do not leak child daemons.
+4. Real test daemons can only be spawned or adopted through the canonical
+   tracked harness; test and QA code cannot launch shared `dev` or `release`
+   daemons, PATH fallback daemon binaries, or untracked helper-local launch
+   scripts.
+5. `daemon-spawn-qa` blocks any non-canonical daemon launch vector, including
+   Rust, shell, Python, CI, and helper scripts.
+
+**Dependency graph**: AQ.1 and AQ.2 may run in parallel; AQ.3 and AQ.4 may run
+in parallel; AQ.5 starts once the AP daemon-spawn findings are known and
+merge-forwards from `integrate/phase-AQ` as needed.
+### Release Gate
+Before version bump and publish:
+1. Dogfood on `develop` via `dev-install`.
+2. Publish as the next version bump only after dogfood passes.
+
+---
+
+## 17.26 Phase AR: Smoke Follow-Up + Lifecycle Timing Corrections
+
+**Goal**: Close the smoke-run failures discovered after AQ by aligning lifecycle
+timers, removing smoke false negatives, and adding the canonical manual
+dev-daemon smoke protocol/script used to validate AN/AO/AP/AQ behavior.
+
+**Integration branch**: `integrate/phase-AR`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Branch | Status |
+|---|---|---|---|
+| AR.1 | Drain timeout alignment, const consolidation, daemon harness cleanup, EnvGuard closure | `feature/pAR-s1-code-fixes` | COMPLETE |
+| AR.2 | Smoke script/protocol delivery and AO.2/AP.2 smoke correction | `feature/pAR-s2-smoke-investigation` | COMPLETE |
+
+### Exit Criteria
+1. Client-side stop/restart/drain timeouts no longer fail before the daemon's
+   own bounded drain window.
+2. Smoke failures caused by return-code/readiness mismatches are corrected or
+   reclassified with explicit evidence.
+3. The canonical manual dev-daemon smoke protocol and executable smoke script
+   exist in-repo for AN/AO/AP/AQ verification.
+
+**Dependency graph**: AR.1 → AR.2
+
+### Release Gate
+Before Phase AR is considered complete:
+1. Run the canonical dev-daemon smoke protocol on `develop`.
+2. Verify smoke results identify real lifecycle defects rather than protocol
+   false negatives.
+
+---
+
+## 17.27 Phase AS: Backlog Gap-Filling + GH API Governance
+
+**Goal**: Address 14 backlog bug/gap items and implement GH API hard firewall
+with two-layer observability to eliminate runaway token consumption.
+
+**Integration branch**: `integrate/phase-AS`
+
+**Planning docs**:
+- `docs/requirements.md` + `docs/ci-monitoring/requirements.md` — GH governance
+  requirements and ownership rules hardened during AS.4–AS.7
+
+**Status**: COMPLETE
+
+### Sprint Map
+| Sprint | Focus | Branch | Status |
+|---|---|---|---|
+| AS.1 | Quick wins: 8 bug fixes (#760,#759,#758,#726,#741,#708,#620,#626) | `feature/pAS-s1-quick-wins` | COMPLETE |
+| AS.2 | Doctor polish + EnvGuard test migration (#688,#681,#701,#784) | `feature/pAS-s2-observability` | COMPLETE |
+| AS.3 | Daemon-touch sidecar + teams status table (#700,#699) | `feature/pAS-s3-sidecar` | COMPLETE |
+| AS.4 | GH API hard firewall (GH-CI-FR-46) | `feature/pAS-s4-gh-firewall` | COMPLETE |
+| AS.5 | Execution ledger (GH-CI-FR-47) | `feature/pAS-s5-gh-observability` | COMPLETE |
+| AS.6 | Freshness ledger + budget constants (GH-CI-FR-48–50) | `feature/pAS-s6-gh-budgeting` | COMPLETE |
+| AS.7 | Requirements hardening + repo-wide violation search/audit/gate + Phase AT handoff | `feature/pAS-s7-smoke-thresholds` | COMPLETE |
+
+### Exit Criteria
+1. All 14 backlog items closed with targeted changes; no new abstractions.
+2. `cargo test --all-targets` passes on all 3 platforms.
+3. No in-scope GitHub monitor/status path can launch `gh` outside the firewall (GH-CI-FR-46).
+4. Token ledger and freshness ledger emit structured events for all GH interactions (GH-CI-FR-47/48).
+5. GH budget constants locked with documented defaults and smoke guidance distinguishes single-monitor and multi-monitor budget envelopes.
+6. Requirements explicitly state that non-plugin crates must not own GitHub behavior.
+7. AS.7 performs a repository-wide search for live boundary violations across crates, scripts, CI helpers, and support tooling.
+8. Every live violation found by the AS.7 search is either removed in AS or mapped to a named AT sprint with file-level ownership; no silent allowlist remains.
+
+**Dependency graph**: AS.1 is foundational; AS.2 depends on AS.1; AS.3 depends on AS.2;
+AS.4–AS.7 GH governance track may proceed in parallel with AS.1–AS.3.
+
+---
+
+## 17.28 Phase AT: GitHub Boundary Elimination
+
+**Goal**: Eliminate every audited GitHub-boundary exception so only the owning
+gh plugin/provider layer contains GitHub-specific behavior, raw `gh`
+execution, and `atm gh` command processing.
+
+**Integration branch**: `integrate/phase-AT`
+
+**Status**: COMPLETE
+
+### Sprint Map
+| Sprint | Focus | Branch | Status |
+|---|---|---|---|
+| AT.1 | Baseline `atm-core` isolation: verify AS.5 (AS5-ARCH-001) closed the non-dev dep and relocated `gh_monitor_observability.rs`; add per-package isolation CI job (#808); confirm `cargo test --package agent-team-mail-core` passes in isolation with zero provider imports | `feature/pAT-s1-atm-core-isolation` | COMPLETE |
+| AT.2 | Move GitHub-specific provider execution out of `crates/atm-ci-monitor/src/github_provider.rs` into the gh plugin/provider layer, leaving `atm-ci-monitor` provider-agnostic only | `feature/pAT-s2-ci-monitor-provider-extraction` | COMPLETE |
+| AT.3 | Route all GitHub command semantics through the gh plugin/provider layer; `crates/atm/src/commands/gh.rs` becomes CLI bootstrap/routing/capability UX only and stops owning raw `gh` probes or GitHub behavior | `feature/pAT-s3-gh-command-routing` | COMPLETE |
+| AT.4 | Remove non-gh-plugin raw `gh` execution paths in `crates/atm-daemon/src/plugins/issues/github.rs`, smoke harnesses, and any additional script/helper violations found by the AS.7 search | `feature/pAT-s4-daemon-issues-boundary` | COMPLETE |
+| AT.5 | Run the final repo-wide illegal-reference audit, delete the allowlist, and close the remaining tracked boundary violations with zero tolerated exceptions | `feature/pAT-s5-final-audit` | COMPLETE |
+| AT.6 | Fix #822 (issues plugin gh routing) and #823 (boundary check script scope) | `feature/pAT-s6-gh-findings-fix` | COMPLETE |
+
+### Planned Inputs
+- audited exceptions and issue set from AS.7:
+  - `#808`
+  - `#809`
+  - `#811`
+  - `#812`
+  - `#813`
+- `ARCH-BOUNDARY-001` requirements and CI grep gate from AS.7
+- current live violations found by the AS.7 repository-wide search:
+  - `crates/atm-ci-monitor/src/github_provider.rs` GitHub-specific provider implementation in shared crate
+  - `crates/atm/src/commands/gh.rs` GitHub semantics and raw `gh` bootstrap/query behavior in CLI routing layer
+  - `crates/atm-daemon/src/plugins/issues/github.rs` raw `gh` execution outside the gh plugin/provider layer
+  - script/helper violations captured by the AS.7 audit and CI boundary gate
+
+### Sprint Execution Contract
+- Each AT sprint must leave the repository buildable and testable; no sprint may
+  depend on merging a temporary broken intermediate state first.
+- Dev completion for a sprint requires the sprint's named illegal references to
+  be removed or explicitly re-planned with file-level ownership and approval.
+- QA review for a sprint must verify both:
+  - the positive seam/ownership contract introduced by the sprint, and
+  - the removal of the exact file-level violations assigned to that sprint.
+- A sprint is not complete if it only adds abstractions while leaving the named
+  illegal references untouched.
+
+
+### Exit Criteria
+1. `atm-core` has zero plugin/provider knowledge and no non-dev dependency on
+   `atm-ci-monitor`, and that isolation is verified by CI and package-scoped
+   validation.
+2. `atm-ci-monitor` contains only provider-agnostic abstractions; no
+   GitHub-specific provider execution remains.
+3. All GitHub-specific behavior, including raw `gh` execution, lives only in
+   the owning gh plugin/provider layer.
+4. `atm gh` namespace routing remains available only when the plugin is
+   present, and non-plugin crates do not implement GitHub semantics.
+5. `scripts/ci/gh_boundary_check.sh` passes with no allowlisted exceptions.
+6. The final AT audit confirms there are no remaining illegal GitHub boundary
+   references anywhere in the repository.
+7. `scripts/ci/gh_boundary_allowlist.txt` is deleted and the boundary gate runs
+   with zero exception entries.
+
+### Dependency Notes
+- AT begins after AS.7 requirement hardening and audit are accepted by QA.
+- AT is the implementation/removal phase; AS.7 was the rule-setting,
+  enforcement, repository-wide search, and audit handoff phase.
+
+---
+
+## 17.29 Phase AU: Daemon Spawn Authorization
+
+**Goal**: make daemon spawning impossible outside the authorized launcher path,
+bind test daemons to explicit lease metadata, and make rogue daemon retention a
+blocking CI/QA failure.
+
+**Integration branch**: `integrate/phase-AU`
+
+**Status**: COMPLETE
+
+### Sprint Map
+| Sprint | Focus | Branch | Status |
+|---|---|---|---|
+| AU.1 | Canonical daemon launcher plus launch-token issuance surface and launch-class schema (`prod-shared`, `dev-shared`, `isolated-test`) | feature/pAU-s1-canonical-launcher | COMPLETE |
+| AU.2 | Daemon startup firewall: reject missing/invalid/replayed launch tokens and hard-fail duplicate shared-runtime starts | feature/pAU-s2-daemon-startup-firewall | COMPLETE |
+| AU.3 | `isolated-test` lease model: `test_identifier`, `owner_pid`, bounded TTL, owner/TTL self-termination, and janitor sweep behavior | feature/pAU-s3-isolated-test-lease | COMPLETE |
+| AU.4 | Lifecycle logging + QA enforcement: launch/termination ledgers, `daemon-spawn-qa` log-driven root cause, and CI/QA blocking on TTL/dead-owner exits | feature/pAU-s4-lifecycle-logging | COMPLETE |
+| AU.5 | Remove remaining bypass spawn paths and run final repo-wide audit proving the canonical launcher is the only daemon spawn path left | feature/pAU-s5-bypass-removal | COMPLETE |
+
+### Planned Inputs
+- DSQ-001 through DSQ-009 daemon leak findings from Phase AT
+- rogue-daemon containment requirements in `docs/requirements.md`
+- Phase AQ/AP daemon harness constraints and `daemon-spawn-qa` policy
+
+### Exit Criteria
+1. `atm-daemon` rejects startup without a valid authorized launch token.
+2. `prod-shared` and `dev-shared` launches hard-fail when a live daemon already
+   owns that runtime.
+3. Every `isolated-test` daemon carries `test_identifier`, `owner_pid`, and
+   TTL lease metadata.
+4. Test fixtures remain responsible for clean daemon shutdown; TTL/dead-owner
+   exits are fail-safe signals and block QA.
+5. `daemon-spawn-qa` can explain forgotten daemons using lifecycle logs rather
+   than code inspection alone.
+6. CI/QA fails on any non-canonical daemon spawn path or rogue daemon without
+   valid launch metadata.
+
+### Dependency Notes
+- AU begins only after `integrate/phase-AT` is merged to `develop` and
+  `docs/arch-boundary.md` records the final AT zero-violation audit state.
+  DSQ root-cause findings are the primary design input after that gate.
+- AU.1 is the mandatory first sprint; AU.2 depends on AU.1, AU.3 depends on
+  AU.1/AU.2, AU.4 depends on AU.2/AU.3, and AU.5 is the final removal/audit sprint.
 
 ---
 

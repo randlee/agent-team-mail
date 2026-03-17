@@ -1,6 +1,8 @@
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::query_team_member_states;
-use agent_team_mail_core::spawn::{PaneMode, SpawnDraft, apply_edits, parse_pane_mode};
+use agent_team_mail_core::spawn::{
+    PaneMode, SpawnDraft, apply_edits, parse_pane_mode, read_agent_frontmatter,
+};
 use anyhow::Result;
 use clap::Args;
 use crossterm::tty::IsTty;
@@ -93,22 +95,29 @@ pub fn execute(args: SpawnArgs) -> Result<()> {
         &home,
     )?;
 
+    let member_name = args
+        .member
+        .clone()
+        .unwrap_or_else(|| runtime_name(&args.runtime).to_string());
+    let frontmatter = read_agent_frontmatter(&home, &member_name);
     let mut draft = SpawnDraft {
         team: args
             .team
             .clone()
             .unwrap_or_else(|| config.core.default_team.clone()),
-        member: args
-            .member
+        member: member_name,
+        model: args
+            .model
             .clone()
-            .unwrap_or_else(|| runtime_name(&args.runtime).to_string()),
-        model: args.model.clone().unwrap_or_else(|| "unknown".to_string()),
+            .or(frontmatter.model)
+            .unwrap_or_else(|| default_model_for_runtime(&args.runtime).to_string()),
         agent_type: args.agent_type.clone(),
         pane_mode: parse_pane_mode(&args.pane_mode)?,
         worktree: args
             .worktree
             .as_ref()
             .map(|p| p.to_string_lossy().to_string()),
+        color: frontmatter.color,
     };
     let mut panel_state = PanelState {
         tmux_context: detect_tmux_context(),
@@ -218,6 +227,10 @@ fn build_teams_spawn_args(draft: &SpawnDraft, runtime: &RuntimeKind) -> Vec<Stri
         "--model".to_string(),
         draft.model.clone(),
     ];
+    if let Some(color) = &draft.color {
+        args.push("--color".to_string());
+        args.push(color.clone());
+    }
     if let Some(worktree) = &draft.worktree {
         args.push("--folder".to_string());
         args.push(worktree.clone());
@@ -245,6 +258,15 @@ fn runtime_name(runtime: &RuntimeKind) -> &'static str {
         RuntimeKind::Codex => "codex",
         RuntimeKind::Gemini => "gemini",
         RuntimeKind::Opencode => "opencode",
+    }
+}
+
+fn default_model_for_runtime(runtime: &RuntimeKind) -> &'static str {
+    match runtime {
+        // Codex spawns should default to the roster baseline when neither the
+        // CLI nor the agent frontmatter pins a model explicitly.
+        RuntimeKind::Codex => "claude-sonnet-4-5",
+        _ => "unknown",
     }
 }
 
@@ -580,6 +602,7 @@ mod tests {
             agent_type: "general-purpose".to_string(),
             pane_mode: PaneMode::NewPane,
             worktree: None,
+            color: None,
         }
     }
 
@@ -609,6 +632,22 @@ mod tests {
         assert!(parse_pane_mode("existing-pane").is_ok());
         assert!(parse_pane_mode("current-pane").is_ok());
         assert!(parse_pane_mode("nope").is_err());
+    }
+
+    #[test]
+    fn test_build_teams_spawn_args_includes_color_when_set() {
+        let mut d = draft();
+        d.color = Some("cyan".to_string());
+        let args = build_teams_spawn_args(&d, &RuntimeKind::Claude);
+        let color_idx = args.iter().position(|a| a == "--color");
+        assert!(color_idx.is_some(), "--color flag should be present");
+        assert_eq!(args[color_idx.unwrap() + 1], "cyan");
+    }
+
+    #[test]
+    fn test_build_teams_spawn_args_omits_color_when_none() {
+        let args = build_teams_spawn_args(&draft(), &RuntimeKind::Claude);
+        assert!(!args.contains(&"--color".to_string()));
     }
 
     #[test]
@@ -661,5 +700,18 @@ mod tests {
         let mut panel = PanelState::default();
         apply_panel_edits(&mut d, &mut panel, "7=2").unwrap();
         assert_eq!(panel.selected_existing_pane.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn test_codex_runtime_defaults_to_claude_sonnet_when_model_missing() {
+        assert_eq!(
+            default_model_for_runtime(&RuntimeKind::Codex),
+            "claude-sonnet-4-5"
+        );
+    }
+
+    #[test]
+    fn test_claude_runtime_does_not_receive_codex_default_model() {
+        assert_eq!(default_model_for_runtime(&RuntimeKind::Claude), "unknown");
     }
 }

@@ -8,24 +8,32 @@ use assert_cmd::cargo;
 use serial_test::serial;
 use std::fs;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 #[path = "support/daemon_process_guard.rs"]
 mod daemon_process_guard;
 #[path = "support/daemon_test_registry.rs"]
 mod daemon_test_registry;
-use daemon_process_guard::DaemonProcessGuard;
+#[path = "support/env_guard.rs"]
+mod env_guard;
+use daemon_process_guard::{DaemonProcessGuard, daemon_binary_path, pid_alive, wait_for_pid_exit};
+use env_guard::EnvGuard;
 
 /// Helper to set home directory for cross-platform test compatibility.
 /// Uses `ATM_HOME` which is checked first by `get_home_dir()`, avoiding
 /// platform-specific differences in how `dirs::home_dir()` resolves.
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
+    set_home_env_path(cmd, temp_dir.path());
+}
+
+fn set_home_env_path(cmd: &mut assert_cmd::Command, home: &std::path::Path) {
     // Use a subdirectory as CWD to avoid:
     // 1. .atm.toml config leak from the repo root
-    // 2. auto-identity CWD matching against team member CWD (temp_dir root)
-    let workdir = temp_dir.path().join("workdir");
+    // 2. auto-identity CWD matching against team member CWD (ATM_HOME root)
+    let workdir = home.join("workdir");
     std::fs::create_dir_all(&workdir).ok();
-    cmd.env("ATM_HOME", temp_dir.path())
+    cmd.env("ATM_HOME", home)
         // Prevent opportunistic daemon autostart from changing expected
         // offline/online label behavior in deterministic integration tests.
         .env("ATM_DAEMON_AUTOSTART", "0")
@@ -34,6 +42,47 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
         .env_remove("ATM_CONFIG")
         .env_remove("CLAUDE_SESSION_ID")
         .current_dir(&workdir);
+}
+
+#[cfg(unix)]
+/// Guards cleanup of a daemon registered via PID file, not a direct `Child` handle.
+struct RuntimeDaemonCleanupGuard {
+    home: PathBuf,
+    daemon_guard: Option<DaemonProcessGuard>,
+}
+
+#[cfg(unix)]
+impl RuntimeDaemonCleanupGuard {
+    fn new(temp_dir: &TempDir) -> Self {
+        daemon_test_registry::sweep_stale_test_daemons();
+        Self {
+            home: temp_dir.path().to_path_buf(),
+            daemon_guard: None,
+        }
+    }
+
+    fn adopt_running_pid(
+        &mut self,
+        daemon_bin: &std::path::Path,
+        timeout: Duration,
+    ) -> Option<u32> {
+        if let Some(existing) = self.daemon_guard.as_ref() {
+            return Some(existing.pid());
+        }
+
+        let pid_path = self.home.join(".atm/daemon/atm-daemon.pid");
+        self.daemon_guard =
+            DaemonProcessGuard::adopt_from_pid_file(&pid_path, daemon_bin, &self.home, timeout);
+        self.daemon_guard.as_ref().map(DaemonProcessGuard::pid)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RuntimeDaemonCleanupGuard {
+    fn drop(&mut self) {
+        drop(self.daemon_guard.take());
+        daemon_test_registry::sweep_stale_test_daemons();
+    }
 }
 
 /// Create a test team structure with multiple agents
@@ -121,13 +170,6 @@ fn wait_for_daemon_pid_change(temp_dir: &TempDir, previous_pid: u32, timeout: Du
 }
 
 #[cfg(unix)]
-fn daemon_binary_path() -> PathBuf {
-    let mut candidate = PathBuf::from(cargo::cargo_bin!("atm"));
-    candidate.set_file_name("atm-daemon");
-    candidate
-}
-
-#[cfg(unix)]
 fn write_lock_metadata(temp_dir: &TempDir, pid: u32, home_scope: String, executable_path: String) {
     let metadata_path = temp_dir.path().join(".atm/daemon/daemon.lock.meta.json");
     if let Some(parent) = metadata_path.parent() {
@@ -147,36 +189,6 @@ fn write_lock_metadata(temp_dir: &TempDir, pid: u32, home_scope: String, executa
     .expect("write metadata");
 }
 
-#[cfg(unix)]
-fn cleanup_pid(pid: u32) {
-    send_signal(pid as i32, 15);
-    for _ in 0..20 {
-        if !pid_alive(pid as i32) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    send_signal(pid as i32, 9);
-}
-
-#[cfg(unix)]
-fn pid_alive(pid: i32) -> bool {
-    unsafe extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
-    // SAFETY: signal 0 checks process existence.
-    unsafe { kill(pid, 0) == 0 }
-}
-
-#[cfg(unix)]
-fn send_signal(pid: i32, sig: i32) {
-    unsafe extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
-    // SAFETY: best-effort test cleanup path.
-    let _ = unsafe { kill(pid, sig) };
-}
-
 // ============================================================================
 // Category 1: Concurrent Write Tests
 // ============================================================================
@@ -184,6 +196,8 @@ fn send_signal(pid: i32, sig: i32) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_concurrent_sends_no_data_loss() {
+    // Still serialized: DaemonProcessGuard records spawned daemon PIDs in the
+    // shared test registry, which remains process-global in AP.3.
     // Root-cause note for #372: CI hangs were traced to harness lifecycle
     // nondeterminism (startup/teardown timing), not a confirmed production
     // data-loss defect in send/inbox persistence.
@@ -247,6 +261,8 @@ async fn test_concurrent_sends_no_data_loss() {
                         || stderr.contains("No such file or directory")
                         || stderr.contains("The system cannot find the file specified");
                     if (transient_missing_config || transient_missing_file) && attempts < 6 {
+                        // Retry backoff only: this gives the daemon time to finish
+                        // startup/config materialization, not a timing fence for correctness.
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
                     }
@@ -346,11 +362,15 @@ async fn test_concurrent_sends_no_data_loss() {
 #[test]
 #[serial]
 fn test_concurrent_cli_and_direct_write_no_loss() {
+    // Still serialized: RuntimeDaemonCleanupGuard sweeps the per-binary daemon
+    // registry on entry/drop and must not race with live daemon-backed tests.
     // Simulate CLI and Claude Code writing simultaneously
     use std::sync::{Arc, Barrier};
 
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
+    #[cfg(unix)]
+    let mut daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
 
     let inbox_path = temp_dir
         .path()
@@ -376,7 +396,7 @@ fn test_concurrent_cli_and_direct_write_no_loss() {
     let handle1 = std::thread::spawn(move || {
         barrier1.wait();
         let mut cmd = cargo::cargo_bin_cmd!("atm");
-        cmd.env("ATM_HOME", &temp_path1);
+        set_home_env_path(&mut cmd, &temp_path1);
         cmd.env("ATM_TEAM", "test-team");
         cmd.env("ATM_IDENTITY", "cli-sender");
         cmd.arg("send").arg("agent-a").arg("CLI message");
@@ -388,7 +408,7 @@ fn test_concurrent_cli_and_direct_write_no_loss() {
     let handle2 = std::thread::spawn(move || {
         barrier2.wait();
         let mut cmd = cargo::cargo_bin_cmd!("atm");
-        cmd.env("ATM_HOME", &temp_path);
+        set_home_env_path(&mut cmd, &temp_path);
         cmd.env("ATM_TEAM", "test-team");
         cmd.env("ATM_IDENTITY", "claude-code");
         cmd.arg("send").arg("agent-a").arg("Claude Code message");
@@ -397,6 +417,12 @@ fn test_concurrent_cli_and_direct_write_no_loss() {
 
     handle1.join().unwrap();
     handle2.join().unwrap();
+    // Best-effort adoption: daemon may not have auto-started for these file-based operations.
+    // adopt_running_pid returns None if no PID file was written; RuntimeDaemonCleanupGuard's
+    // Drop sweep still attempts cleanup of any leaked daemon processes.
+    #[cfg(unix)]
+    let _adopted =
+        daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
 
     // Verify all messages are present
     let content = fs::read_to_string(&inbox_path).unwrap();
@@ -416,7 +442,6 @@ fn test_concurrent_cli_and_direct_write_no_loss() {
 // ============================================================================
 
 #[test]
-#[serial]
 fn test_lock_contention_queues_to_spool() {
     // When the lock can't be acquired, messages should be spooled
     // We simulate this by having one thread hold the lock while another sends
@@ -461,6 +486,8 @@ fn test_lock_contention_queues_to_spool() {
 #[test]
 #[serial]
 fn test_spool_drain_delivery_cycle() {
+    // Still serialized: this test mutates ATM_HOME process-wide while exercising
+    // the spool path resolved from that shared env var.
     // This test uses the library API directly since spool_drain is not yet
     // exposed via CLI command.
     use agent_team_mail_core::io::inbox::inbox_append;
@@ -471,10 +498,7 @@ fn test_spool_drain_delivery_cycle() {
     let temp_dir = TempDir::new().unwrap();
     // Use ATM_HOME to redirect spool dir — works cross-platform (dirs::config_dir()
     // ignores HOME/USERPROFILE on Windows)
-    let prev_atm_home = std::env::var("ATM_HOME").ok();
-    unsafe {
-        std::env::set_var("ATM_HOME", temp_dir.path());
-    }
+    let _atm_home = EnvGuard::set("ATM_HOME", temp_dir.path());
     let teams_dir = temp_dir.path().join("teams");
     let team_dir = teams_dir.join("test-team");
     let inboxes_dir = team_dir.join("inboxes");
@@ -513,11 +537,17 @@ fn test_spool_drain_delivery_cycle() {
     // Step 4: Drain the spool - message should be delivered
     // Note: spool_drain uses system-global spool dir, so other tests may have
     // queued messages. We verify our message was delivered rather than exact count.
+    let drain_start = Instant::now();
     let status = agent_team_mail_core::io::spool::spool_drain(&teams_dir).unwrap();
+    let drain_elapsed = drain_start.elapsed();
     assert!(
         status.delivered >= 1,
         "At least our spooled message should be delivered, got: {}",
         status.delivered
+    );
+    assert!(
+        drain_elapsed < Duration::from_secs(5),
+        "spool drain took too long: {drain_elapsed:?}"
     );
 
     // Step 5: Verify message is in inbox
@@ -527,14 +557,6 @@ fn test_spool_drain_delivery_cycle() {
         messages.iter().any(|m| m["text"] == "Spooled message"),
         "Delivered message should be in inbox"
     );
-
-    // Restore environment
-    unsafe {
-        match prev_atm_home {
-            Some(val) => std::env::set_var("ATM_HOME", val),
-            None => std::env::remove_var("ATM_HOME"),
-        }
-    }
 }
 
 // ============================================================================
@@ -542,7 +564,6 @@ fn test_spool_drain_delivery_cycle() {
 // ============================================================================
 
 #[test]
-#[serial]
 fn test_malformed_inbox_json_graceful_failure() {
     // Write corrupt JSON to inbox, then try to send - should fail gracefully
     let temp_dir = TempDir::new().unwrap();
@@ -566,7 +587,6 @@ fn test_malformed_inbox_json_graceful_failure() {
 }
 
 #[test]
-#[serial]
 fn test_empty_json_array_inbox_ok() {
     // Empty JSON array is valid - send should succeed
     let temp_dir = TempDir::new().unwrap();
@@ -593,7 +613,6 @@ fn test_empty_json_array_inbox_ok() {
 }
 
 #[test]
-#[serial]
 fn test_malformed_inbox_read_graceful() {
     // Read command on malformed inbox should handle error gracefully
     let temp_dir = TempDir::new().unwrap();
@@ -621,7 +640,6 @@ fn test_malformed_inbox_read_graceful() {
 // ============================================================================
 
 #[test]
-#[serial]
 fn test_large_inbox_10k_messages() {
     // Verify no degradation with 10K+ messages in inbox
     use std::time::Instant;
@@ -697,7 +715,6 @@ fn test_large_inbox_10k_messages() {
 // ============================================================================
 
 #[test]
-#[serial]
 fn test_send_to_nonexistent_inbox_creates_file() {
     // First send to an agent with no existing inbox file
     let temp_dir = TempDir::new().unwrap();
@@ -729,7 +746,6 @@ fn test_send_to_nonexistent_inbox_creates_file() {
 }
 
 #[test]
-#[serial]
 fn test_read_nonexistent_inbox_graceful() {
     // Reading an agent's inbox when no inbox file exists
     let temp_dir = TempDir::new().unwrap();
@@ -750,7 +766,6 @@ fn test_read_nonexistent_inbox_graceful() {
 }
 
 #[test]
-#[serial]
 fn test_empty_inbox_file_read() {
     // Empty file (not valid JSON) should fail gracefully
     let temp_dir = TempDir::new().unwrap();
@@ -775,7 +790,6 @@ fn test_empty_inbox_file_read() {
 }
 
 #[test]
-#[serial]
 fn test_status_with_missing_inboxes_dir() {
     // Status command when inboxes directory doesn't exist
     let temp_dir = TempDir::new().unwrap();
@@ -823,7 +837,6 @@ fn test_status_with_missing_inboxes_dir() {
 
 #[cfg(unix)]
 #[test]
-#[serial]
 fn test_permission_denied_lock_file_creation() {
     // Make lock file a directory so exclusive lock acquisition fails
 
@@ -858,11 +871,14 @@ fn test_permission_denied_lock_file_creation() {
 #[test]
 #[serial]
 fn test_permission_denied_inboxes_dir() {
+    // Still serialized: RuntimeDaemonCleanupGuard sweeps the per-binary daemon
+    // registry on entry/drop and must not race with live daemon-backed tests.
     // Make inboxes directory read-only, then try to send to new inbox
     use std::os::unix::fs::PermissionsExt;
 
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
+    let mut daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
 
     let inboxes_dir = temp_dir.path().join(".claude/teams/test-team/inboxes");
 
@@ -883,6 +899,11 @@ fn test_permission_denied_inboxes_dir() {
         !output.status.success(),
         "Send should fail when directory is read-only"
     );
+    // Best-effort adoption: daemon may not have auto-started for this error-path test.
+    // adopt_running_pid returns None if no PID file was written; RuntimeDaemonCleanupGuard's
+    // Drop sweep still attempts cleanup of any leaked daemon processes.
+    let _adopted =
+        daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
 
     // Restore permissions for cleanup
     fs::set_permissions(&inboxes_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -895,11 +916,15 @@ fn test_permission_denied_inboxes_dir() {
 #[test]
 #[serial]
 fn test_no_duplicate_message_ids_under_concurrent_sends() {
+    // Still serialized: RuntimeDaemonCleanupGuard sweeps the per-binary daemon
+    // registry on entry/drop and must not race with live daemon-backed tests.
     // Verify that concurrent sends to same inbox produce unique message IDs
     use std::sync::{Arc, Barrier};
 
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
+    #[cfg(unix)]
+    let mut daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
 
     let num_threads = 4;
     let barrier = Arc::new(Barrier::new(num_threads));
@@ -911,7 +936,7 @@ fn test_no_duplicate_message_ids_under_concurrent_sends() {
         let handle = std::thread::spawn(move || {
             barrier.wait();
             let mut cmd = cargo::cargo_bin_cmd!("atm");
-            cmd.env("ATM_HOME", &temp_path);
+            set_home_env_path(&mut cmd, &temp_path);
             cmd.env("ATM_TEAM", "test-team");
             cmd.env("ATM_IDENTITY", format!("thread-{thread_id}"));
             cmd.arg("send")
@@ -925,6 +950,12 @@ fn test_no_duplicate_message_ids_under_concurrent_sends() {
     for handle in handles {
         handle.join().unwrap();
     }
+    // Best-effort adoption: daemon may not have auto-started for these file-based concurrent sends.
+    // adopt_running_pid returns None if no PID file was written; RuntimeDaemonCleanupGuard's
+    // Drop sweep still attempts cleanup of any leaked daemon processes.
+    #[cfg(unix)]
+    let _adopted =
+        daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
 
     // Check inbox for duplicates
     let inbox_path = temp_dir
@@ -948,12 +979,53 @@ fn test_no_duplicate_message_ids_under_concurrent_sends() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_runtime_daemon_cleanup_guard_adopts_pid_written_after_creation() {
+    let temp_dir = TempDir::new().unwrap();
+    let mut daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
+    let daemon_dir = temp_dir.path().join(".atm/daemon");
+    fs::create_dir_all(&daemon_dir).unwrap();
+
+    let launcher = temp_dir.path().join("late-pid-launcher.sh");
+    fs::write(
+        &launcher,
+        format!(
+            "#!/bin/sh\nset -eu\nmkdir -p \"{}\"\n(sleep 30) &\nbgpid=$!\nprintf '%s\\n' \"$bgpid\" > \"{}\"\nexit 0\n",
+            daemon_dir.display(),
+            daemon_dir.join("atm-daemon.pid").display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&launcher).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&launcher, perms).unwrap();
+    }
+
+    let status = Command::new(&launcher)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let adopted_pid = daemon_cleanup
+        .adopt_running_pid(&launcher, Duration::from_secs(1))
+        .expect("expected cleanup guard to adopt late pid-file daemon");
+    drop(daemon_cleanup);
+    wait_for_pid_exit(adopted_pid as i32, Duration::from_secs(2));
+}
+
 // ============================================================================
 // Category 9: Inbox Round-Trip Preservation
 // ============================================================================
 
 #[test]
-#[serial]
 fn test_unknown_fields_preserved_through_send() {
     // Inbox with unknown fields should preserve them after a new send
     let temp_dir = TempDir::new().unwrap();
@@ -1003,7 +1075,6 @@ fn test_unknown_fields_preserved_through_send() {
 // ============================================================================
 
 #[test]
-#[serial]
 fn test_inbox_command_with_no_messages_anywhere() {
     // Inbox command when all inboxes are empty or nonexistent
     let temp_dir = TempDir::new().unwrap();
@@ -1019,7 +1090,6 @@ fn test_inbox_command_with_no_messages_anywhere() {
 }
 
 #[test]
-#[serial]
 fn test_members_command_shows_correct_labels() {
     // Verify no-daemon context renders Unknown (liveness cannot be confirmed).
     let temp_dir = TempDir::new().unwrap();
@@ -1079,7 +1149,6 @@ fn test_members_command_shows_correct_labels() {
 }
 
 #[test]
-#[serial]
 fn test_status_command_shows_correct_labels() {
     // Verify no-daemon context renders Unknown (liveness cannot be confirmed).
     let temp_dir = TempDir::new().unwrap();
@@ -1139,7 +1208,6 @@ fn test_status_command_shows_correct_labels() {
 }
 
 #[test]
-#[serial]
 fn test_doctor_status_members_consistent_unknown_when_daemon_unreachable() {
     let temp_dir = TempDir::new().unwrap();
     let team_dir = temp_dir.path().join(".claude/teams/test-team");
@@ -1282,6 +1350,8 @@ fn test_doctor_status_members_consistent_unknown_when_daemon_unreachable() {
 #[test]
 #[serial]
 fn test_dead_pid_stale_lock_starts_daemon_cleanly() {
+    // Still serialized: restarted daemon PIDs are tracked in the shared test
+    // registry until AP replaces that global file with a per-test-safe owner.
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
     let dead_pid = 999_991_u32;
@@ -1333,15 +1403,17 @@ fn test_dead_pid_stale_lock_starts_daemon_cleanly() {
 
     let new_pid = wait_for_daemon_pid_change(&temp_dir, dead_pid, Duration::from_secs(5));
     assert!(new_pid > 1);
-    daemon_test_registry::register_test_daemon(new_pid, &daemon_binary_path());
-    cleanup_pid(new_pid);
-    daemon_test_registry::unregister_test_daemon(new_pid);
+    let _restarted_daemon =
+        DaemonProcessGuard::adopt_registered_pid(new_pid, &daemon_binary_path(), temp_dir.path());
 }
 
 #[cfg(unix)]
 #[test]
 #[serial]
 fn test_identity_mismatch_socket_is_detected_and_restarted() {
+    // Still serialized: ensure_daemon_running reads ATM_HOME / ATM_DAEMON_BIN
+    // / ATM_DAEMON_AUTOSTART from process-global env and the restarted PID is
+    // tracked in the shared daemon test registry.
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
 
@@ -1359,34 +1431,15 @@ fn test_identity_mismatch_socket_is_detected_and_restarted() {
         daemon_binary_path().to_string_lossy().to_string(),
     );
 
-    let old_home = std::env::var("ATM_HOME").ok();
-    let old_daemon_bin = std::env::var("ATM_DAEMON_BIN").ok();
-    let old_autostart = std::env::var("ATM_DAEMON_AUTOSTART").ok();
-    unsafe {
-        std::env::set_var("ATM_HOME", temp_dir.path());
-        std::env::set_var("ATM_DAEMON_BIN", daemon_binary_path());
-        std::env::set_var("ATM_DAEMON_AUTOSTART", "1");
-    }
+    let daemon_bin = daemon_binary_path();
+    let _atm_home = EnvGuard::set("ATM_HOME", temp_dir.path());
+    let _atm_daemon_bin = EnvGuard::set("ATM_DAEMON_BIN", &daemon_bin);
+    let _atm_daemon_autostart = EnvGuard::set("ATM_DAEMON_AUTOSTART", "1");
     let ensure_result = agent_team_mail_core::daemon_client::ensure_daemon_running();
-    unsafe {
-        match old_home {
-            Some(v) => std::env::set_var("ATM_HOME", v),
-            None => std::env::remove_var("ATM_HOME"),
-        }
-        match old_daemon_bin {
-            Some(v) => std::env::set_var("ATM_DAEMON_BIN", v),
-            None => std::env::remove_var("ATM_DAEMON_BIN"),
-        }
-        match old_autostart {
-            Some(v) => std::env::set_var("ATM_DAEMON_AUTOSTART", v),
-            None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
-        }
-    }
     ensure_result.expect("ensure_daemon_running should restart on identity mismatch");
 
     let new_pid = wait_for_daemon_pid_change(&temp_dir, old_pid, Duration::from_secs(8));
     assert!(new_pid > 1);
-    daemon_test_registry::register_test_daemon(new_pid, &daemon_binary_path());
-    cleanup_pid(new_pid);
-    daemon_test_registry::unregister_test_daemon(new_pid);
+    let _restarted_daemon =
+        DaemonProcessGuard::adopt_registered_pid(new_pid, &daemon_binary_path(), temp_dir.path());
 }

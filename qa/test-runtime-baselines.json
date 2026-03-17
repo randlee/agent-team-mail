@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "defaults": {
+    "warn_multiplier": 2.0,
+    "update_policy": "reviewed-periodically"
+  },
+  "entries": [
+    {
+      "id": "crates/atm-daemon/tests/daemon_tests.rs",
+      "scope": "test-binary",
+      "expected_seconds": 20.0,
+      "warn_multiplier": 2.0,
+      "last_updated": "2026-03-15",
+      "sample_source": "seed-baseline"
+    },
+    {
+      "id": "crates/atm-daemon/tests/tmux_integration.rs",
+      "scope": "test-binary",
+      "expected_seconds": 15.0,
+      "warn_multiplier": 2.0,
+      "last_updated": "2026-03-15",
+      "sample_source": "seed-baseline"
+    },
+    {
+      "id": "crates/atm-agent-mcp/tests/proxy_integration.rs",
+      "scope": "test-binary",
+      "expected_seconds": 20.0,
+      "warn_multiplier": 2.0,
+      "last_updated": "2026-03-15",
+      "sample_source": "seed-baseline"
+    },
+    {
+      "id": "crates/atm-agent-mcp/tests/app_server_transport.rs",
+      "scope": "test-binary",
+      "expected_seconds": 15.0,
+      "warn_multiplier": 2.0,
+      "last_updated": "2026-03-15",
+      "sample_source": "seed-baseline"
+    },
+    {
+      "id": "crates/atm-agent-mcp/tests/transport_reliability.rs",
+      "scope": "test-binary",
+      "expected_seconds": 15.0,
+      "warn_multiplier": 2.0,
+      "last_updated": "2026-03-15",
+      "sample_source": "seed-baseline"
+    },
+    {
+      "id": "crates/atm/tests/integration_multiteam_isolation.rs",
+      "scope": "test-binary",
+      "expected_seconds": 20.0,
+      "warn_multiplier": 2.0,
+      "last_updated": "2026-03-15",
+      "sample_source": "seed-baseline"
+    }
+  ]
+}

@@ -14,6 +14,7 @@ use agent_team_mail_core::text::{
     DEFAULT_MAX_MESSAGE_BYTES, truncate_chars_slice, validate_message_text,
 };
 
+use crate::consts::MESSAGE_MAX_LEN;
 use crate::util::settings::{get_home_dir, teams_root_dir_for};
 
 /// Broadcast a message to all agents in a team
@@ -218,13 +219,11 @@ fn get_message_text(args: &BroadcastArgs) -> Result<String> {
 
 /// Generate summary from message text (first ~100 chars)
 fn generate_summary(text: &str) -> String {
-    const MAX_LEN: usize = 100;
-
     let trimmed = text.trim();
-    if trimmed.chars().count() <= MAX_LEN {
+    if trimmed.chars().count() <= MESSAGE_MAX_LEN {
         trimmed.to_string()
     } else {
-        let slice = truncate_chars_slice(trimmed, MAX_LEN);
+        let slice = truncate_chars_slice(trimmed, MESSAGE_MAX_LEN);
         if let Some(pos) = slice.rfind(|c: char| c.is_whitespace()) {
             format!("{}...", slice[..pos].trim())
         } else {

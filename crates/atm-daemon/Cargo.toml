@@ -15,8 +15,20 @@ categories = ["command-line-utilities", "development-tools"]
 name = "atm-daemon"
 path = "src/main.rs"
 
+[[test]]
+name = "ci_monitor_error_tests"
+path = "tests/ci_monitor_error_tests.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "ci_monitor_integration"
+path = "tests/ci_monitor_integration.rs"
+required-features = ["test-support"]
+
 [dependencies]
+agent-team-mail-ci-monitor.workspace = true
 agent-team-mail-core.workspace = true
+agent-team-mail-daemon-launch.workspace = true
 sc-observability.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
@@ -49,8 +61,10 @@ libc = "0.2"
 default = []
 ssh = ["ssh2"]
 ssh-tests = ["ssh"]
+test-support = []
 
 [dev-dependencies]
+agent-team-mail-ci-monitor = { workspace = true, features = ["test-support"] }
 tempfile = "3.13"
 tokio = { version = "1", features = ["full", "test-util"] }
 chrono = "0.4"

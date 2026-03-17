@@ -1,7 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/atm-ci-monitor",
     "crates/atm-core",
+    "crates/atm-daemon-launch",
     "crates/atm",
     "crates/atm-daemon",
     "crates/atm-agent-mcp",
@@ -15,7 +17,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.44.9"
+version = "0.45.0"
 edition = "2024"
 authors = ["agent-team-mail contributors"]
 license = "MIT OR Apache-2.0"
@@ -37,6 +39,9 @@ thiserror = "2.0"
 anyhow = "1.0"
 
 # Internal dependencies
-agent-team-mail-core = { path = "crates/atm-core", version = "=0.44.9" }
-sc-composer = { path = "crates/sc-composer", version = "=0.44.9" }
-sc-observability = { path = "crates/sc-observability", version = "=0.44.9" }
+agent-team-mail-ci-monitor = { path = "crates/atm-ci-monitor", version = "=0.45.0" }
+agent-team-mail-core = { path = "crates/atm-core", version = "=0.45.0" }
+agent-team-mail-daemon-launch = { path = "crates/atm-daemon-launch", version = "=0.45.0" }
+agent-team-mail-daemon = { path = "crates/atm-daemon", version = "=0.45.0" }
+sc-composer = { path = "crates/sc-composer", version = "=0.45.0" }
+sc-observability = { path = "crates/sc-observability", version = "=0.45.0" }

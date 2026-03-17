@@ -1,5 +1,12 @@
 //! `atm doctor` — daemon/team health diagnostics.
 
+use agent_team_mail_ci_monitor::{
+    GhCliObserverContext, RateLimitUpdate, emit_gh_info_denied, emit_gh_info_live_refresh,
+    emit_gh_info_requested, emit_gh_info_served_from_cache, gh_repo_state_cache_age_secs,
+    new_gh_execution_call_id, new_gh_info_request_id, read_gh_repo_state,
+    update_gh_repo_state_rate_limit,
+};
+use agent_team_mail_daemon::plugins::ci_monitor::run_attributed_gh_command_with_ids;
 use anyhow::{Context, Result};
 use clap::Args;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -8,12 +15,14 @@ use std::path::{Path, PathBuf};
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    AgentSummary, CanonicalMemberState, SessionQueryResult, daemon_is_running, daemon_lock_path,
-    daemon_pid_path, daemon_socket_path, daemon_status_path_for, query_list_agents,
-    query_list_agents_for_team, query_session_for_team, query_team_member_states,
+    AgentSummary, CanonicalMemberState, DaemonTouchSnapshot, SessionQueryResult, daemon_is_running,
+    daemon_lock_path, daemon_pid_path, daemon_socket_path, daemon_status_path_for,
+    daemon_touch_path_for, query_list_agents, query_list_agents_for_team, query_session_for_team,
+    query_team_member_states, read_daemon_lock_metadata,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::log_reader::{LogFilter, LogReader};
+use agent_team_mail_core::pid::is_pid_alive;
 use agent_team_mail_core::schema::TeamConfig;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -90,6 +99,8 @@ struct Summary {
     has_critical: bool,
     counts: FindingCounts,
     #[serde(skip_serializing_if = "Option::is_none")]
+    uptime_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     daemon_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     install_milestone: Option<String>,
@@ -126,6 +137,8 @@ struct DoctorReport {
     recommendations: Vec<Recommendation>,
     log_window: LogWindow,
     env_overrides: EnvOverrides,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gh_rate_limit_audit: Option<GhRateLimitAudit>,
     #[serde(default)]
     logging_health: LoggingHealthContract,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -149,6 +162,39 @@ struct MemberSnapshot {
 struct DoctorState {
     // RFC3339 timestamp of last doctor invocation per team.
     last_call_by_team: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GhRateLimitAudit {
+    live_remaining: u64,
+    live_limit: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live_reset_at: Option<String>,
+    cached_used_in_window: u64,
+    repos_observed: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cached_rate_limit_remaining: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cached_rate_limit_limit: Option<u64>,
+    delta_consumed_vs_cached: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhRateLimitResponse {
+    resources: GhRateLimitResources,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhRateLimitResources {
+    core: GhCoreRateLimit,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhCoreRateLimit {
+    limit: u64,
+    remaining: u64,
+    #[serde(default)]
+    reset: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -194,7 +240,8 @@ pub fn execute(args: DoctorArgs) -> Result<()> {
             .ok()
             .flatten();
 
-    let report = build_report(&home_dir, &team, &args)?;
+    let mut report = build_report(&home_dir, &team, &args)?;
+    report.gh_rate_limit_audit = build_gh_rate_limit_audit(&home_dir, &team).ok().flatten();
 
     emit_event_best_effort(EventFields {
         level: "info",
@@ -280,6 +327,7 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
 
     // Check 1: daemon health (lock/socket/PID/status coherence)
     findings.extend(check_daemon_health(home_dir));
+    findings.extend(check_daemon_ownership_mismatch(home_dir));
     findings.extend(check_plugin_init_failures(home_dir));
 
     // Check 2 + 3 + 4: session/roster/mailbox integrity
@@ -296,7 +344,7 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
     findings.extend(check_config_runtime_drift(team, &args.team));
 
     // Check 5b: hook installation / config audit
-    findings.extend(check_hook_audit(home_dir));
+    findings.extend(check_hook_audit(home_dir, &std::env::current_dir()?));
 
     // Check 6: unified log diagnostics
     let (window_start, mode) =
@@ -323,6 +371,7 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
         generated_at: now.to_rfc3339(),
         has_critical: counts.critical > 0,
         counts,
+        uptime_secs: read_daemon_status_uptime_secs(home_dir),
         daemon_version: None,
         install_milestone: read_active_install_milestone(),
     };
@@ -349,10 +398,127 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
                 .max(0) as u64,
         },
         env_overrides: active_env_overrides(),
+        gh_rate_limit_audit: None,
         logging_health,
         members: member_snapshot.clone(),
         member_snapshot,
     })
+}
+
+fn build_gh_rate_limit_audit(home_dir: &Path, team: &str) -> Result<Option<GhRateLimitAudit>> {
+    let state = read_gh_repo_state(home_dir)?;
+    let team_records: Vec<_> = state
+        .records
+        .into_iter()
+        .filter(|record| record.team == team)
+        .collect();
+    if team_records.is_empty() {
+        return Ok(None);
+    }
+
+    let repo_scope = &team_records[0].repo;
+    if !repo_scope.contains('/') {
+        anyhow::bail!("invalid owner/repo scope in gh repo-state: {repo_scope}");
+    }
+    let observer_ctx = GhCliObserverContext::new(
+        home_dir.to_path_buf(),
+        team.to_string(),
+        repo_scope.to_string(),
+        "atm".to_string(),
+    );
+    let request_id = new_gh_info_request_id();
+    let call_id = new_gh_execution_call_id();
+    emit_gh_info_requested(&observer_ctx, &request_id, "gh_api_rate_limit", None, None);
+    if let Some(cached_rate_limit) = team_records
+        .iter()
+        .filter_map(|record| record.rate_limit.as_ref().map(|_| record))
+        .max_by_key(|record| record.updated_at.clone())
+    {
+        emit_gh_info_served_from_cache(
+            &observer_ctx,
+            &request_id,
+            "gh_api_rate_limit",
+            gh_repo_state_cache_age_secs(cached_rate_limit),
+            None,
+            None,
+        );
+    }
+    let output = match run_attributed_gh_command_with_ids(
+        &observer_ctx,
+        "gh_api_rate_limit",
+        &["api", "rate_limit"],
+        None,
+        None,
+        request_id.clone(),
+        call_id.clone(),
+    ) {
+        Ok(output) => {
+            emit_gh_info_live_refresh(
+                &observer_ctx,
+                &request_id,
+                "gh_api_rate_limit",
+                &call_id,
+                None,
+                None,
+            );
+            output
+        }
+        Err(err) => {
+            emit_gh_info_denied(
+                &observer_ctx,
+                &request_id,
+                "gh_api_rate_limit",
+                &err.to_string(),
+                None,
+                None,
+            );
+            return Err(err).context("gh api rate_limit failed via attributed provider path");
+        }
+    };
+
+    let live: GhRateLimitResponse =
+        serde_json::from_str(&output).context("failed to parse gh api rate_limit response")?;
+    let live_reset_at = live
+        .resources
+        .core
+        .reset
+        .and_then(|epoch| DateTime::<Utc>::from_timestamp(epoch, 0))
+        .map(|ts| ts.to_rfc3339());
+    let _ = update_gh_repo_state_rate_limit(
+        home_dir,
+        team,
+        repo_scope,
+        RateLimitUpdate {
+            runtime: "atm".to_string(),
+            remaining: live.resources.core.remaining,
+            limit: live.resources.core.limit,
+            reset_at: live_reset_at.clone(),
+            source: "atm_doctor",
+        },
+    );
+    let cached_used_in_window: u64 = team_records
+        .iter()
+        .map(|record| record.budget_used_in_window)
+        .sum();
+    let cached_rate_limit = team_records
+        .iter()
+        .filter_map(|record| record.rate_limit.as_ref())
+        .max_by_key(|rate| rate.updated_at.clone());
+    let consumed_live = live
+        .resources
+        .core
+        .limit
+        .saturating_sub(live.resources.core.remaining);
+    Ok(Some(GhRateLimitAudit {
+        live_remaining: live.resources.core.remaining,
+        live_limit: live.resources.core.limit,
+        live_reset_at,
+        cached_used_in_window,
+        repos_observed: team_records.len(),
+        cached_rate_limit_remaining: cached_rate_limit.map(|rate| rate.remaining),
+        cached_rate_limit_limit: cached_rate_limit.map(|rate| rate.limit),
+        delta_consumed_vs_cached: consumed_live as i64 - cached_used_in_window as i64,
+    }))
 }
 
 fn build_member_snapshot(
@@ -605,10 +771,25 @@ fn audit_gemini_command(
     }
 }
 
-fn check_hook_audit(home_dir: &Path) -> Vec<Finding> {
+fn selected_claude_hook_root(home_dir: &Path, current_dir: &Path) -> (PathBuf, bool) {
+    let local_root = current_dir.join(".claude");
+    let global_root = claude_root_dir_for(home_dir);
+    if local_root != global_root && local_root.join("settings.json").exists() {
+        (local_root, true)
+    } else {
+        (global_root, false)
+    }
+}
+
+fn check_hook_audit(home_dir: &Path, current_dir: &Path) -> Vec<Finding> {
     let mut findings = Vec::new();
-    let claude_root = claude_root_dir_for(home_dir);
+    let (claude_root, local_claude_install) = selected_claude_hook_root(home_dir, current_dir);
     let claude_scripts_dir = claude_root.join("scripts");
+    let claude_command_scripts_dir: Option<&Path> = if local_claude_install {
+        None
+    } else {
+        Some(claude_scripts_dir.as_path())
+    };
 
     findings.extend(hook_script_findings(
         &claude_scripts_dir,
@@ -637,56 +818,56 @@ fn check_hook_audit(home_dir: &Path) -> Vec<Finding> {
                         hooks,
                         "SessionStart",
                         "SessionStart",
-                        &session_start_cmd(Some(&claude_scripts_dir)),
+                        &session_start_cmd(claude_command_scripts_dir),
                     );
                     audit_claude_command(
                         &mut findings,
                         hooks,
                         "SessionEnd",
                         "SessionEnd",
-                        &session_end_cmd(Some(&claude_scripts_dir)),
+                        &session_end_cmd(claude_command_scripts_dir),
                     );
                     audit_claude_command(
                         &mut findings,
                         hooks,
                         "PermissionRequest",
                         "PermissionRequest",
-                        &permission_request_cmd(Some(&claude_scripts_dir)),
+                        &permission_request_cmd(claude_command_scripts_dir),
                     );
                     audit_claude_command(
                         &mut findings,
                         hooks,
                         "Stop",
                         "Stop",
-                        &stop_cmd(Some(&claude_scripts_dir)),
+                        &stop_cmd(claude_command_scripts_dir),
                     );
                     audit_claude_command(
                         &mut findings,
                         hooks,
                         "Notification",
                         "Notification(idle_prompt)",
-                        &notification_idle_prompt_cmd(Some(&claude_scripts_dir)),
+                        &notification_idle_prompt_cmd(claude_command_scripts_dir),
                     );
                     audit_claude_command(
                         &mut findings,
                         hooks,
                         "PreToolUse",
                         "PreToolUse(Bash)",
-                        &pre_tool_use_bash_cmd(Some(&claude_scripts_dir)),
+                        &pre_tool_use_bash_cmd(claude_command_scripts_dir),
                     );
                     audit_claude_command(
                         &mut findings,
                         hooks,
                         "PreToolUse",
                         "PreToolUse(Task)",
-                        &pre_tool_use_task_cmd(Some(&claude_scripts_dir)),
+                        &pre_tool_use_task_cmd(claude_command_scripts_dir),
                     );
                     audit_claude_command(
                         &mut findings,
                         hooks,
                         "PostToolUse",
                         "PostToolUse(Bash)",
-                        &post_tool_use_bash_cmd(Some(&claude_scripts_dir)),
+                        &post_tool_use_bash_cmd(claude_command_scripts_dir),
                     );
                 } else {
                     findings.push(finding(
@@ -723,19 +904,15 @@ fn check_hook_audit(home_dir: &Path) -> Vec<Finding> {
 
     let codex_config_path = home_dir.join(".codex/config.toml");
     if runtime_detected("codex", &codex_config_path) {
-        let expected_notify = vec![
-            toml::Value::String("python3".to_string()),
-            toml::Value::String(
-                claude_scripts_dir
-                    .join("atm-hook-relay.py")
-                    .to_string_lossy()
-                    .to_string(),
-            ),
-        ];
+        let expected_notify_script = claude_scripts_dir
+            .join("atm-hook-relay.py")
+            .to_string_lossy()
+            .replace('\\', "/");
         match fs::read_to_string(&codex_config_path) {
             Ok(raw) => match raw.parse::<toml::Table>() {
                 Ok(table) => match table.get("notify").and_then(|value| value.as_array()) {
-                    Some(array) if array == &expected_notify => {}
+                    Some(array)
+                        if codex_notify_matches_expected(array, &expected_notify_script) => {}
                     Some(_) => findings.push(finding(
                         Severity::Warn,
                         "hook_audit",
@@ -858,6 +1035,19 @@ fn check_hook_audit(home_dir: &Path) -> Vec<Finding> {
     findings
 }
 
+fn codex_notify_matches_expected(array: &[toml::Value], expected_script: &str) -> bool {
+    if array.len() != 2 {
+        return false;
+    }
+
+    let python = array[0].as_str().map(str::trim).unwrap_or_default();
+    let script = array[1].as_str().map(str::trim).unwrap_or_default();
+    let python_name_matches =
+        Path::new(python).file_name().and_then(|name| name.to_str()) == Some("python3");
+
+    python_name_matches && script.replace('\\', "/") == expected_script
+}
+
 fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
     let mut findings = Vec::new();
 
@@ -929,7 +1119,41 @@ fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
         ));
     }
 
+    findings.extend(check_competing_daemon_touch(home_dir, &pid_path));
+
     findings
+}
+
+fn check_competing_daemon_touch(home_dir: &Path, pid_path: &Path) -> Vec<Finding> {
+    let touch_path = daemon_touch_path_for(home_dir);
+    let Ok(raw) = fs::read_to_string(&touch_path) else {
+        return Vec::new();
+    };
+    let Ok(snapshot) = serde_json::from_str::<DaemonTouchSnapshot>(&raw) else {
+        return Vec::new();
+    };
+    let current_pid = fs::read_to_string(pid_path)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+        .or_else(|| read_daemon_lock_metadata(home_dir).map(|meta| meta.pid));
+
+    snapshot
+        .into_iter()
+        .filter_map(|(team, entry)| {
+            if current_pid.is_some_and(|pid| pid == entry.pid) || !is_pid_alive(entry.pid) {
+                return None;
+            }
+            Some(finding(
+                Severity::Critical,
+                "daemon_health",
+                "COMPETING_DAEMON_DETECTED",
+                format!(
+                    "Team '{}' daemon-touch sidecar points at live foreign pid={} (started_at={}, binary={})",
+                    team, entry.pid, entry.started_at, entry.binary
+                ),
+            ))
+        })
+        .collect()
 }
 
 fn check_plugin_init_failures(home_dir: &Path) -> Vec<Finding> {
@@ -956,6 +1180,47 @@ fn check_plugin_init_failures(home_dir: &Path) -> Vec<Finding> {
     findings
 }
 
+fn check_daemon_ownership_mismatch(home_dir: &Path) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let Some(metadata) = read_daemon_lock_metadata(home_dir) else {
+        return findings;
+    };
+
+    let expected_home = fs::canonicalize(home_dir)
+        .unwrap_or_else(|_| home_dir.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    if !metadata.owner.home_scope.trim().is_empty() && metadata.owner.home_scope != expected_home {
+        findings.push(finding(
+            Severity::Warn,
+            "daemon_health",
+            "DAEMON_OWNERSHIP_MISMATCH",
+            format!(
+                "Daemon ownership mismatch: lock metadata home_scope='{}' expected='{}'",
+                metadata.owner.home_scope, expected_home
+            ),
+        ));
+    }
+
+    let pid_path = home_dir.join(".atm/daemon/atm-daemon.pid");
+    if let Ok(raw_pid) = fs::read_to_string(&pid_path)
+        && let Ok(pid_from_file) = raw_pid.trim().parse::<u32>()
+        && pid_from_file != metadata.pid
+    {
+        findings.push(finding(
+            Severity::Warn,
+            "daemon_health",
+            "DAEMON_OWNERSHIP_MISMATCH",
+            format!(
+                "Daemon ownership mismatch: pid file ({pid_from_file}) != lock metadata ({})",
+                metadata.pid
+            ),
+        ));
+    }
+
+    findings
+}
+
 fn read_daemon_status(home_dir: &Path) -> DaemonStatusSnapshot {
     let status_path = daemon_status_path_for(home_dir);
     let Ok(raw) = fs::read_to_string(&status_path) else {
@@ -970,6 +1235,13 @@ fn read_daemon_status(home_dir: &Path) -> DaemonStatusSnapshot {
         plugins: Vec::new(),
         logging: LoggingHealthSnapshot::default(),
     })
+}
+
+fn read_daemon_status_uptime_secs(home_dir: &Path) -> Option<u64> {
+    let status_path = daemon_status_path_for(home_dir);
+    let raw = fs::read_to_string(status_path).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+    value.get("uptime_secs").and_then(serde_json::Value::as_u64)
 }
 
 fn read_active_install_milestone() -> Option<String> {
@@ -997,9 +1269,8 @@ where
     F: Fn(&str) -> anyhow::Result<Option<Vec<CanonicalMemberState>>>,
 {
     let mut findings = Vec::new();
-    let (daemon_states, query_unreachable, unreachable_reason): (
+    let (daemon_states, unreachable_reason): (
         HashMap<String, CanonicalMemberState>,
-        bool,
         Option<String>,
     ) = match query_states(team) {
         Ok(Some(states)) => (
@@ -1007,19 +1278,16 @@ where
                 .into_iter()
                 .map(|s| (s.agent.clone(), s))
                 .collect::<HashMap<_, _>>(),
-            false,
             None,
         ),
         Ok(None) => (
             HashMap::new(),
-            true,
             Some(format!(
                 "Daemon team-scoped state query unavailable for team '{team}'"
             )),
         ),
         Err(err) => (
             HashMap::new(),
-            true,
             Some(format!(
                 "Daemon team-scoped state query failed for team '{team}': {err}"
             )),
@@ -1095,24 +1363,6 @@ where
                     ),
                 ))
             }
-            _ if member.is_active == Some(true) && query_unreachable => findings.push(finding(
-                Severity::Warn,
-                "pid_session_reconciliation",
-                "ACTIVE_WITHOUT_SESSION",
-                format!(
-                    "Member '{}' has activity hint isActive=true but daemon state query unavailable",
-                    member.name
-                ),
-            )),
-            _ if member.is_active == Some(true) && daemon_state.is_none() => findings.push(finding(
-                Severity::Warn,
-                "pid_session_reconciliation",
-                "ACTIVE_WITHOUT_SESSION",
-                format!(
-                    "Member '{}' has activity hint isActive=true but no daemon state record found",
-                    member.name
-                ),
-            )),
             _ => {}
         }
     }
@@ -1584,6 +1834,9 @@ fn render_human(report: &DoctorReport) -> String {
     if let Some(version) = &report.summary.daemon_version {
         out.push_str(&format!("Daemon version: {version}\n"));
     }
+    if let Some(uptime_secs) = report.summary.uptime_secs {
+        out.push_str(&format!("Daemon uptime: {uptime_secs}s\n"));
+    }
     if let Some(milestone) = &report.summary.install_milestone {
         out.push_str(&format!("Install milestone: {milestone}\n"));
     }
@@ -1654,6 +1907,32 @@ fn render_human(report: &DoctorReport) -> String {
             ));
         }
         out.push('\n');
+    }
+
+    if let Some(audit) = &report.gh_rate_limit_audit {
+        out.push_str("GitHub rate audit:\n");
+        out.push_str(&format!(
+            "  live_remaining: {}/{}\n",
+            audit.live_remaining, audit.live_limit
+        ));
+        out.push_str(&format!(
+            "  cached_used_in_window: {}\n",
+            audit.cached_used_in_window
+        ));
+        out.push_str(&format!("  repos_observed: {}\n", audit.repos_observed));
+        if let (Some(remaining), Some(limit)) = (
+            audit.cached_rate_limit_remaining,
+            audit.cached_rate_limit_limit,
+        ) {
+            out.push_str(&format!("  cached_rate_limit: {remaining}/{limit}\n"));
+        }
+        if let Some(reset_at) = &audit.live_reset_at {
+            out.push_str(&format!("  live_reset_at: {reset_at}\n"));
+        }
+        out.push_str(&format!(
+            "  delta_consumed_vs_cached: {}\n\n",
+            audit.delta_consumed_vs_cached
+        ));
     }
 
     if !report.member_snapshot.is_empty() {
@@ -2327,7 +2606,7 @@ mod tests {
     }
 
     #[test]
-    fn check_pid_session_reconciliation_query_error_maps_to_active_without_session() {
+    fn check_pid_session_reconciliation_query_error_only_reports_daemon_unreachable() {
         let cfg = TeamConfig {
             name: "atm-dev".to_string(),
             description: None,
@@ -2341,14 +2620,12 @@ mod tests {
         let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
             Err(anyhow::anyhow!("daemon unavailable"))
         });
-        assert!(findings.iter().any(|f| {
-            f.code == "ACTIVE_WITHOUT_SESSION" && f.message.contains("query unavailable")
-        }));
         assert!(findings.iter().any(|f| f.code == "DAEMON_UNREACHABLE"));
+        assert!(!findings.iter().any(|f| f.code == "ACTIVE_WITHOUT_SESSION"));
     }
 
     #[test]
-    fn check_pid_session_reconciliation_query_none_maps_to_daemon_unreachable() {
+    fn check_pid_session_reconciliation_query_none_only_reports_daemon_unreachable() {
         let cfg = TeamConfig {
             name: "atm-dev".to_string(),
             description: None,
@@ -2366,7 +2643,7 @@ mod tests {
                 .iter()
                 .any(|f| f.code == "DAEMON_UNREACHABLE" && f.message.contains("unavailable"))
         );
-        assert!(findings.iter().any(|f| f.code == "ACTIVE_WITHOUT_SESSION"));
+        assert!(!findings.iter().any(|f| f.code == "ACTIVE_WITHOUT_SESSION"));
     }
 
     #[test]
@@ -2641,13 +2918,87 @@ mod tests {
     }
 
     #[test]
+    fn read_daemon_status_uptime_secs_reads_existing_status_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon_dir = tmp.path().join(".atm/daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+        fs::write(
+            daemon_dir.join("status.json"),
+            r#"{"timestamp":"2026-03-02T00:00:00Z","pid":42,"version":"0.44.1","uptime_secs":123,"plugins":[],"teams":[]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(read_daemon_status_uptime_secs(tmp.path()), Some(123));
+    }
+
+    #[test]
+    fn check_daemon_ownership_mismatch_reports_home_scope_drift() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon_dir = tmp.path().join(".atm/daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+        fs::write(
+            daemon_dir.join("daemon.lock.meta.json"),
+            r#"{
+  "pid": 42,
+  "runtime_kind": "dev",
+  "build_profile": "release",
+  "executable_path": "/tmp/atm-daemon",
+  "home_scope": "/tmp/other-home",
+  "version": "0.44.1",
+  "written_at": "2026-03-02T00:00:00Z"
+}"#,
+        )
+        .unwrap();
+
+        let findings = check_daemon_ownership_mismatch(tmp.path());
+        assert!(
+            findings.iter().any(|f| {
+                f.code == "DAEMON_OWNERSHIP_MISMATCH" && f.message.contains("/tmp/other-home")
+            }),
+            "expected home-scope mismatch finding, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn check_daemon_health_reports_competing_live_pid_from_touch_sidecar() {
+        let _guard = EnvGuard::isolate(OVERRIDE_ENV_KEYS);
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon_dir = tmp.path().join(".atm/daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+        fs::write(daemon_dir.join("atm-daemon.pid"), "999999\n").unwrap();
+        fs::write(
+            daemon_dir.join("daemon-touch.json"),
+            format!(
+                r#"{{
+  "atm-dev": {{
+    "pid": {},
+    "started_at": "2026-03-16T00:00:00Z",
+    "binary": "/tmp/foreign-atm-daemon"
+  }}
+}}"#,
+                std::process::id()
+            ),
+        )
+        .unwrap();
+        unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+
+        let findings = check_daemon_health(tmp.path());
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.code == "COMPETING_DAEMON_DETECTED")
+        );
+    }
+
+    #[test]
     #[serial]
     fn check_hook_audit_reports_missing_claude_settings_and_scripts() {
         let _guard = EnvGuard::isolate(&["ATM_HOME", "ATM_TEAM", "ATM_IDENTITY", "PATH"]);
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("PATH", "") };
 
-        let findings = check_hook_audit(tmp.path());
+        let findings = check_hook_audit(tmp.path(), tmp.path());
         assert!(findings.iter().any(|f| f.code == "HOOK_SCRIPT_MISSING"));
         assert!(findings.iter().any(|f| f.code == "HOOK_CONFIG_MISSING"));
     }
@@ -2716,10 +3067,110 @@ mod tests {
         )
         .unwrap();
 
-        let findings = check_hook_audit(tmp.path());
+        let findings = check_hook_audit(tmp.path(), tmp.path());
         assert!(
             findings.is_empty(),
             "expected clean hook audit, got: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn check_hook_audit_accepts_project_local_claude_hooks_under_redirected_home() {
+        let _guard = EnvGuard::isolate(&["ATM_HOME", "ATM_TEAM", "ATM_IDENTITY", "PATH"]);
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("PATH", "") };
+
+        let claude_root = project.path().join(".claude");
+        let scripts_dir = claude_root.join("scripts");
+        fs::create_dir_all(&scripts_dir).unwrap();
+        for script in [
+            "session-start.py",
+            "session-end.py",
+            "permission-request-relay.py",
+            "stop-relay.py",
+            "notification-idle-relay.py",
+            "atm-identity-write.py",
+            "gate-agent-spawns.py",
+            "atm-identity-cleanup.py",
+            "atm-hook-relay.py",
+            "atm_hook_lib.py",
+            "teammate-idle-relay.py",
+        ] {
+            fs::write(scripts_dir.join(script), "#!/usr/bin/env python3\n").unwrap();
+        }
+
+        let settings = serde_json::json!({
+            "hooks": {
+                "SessionStart": [{
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": session_start_cmd(None)}]
+                }],
+                "SessionEnd": [{
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": session_end_cmd(None)}]
+                }],
+                "PermissionRequest": [{
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": permission_request_cmd(None)}]
+                }],
+                "Stop": [{
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": stop_cmd(None)}]
+                }],
+                "Notification": [{
+                    "matcher": "idle_prompt",
+                    "hooks": [{"type": "command", "command": notification_idle_prompt_cmd(None)}]
+                }],
+                "PreToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": pre_tool_use_bash_cmd(None)}]},
+                    {"matcher": "Task", "hooks": [{"type": "command", "command": pre_tool_use_task_cmd(None)}]}
+                ],
+                "PostToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": post_tool_use_bash_cmd(None)}]}
+                ]
+            }
+        });
+        fs::write(
+            claude_root.join("settings.json"),
+            serde_json::to_vec_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+
+        let codex_root = home.path().join(".codex");
+        fs::create_dir_all(&codex_root).unwrap();
+        let relay_path_toml = scripts_dir
+            .join("atm-hook-relay.py")
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        fs::write(
+            codex_root.join("config.toml"),
+            format!("notify = [\"python3\", \"{}\"]\n", relay_path_toml),
+        )
+        .unwrap();
+
+        let gemini_root = home.path().join(".gemini");
+        fs::create_dir_all(&gemini_root).unwrap();
+        let gemini_settings = serde_json::json!({
+            "hooks": {
+                "SessionStart": [{"command": format!("python3 \"{}\"", scripts_dir.join("session-start.py").display())}],
+                "SessionEnd": [{"command": format!("python3 \"{}\"", scripts_dir.join("session-end.py").display())}],
+                "AfterAgent": [{"command": format!("python3 \"{}\"", scripts_dir.join("teammate-idle-relay.py").display())}]
+            }
+        });
+        fs::write(
+            gemini_root.join("settings.json"),
+            serde_json::to_vec_pretty(&gemini_settings).unwrap(),
+        )
+        .unwrap();
+
+        let findings = check_hook_audit(home.path(), project.path());
+        assert!(
+            findings.is_empty(),
+            "expected clean local hook audit, got: {:?}",
             findings
         );
     }
@@ -2775,6 +3226,7 @@ mod tests {
                     warn: 1,
                     info: 0,
                 },
+                uptime_secs: Some(42),
                 daemon_version: Some("0.44.1".to_string()),
                 install_milestone: Some("0.44.2".to_string()),
             },
@@ -2792,6 +3244,7 @@ mod tests {
                 elapsed_secs: 60,
             },
             env_overrides: EnvOverrides::default(),
+            gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
             members: vec![MemberSnapshot {
                 name: "team-lead".to_string(),
@@ -2814,6 +3267,7 @@ mod tests {
         };
         let rendered = render_human(&report);
         assert!(rendered.contains("Model"));
+        assert!(rendered.contains("Daemon uptime: 42s"));
         let members_idx = rendered.find("Members:").unwrap();
         let findings_idx = rendered.find("Findings (ordered by severity):").unwrap();
         assert!(members_idx < findings_idx);
@@ -2870,6 +3324,7 @@ mod tests {
                     warn: 0,
                     info: 0,
                 },
+                uptime_secs: Some(42),
                 daemon_version: Some("0.44.1".to_string()),
                 install_milestone: Some("0.44.2".to_string()),
             },
@@ -2895,6 +3350,7 @@ mod tests {
                     value: "arch-ctm".to_string(),
                 }),
             },
+            gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
             members: vec![MemberSnapshot {
                 name: "arch-ctm".to_string(),
@@ -2932,6 +3388,10 @@ mod tests {
         assert_eq!(
             value["log_window"]["elapsed_secs"],
             serde_json::Value::Number(60u64.into())
+        );
+        assert_eq!(
+            value["summary"]["uptime_secs"],
+            serde_json::Value::Number(42u64.into())
         );
         assert!(
             value.get("logging").is_none(),
@@ -2998,6 +3458,7 @@ mod tests {
                     warn: 0,
                     info: 0,
                 },
+                uptime_secs: None,
                 daemon_version: Some("0.44.1".to_string()),
                 install_milestone: Some("0.44.2".to_string()),
             },
@@ -3023,6 +3484,7 @@ mod tests {
                     value: "arch-ctm".to_string(),
                 }),
             },
+            gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
             members: vec![],
             member_snapshot: vec![],
@@ -3048,6 +3510,7 @@ mod tests {
                     warn: 0,
                     info: 0,
                 },
+                uptime_secs: None,
                 daemon_version: Some("0.44.1".to_string()),
                 install_milestone: Some("0.44.2".to_string()),
             },
@@ -3060,6 +3523,7 @@ mod tests {
                 elapsed_secs: 60,
             },
             env_overrides: EnvOverrides::default(),
+            gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
             members: vec![MemberSnapshot {
                 name: "arch-ctm".to_string(),
@@ -3107,6 +3571,7 @@ mod tests {
                     warn: 0,
                     info: 0,
                 },
+                uptime_secs: None,
                 daemon_version: Some("0.44.5".to_string()),
                 install_milestone: Some("0.44.5-dev.1".to_string()),
             },
@@ -3119,6 +3584,7 @@ mod tests {
                 elapsed_secs: 60,
             },
             env_overrides: EnvOverrides::default(),
+            gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
             members: vec![
                 MemberSnapshot {

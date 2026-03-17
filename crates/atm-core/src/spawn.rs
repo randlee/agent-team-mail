@@ -1,6 +1,7 @@
 //! Shared spawn UX helpers.
 
 use anyhow::{Result, anyhow};
+use std::path::Path;
 
 /// Spawn pane placement mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +21,56 @@ impl PaneMode {
     }
 }
 
+/// Color and model extracted from a `.claude/agents/<name>.md` frontmatter block.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentFrontmatter {
+    pub color: Option<String>,
+    pub model: Option<String>,
+}
+
+/// Read `color` and `model` from `.claude/agents/<agent_name>.md` frontmatter.
+///
+/// Returns `AgentFrontmatter::default()` (all `None`) if the file is absent or has no
+/// recognisable frontmatter — callers should treat missing values as "no preference".
+pub fn read_agent_frontmatter(home_dir: &Path, agent_name: &str) -> AgentFrontmatter {
+    let path = home_dir
+        .join(".claude")
+        .join("agents")
+        .join(format!("{agent_name}.md"));
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return AgentFrontmatter::default();
+    };
+    parse_agent_frontmatter(&text)
+}
+
+/// Parse `color` and `model` from a YAML frontmatter block (lines between `---` delimiters).
+fn parse_agent_frontmatter(text: &str) -> AgentFrontmatter {
+    let mut lines = text.lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return AgentFrontmatter::default();
+    }
+    let mut color = None;
+    let mut model = None;
+    for line in lines {
+        if line.trim() == "---" {
+            break;
+        }
+        if let Some((key, val)) = line.split_once(':') {
+            let key = key.trim();
+            let val = val.trim().to_string();
+            if val.is_empty() {
+                continue;
+            }
+            match key {
+                "color" => color = Some(val),
+                "model" => model = Some(val),
+                _ => {}
+            }
+        }
+    }
+    AgentFrontmatter { color, model }
+}
+
 /// Mutable spawn review state used by the interactive panel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnDraft {
@@ -29,6 +80,7 @@ pub struct SpawnDraft {
     pub agent_type: String,
     pub pane_mode: PaneMode,
     pub worktree: Option<String>,
+    pub color: Option<String>,
 }
 
 /// Parse `pane-mode` into the canonical enum.
@@ -73,7 +125,14 @@ pub fn apply_edits(draft: &mut SpawnDraft, edits: &str) -> Result<()> {
                     draft.worktree = Some(value.to_string());
                 }
             }
-            _ => return Err(anyhow!("unknown field index '{idx}'. valid fields: 1..6")),
+            7 => {
+                if value.is_empty() || value.eq_ignore_ascii_case("(none)") {
+                    draft.color = None;
+                } else {
+                    draft.color = Some(value.to_string());
+                }
+            }
+            _ => return Err(anyhow!("unknown field index '{idx}'. valid fields: 1..7")),
         }
     }
     Ok(())
@@ -91,7 +150,30 @@ mod tests {
             agent_type: "general-purpose".to_string(),
             pane_mode: PaneMode::NewPane,
             worktree: None,
+            color: None,
         }
+    }
+
+    #[test]
+    fn test_parse_agent_frontmatter_extracts_color_and_model() {
+        let text = "---\nname: atm-monitor\nmodel: haiku\ncolor: orange\n---\nbody";
+        let fm = parse_agent_frontmatter(text);
+        assert_eq!(fm.color.as_deref(), Some("orange"));
+        assert_eq!(fm.model.as_deref(), Some("haiku"));
+    }
+
+    #[test]
+    fn test_parse_agent_frontmatter_no_frontmatter_returns_default() {
+        let fm = parse_agent_frontmatter("just body text");
+        assert_eq!(fm, AgentFrontmatter::default());
+    }
+
+    #[test]
+    fn test_parse_agent_frontmatter_missing_fields_returns_none() {
+        let text = "---\nname: arch-ctm\ndescription: something\n---\nbody";
+        let fm = parse_agent_frontmatter(text);
+        assert!(fm.color.is_none());
+        assert!(fm.model.is_none());
     }
 
     #[test]

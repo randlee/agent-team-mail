@@ -17,7 +17,7 @@
 //! `Arc<Mutex<SessionRegistry>>` before sharing between tasks.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -367,6 +367,36 @@ impl SessionRegistry {
         keys.into_iter()
             .filter_map(|k| self.sessions.get(&k).cloned())
             .collect()
+    }
+
+    /// On daemon startup, refresh liveness for every tracked team and remove
+    /// any records whose PID has already converged to dead.
+    pub fn prune_pid_dead_sessions_on_startup(&mut self) -> usize {
+        let teams: BTreeSet<String> = self
+            .sessions
+            .values()
+            .map(|record| record.team.clone())
+            .collect();
+        let mut keys_to_remove = Vec::new();
+        for team in teams {
+            for session in self.sessions_for_team_with_liveness(&team) {
+                if session.state == SessionState::Dead {
+                    keys_to_remove.push(make_key(&session.team, &session.agent_name));
+                }
+            }
+        }
+
+        let mut removed = 0usize;
+        for key in keys_to_remove {
+            if let Some(record) = self.sessions.remove(&key) {
+                self.liveness_cache.remove(&record.process_id);
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            self.persist_best_effort();
+        }
+        removed
     }
 
     /// Return all tracked agent names for a team.
@@ -933,6 +963,26 @@ mod tests {
             SessionState::Dead,
             "expired cache entry must trigger re-probe and dead convergence"
         );
+    }
+
+    #[test]
+    fn test_startup_prune_removes_dead_sessions_after_liveness_refresh() {
+        let mut reg = SessionRegistry::new();
+        let live_pid = std::process::id();
+        let dead_pid = i32::MAX as u32;
+        reg.upsert_for_team("atm-dev", "team-lead", "sess-live", live_pid);
+        reg.upsert_for_team("atm-dev", "arch-ctm", "sess-dead", dead_pid);
+
+        if let Some(entry) = reg.liveness_cache.get_mut(&dead_pid) {
+            entry.checked_at = chrono::Utc::now()
+                - chrono::Duration::from_std(SessionRegistry::PID_LIVENESS_TTL).unwrap()
+                - chrono::Duration::milliseconds(10);
+        }
+
+        let removed = reg.prune_pid_dead_sessions_on_startup();
+        assert_eq!(removed, 1, "startup prune must remove only dead records");
+        assert!(reg.query_for_team("atm-dev", "arch-ctm").is_none());
+        assert!(reg.query_for_team("atm-dev", "team-lead").is_some());
     }
 
     /// Liveness check: the current process must be alive.

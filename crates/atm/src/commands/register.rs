@@ -12,15 +12,13 @@
 //! with `ATM_SESSION_ID` as the explicit override.
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
-use agent_team_mail_core::io::atomic::atomic_swap;
 use agent_team_mail_core::io::inbox::inbox_append;
-use agent_team_mail_core::io::lock::acquire_lock;
-use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
+use agent_team_mail_core::schema::InboxMessage;
+use agent_team_mail_core::team_config_store::TeamConfigStore;
 use anyhow::Result;
 use chrono::Utc;
 use clap::Args;
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::PathBuf;
 use tracing::warn;
 use uuid::Uuid;
@@ -95,9 +93,15 @@ fn register_team_lead(
         );
     }
 
+    let store = TeamConfigStore::open(
+        config_path
+            .parent()
+            .expect("config_path must have a parent directory"),
+    );
+
     // Check liveness of existing session if not forced.
     if !force {
-        let existing: TeamConfig = serde_json::from_str(&std::fs::read_to_string(config_path)?)?;
+        let existing = store.read()?;
         if !existing.lead_session_id.is_empty() && existing.lead_session_id == session_id {
             println!(
                 "Already registered as team-lead for team '{}'. Session: {}",
@@ -136,21 +140,13 @@ fn register_team_lead(
         }
     }
 
-    // Atomically update config.
-    {
-        let lock_path = config_path.with_extension("lock");
-        let _lock = acquire_lock(&lock_path, 5)
-            .map_err(|e| anyhow::anyhow!("Failed to acquire lock for team config: {e}"))?;
-
-        let mut team_config: TeamConfig =
-            serde_json::from_str(&std::fs::read_to_string(config_path)?)?;
+    store.update(|mut team_config| {
         team_config.lead_session_id = session_id.to_string();
-
-        write_team_config(config_path, &team_config)?;
-    }
+        Ok(Some(team_config))
+    })?;
 
     // Reload and notify members.
-    let team_config: TeamConfig = serde_json::from_str(&std::fs::read_to_string(config_path)?)?;
+    let team_config = store.read()?;
 
     let team_dir = config_path
         .parent()
@@ -198,7 +194,12 @@ fn register_teammate(
     session_id: &str,
 ) -> Result<()> {
     // Verify member exists in team config.
-    let existing: TeamConfig = serde_json::from_str(&std::fs::read_to_string(config_path)?)?;
+    let store = TeamConfigStore::open(
+        config_path
+            .parent()
+            .expect("config_path must have a parent directory"),
+    );
+    let existing = store.read()?;
 
     if !existing.members.iter().any(|m| m.name == name) {
         anyhow::bail!(
@@ -220,15 +221,7 @@ fn register_teammate(
         );
     }
 
-    // Atomically update the member's session ID.
-    {
-        let lock_path = config_path.with_extension("lock");
-        let _lock = acquire_lock(&lock_path, 5)
-            .map_err(|e| anyhow::anyhow!("Failed to acquire lock for team config: {e}"))?;
-
-        let mut team_config: TeamConfig =
-            serde_json::from_str(&std::fs::read_to_string(config_path)?)?;
-
+    store.update(|mut team_config| {
         let member = team_config
             .members
             .iter_mut()
@@ -237,25 +230,12 @@ fn register_teammate(
         member.session_id = Some(session_id.to_string());
         let now_ms = chrono::Utc::now().timestamp_millis() as u64;
         member.last_active = Some(now_ms);
-
-        write_team_config(config_path, &team_config)?;
-    }
+        Ok(Some(team_config))
+    })?;
 
     println!(
         "Registered as '{}' in team '{}'. Session: {}",
         name, team, session_id
     );
-    Ok(())
-}
-
-/// Write team config atomically using a temp file + fsync + swap.
-fn write_team_config(config_path: &std::path::Path, config: &TeamConfig) -> Result<()> {
-    let serialized = serde_json::to_string_pretty(config)?;
-    let tmp_path = config_path.with_extension("tmp");
-    let mut file = std::fs::File::create(&tmp_path)?;
-    file.write_all(serialized.as_bytes())?;
-    file.sync_all()?;
-    drop(file);
-    atomic_swap(config_path, &tmp_path)?;
     Ok(())
 }
