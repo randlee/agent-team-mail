@@ -19,13 +19,33 @@
 
 - `sc-observability` (library): event model, validators, redaction, sink traits,
   health evaluator, default init path.
-- planned dedicated OTel transport adapter crate: owns OTLP/collector transport,
-  auth/TLS, batching, retry, and SDK dependency integration.
+- `sc-observability-otlp` (planned dedicated OTel transport adapter crate):
+  owns OTLP/collector transport, auth/TLS, batching, retry, and SDK dependency
+  integration.
 - Producers: `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `sc-compose`,
   `sc-composer`, `scmux` (follow-on, not in Phase AV scope), `schook`
   (follow-on, not in Phase AV scope).
 - Daemon writer path: `atm-daemon` canonical sink for ATM producer traffic.
 - Mandatory OTel exporter path for in-scope tools (non-optional AV rollout).
+
+## 2.1 In-Repo vs Follow-On Scope
+
+Phase AV implementation in this repository covers:
+- `atm`
+- `atm-daemon`
+- `atm-tui`
+- `atm-agent-mcp`
+- `sc-compose`
+- `sc-composer`
+- `sc-observability`
+- `sc-observability-otlp`
+
+Phase AV does not implement collector rollout for:
+- `scmux`
+- `schook`
+
+Those remain follow-on work in their own repositories. Their future producer
+status does not expand this repository's AV implementation scope.
 
 ## 3. Data Flow
 
@@ -118,6 +138,10 @@ logging remains continuously available.
   - auth/TLS and headers
   - batching, flush, and remote retry policy
   - stdout/debug export modes
+- Canonical transport configuration is shared and centralized. The contract
+  surface includes endpoint, protocol, auth material, TLS configuration,
+  export enablement, stdout/debug export controls, batching/flush, and
+  retry/backoff. Per-binary config drift is forbidden.
 - Application and daemon crates call the generic observability facade only.
   They must not import collector SDK crates or construct OTLP exporters
   themselves.
@@ -125,6 +149,9 @@ logging remains continuously available.
   Entry-point wiring is limited to the small set of binaries/modules that
   initialize process-wide observability. Internal feature modules, helpers, and
   libraries must depend on the generic facade instead.
+- `scripts/ci/observability_boundary_check.sh` is the dedicated enforcement
+  gate for this rule. CI must run it before AV.2 begins and keep it active
+  afterward.
 - Canonical enforcement reference: `docs/arch-boundary.md`
   ("ARCH-BOUNDARY-002 Observability Import Boundary").
 - The partition goal for Phase AV is to keep collector-facing code in one

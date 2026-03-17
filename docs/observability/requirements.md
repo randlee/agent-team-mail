@@ -255,12 +255,41 @@ Lifecycle and hook coverage:
 - Phase AV must define one canonical transport config surface: endpoint,
   protocol, auth/TLS material, export enablement, and debug exporter controls.
   Per-binary config drift is forbidden.
+- The same canonical config surface must define batching/flush and retry/backoff
+  controls so transport policy is not reimplemented per binary.
 - High-value in-repo telemetry required in Phase AV includes:
   - CLI request/response traces for `atm read`, `atm send`, and daemon commands
   - daemon request, plugin dispatch, and lifecycle spans
   - GitHub firewall/ledger correlation spans and metrics
   - worker/session lifecycle metrics already represented in local JSONL logs
   - MCP request/session traces within `atm-agent-mcp`
+
+### 9.1 In-Repo Scope Lock
+
+Phase AV implementation scope for this repository is limited to:
+- `atm`
+- `atm-daemon`
+- `atm-tui`
+- `atm-agent-mcp`
+- `sc-compose`
+- `sc-composer`
+- `sc-observability`
+- `sc-observability-otlp`
+
+`scmux` and `schook` are explicit follow-on work in their own repositories.
+They must not be treated as delivered by this repository's AV implementation.
+
+### 9.2 Import Boundary Enforcement
+
+- `scripts/ci/observability_boundary_check.sh` is the canonical CI/review gate
+  for `ARCH-BOUNDARY-002`.
+- The gate must fail on direct `opentelemetry*`, `opentelemetry-otlp`, or
+  `sc-observability-otlp` imports/dependencies outside the approved adapter and
+  entry-point layer.
+- The gate must also fail on direct `sc-observability` imports from modules
+  outside the approved entry-point/facade wiring set.
+- CI must run the observability boundary check before AV.2 begins, and the rule
+  remains mandatory after AV.2 lands.
 
 ## 10. Cross-Tool Integration Requirements
 
