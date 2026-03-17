@@ -2099,6 +2099,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
+    // AU-BYPASS: migrate this raw autostart path to atm-daemon-launch in AU.5.
     // When autostart is disabled, the daemon lifecycle is managed externally.
     // Skip identity validation and restart logic — trust the external daemon as-is.
     if !daemon_autostart_enabled() {

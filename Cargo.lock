@@ -108,6 +108,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-team-mail-daemon-launch"
+version = "0.44.9"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "agent-team-mail-mcp"
 version = "0.44.9"
 dependencies = [
