@@ -8,6 +8,7 @@ version = "0.44.9"
 dependencies = [
  "agent-team-mail-ci-monitor",
  "agent-team-mail-core",
+ "agent-team-mail-daemon",
  "anyhow",
  "assert_cmd",
  "chrono",

@@ -194,6 +194,7 @@ pub fn flush_gh_observability_records() -> Result<(), String> {
         .map_err(|err| format!("wait for gh ledger flush completion: {err}"))
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub fn read_gh_observability_records(home: &Path) -> Result<Vec<GhLedgerRecord>, String> {
     flush_gh_observability_records()?;
     let path = gh_observability_ledger_path(home);

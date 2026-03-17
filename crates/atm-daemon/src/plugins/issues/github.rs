@@ -3,59 +3,90 @@
 use super::provider::IssueProvider;
 use super::types::{Issue, IssueComment, IssueFilter, IssueLabel, IssueState};
 use crate::plugin::PluginError;
+use crate::plugins::ci_monitor::run_attributed_gh_command_with_ids;
+use agent_team_mail_ci_monitor::{GhCliObserverContext, new_gh_call_id, new_gh_request_id};
 use serde::Deserialize;
-use std::process::Command;
+use std::path::PathBuf;
 
 /// GitHub issue provider that uses the `gh` CLI
 #[derive(Debug)]
 pub struct GitHubProvider {
     owner: String,
     repo: String,
+    team: String,
+    home: PathBuf,
+    runtime: String,
 }
 
 impl GitHubProvider {
     /// Create a new GitHub provider for the given owner/repo
     pub fn new(owner: String, repo: String) -> Self {
-        Self { owner, repo }
+        Self::new_with_context(
+            owner,
+            repo,
+            "default".to_string(),
+            agent_team_mail_core::home::get_home_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            "issues-plugin".to_string(),
+        )
+    }
+
+    pub fn new_with_context(
+        owner: String,
+        repo: String,
+        team: String,
+        home: PathBuf,
+        runtime: String,
+    ) -> Self {
+        Self {
+            owner,
+            repo,
+            team,
+            home,
+            runtime,
+        }
+    }
+
+    fn observer_context(&self) -> GhCliObserverContext {
+        GhCliObserverContext::new(
+            self.home.clone(),
+            self.team.clone(),
+            format!("{}/{}", self.owner, self.repo),
+            self.runtime.clone(),
+        )
     }
 
     /// Execute a `gh` command and return stdout
-    async fn run_gh(&self, args: &[&str]) -> Result<String, PluginError> {
-        // NOT_MONITORED_PATH: the issues plugin is outside the gh_monitor /
-        // `atm gh ...` status+budget firewall scope. AS.4 only hardens monitor/status
-        // execution paths; this provider remains an explicit non-monitor exception.
-        // Run gh command in a blocking task
+    async fn run_gh(
+        &self,
+        action: &str,
+        args: &[&str],
+        branch: Option<&str>,
+        reference: Option<&str>,
+    ) -> Result<String, PluginError> {
+        // Delegate to the attributed gh plugin/provider entrypoint so issues
+        // requests participate in request/call IDs and future firewall/budget gates.
         let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let observer_ctx = self.observer_context();
+        let action_owned = action.to_string();
+        let branch_owned = branch.map(str::to_string);
+        let reference_owned = reference.map(str::to_string);
+        let request_id = new_gh_request_id();
+        let call_id = new_gh_call_id();
         tokio::task::spawn_blocking(move || {
-            let output = Command::new("gh").args(&args_owned).output().map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    PluginError::Provider {
-                        message: "gh CLI not found. Install from https://cli.github.com/"
-                            .to_string(),
-                        source: Some(Box::new(e)),
-                    }
-                } else {
-                    PluginError::Provider {
-                        message: format!("Failed to execute gh: {e}"),
-                        source: Some(Box::new(e)),
-                    }
-                }
-            })?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(PluginError::Provider {
-                    message: format!("gh command failed: {stderr}"),
-                    source: None,
-                });
-            }
-
-            let stdout = String::from_utf8(output.stdout).map_err(|e| PluginError::Provider {
-                message: format!("Invalid UTF-8 in gh output: {e}"),
-                source: Some(Box::new(e)),
-            })?;
-
-            Ok(stdout)
+            let args_refs: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
+            run_attributed_gh_command_with_ids(
+                &observer_ctx,
+                &action_owned,
+                &args_refs,
+                branch_owned.as_deref(),
+                reference_owned.as_deref(),
+                request_id,
+                call_id,
+            )
+            .map_err(|e| PluginError::Provider {
+                message: e.to_string(),
+                source: None,
+            })
         })
         .await
         .map_err(|e| PluginError::Runtime {
@@ -133,7 +164,9 @@ impl IssueProvider for GitHubProvider {
 
         // Convert to &str for run_gh
         let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let output = self.run_gh(&args_refs).await?;
+        let output = self
+            .run_gh("issues.list_issues", &args_refs, None, None)
+            .await?;
 
         let gh_issues: Vec<GhIssue> =
             serde_json::from_str(&output).map_err(|e| PluginError::Provider {
@@ -164,7 +197,9 @@ impl IssueProvider for GitHubProvider {
             "number,title,body,state,labels,assignees,author,createdAt,updatedAt,url",
         ];
 
-        let output = self.run_gh(&args).await?;
+        let output = self
+            .run_gh("issues.get_issue", &args, None, Some(&number_arg))
+            .await?;
 
         let gh_issue: GhIssue =
             serde_json::from_str(&output).map_err(|e| PluginError::Provider {
@@ -192,7 +227,8 @@ impl IssueProvider for GitHubProvider {
             body,
         ];
 
-        self.run_gh(&args).await?;
+        self.run_gh("issues.add_comment", &args, None, Some(&number_arg))
+            .await?;
 
         // gh issue comment doesn't return JSON, so we construct a minimal comment
         // In a real implementation, we'd fetch the comment ID via API
@@ -205,6 +241,7 @@ impl IssueProvider for GitHubProvider {
     }
 
     async fn list_comments(&self, issue_number: u64) -> Result<Vec<IssueComment>, PluginError> {
+        let issue_ref = issue_number.to_string();
         let api_path = format!(
             "repos/{}/{}/issues/{}/comments",
             self.owner, self.repo, issue_number
@@ -216,7 +253,9 @@ impl IssueProvider for GitHubProvider {
             r#"[.[] | {id: (.id | tostring), body, author: .user.login, created_at: .created_at}]"#,
         ];
 
-        let output = self.run_gh(&args).await?;
+        let output = self
+            .run_gh("issues.list_comments", &args, None, Some(&issue_ref))
+            .await?;
 
         let comments: Vec<IssueComment> =
             serde_json::from_str(&output).map_err(|e| PluginError::Provider {

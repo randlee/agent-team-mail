@@ -17,6 +17,7 @@ This primary requirements document registers secondary source-of-truth documents
 - CI monitoring requirements: `docs/ci-monitoring/requirements.md`
 - CI monitoring architecture: `docs/ci-monitoring/architecture.md`
 - CI monitoring ADR index: `docs/ci-monitoring/adr.md`
+- Daemon spawn authorization requirements: `docs/daemon-spawn-auth/requirements.md`
 
 All logging/OpenTelemetry requirements for ATM and companion tools are defined
 in the observability documents above. This file references that contract and
@@ -2658,31 +2659,49 @@ Informed by analysis of the `coding_agent_session_search` connector system (14-p
 - Stateful plugins (daemon plugins maintain connections, sync cursors, watch handles)
 - Plugin metadata with versioning
 
-### 5.1.1 Plugin Ownership and Dependency Boundaries
+### 5.1.1 ARCH-BOUNDARY-001 GitHub Boundary Enforcement
 
-Plugin extraction into a separate crate is not sufficient by itself to define
-ownership. The requirements must explicitly assign ownership of plugin behavior.
+`ARCH-BOUNDARY-001` is a hard crate-boundary rule for all GitHub-specific code.
 
 Required rules:
-- Plugin implementation code is owned by the plugin/provider layer, not by
-  `atm-core` or unrelated shared crates.
-- Shared crates may define generic interfaces and data contracts only; they
-  must not depend on plugin implementations.
-- `atm-core` must not import plugin/provider crates or own provider-specific
-  behavior.
-- A shared support crate such as `atm-ci-monitor` may exist only for
-  provider-agnostic abstractions; it must not become a second home for
-  provider-specific GitHub execution or command semantics.
-- All plugin-owned commands are processed by the owning plugin/provider layer.
-  CLI command modules may route requests, but they must not implement the
-  plugin's external-system behavior themselves.
-- Any raw `gh` execution outside the owning gh plugin/provider layer is a
+- All GitHub-specific code must live exclusively in the gh-monitor provider
+  layer (`crates/atm-daemon/src/plugins/ci_monitor/` or a successor provider
+  crate that is explicitly documented as the gh-monitor provider layer).
+- `atm-ci-monitor` must contain only provider-agnostic CI-monitor abstractions:
+  observer traits, firewall traits, ledger interfaces, and budget/freshness
+  policy that is not GitHub-specific.
+- `atm-core` must contain zero provider knowledge:
+  - no imports of plugin/provider crates,
+  - no GitHub-specific types,
+  - no raw `gh` subprocess invocations.
+- Dependency direction is one-way:
+  - providers/plugins -> `atm-core`
+  - providers/plugins -> `atm-ci-monitor`
+  - never `atm-core` -> providers/plugins
+- Any `Command::new("gh")` call outside the gh-monitor provider layer is a hard
   boundary violation.
-- Boundary-enforcement work must include a repository-wide search for current
-  violations across Rust crates, shell/Python scripts, CI helpers, and support
-  tooling. Any surviving violation found by that search must be either removed
-  in the active implementation phase or explicitly mapped to a named follow-up
-  sprint with file-level ownership; silent allowlisting is not sufficient.
+- CI must enforce `ARCH-BOUNDARY-001` with a grep gate that fails on new or
+  untracked violations.
+- Boundary-enforcement work must include a repository-wide search for live
+  violations across crates, shell/Python scripts, CI helpers, and support
+  tooling.
+- Boundary-elimination implementation sprints must leave the repository
+  buildable and testable at the end of each sprint; no sprint may rely on a
+  temporary broken intermediate state being merged first.
+- Any surviving violation found by the repository-wide search must be either
+  removed in the active implementation sprint or mapped to a named follow-up
+  sprint with file-level ownership and explicit QA review scope.
+- Boundary enforcement work must run a repository-wide violation search and map
+  every live violation to a named removal sprint.
+
+Temporary audited exceptions are permitted only when:
+- the violating line is explicitly annotated with
+  `TODO(ARCH-BOUNDARY-001)`,
+- the migration is tracked by a GitHub issue, and
+- the location is listed in the audited allowlist used by the CI grep gate.
+
+See [docs/arch-boundary.md](./arch-boundary.md) for the crate-boundary map,
+allowed import matrix, audited exceptions, and migration checklist.
 
 ### 5.2 Plugin Trait
 
@@ -3157,6 +3176,77 @@ The core has no awareness of whether a team member is local or remote.
 - **Production daemon-spawn guard rule**: production code paths that spawn a
   daemon process MUST adopt the child handle into a `DaemonProcessGuard` or
   equivalent RAII guard before any suspension or early-return point.
+
+#### 8.3.1 Daemon Spawn Authorization
+
+- **Single authorized launcher**: all real `atm-daemon` launches MUST flow
+  through one canonical launcher owned by the product layer, not by shared
+  crates. The planned owning surface is a dedicated launcher crate (for
+  example `crates/atm-daemon-launch`); if that crate split is deliberately
+  deferred, the only acceptable temporary owner is a thin
+  `agent_team_mail_daemon::spawn_auth` module in `atm-daemon`. Private
+  `ensure_daemon_running` copies, helper-local `Command::new("atm-daemon")`,
+  shell wrappers, or other direct spawn paths are forbidden unless they
+  delegate to that launcher. `atm-core` and `atm-ci-monitor` are explicitly
+  forbidden from owning launcher code, launch-token issuance, or daemon
+  lifecycle authority.
+- **Mandatory launch-token firewall**: the daemon MUST reject startup unless
+  the caller presents a valid launch token issued by the canonical launcher.
+  Missing, invalid, expired, replayed, or mismatched launch tokens MUST cause
+  immediate daemon exit with a structured error record.
+- **Launch classes**: launch tokens MUST declare one of exactly three launch
+  classes:
+  - `prod-shared`
+  - `dev-shared`
+  - `isolated-test`
+  Each class MUST bind the token to the expected binary/channel, target
+  `ATM_HOME`, runtime kind, and singleton/lease policy for that class.
+- **No GitHub metadata in launch tokens**: launch-token fields and lifecycle
+  lease records MUST remain daemon/runtime scoped only. They MUST NOT include
+  GitHub-specific metadata such as runner IDs, GitHub Actions context, workflow
+  identifiers, PR numbers, or other GH provider payload.
+- **Shared-runtime hard fail**: `prod-shared` and `dev-shared` launches MUST
+  hard-fail when a live daemon already owns that shared runtime. No fallback or
+  best-effort second launch is allowed.
+- **Isolated-test lease contract**: `isolated-test` launches MUST carry and log
+  all of:
+  - `test_identifier`
+  - `owner_pid`
+  - `issued_at`
+  - `expires_at`
+  - `atm_home`
+  - launch-token identifier / nonce
+  The daemon MUST reject an `isolated-test` token if the runtime is not truly
+  isolated.
+- **Isolated-test TTL fail-safe**: test daemons MUST self-terminate when
+  `owner_pid` is dead or the token TTL expires. The default TTL MUST be short
+  and bounded; planning baseline is a hard maximum of `10 minutes`.
+- **Fixture-owned shutdown requirement**: TTL expiry or `owner_pid` death is a
+  fail-safe, not a success path. The test fixture or harness that launched the
+  daemon remains responsible for shutting it down cleanly before either condition
+  triggers. Any daemon that exits because `owner_pid` disappeared or TTL expired
+  is a harness-gap finding, not acceptable steady-state behavior.
+- **Lifecycle logging is mandatory**: every launch attempt and daemon lifetime
+  transition MUST be logged with enough context to reconstruct ownership and
+  cleanup. At minimum this includes:
+  - launch accepted / rejected
+  - launch class
+  - token / request identifier
+  - `ATM_HOME`
+  - `test_identifier` and `owner_pid` for `isolated-test`
+  - clean owner-initiated shutdown
+  - self-termination due to TTL expiry
+  - self-termination due to dead `owner_pid`
+  - janitor / stale-runtime reap
+- **QA/CI hard gates**: CI and QA MUST fail on:
+  - any daemon spawn path outside the canonical launcher
+  - any daemon process alive without canonical launch metadata
+  - any rogue shared-runtime daemon before or after a test/QA batch
+  - any test daemon whose termination reason is TTL expiry or dead `owner_pid`
+    instead of clean fixture teardown
+- **Canonical root-cause surface**: `daemon-spawn-qa` and related diagnostics
+  MUST use the lifecycle logs above as the primary root-cause source for
+  forgotten daemons, launch bypasses, and teardown gaps.
 
 ### 8.4 Performance
 

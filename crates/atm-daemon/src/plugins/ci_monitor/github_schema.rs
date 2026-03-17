@@ -17,6 +17,10 @@ pub(crate) struct GhRun {
     pub(crate) url: String,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
+    #[serde(default)]
+    pub(crate) attempt: Option<u64>,
+    #[serde(default)]
+    pub(crate) pull_requests: Option<Vec<GhPullRequest>>,
     pub(crate) jobs: Option<Vec<GhJob>>,
 }
 
@@ -30,6 +34,8 @@ pub(crate) struct GhJob {
     pub(crate) conclusion: Option<String>,
     pub(crate) started_at: Option<String>,
     pub(crate) completed_at: Option<String>,
+    #[serde(default)]
+    pub(crate) url: Option<String>,
     pub(crate) steps: Option<Vec<GhStep>>,
 }
 
@@ -94,6 +100,8 @@ pub(crate) struct GhRunStep {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GhPullRequest {
     #[serde(default)]
+    pub(crate) number: Option<u64>,
+    #[serde(default)]
     pub(crate) url: Option<String>,
 }
 
@@ -112,9 +120,17 @@ pub(crate) struct GhPrLookupView {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GhPrView {
     #[serde(default)]
+    pub(crate) number: u64,
+    #[serde(default)]
     pub(crate) merge_state_status: Option<String>,
     #[serde(default)]
     pub(crate) url: Option<String>,
+    #[serde(default)]
+    pub(crate) head_ref_name: Option<String>,
+    #[serde(default)]
+    pub(crate) head_ref_oid: Option<String>,
+    #[serde(default)]
+    pub(crate) created_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
