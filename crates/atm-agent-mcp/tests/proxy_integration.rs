@@ -465,7 +465,7 @@ async fn test_lazy_spawn_on_first_codex_call() {
     send_newline(&mut writer, &codex_req).await;
 
     // Should get events + response now
-    let responses = read_all_responses(&mut reader, Duration::from_secs(5)).await;
+    let responses = collect_until_id(&mut reader, json!(2), Duration::from_secs(5)).await;
     assert!(!responses.is_empty(), "should have received response(s)");
 
     // Find the response with id=2
@@ -608,7 +608,7 @@ async fn test_child_crash_includes_exit_code() {
     });
     send_newline(&mut writer, &req).await;
 
-    let responses = read_all_responses(&mut reader, Duration::from_secs(5)).await;
+    let responses = collect_until_id(&mut reader, json!(1), Duration::from_secs(5)).await;
     let error_resp = responses.iter().find(|r| r.get("id") == Some(&json!(3)));
     assert!(error_resp.is_some(), "expected error response");
 
