@@ -313,8 +313,8 @@ fn rotation_path(base: &Path, n: u32) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_team_mail_core::logging_event::new_log_event;
     use crate::daemon::observability::{clear_otel_export_hook, install_otel_export_hook};
+    use agent_team_mail_core::logging_event::new_log_event;
     use serial_test::serial;
     use std::time::Duration;
     use tempfile::TempDir;

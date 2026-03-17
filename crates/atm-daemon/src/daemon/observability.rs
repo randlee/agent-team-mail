@@ -15,7 +15,6 @@ pub fn install_otel_export_hook(hook: OtelExportHook) {
         .expect("atm-daemon otel export hook lock poisoned") = Some(hook);
 }
 
-#[cfg(test)]
 pub fn clear_otel_export_hook() {
     *otel_export_hook_slot()
         .lock()
