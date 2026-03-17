@@ -22,6 +22,19 @@ launch-token validation, isolated-test leases, and lifecycle logging.
   immediate exit with structured rejection logs.
 - Shared runtimes (`prod-shared`, `dev-shared`) MUST hard-fail duplicate starts.
 
+### Rejection Log Event Schema
+
+- `rejection_reason`
+  - string describing which rejection condition triggered
+- `launch_class`
+  - string when known: `ProdShared`, `DevShared`, or `IsolatedTest`
+- `token_id`
+  - string when available; the nonce / UUID from the presented token
+- `atm_home`
+  - path bound to the rejected startup attempt
+- `timestamp`
+  - RFC3339 datetime when the rejection was emitted
+
 ## Launch Classes
 
 - `prod-shared`
@@ -63,6 +76,18 @@ serialized with `serde` and currently represented as JSON-safe data.
   - RFC3339 UTC timestamp after which startup MUST be rejected
 
 No other crate may define or issue a competing launch token schema.
+
+## Bypass Annotation Convention
+
+- `AU-BYPASS` is the normative comment token for temporary daemon-launch bypass
+  sites that have not yet been migrated into `atm-daemon-launch`.
+- Required format:
+  - `// AU-BYPASS: migrate <description> to atm-daemon-launch in AU.5`
+- Complete bypass inventory for the current AU plan:
+  - `crates/atm-core/src/daemon_client.rs:2102`
+  - `crates/atm-tui/src/main.rs:493`
+- Any additional bypass sites found during the AU.5 final audit MUST be added
+  to this inventory before that sprint is considered complete.
 
 ## Isolated-Test Lease
 
