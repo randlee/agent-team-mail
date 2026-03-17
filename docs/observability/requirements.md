@@ -1,7 +1,7 @@
 # Observability Requirements
 
 **Status**: Active (Phase AH baseline; AJ complete; AV updates in planning)
-**Scope**: `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `sc-compose`, `sc-composer`, `scmux`, `schook`
+**Scope**: `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `sc-compose`, `sc-composer`
 **See also**:
 - `docs/observability/architecture.md`
 - `docs/project-plan.md` (Phase AJ and Phase AV sections)
@@ -194,8 +194,6 @@ Minimum required coverage:
 - `atm-daemon`: lifecycle, session-registry transitions, plugin lifecycle/errors.
 - `atm-agent-mcp`: tool-call audit + lifecycle context.
 - `atm-tui`: startup/shutdown, stream attach/detach, control-send/ack summaries.
-- `scmux`: team/orchestration lifecycle, message routing outcomes, and transport errors.
-- `schook`: hook invocation lifecycle (`session_start`, `session_end`, compact events), policy decision outcomes, and hook failures.
 - `sc-compose`: render/validate command lifecycle, missing-var diagnostics,
   output-path decisions, and runtime errors.
 - `sc-composer`: library render lifecycle, include expansion outcomes, and

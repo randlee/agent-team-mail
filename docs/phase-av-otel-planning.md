@@ -80,8 +80,7 @@ It should not become the home for:
 
 ### 2. Introduce one dedicated OTel transport adapter
 
-Create a dedicated adapter layer/crate, planned as `sc-observability-otlp`
-(name can be finalized during AV.1), that owns:
+Create a dedicated adapter layer/crate, `sc-observability-otlp`, that owns:
 
 - `opentelemetry*` / `opentelemetry-otlp` dependencies
 - OTLP/HTTP collector transport
@@ -149,21 +148,44 @@ The collector path must be optional at runtime but mandatory in capability:
 
 ## Sprint Breakdown
 
+### AV.0 — Boundary Remediation Prerequisite
+
+Deliver:
+
+- remove the pre-existing direct `sc-observability` imports that already bypass
+  the intended facade/boundary:
+  - `crates/atm-daemon/src/daemon/socket.rs`
+  - `crates/atm-daemon/src/daemon/log_writer.rs`
+  - `crates/sc-composer/src/lib.rs`
+  - `crates/sc-compose/src/observability.rs`
+- move those call sites onto the canonical facade/entry-point wiring before any
+  new collector adapter is introduced
+
+Acceptance:
+
+- the file-level violations above are removed
+- AV.2 does not begin until AV.0 is merged
+- QA can enforce the AV transport boundary on a clean baseline instead of an
+  already-bypassed codebase
+
 ### AV.1 — Boundary + Config Contract
 
 Deliver:
 
-- finalize the dedicated OTel transport adapter boundary
+- finalize the `sc-observability-otlp` transport adapter boundary
 - define canonical config surface for endpoint/protocol/auth/TLS/debug export
 - document in-repo vs out-of-repo scope explicitly
-- add CI/review rule forbidding direct `opentelemetry*` imports outside the
-  adapter layer
+- add CI/review rule forbidding direct `opentelemetry*` and
+  `sc-observability-otlp` imports outside the adapter/entry-point layer
 
 Acceptance:
 
 - requirements and architecture docs explicitly separate generic observability
   from collector transport
 - crate/dependency ownership is unambiguous
+- `sc-observability-otlp` is the committed adapter crate name
+- a CI import lint rule exists before AV.2 begins and blocks
+  `sc-observability-otlp` imports from non-entry-point modules
 
 ### AV.2 — Transport Adapter
 
@@ -180,6 +202,10 @@ Acceptance:
 - local logging still succeeds during collector outage
 
 ### AV.3 — Daemon/CLI/Core Instrumentation
+
+Prerequisite: Phase AT must be merged to `develop` before AV.3 begins. AV.3
+must instrument the post-AT GitHub ownership layout rather than targeting code
+paths that AT is still relocating.
 
 Deliver:
 
@@ -249,6 +275,8 @@ QA should review each AV sprint against two axes:
 Blocking QA failure examples:
 
 - direct `opentelemetry*` import added to application/daemon/CLI crates
+- direct `sc-observability-otlp` import added outside approved entry-point
+  modules
 - collector outage blocks command success
 - per-binary exporter config drift
 - AV claims external repo coverage (`scmux`/`schook`) without actual delivery

@@ -1488,7 +1488,7 @@ the current tranche focused on onboarding contract closure.
 
 **Completed**: 133+ sprints across 29 phases (CI green)
 **Current version**: v0.42.0
-**Current planning phase**: Phase AJ
+**Current planning phase**: Phase AV
 **Next planned phase**: Phase AV (live OTel collector integration + partitioning)
 
 ---
@@ -1594,9 +1594,10 @@ collector/export plumbing isolated from the rest of the codebase.
 ### Sprint Map
 | Sprint | Focus | Status |
 |---|---|---|
-| AV.1 | Architecture boundary + config contract: define the dedicated OTel transport adapter seam, collector config surface, and in-repo scope | PLANNED |
+| AV.0 | Boundary remediation prerequisite: remove existing direct `sc-observability` imports that already bypass the intended facade before collector work begins | PLANNED |
+| AV.1 | Architecture boundary + config contract: define the dedicated `sc-observability-otlp` transport adapter seam, collector config surface, and in-repo scope | PLANNED |
 | AV.2 | Transport adapter implementation: add OTLP/HTTP exporter path, stdout debug exporter, and fail-open collector transport behind the dedicated adapter boundary | PLANNED |
-| AV.3 | High-value daemon/CLI instrumentation: `atm`, `atm-daemon`, `atm-core`, GitHub firewall/ledger paths, and daemon lifecycle/request spans/metrics | PLANNED |
+| AV.3 | High-value daemon/CLI instrumentation: `atm`, `atm-daemon`, `atm-core`, GitHub firewall/ledger paths, and daemon lifecycle/request spans/metrics (after Phase AT is merged to `develop`) | PLANNED |
 | AV.4 | In-repo producer rollout: `atm-tui`, `atm-agent-mcp`, `sc-compose`, `sc-composer`, plus doctor/status health and troubleshooting closure | PLANNED |
 | AV.5 | Dogfood, QA, and release confidence: collector-backed smoke, fail-open outage tests, and explicit external follow-on handoff for `scmux`/`schook` | PLANNED |
 

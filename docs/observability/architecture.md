@@ -120,6 +120,10 @@ logging remains continuously available.
 - Application and daemon crates call the generic observability facade only.
   They must not import collector SDK crates or construct OTLP exporters
   themselves.
+- `sc-observability-otlp` must not be imported by non-entry-point modules.
+  Entry-point wiring is limited to the small set of binaries/modules that
+  initialize process-wide observability. Internal feature modules, helpers, and
+  libraries must depend on the generic facade instead.
 - The partition goal for Phase AV is to keep collector-facing code in one
   replaceable layer so future backend changes do not leak through the rest of
   the codebase.
@@ -128,6 +132,16 @@ logging remains continuously available.
 
 `atm doctor --json` and `atm status --json` share one locked `logging_health`
 object contract:
-- `status`, `otel_exporter`, `local_structured`, `last_export_error`.
+- `logging_health.schema_version`
+- `logging_health.state`
+- `logging_health.log_root`
+- `logging_health.canonical_log_path`
+- `logging_health.spool_path`
+- `logging_health.dropped_events_total`
+- `logging_health.spool_file_count`
+- `logging_health.oldest_spool_age_seconds`
+- `logging_health.last_error.code`
+- `logging_health.last_error.message`
+- `logging_health.last_error.at`
 
 No drift is allowed across these two command surfaces for shared keys.
