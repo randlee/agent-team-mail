@@ -522,16 +522,16 @@ mod tests {
     #[test]
     fn non_isolated_tokens_may_omit_lease_fields() {
         clear_seen_tokens_for_tests();
-        let temp = TempDir::new().unwrap();
+        let temp = agent_team_mail_core::home::get_os_home_dir().unwrap();
         let token = issue_launch_token(
             LaunchClass::ProdShared,
-            temp.path(),
+            &temp,
             "test-binary",
             "startup-auth-test",
             Duration::from_secs(30),
         );
         let raw = encode_launch_token(&token).unwrap();
-        let accepted = validate_token_inner(temp.path(), Some(&raw)).unwrap();
+        let accepted = validate_token_inner(&temp, Some(&raw)).unwrap();
         assert_eq!(accepted.launch_class, LaunchClass::ProdShared);
     }
 }

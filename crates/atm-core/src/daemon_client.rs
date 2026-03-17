@@ -3258,7 +3258,9 @@ cat > "$home/.atm/daemon/daemon.lock.meta.json" <<'EOF'
   "written_at": "2026-03-16T00:00:00Z"
 }}
 EOF
-sleep 2
+while [ ! -f "$home/stop-daemon" ]; do
+  sleep 0.1
+done
 "#,
             env!("CARGO_PKG_VERSION"),
             script_path.display(),
@@ -3293,6 +3295,7 @@ sleep 2
             .flatten()
             .filter_map(Result::ok)
             .count();
+        fs::write(home.join("stop-daemon"), "stop").unwrap();
         assert_eq!(
             count, 1,
             "concurrent startup attempts should spawn at most one daemon process"
