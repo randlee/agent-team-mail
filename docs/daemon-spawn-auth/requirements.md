@@ -64,6 +64,18 @@ serialized with `serde` and currently represented as JSON-safe data.
 
 No other crate may define or issue a competing launch token schema.
 
+## Bypass Annotation Convention
+
+- `AU-BYPASS` is the normative comment token for temporary daemon-launch bypass
+  sites that have not yet been migrated into `atm-daemon-launch`.
+- Required format:
+  - `// AU-BYPASS: migrate <description> to atm-daemon-launch in AU.5`
+- Complete bypass inventory for the current AU plan:
+  - `crates/atm-core/src/daemon_client.rs:2102`
+  - `crates/atm-tui/src/main.rs:493`
+- Any additional bypass sites found during the AU.5 final audit MUST be added
+  to this inventory before that sprint is considered complete.
+
 ## Isolated-Test Lease
 
 - Every isolated test daemon MUST carry:

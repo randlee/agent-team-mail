@@ -73,16 +73,17 @@ mod tests {
 
     #[test]
     fn issue_launch_token_populates_required_fields() {
+        let atm_home = std::env::temp_dir().join("atm-home");
         let token = issue_launch_token(
             LaunchClass::DevShared,
-            Path::new("/tmp/atm-home"),
+            &atm_home,
             "dev-channel",
             "au.1-test",
             Duration::from_secs(90),
         );
 
         assert_eq!(token.launch_class, LaunchClass::DevShared);
-        assert_eq!(token.atm_home, PathBuf::from("/tmp/atm-home"));
+        assert_eq!(token.atm_home, atm_home);
         assert_eq!(token.binary_identity, "dev-channel");
         assert_eq!(token.issuer, "au.1-test");
         assert!(!token.token_id.is_empty());
