@@ -38,9 +38,7 @@ use std::{
     process::Stdio,
 };
 
-use agent_team_mail_daemon_launch::{
-    LaunchClass, spawn_daemon_process,
-};
+use agent_team_mail_daemon_launch::{LaunchClass, spawn_daemon_process};
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{

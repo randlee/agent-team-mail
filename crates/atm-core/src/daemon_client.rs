@@ -36,9 +36,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use agent_team_mail_daemon_launch::{
-    LaunchClass, spawn_daemon_process,
-};
+use agent_team_mail_daemon_launch::{LaunchClass, spawn_daemon_process};
 
 use crate::consts::{
     DAEMON_METADATA_SETTLE_MS, DAEMON_QUERY_TIMEOUT_MS, DAEMON_TIMEOUT_MAX_SECS,
