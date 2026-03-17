@@ -1366,15 +1366,15 @@ fn test_isolated_test_clean_shutdown_emits_lifecycle_events() {
         if saw_clean_shutdown {
             return;
         }
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(Duration::from_millis(50));
     }
 
     let events = read_spool_events(&spool);
     panic!(
-        "expected clean_owner_shutdown in daemon spool; saw actions: {:?}",
+        "expected clean_owner_shutdown event in spool, got events: {:?}",
         events
             .iter()
-            .map(|event| event.action.as_str())
+            .map(|event| (&event.action, event.fields.get("event_name")))
             .collect::<Vec<_>>()
     );
 }

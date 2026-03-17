@@ -823,7 +823,7 @@ async fn test_codex_reply_passes_through() {
         "params": {"name": "codex", "arguments": {"prompt": "start session"}}
     });
     send_newline(&mut writer, &codex_req).await;
-    let _ = read_all_responses(&mut reader, Duration::from_secs(5)).await;
+    let _ = collect_until_id(&mut reader, json!(1), Duration::from_secs(5)).await;
 
     // Now send codex-reply
     let reply_req = json!({
@@ -837,7 +837,7 @@ async fn test_codex_reply_passes_through() {
     });
     send_newline(&mut writer, &reply_req).await;
 
-    let responses = read_all_responses(&mut reader, Duration::from_secs(5)).await;
+    let responses = collect_until_id(&mut reader, json!(2), Duration::from_secs(5)).await;
     let main_resp = responses.iter().find(|r| r.get("id") == Some(&json!(2)));
     assert!(main_resp.is_some(), "should get codex-reply response");
 

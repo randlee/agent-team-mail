@@ -4,8 +4,10 @@
 //! token issuance. Other crates may consume the token schema, but they must not
 //! issue new launch tokens themselves.
 
+use std::ffi::OsStr;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use chrono::{SecondsFormat, Utc};
@@ -121,6 +123,52 @@ pub fn attach_launch_token(
 ) -> serde_json::Result<()> {
     command.env(ATM_LAUNCH_TOKEN_ENV, encode_launch_token(token)?);
     Ok(())
+}
+
+pub struct SpawnDaemonRequest<'a> {
+    pub daemon_bin: &'a OsStr,
+    pub atm_home: &'a Path,
+    pub launch_class: LaunchClass,
+    pub issuer: &'a str,
+    pub team: Option<&'a str>,
+    pub stdin: Stdio,
+    pub stdout: Stdio,
+    pub stderr: Stdio,
+}
+
+/// Spawn `atm-daemon` through the canonical launcher surface.
+pub fn spawn_daemon_process(request: SpawnDaemonRequest<'_>) -> io::Result<Child> {
+    let binary_identity = request.daemon_bin.to_string_lossy().into_owned();
+    let token = if request.launch_class == LaunchClass::IsolatedTest {
+        issue_isolated_test_launch_token(
+            request.atm_home,
+            binary_identity,
+            request.issuer,
+            format!("{}:{}", request.issuer, std::process::id()),
+            std::process::id(),
+            Duration::from_secs(DEFAULT_LAUNCH_TOKEN_TTL_SECS),
+        )
+    } else {
+        issue_launch_token(
+            request.launch_class,
+            request.atm_home,
+            binary_identity,
+            request.issuer,
+            Duration::from_secs(DEFAULT_LAUNCH_TOKEN_TTL_SECS),
+        )
+    };
+
+    let mut command = Command::new(request.daemon_bin);
+    if let Some(team) = request.team {
+        command.arg("--team").arg(team);
+    }
+    command
+        .stdin(request.stdin)
+        .stdout(request.stdout)
+        .stderr(request.stderr);
+    attach_launch_token(&mut command, &token)
+        .map_err(|e| io::Error::other(format!("failed to encode daemon launch token: {e}")))?;
+    command.spawn()
 }
 
 #[cfg(test)]

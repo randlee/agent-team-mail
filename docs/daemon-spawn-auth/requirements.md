@@ -84,8 +84,8 @@ No other crate may define or issue a competing launch token schema.
 - Required format:
   - `// AU-BYPASS: migrate <description> to atm-daemon-launch in AU.5`
 - Complete bypass inventory for the current AU plan:
-  - `crates/atm-core/src/daemon_client.rs:2131`
-  - `crates/atm-tui/src/main.rs:497`
+  - none; AU.5 removed the tracked `daemon_client.rs` and `atm-tui/src/main.rs`
+    bypasses and closed the inventory
 - Any additional bypass sites found during the AU.5 final audit MUST be added
   to this inventory before that sprint is considered complete.
 
@@ -187,6 +187,9 @@ No other crate may define or issue a competing launch token schema.
 - Any rogue daemon without canonical launch metadata is a blocking violation.
 - Any test daemon whose termination reason is TTL expiry or dead `owner_pid`
   instead of clean fixture shutdown is a blocking harness-gap finding.
+- `scripts/ci/gh_boundary_check.sh` is the required CI enforcement surface for
+  boundary regressions and MUST fail on both raw daemon-launch bypasses and any
+  reintroduced `AU-BYPASS` annotations under `crates/**/*.rs`.
 
 ## Non-Goals
 

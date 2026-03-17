@@ -3,7 +3,7 @@
 **Integration branch**: `integrate/phase-AU` off `develop`
 **Prerequisites**: Phase AT merged to `develop` AND `docs/arch-boundary.md`
 records the zero-violation audit state
-**Status**: IN PROGRESS
+**Status**: COMPLETE
 
 ## Overview
 
@@ -174,6 +174,13 @@ the normative success path.
 - CI/QA fails when a test daemon ends by TTL/dead-owner instead of clean teardown
 
 ### AU.5 — Bypass Removal + Final Audit
+
+**Status**: COMPLETE
+**Implementation Note**: the remaining `daemon_client` and `atm-tui` product
+launch bypasses now route through `agent-team-mail-daemon-launch`, the
+repository audit found no remaining raw `Command::new("atm-daemon")` spawn
+sites under `crates/`, only approved operational script references remain in
+`scripts/`, and the CI boundary check now blocks that regression shape.
 
 **Scope**: remove remaining non-canonical daemon launch paths and prove the
 authorization model is the only one left.
