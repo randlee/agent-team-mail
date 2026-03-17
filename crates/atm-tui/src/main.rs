@@ -39,8 +39,7 @@ use std::{
 };
 
 use agent_team_mail_daemon_launch::{
-    DEFAULT_LAUNCH_TOKEN_TTL_SECS, LaunchClass, attach_launch_token,
-    issue_isolated_test_launch_token, issue_launch_token,
+    LaunchClass, spawn_daemon_process,
 };
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -494,7 +493,6 @@ fn build_member_rows(
 }
 
 fn ensure_daemon_running(team: &str) -> Option<String> {
-    // AU-BYPASS: migrate this private TUI launcher to atm-daemon-launch in AU.5.
     let socket_path =
         daemon_socket_path().unwrap_or_else(|_| std::env::temp_dir().join("atm-daemon.sock"));
     if daemon_is_running() && socket_path.exists() {
@@ -508,38 +506,18 @@ fn ensure_daemon_running(team: &str) -> Option<String> {
             agent_team_mail_core::daemon_client::RuntimeKind::Dev => LaunchClass::DevShared,
             agent_team_mail_core::daemon_client::RuntimeKind::Isolated => LaunchClass::IsolatedTest,
         };
-    let token = if launch_class == LaunchClass::IsolatedTest {
-        issue_isolated_test_launch_token(
-            &home,
-            "atm-daemon",
-            "agent-team-mail-tui::ensure_daemon_running",
-            format!("atm-tui::ensure_daemon_running:{}", std::process::id()),
-            std::process::id(),
-            Duration::from_secs(DEFAULT_LAUNCH_TOKEN_TTL_SECS),
-        )
-    } else {
-        issue_launch_token(
-            launch_class,
-            &home,
-            "atm-daemon",
-            "agent-team-mail-tui::ensure_daemon_running",
-            Duration::from_secs(DEFAULT_LAUNCH_TOKEN_TTL_SECS),
-        )
-    };
-    let mut command = std::process::Command::new("atm-daemon");
-    command
-        .arg("--team")
-        .arg(team)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    if attach_launch_token(&mut command, &token).is_err() {
-        return Some("daemon unavailable: failed to encode launch token".to_string());
-    }
-
-    let spawn = command.spawn();
-
-    if spawn.is_err() {
+    if spawn_daemon_process(
+        "atm-daemon",
+        &home,
+        launch_class,
+        "agent-team-mail-tui::ensure_daemon_running",
+        Some(team),
+        Stdio::null(),
+        Stdio::null(),
+        Stdio::null(),
+    )
+    .is_err()
+    {
         return Some(format!(
             "daemon unavailable: failed to start; run `atm-daemon --team {team}`"
         ));

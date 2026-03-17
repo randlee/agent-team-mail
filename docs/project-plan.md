@@ -1904,7 +1904,7 @@ blocking CI/QA failure.
 | AU.2 | Daemon startup firewall: reject missing/invalid/replayed launch tokens and hard-fail duplicate shared-runtime starts | feature/pAU-s2-daemon-startup-firewall | COMPLETE |
 | AU.3 | `isolated-test` lease model: `test_identifier`, `owner_pid`, bounded TTL, owner/TTL self-termination, and janitor sweep behavior | feature/pAU-s3-isolated-test-lease | COMPLETE |
 | AU.4 | Lifecycle logging + QA enforcement: launch/termination ledgers, `daemon-spawn-qa` log-driven root cause, and CI/QA blocking on TTL/dead-owner exits | feature/pAU-s4-lifecycle-logging | COMPLETE |
-| AU.5 | Remove remaining bypass spawn paths and run final repo-wide audit proving the canonical launcher is the only daemon spawn path left | TBD | PLANNED |
+| AU.5 | Remove remaining bypass spawn paths and run final repo-wide audit proving the canonical launcher is the only daemon spawn path left | feature/pAU-s5-bypass-removal | COMPLETE |
 
 ### Planned Inputs
 - DSQ-001 through DSQ-009 daemon leak findings from Phase AT

@@ -4,8 +4,9 @@
 //! token issuance. Other crates may consume the token schema, but they must not
 //! issue new launch tokens themselves.
 
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use chrono::{SecondsFormat, Utc};
@@ -121,6 +122,48 @@ pub fn attach_launch_token(
 ) -> serde_json::Result<()> {
     command.env(ATM_LAUNCH_TOKEN_ENV, encode_launch_token(token)?);
     Ok(())
+}
+
+/// Spawn `atm-daemon` through the canonical launcher surface.
+pub fn spawn_daemon_process(
+    daemon_bin: impl AsRef<std::ffi::OsStr>,
+    atm_home: &Path,
+    launch_class: LaunchClass,
+    issuer: impl Into<String>,
+    team: Option<&str>,
+    stdin: Stdio,
+    stdout: Stdio,
+    stderr: Stdio,
+) -> io::Result<Child> {
+    let issuer = issuer.into();
+    let binary_identity = daemon_bin.as_ref().to_string_lossy().into_owned();
+    let token = if launch_class == LaunchClass::IsolatedTest {
+        issue_isolated_test_launch_token(
+            atm_home,
+            binary_identity,
+            issuer.clone(),
+            format!("{issuer}:{}", std::process::id()),
+            std::process::id(),
+            Duration::from_secs(DEFAULT_LAUNCH_TOKEN_TTL_SECS),
+        )
+    } else {
+        issue_launch_token(
+            launch_class,
+            atm_home,
+            binary_identity,
+            issuer,
+            Duration::from_secs(DEFAULT_LAUNCH_TOKEN_TTL_SECS),
+        )
+    };
+
+    let mut command = Command::new(daemon_bin);
+    if let Some(team) = team {
+        command.arg("--team").arg(team);
+    }
+    command.stdin(stdin).stdout(stdout).stderr(stderr);
+    attach_launch_token(&mut command, &token)
+        .map_err(|e| io::Error::other(format!("failed to encode daemon launch token: {e}")))?;
+    command.spawn()
 }
 
 #[cfg(test)]
