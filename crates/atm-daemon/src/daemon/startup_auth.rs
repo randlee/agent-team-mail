@@ -106,7 +106,6 @@ fn emit_lifecycle_event(
     atm_home: &Path,
     detail: Option<&str>,
 ) {
-    let launch_class = token.map(|value| value.launch_class.as_str().to_string());
     let token_id = token.map(|value| value.token_id.clone());
     let test_identifier = token.and_then(|value| value.test_identifier.clone());
     let owner_pid = token.and_then(|value| value.owner_pid);
@@ -192,7 +191,6 @@ fn emit_startup_rejection(
     atm_home: &Path,
     detail: Option<&str>,
 ) {
-    let launch_class = token.map(|token| token.launch_class.as_str().to_string());
     let token_id = token.map(|token| token.token_id.clone());
     let atm_home_text = canonicalize_lossy(atm_home).display().to_string();
     let mut extra = serde_json::Map::new();
