@@ -2,6 +2,9 @@
 
 **Status**: PLANNED
 
+**Prerequisites**: Phase AH complete, Phase AJ complete, Phase AT complete, and
+current `sc-observability` baseline present on `develop`.
+
 ## Goal
 
 Get OpenTelemetry live for the binaries that ship from this repository while
@@ -175,6 +178,10 @@ Deliver:
 - finalize the `sc-observability-otlp` transport adapter boundary
 - define canonical config surface for endpoint/protocol/auth/TLS/debug export
 - document in-repo vs out-of-repo scope explicitly
+- add `scripts/ci/observability_boundary_check.sh` as the dedicated
+  observability import-boundary enforcement script
+- add a `.github/workflows/ci.yml` step that runs
+  `scripts/ci/observability_boundary_check.sh`
 - add CI/review rule forbidding direct `opentelemetry*` and
   `sc-observability-otlp` imports outside the adapter/entry-point layer
 

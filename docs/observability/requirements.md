@@ -274,7 +274,8 @@ Lifecycle and hook coverage:
 Phase mapping:
 - AH.1: shared crate contracts (`LogEventV1`, socket contract, queue/rotation/spool baseline).
 - AJ: session identity canonicalization (`session_id` normalization and SSoT alignment).
-- AK: historical planning placeholder for mandatory OTel rollout.
+- AK: historical planning placeholder for mandatory OTel rollout (SUPERSEDED by
+  Phase AV).
 - AV: live collector integration, transport partitioning, in-repo producer
   instrumentation rollout, and health/reporting hardening.
 

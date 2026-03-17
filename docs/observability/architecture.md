@@ -22,7 +22,8 @@
 - planned dedicated OTel transport adapter crate: owns OTLP/collector transport,
   auth/TLS, batching, retry, and SDK dependency integration.
 - Producers: `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `sc-compose`,
-  `sc-composer`, `scmux`, `schook`.
+  `sc-composer`, `scmux` (follow-on, not in Phase AV scope), `schook`
+  (follow-on, not in Phase AV scope).
 - Daemon writer path: `atm-daemon` canonical sink for ATM producer traffic.
 - Mandatory OTel exporter path for in-scope tools (non-optional AV rollout).
 
@@ -124,6 +125,8 @@ logging remains continuously available.
   Entry-point wiring is limited to the small set of binaries/modules that
   initialize process-wide observability. Internal feature modules, helpers, and
   libraries must depend on the generic facade instead.
+- Canonical enforcement reference: `docs/arch-boundary.md`
+  ("ARCH-BOUNDARY-002 Observability Import Boundary").
 - The partition goal for Phase AV is to keep collector-facing code in one
   replaceable layer so future backend changes do not leak through the rest of
   the codebase.

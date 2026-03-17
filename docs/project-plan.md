@@ -2,7 +2,7 @@
 
 **Version**: 0.7
 **Date**: 2026-03-10
-**Status**: Phase AM refactor in progress. Phase AV queued.
+**Status**: Phases through AU complete (v0.45.0). Phase AV (OTel) in planning.
 
 ---
 
@@ -1487,9 +1487,9 @@ the current tranche focused on onboarding contract closure.
 | | AG.4 | ATM Spawn Integration (`--system-prompt .j2`) | COMPLETE | [#553](https://github.com/randlee/agent-team-mail/pull/553) |
 
 **Completed**: 133+ sprints across 29 phases (CI green)
-**Current version**: v0.42.0
+**Current version**: v0.45.0
 **Current planning phase**: Phase AV
-**Next planned phase**: Phase AV (live OTel collector integration + partitioning)
+**Next planned phase**: TBD
 
 ---
 
@@ -1584,8 +1584,8 @@ local structured logging always-on and fail-open.
 
 **Goal**: get OpenTelemetry live for the ATM repository itself while keeping
 collector/export plumbing isolated from the rest of the codebase.
-**Prerequisites**: Phase AH complete, Phase AJ complete, and current
-`sc-observability` baseline present on `develop`.
+**Prerequisites**: Phase AH complete, Phase AJ complete, Phase AT complete, and
+current `sc-observability` baseline present on `develop`.
 
 **Planning doc**: `docs/phase-av-otel-planning.md`
 **Requirements**: `docs/observability/requirements.md`
