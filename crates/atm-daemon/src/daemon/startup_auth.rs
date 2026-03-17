@@ -592,6 +592,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn replayed_token_is_rejected() {
         clear_seen_tokens_for_tests();
         let temp = TempDir::new().unwrap();
