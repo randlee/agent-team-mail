@@ -1,11 +1,11 @@
 # Observability Architecture
 
-**Status**: Active (Phase AH baseline; AJ/AK updates in planning)
+**Status**: Active (Phase AH baseline; AJ complete; AV updates in planning)
 **Primary crate**: `sc-observability`
 **See also**:
 - `docs/observability/requirements.md`
 - `docs/observability/troubleshooting.md`
-- `docs/project-plan.md` (Phase AJ and Phase AK sections)
+- `docs/project-plan.md` (Phase AJ and Phase AV sections)
 
 ## 1. Architecture Goals
 
@@ -13,15 +13,19 @@
 - Deterministic, structured event schema.
 - Default-on logging with fail-open behavior.
 - Mandatory OpenTelemetry export with local file logging always available.
+- OTel collector transport remains partitioned from generic observability logic.
 
 ## 2. Components
 
 - `sc-observability` (library): event model, validators, redaction, sink traits,
   health evaluator, default init path.
+- planned dedicated OTel transport adapter crate: owns OTLP/collector transport,
+  auth/TLS, batching, retry, and SDK dependency integration.
 - Producers: `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `sc-compose`,
-  `sc-composer`, `scmux`, `schook`.
+  `sc-composer`, `scmux` (follow-on, not in Phase AV scope), `schook`
+  (follow-on, not in Phase AV scope).
 - Daemon writer path: `atm-daemon` canonical sink for ATM producer traffic.
-- Mandatory OTel exporter path for in-scope tools (non-optional AK rollout).
+- Mandatory OTel exporter path for in-scope tools (non-optional AV rollout).
 
 ## 3. Data Flow
 
@@ -30,7 +34,9 @@
 3. ATM producers send `log-event` to daemon.
 4. Daemon validates, redacts, queues, and writes canonical JSONL.
 5. If daemon unavailable, producer writes spool event; daemon merges on startup.
-6. A mirrored OTel exporter sink emits selected traces/metrics.
+6. `sc-observability` maps structured events into neutral OTel records.
+7. The OTel transport adapter exports those records to the configured
+   collector target and optional debug mirrors.
 
 ## 4. Canonical State and Health Computation
 
@@ -98,10 +104,47 @@ Required baseline:
 OTel export failures must never block core command execution; local structured
 logging remains continuously available.
 
+## 9.1 OTel Partition Boundary
+
+- `sc-observability` remains the generic observability layer. It owns:
+  - structured event schema
+  - validation and redaction
+  - local JSONL sink/spool behavior
+  - neutral `OtelRecord` shaping
+  - exporter trait definitions and fail-open semantics
+- The dedicated OTel transport adapter owns:
+  - OTLP protocol/client dependencies
+  - collector endpoint configuration
+  - auth/TLS and headers
+  - batching, flush, and remote retry policy
+  - stdout/debug export modes
+- Application and daemon crates call the generic observability facade only.
+  They must not import collector SDK crates or construct OTLP exporters
+  themselves.
+- `sc-observability-otlp` must not be imported by non-entry-point modules.
+  Entry-point wiring is limited to the small set of binaries/modules that
+  initialize process-wide observability. Internal feature modules, helpers, and
+  libraries must depend on the generic facade instead.
+- Canonical enforcement reference: `docs/arch-boundary.md`
+  ("ARCH-BOUNDARY-002 Observability Import Boundary").
+- The partition goal for Phase AV is to keep collector-facing code in one
+  replaceable layer so future backend changes do not leak through the rest of
+  the codebase.
+
 ## 10. Diagnostics JSON Contract Lock
 
 `atm doctor --json` and `atm status --json` share one locked `logging_health`
 object contract:
-- `status`, `otel_exporter`, `local_structured`, `last_export_error`.
+- `logging_health.schema_version`
+- `logging_health.state`
+- `logging_health.log_root`
+- `logging_health.canonical_log_path`
+- `logging_health.spool_path`
+- `logging_health.dropped_events_total`
+- `logging_health.spool_file_count`
+- `logging_health.oldest_spool_age_seconds`
+- `logging_health.last_error.code`
+- `logging_health.last_error.message`
+- `logging_health.last_error.at`
 
 No drift is allowed across these two command surfaces for shared keys.

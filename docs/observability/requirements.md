@@ -1,10 +1,10 @@
 # Observability Requirements
 
-**Status**: Active (Phase AH baseline; AJ/AK updates in planning)
-**Scope**: `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `sc-compose`, `sc-composer`, `scmux`, `schook`
+**Status**: Active (Phase AH baseline; AJ complete; AV updates in planning)
+**Scope**: `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `sc-compose`, `sc-composer`
 **See also**:
 - `docs/observability/architecture.md`
-- `docs/project-plan.md` (Phase AJ and Phase AK sections)
+- `docs/project-plan.md` (Phase AJ and Phase AV sections)
 
 ## 1. Purpose
 
@@ -19,7 +19,8 @@ behavior across ATM tools and companion tooling.
 - Tool outputs are namespaced under per-tool log directories beneath a common root.
 - Schema and health-state semantics are shared across tools; no per-tool drift.
 - OpenTelemetry export is required for in-scope tools in this document;
-  non-optional enforcement is effective in Phase AK rollout.
+  live collector integration and non-optional enforcement are effective in
+  Phase AV rollout.
 
 ## 3. Canonical Logging Architecture Contract
 
@@ -193,8 +194,6 @@ Minimum required coverage:
 - `atm-daemon`: lifecycle, session-registry transitions, plugin lifecycle/errors.
 - `atm-agent-mcp`: tool-call audit + lifecycle context.
 - `atm-tui`: startup/shutdown, stream attach/detach, control-send/ack summaries.
-- `scmux`: team/orchestration lifecycle, message routing outcomes, and transport errors.
-- `schook`: hook invocation lifecycle (`session_start`, `session_end`, compact events), policy decision outcomes, and hook failures.
 - `sc-compose`: render/validate command lifecycle, missing-var diagnostics,
   output-path decisions, and runtime errors.
 - `sc-composer`: library render lifecycle, include expansion outcomes, and
@@ -215,7 +214,7 @@ Lifecycle and hook coverage:
 
 ## 9. OpenTelemetry Requirements
 
-- OTel export is mandatory for in-scope tools (non-optional in Phase AK rollout).
+- OTel export is mandatory for in-scope tools (non-optional in Phase AV rollout).
 - Local structured file logging remains mandatory regardless of OTel state.
 - OTel exporter startup is enabled by default.
 - Temporary disablement is allowed only for tests/controlled diagnostics paths
@@ -233,6 +232,35 @@ Lifecycle and hook coverage:
   - metrics: `subagent_runs_total`, `subagent_run_duration_ms`,
     `subagent_active_count`, `atm_messages_total`, `log_events_total`,
     `warnings_total`, `errors_total`
+- Phase AV must add live collector export for the binaries that ship from this
+  repository: `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `sc-compose`,
+  and `sc-composer`.
+- `scmux` and `schook` remain explicit follow-on work in their own repositories;
+  Phase AV must document the handoff instead of implying those tools are
+  delivered here.
+- Export targets must be explicit:
+  - primary: OTLP/HTTP collector export
+  - secondary: stdout exporter for controlled diagnostics
+  - retained local mirror: per-tool `.otel.jsonl` sidecar for fail-open auditing
+- OTel partition boundary is mandatory:
+  - `sc-observability` owns neutral event shaping, `OtelRecord`, correlation
+    requirements, and exporter traits only
+  - one dedicated transport adapter crate owns OTLP endpoint config, auth/TLS,
+    batching, retry behavior, and all `opentelemetry*` / OTLP SDK dependencies
+  - non-transport crates must not import `opentelemetry*`,
+    `opentelemetry-otlp`, or collector-specific SDK crates directly
+- Caller-facing crates (`atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`,
+  `sc-compose`, `sc-composer`) must emit through the shared observability
+  facade and must not construct exporters directly.
+- Phase AV must define one canonical transport config surface: endpoint,
+  protocol, auth/TLS material, export enablement, and debug exporter controls.
+  Per-binary config drift is forbidden.
+- High-value in-repo telemetry required in Phase AV includes:
+  - CLI request/response traces for `atm read`, `atm send`, and daemon commands
+  - daemon request, plugin dispatch, and lifecycle spans
+  - GitHub firewall/ledger correlation spans and metrics
+  - worker/session lifecycle metrics already represented in local JSONL logs
+  - MCP request/session traces within `atm-agent-mcp`
 
 ## 10. Cross-Tool Integration Requirements
 
@@ -246,7 +274,10 @@ Lifecycle and hook coverage:
 Phase mapping:
 - AH.1: shared crate contracts (`LogEventV1`, socket contract, queue/rotation/spool baseline).
 - AJ: session identity canonicalization (`session_id` normalization and SSoT alignment).
-- AK: mandatory OTel rollout, full producer adoption, health/reporting hardening.
+- AK: historical planning placeholder for mandatory OTel rollout (SUPERSEDED by
+  Phase AV).
+- AV: live collector integration, transport partitioning, in-repo producer
+  instrumentation rollout, and health/reporting hardening.
 
 Testability gate:
 - Every requirement section above is enforced by at least one unit or integration test.
