@@ -1,7 +1,7 @@
 use agent_team_mail_daemon_launch::{attach_launch_token, issue_isolated_test_launch_token};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -134,6 +134,17 @@ impl DaemonProcessGuard {
         self.child
             .as_mut()
             .expect("no child handle — use from_child or spawn, not adopt_registered_pid")
+    }
+
+    #[allow(dead_code)]
+    pub fn wait_with_output(mut self) -> std::io::Result<Output> {
+        let child = self
+            .child
+            .take()
+            .expect("no child handle — use from_child or spawn, not adopt_registered_pid");
+        let output = child.wait_with_output();
+        daemon_test_registry::unregister_test_daemon(self.pid);
+        output
     }
 
     pub fn wait_ready(&mut self, home: &TempDir) {

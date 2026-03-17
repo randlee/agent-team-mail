@@ -141,6 +141,8 @@ the normative success path.
 
 ### AU.4 — Lifecycle Logging + QA Enforcement
 
+**Status**: COMPLETE
+
 **Scope**: make launch/termination reasons observable and actionable.
 
 **Deliverables**:
@@ -154,6 +156,17 @@ the normative success path.
 - `daemon-spawn-qa` update to consume lifecycle logs for root cause analysis
 - QA rule: TTL/dead-owner shutdown in tests is a blocking harness-gap finding
 - CI/QA preflight/postflight rogue-daemon checks bound to launch metadata
+
+**Implementation Note**:
+- added structured lifecycle events for `launch_accepted`,
+  `clean_owner_shutdown`, `ttl_expiry_shutdown`, `dead_owner_shutdown`, and
+  `janitor_reap`, with `daemon_start_rejected` retained as the authoritative
+  firewall denial event
+- wired daemon startup and clean exit through those lifecycle records so
+  `daemon-spawn-qa` can treat them as the source of truth
+- updated `daemon-spawn-qa` to use lifecycle event names directly and to report
+  TTL/dead-owner terminations without `clean_owner_shutdown` as blocking
+  harness gaps
 
 **Acceptance Criteria**:
 - `daemon-spawn-qa` can explain forgotten daemons using logged facts

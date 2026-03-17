@@ -132,6 +132,7 @@ async fn main() -> Result<()> {
     .context("Failed to write daemon lock metadata")?;
     daemon::startup_auth::persist_runtime_metadata_from_token(&home_dir, &launch_token)
         .context("Failed to persist launch lease metadata")?;
+    daemon::startup_auth::log_launch_accepted(&home_dir, &launch_token);
 
     // Resolve canonical log writer config once and reuse for startup merge + writer task.
     let log_writer_config = LogWriterConfig::from_env(&home_dir);
@@ -405,8 +406,23 @@ async fn main() -> Result<()> {
     if let Some(task) = lease_monitor_task {
         let _ = task.await;
     }
-    match &run_result {
-        Ok(_) => emit_event_best_effort(EventFields {
+    let lease_violation = lease_violation.lock().unwrap().clone();
+    match (&run_result, &lease_violation) {
+        (Ok(_), None) => {
+            daemon::startup_auth::log_clean_owner_shutdown(&home_dir, &launch_token);
+            emit_event_best_effort(EventFields {
+                level: "info",
+                source: "atm-daemon",
+                action: "daemon_stop",
+                team: Some(plugin_ctx.config.core.default_team.clone()),
+                session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+                agent_id: std::env::var("ATM_IDENTITY").ok(),
+                agent_name: std::env::var("ATM_IDENTITY").ok(),
+                result: Some("ok".to_string()),
+                ..Default::default()
+            })
+        }
+        (Ok(_), Some(_)) => emit_event_best_effort(EventFields {
             level: "info",
             source: "atm-daemon",
             action: "daemon_stop",
@@ -417,7 +433,7 @@ async fn main() -> Result<()> {
             result: Some("ok".to_string()),
             ..Default::default()
         }),
-        Err(e) => emit_event_best_effort(EventFields {
+        (Err(e), _) => emit_event_best_effort(EventFields {
             level: "error",
             source: "atm-daemon",
             action: "daemon_stop",
@@ -430,7 +446,7 @@ async fn main() -> Result<()> {
             ..Default::default()
         }),
     }
-    if let Some(violation) = lease_violation.lock().unwrap().clone() {
+    if let Some(violation) = lease_violation {
         anyhow::bail!(
             "daemon lease violation: {} ({})",
             violation.event_name,

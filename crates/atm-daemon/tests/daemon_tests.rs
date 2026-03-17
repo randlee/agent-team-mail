@@ -3,6 +3,7 @@
 use agent_team_mail_core::config::Config;
 use agent_team_mail_core::context::SystemContext;
 use agent_team_mail_core::daemon_client::{BuildProfile, RuntimeKind, RuntimeOwnerMetadata};
+use agent_team_mail_core::logging_event::{LogEventV1, spool_dir};
 use agent_team_mail_daemon::daemon;
 use agent_team_mail_daemon::daemon::{
     SessionRegistry, StatusWriter, new_dedup_store, new_launch_sender, new_log_event_queue,
@@ -32,9 +33,40 @@ use serial_test::serial;
 use std::path::Path;
 use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
+
+fn read_spool_events(spool: &std::path::Path) -> Vec<LogEventV1> {
+    if !spool.exists() {
+        return Vec::new();
+    }
+    let mut events = Vec::new();
+    let entries = match std::fs::read_dir(spool) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .extension()
+            .and_then(|x| x.to_str())
+            .map(|x| x == "jsonl")
+            != Some(true)
+        {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in content.lines().filter(|line| !line.trim().is_empty()) {
+            if let Ok(event) = serde_json::from_str::<LogEventV1>(line) {
+                events.push(event);
+            }
+        }
+    }
+    events
+}
 
 fn issue_isolated_test_launch_token(home: &Path, issuer: &str) -> DaemonLaunchToken {
     issue_isolated_test_launch_token_inner(
@@ -1257,5 +1289,92 @@ fn test_daemon_exits_when_isolated_test_ttl_expires() {
         stderr.contains("\"event_name\":\"ttl_expiry_shutdown\"")
             || stderr.contains("ttl_expiry_shutdown"),
         "stderr should contain ttl_expiry_shutdown event, got: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_isolated_test_clean_shutdown_emits_lifecycle_events() {
+    let temp_dir = TempDir::new().unwrap();
+    let daemon_bin = Path::new(env!("CARGO_BIN_EXE_atm-daemon"));
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"));
+    cmd.env("ATM_HOME", temp_dir.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let token = issue_isolated_test_launch_token_with_lease(
+        temp_dir.path(),
+        "daemon_tests::clean_shutdown",
+        "daemon_tests::clean_shutdown",
+        std::process::id(),
+        Duration::from_secs(30),
+    );
+    attach_launch_token(&mut cmd, &token).expect("encode clean-shutdown token");
+    let child = cmd.spawn().expect("spawn daemon for clean shutdown");
+    let mut guard =
+        daemon_process_guard::DaemonProcessGuard::from_child(child, daemon_bin, temp_dir.path());
+
+    let daemon_running = wait_for_child_running_elapsed(guard.child_mut(), 1_000)
+        .expect("daemon should still be running");
+    assert!(
+        daemon_running <= Duration::from_secs(1),
+        "daemon should still be running: elapsed={daemon_running:?}"
+    );
+    let lock_elapsed = wait_for_lock_file_acquired_elapsed(temp_dir.path(), 8_000)
+        .expect("daemon should acquire daemon.lock");
+    assert!(
+        lock_elapsed <= Duration::from_secs(8),
+        "daemon should acquire daemon.lock within 8s: elapsed={lock_elapsed:?}"
+    );
+    std::thread::sleep(Duration::from_millis(250));
+
+    #[cfg(unix)]
+    {
+        let signal_result = unsafe { libc::kill(guard.pid() as i32, libc::SIGTERM) };
+        assert_eq!(signal_result, 0, "SIGTERM should succeed");
+    }
+    #[cfg(windows)]
+    {
+        guard
+            .child_mut()
+            .kill()
+            .expect("terminate daemon on windows");
+    }
+
+    let output = guard
+        .wait_with_output()
+        .expect("wait for clean shutdown daemon output");
+    assert!(
+        output.status.success(),
+        "daemon should exit cleanly after SIGTERM: status={:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let spool = spool_dir(temp_dir.path());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        let events = read_spool_events(&spool);
+        let saw_clean_shutdown = events.iter().any(|event| {
+            event.action == "clean_owner_shutdown"
+                && event
+                    .fields
+                    .get("event_name")
+                    .and_then(|value| value.as_str())
+                    == Some("clean_owner_shutdown")
+        });
+        if saw_clean_shutdown {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    let events = read_spool_events(&spool);
+    panic!(
+        "expected clean_owner_shutdown in daemon spool; saw actions: {:?}",
+        events
+            .iter()
+            .map(|event| event.action.as_str())
+            .collect::<Vec<_>>()
     );
 }
