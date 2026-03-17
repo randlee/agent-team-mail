@@ -34,6 +34,11 @@ while IFS= read -r match; do
   matches+=("$match")
 done < <(grep -RInE 'Command::new\("atm-daemon"\)' "$ROOT/crates" --include='*.rs' | cut -d: -f1,2 | sed "s#^$ROOT/##" || true)
 
+if grep -rn 'AU-BYPASS' "$ROOT/crates" --include='*.rs' | grep -v '^Binary'; then
+  echo 'ARCH-BOUNDARY: AU-BYPASS annotations must be removed before merge (found in source)' >&2
+  exit 1
+fi
+
 fail=0
 for match in "${matches[@]-}"; do
   [[ -z "$match" ]] && continue

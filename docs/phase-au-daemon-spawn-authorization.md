@@ -37,6 +37,8 @@ teardown. Clean shutdown by the owning test fixture remains mandatory.
 
 ### AU.1 — Canonical Launcher + Token Issuance
 
+**Status**: COMPLETE
+
 **Scope**: define the only allowed daemon launcher and its token model.
 
 **Deliverables**:

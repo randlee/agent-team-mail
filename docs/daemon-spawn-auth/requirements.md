@@ -128,6 +128,9 @@ No other crate may define or issue a competing launch token schema.
 - Any rogue daemon without canonical launch metadata is a blocking violation.
 - Any test daemon whose termination reason is TTL expiry or dead `owner_pid`
   instead of clean fixture shutdown is a blocking harness-gap finding.
+- `scripts/ci/gh_boundary_check.sh` is the required CI enforcement surface for
+  boundary regressions and MUST fail on both raw daemon-launch bypasses and any
+  reintroduced `AU-BYPASS` annotations under `crates/**/*.rs`.
 
 ## Non-Goals
 
