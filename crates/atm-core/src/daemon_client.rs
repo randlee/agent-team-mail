@@ -36,6 +36,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use agent_team_mail_daemon_launch::{
+    DEFAULT_LAUNCH_TOKEN_TTL_SECS, LaunchClass, attach_launch_token, issue_launch_token,
+};
+
 use crate::consts::{
     DAEMON_METADATA_SETTLE_MS, DAEMON_QUERY_TIMEOUT_MS, DAEMON_TIMEOUT_MAX_SECS,
     DAEMON_TIMEOUT_MIN_SECS, RETRY_SLEEP_MS, SOCKET_IO_TIMEOUT_MS, STARTUP_DEADLINE_SECS,
@@ -731,6 +735,14 @@ pub fn validate_runtime_admission_for_current_process(
 ) -> anyhow::Result<RuntimeOwnerMetadata> {
     let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("atm-daemon"));
     validate_runtime_admission(home, &current_exe)
+}
+
+fn launch_class_for_runtime_kind(kind: &RuntimeKind) -> LaunchClass {
+    match kind {
+        RuntimeKind::Release => LaunchClass::ProdShared,
+        RuntimeKind::Dev => LaunchClass::DevShared,
+        RuntimeKind::Isolated => LaunchClass::IsolatedTest,
+    }
 }
 
 pub fn runtime_kind_for_home(home: &Path) -> anyhow::Result<RuntimeKind> {
@@ -2207,12 +2219,33 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     let stderr_file = std::fs::File::create(&stderr_capture)
         .map_err(|e| anyhow::anyhow!("failed to prepare daemon stderr capture: {e}"))?;
 
-    let mut child = match Command::new(&daemon_bin)
+    let mut command = Command::new(&daemon_bin);
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::from(stderr_file))
-        .spawn()
-    {
+        .stderr(Stdio::from(stderr_file));
+    let launch_token = issue_launch_token(
+        launch_class_for_runtime_kind(&runtime_owner.runtime_kind),
+        &home,
+        daemon_bin_path.display().to_string(),
+        "agent-team-mail-core::daemon_client::ensure_daemon_running_unix",
+        Duration::from_secs(DEFAULT_LAUNCH_TOKEN_TTL_SECS),
+    );
+    if let Err(e) = attach_launch_token(&mut command, &launch_token) {
+        let error = format!("failed to encode daemon launch token: {e}");
+        emit_event_best_effort(EventFields {
+            level: "error",
+            source: "atm",
+            action: "daemon_autostart_failure",
+            result: Some("launch_token_encoding_error".to_string()),
+            target: Some(daemon_bin_path.display().to_string()),
+            error: Some(error.clone()),
+            ..Default::default()
+        });
+        anyhow::bail!("{error}");
+    }
+
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) => {
             let error = if e.kind() == ErrorKind::NotFound {

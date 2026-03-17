@@ -5,6 +5,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agent_team_mail_daemon::plugins::worker_adapter::{CodexTmuxBackend, WorkerAdapter};
+use agent_team_mail_daemon_launch::{LaunchClass, attach_launch_token, issue_launch_token};
 #[path = "../../atm/tests/support/daemon_process_guard.rs"]
 #[allow(dead_code)]
 mod daemon_process_guard;
@@ -107,6 +108,14 @@ fn start_daemon(env: &DaemonEnv) -> daemon_process_guard::DaemonProcessGuard {
     cmd.current_dir(env.workdir.path())
         .env("ATM_HOME", &env.atm_home)
         .arg("--verbose");
+    let token = issue_launch_token(
+        LaunchClass::IsolatedTest,
+        &env.atm_home,
+        env!("CARGO_BIN_EXE_atm-daemon"),
+        "tmux_integration::start_daemon",
+        Duration::from_secs(600),
+    );
+    attach_launch_token(&mut cmd, &token).expect("encode daemon launch token");
     let log_path = env.workdir.path().join("daemon.log");
     let log = fs::OpenOptions::new()
         .create(true)

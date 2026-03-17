@@ -1901,7 +1901,7 @@ blocking CI/QA failure.
 | Sprint | Focus | Branch | Status |
 |---|---|---|---|
 | AU.1 | Canonical daemon launcher plus launch-token issuance surface and launch-class schema (`prod-shared`, `dev-shared`, `isolated-test`) | feature/pAU-s1-canonical-launcher | COMPLETE |
-| AU.2 | Daemon startup firewall: reject missing/invalid/replayed launch tokens and hard-fail duplicate shared-runtime starts | TBD | PLANNED |
+| AU.2 | Daemon startup firewall: reject missing/invalid/replayed launch tokens and hard-fail duplicate shared-runtime starts | feature/pAU-s2-daemon-startup-firewall | COMPLETE |
 | AU.3 | `isolated-test` lease model: `test_identifier`, `owner_pid`, bounded TTL, owner/TTL self-termination, and janitor sweep behavior | TBD | PLANNED |
 | AU.4 | Lifecycle logging + QA enforcement: launch/termination ledgers, `daemon-spawn-qa` log-driven root cause, and CI/QA blocking on TTL/dead-owner exits | TBD | PLANNED |
 | AU.5 | Remove remaining bypass spawn paths and run final repo-wide audit proving the canonical launcher is the only daemon spawn path left | TBD | PLANNED |

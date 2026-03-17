@@ -78,6 +78,8 @@ DevShared | IsolatedTest`), the `issue_launch_token()` issuance surface in
 
 ### AU.2 — Daemon Startup Firewall
 
+**Status**: COMPLETE
+
 **Scope**: make `atm-daemon` reject unauthorized startup.
 
 **Deliverables**:
@@ -90,6 +92,14 @@ DevShared | IsolatedTest`), the `issue_launch_token()` issuance surface in
   - replayed token
 - structured startup rejection logging
 - shared-runtime singleton checks integrated with launch-class validation
+
+**Implementation Note**:
+- implemented `validate_startup_token()` with 6 rejection conditions:
+  missing, invalid, expired, wrong-atm-home, wrong-class, and replayed
+- implemented `emit_startup_rejection()` with the 5-field structured event
+  contract
+- implemented `SharedRuntimeAlreadyRunning` rejection for `ProdShared` and
+  `DevShared`
 
 **Acceptance Criteria**:
 - raw `atm-daemon` execution outside the authorized launcher fails immediately

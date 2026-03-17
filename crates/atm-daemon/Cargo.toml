@@ -28,6 +28,7 @@ required-features = ["test-support"]
 [dependencies]
 agent-team-mail-ci-monitor.workspace = true
 agent-team-mail-core.workspace = true
+agent-team-mail-daemon-launch.workspace = true
 sc-observability.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
