@@ -546,6 +546,7 @@ mod tests {
     /// Verify that `emit_event_best_effort` is fail-open: calling it without
     /// an initialised unified channel must not panic.
     #[test]
+    #[serial]
     fn test_emit_event_best_effort_is_fail_open() {
         // No unified channel is registered in unit-test context; the call
         // should spool the event rather than panicking or dropping it.
