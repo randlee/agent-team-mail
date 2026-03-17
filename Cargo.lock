@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-team-mail"
-version = "0.45.0"
+version = "0.45.1"
 dependencies = [
  "agent-team-mail-ci-monitor",
  "agent-team-mail-core",
@@ -37,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-ci-monitor"
-version = "0.45.0"
+version = "0.45.1"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
@@ -53,7 +53,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-core"
-version = "0.45.0"
+version = "0.45.1"
 dependencies = [
  "agent-team-mail-daemon-launch",
  "anyhow",
@@ -77,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-daemon"
-version = "0.45.0"
+version = "0.45.1"
 dependencies = [
  "agent-team-mail-ci-monitor",
  "agent-team-mail-core",
@@ -112,7 +112,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-daemon-launch"
-version = "0.45.0"
+version = "0.45.1"
 dependencies = [
  "chrono",
  "serde",
@@ -122,7 +122,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-mcp"
-version = "0.45.0"
+version = "0.45.1"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
@@ -145,7 +145,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-tui"
-version = "0.45.0"
+version = "0.45.1"
 dependencies = [
  "agent-team-mail-core",
  "agent-team-mail-daemon-launch",
@@ -1625,7 +1625,7 @@ dependencies = [
 
 [[package]]
 name = "sc-compose"
-version = "0.45.0"
+version = "0.45.1"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
@@ -1644,7 +1644,7 @@ dependencies = [
 
 [[package]]
 name = "sc-composer"
-version = "0.45.0"
+version = "0.45.1"
 dependencies = [
  "agent-team-mail-core",
  "minijinja",
@@ -1659,7 +1659,7 @@ dependencies = [
 
 [[package]]
 name = "sc-observability"
-version = "0.45.0"
+version = "0.45.1"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
