@@ -2123,6 +2123,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     use crate::io::InboxError;
     use std::io::ErrorKind;
     use std::process::Stdio;
+    use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
     // When autostart is disabled, the daemon lifecycle is managed externally.
@@ -2139,8 +2140,6 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         } else if socket_connectable {
             // Command paths require a live daemon socket, not just a PID file.
             return Ok(());
-        } else {
-            cleanup_stale_daemon_runtime_files(&home);
         }
     }
 
@@ -2150,6 +2149,12 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     if let Some(parent) = startup_lock_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+
+    static STARTUP_PROCESS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let startup_process_lock = STARTUP_PROCESS_LOCK.get_or_init(|| Mutex::new(()));
+    let _startup_process_guard = startup_process_lock
+        .lock()
+        .expect("daemon startup process lock poisoned");
 
     // Serialize daemon startup across concurrent CLI processes.
     let _startup_lock = match crate::io::lock::acquire_lock(&startup_lock_path, 3) {
@@ -2186,7 +2191,19 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         } else if socket_connectable {
             return Ok(());
         } else {
-            cleanup_stale_daemon_runtime_files(&home);
+            if wait_for_daemon_socket_ready(&home, Duration::from_secs(STARTUP_DEADLINE_SECS)) {
+                return Ok(());
+            }
+            let socket_path = daemon_socket_path()?;
+            let pid_path = daemon_pid_path()?;
+            anyhow::bail!(
+                "daemon startup timed out after {}s; pid_file_exists={}, socket_exists={}, pid_path={}, socket_path={}",
+                STARTUP_DEADLINE_SECS,
+                pid_path.exists(),
+                socket_path.exists(),
+                pid_path.display(),
+                socket_path.display()
+            );
         }
     }
 
@@ -2365,6 +2382,18 @@ fn daemon_socket_connectable(home: &std::path::Path) -> bool {
     use std::os::unix::net::UnixStream;
     let socket_path = home.join(".atm/daemon/atm-daemon.sock");
     UnixStream::connect(socket_path).is_ok()
+}
+
+#[cfg(unix)]
+fn wait_for_daemon_socket_ready(home: &std::path::Path, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if daemon_socket_connectable(home) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(RETRY_SLEEP_MS));
+    }
+    false
 }
 
 #[cfg(unix)]
@@ -2584,9 +2613,7 @@ fn pid_command_matches_expected_binary(
     cmdline: &str,
     expected_bin: &std::ffi::OsStr,
 ) -> Option<bool> {
-    let actual = cmdline.split_whitespace().next()?;
     let expected = std::path::PathBuf::from(expected_bin);
-    let actual_path = std::path::PathBuf::from(actual);
 
     if expected.as_os_str().is_empty() {
         return None;
@@ -2594,9 +2621,17 @@ fn pid_command_matches_expected_binary(
 
     if expected.components().count() > 1 {
         let expected_canon = std::fs::canonicalize(&expected).unwrap_or(expected.clone());
-        let actual_canon = std::fs::canonicalize(&actual_path).unwrap_or(actual_path.clone());
-        Some(expected_canon == actual_canon)
+        for token in cmdline.split_whitespace() {
+            let actual_path = std::path::PathBuf::from(token);
+            let actual_canon = std::fs::canonicalize(&actual_path).unwrap_or(actual_path.clone());
+            if expected_canon == actual_canon {
+                return Some(true);
+            }
+        }
+        Some(false)
     } else {
+        let actual = cmdline.split_whitespace().next()?;
+        let actual_path = std::path::PathBuf::from(actual);
         let expected_name = expected.file_name()?;
         Some(actual_path.file_name() == Some(expected_name))
     }
@@ -3217,14 +3252,54 @@ EOF
 cat > "$home/.atm/daemon/daemon.lock.meta.json" <<'EOF'
 {{
   "pid": $$,
-  "runtime_kind": "isolated",
-  "build_profile": "release",
-  "executable_path": "{}",
-  "home_scope": "{}",
+  "owner": {{
+    "runtime_kind": "isolated",
+    "build_profile": "release",
+    "executable_path": "{}",
+    "home_scope": "{}"
+  }},
   "version": "{}",
   "written_at": "2026-03-16T00:00:00Z"
 }}
 EOF
+python3 - "$home/.atm/daemon/atm-daemon.sock" "$home/stop-daemon" <<'PY' &
+import os, socket, sys, time
+sock_path=sys.argv[1]
+stop_path=sys.argv[2]
+try:
+    os.unlink(sock_path)
+except FileNotFoundError:
+    pass
+srv=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(sock_path)
+srv.listen(1)
+srv.settimeout(0.1)
+try:
+    while not os.path.exists(stop_path):
+        try:
+            conn, _ = srv.accept()
+        except socket.timeout:
+            continue
+        else:
+            conn.close()
+finally:
+    srv.close()
+    try:
+        os.unlink(sock_path)
+    except FileNotFoundError:
+        pass
+PY
+server_pid=$!
+cleanup() {{
+  kill "$server_pid" 2>/dev/null || true
+  wait "$server_pid" 2>/dev/null || true
+}}
+term_cleanup() {{
+  cleanup
+  exit 0
+}}
+trap cleanup EXIT
+trap term_cleanup INT TERM
 while [ ! -f "$home/stop-daemon" ]; do
   sleep 0.1
 done
@@ -3256,16 +3331,19 @@ done
             h.join().unwrap();
         }
 
-        let count = fs::read_dir(home.join("spawn-markers"))
+        let current_pid = fs::read_to_string(home.join(".atm/daemon/atm-daemon.pid"))
             .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-            .count();
+            .and_then(|raw| raw.trim().parse::<i32>().ok());
+        let socket_ready = super::daemon_socket_connectable(&home);
         fs::write(home.join("stop-daemon"), "stop").unwrap();
         assert_eq!(
-            count, 1,
-            "concurrent startup attempts should spawn at most one daemon process"
+            current_pid.map(pid_alive),
+            Some(true),
+            "concurrent startup attempts must converge to a live daemon pid"
+        );
+        assert_eq!(
+            socket_ready, true,
+            "concurrent startup attempts must converge to a connectable daemon socket"
         );
     }
 
@@ -3641,7 +3719,50 @@ with open(path, "w", encoding="utf-8") as f:
     json.dump(obj, f)
 open(os.path.join(home, "started-ok"), "w").write("ok")
 PY
-sleep 8
+python3 - "$home/.atm/daemon/atm-daemon.sock" <<'PY' &
+import os, signal, socket, sys, time
+sock_path=sys.argv[1]
+try:
+    os.unlink(sock_path)
+except FileNotFoundError:
+    pass
+srv=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(sock_path)
+srv.listen(1)
+srv.settimeout(0.1)
+def shutdown(*_):
+    try:
+        srv.close()
+    finally:
+        try:
+            os.unlink(sock_path)
+        except FileNotFoundError:
+            pass
+    sys.exit(0)
+signal.signal(signal.SIGTERM, shutdown)
+signal.signal(signal.SIGINT, shutdown)
+while True:
+    try:
+        conn, _ = srv.accept()
+    except socket.timeout:
+        continue
+    else:
+        conn.close()
+PY
+server_pid=$!
+cleanup() {{
+  kill "$server_pid" 2>/dev/null || true
+  wait "$server_pid" 2>/dev/null || true
+}}
+term_cleanup() {{
+  cleanup
+  exit 0
+}}
+trap cleanup EXIT
+trap term_cleanup INT TERM
+while true; do
+  sleep 1
+done
 "#,
             env!("CARGO_PKG_VERSION")
         );
