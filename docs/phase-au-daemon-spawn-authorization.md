@@ -91,6 +91,14 @@ rejection records, and hard-fails duplicate shared-runtime starts.
 - structured startup rejection logging
 - shared-runtime singleton checks integrated with launch-class validation
 
+**Implementation Note**:
+- implemented `validate_startup_token()` with 6 rejection conditions:
+  missing, invalid, expired, wrong-atm-home, wrong-class, and replayed
+- implemented `emit_startup_rejection()` with the 5-field structured event
+  contract
+- implemented `SharedRuntimeAlreadyRunning` rejection for `ProdShared` and
+  `DevShared`
+
 **Acceptance Criteria**:
 - raw `atm-daemon` execution outside the authorized launcher fails immediately
 - `prod-shared` and `dev-shared` second launches hard-fail

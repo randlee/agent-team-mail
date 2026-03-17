@@ -22,6 +22,19 @@ launch-token validation, isolated-test leases, and lifecycle logging.
   immediate exit with structured rejection logs.
 - Shared runtimes (`prod-shared`, `dev-shared`) MUST hard-fail duplicate starts.
 
+### Rejection Log Event Schema
+
+- `rejection_reason`
+  - string describing which rejection condition triggered
+- `launch_class`
+  - string when known: `ProdShared`, `DevShared`, or `IsolatedTest`
+- `token_id`
+  - string when available; the nonce / UUID from the presented token
+- `atm_home`
+  - path bound to the rejected startup attempt
+- `timestamp`
+  - RFC3339 datetime when the rejection was emitted
+
 ## Launch Classes
 
 - `prod-shared`
