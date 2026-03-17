@@ -1292,6 +1292,7 @@ fn test_daemon_exits_when_isolated_test_ttl_expires() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 #[serial]
 fn test_isolated_test_clean_shutdown_emits_lifecycle_events() {
@@ -1367,6 +1368,7 @@ fn test_isolated_test_clean_shutdown_emits_lifecycle_events() {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+
     let events = read_spool_events(&spool);
     panic!(
         "expected clean_owner_shutdown event in spool, got events: {:?}",

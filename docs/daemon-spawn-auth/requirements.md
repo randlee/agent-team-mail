@@ -122,6 +122,65 @@ No other crate may define or issue a competing launch token schema.
   and MUST be treated as harness-gap evidence when they replace clean fixture
   shutdown.
 
+### Lifecycle Event Field Schemas
+
+- `launch_accepted`
+  - `event_name`
+    - fixed string `launch_accepted`
+  - `atm_home`
+    - canonicalized runtime path for the accepted launch
+  - `launch_class`
+    - `prod-shared`, `dev-shared`, or `isolated-test`
+  - `token_id`
+    - launch token nonce / UUID for the accepted daemon start
+  - `timestamp`
+    - RFC3339 UTC emission time
+- `clean_owner_shutdown`
+  - `event_name`
+    - fixed string `clean_owner_shutdown`
+  - `atm_home`
+    - canonicalized runtime path for the terminated daemon
+  - `launch_class`
+    - `isolated-test` for test-owned daemons
+  - `token_id`
+    - launch token nonce / UUID when known
+  - `timestamp`
+    - RFC3339 UTC emission time
+- `ttl_expiry_shutdown`
+  - `event_name`
+    - fixed string `ttl_expiry_shutdown`
+  - `atm_home`
+    - canonicalized runtime path for the expired daemon
+  - `launch_class`
+    - `isolated-test`
+  - `token_id`
+    - launch token nonce / UUID when known
+  - `timestamp`
+    - RFC3339 UTC emission time
+- `dead_owner_shutdown`
+  - `event_name`
+    - fixed string `dead_owner_shutdown`
+  - `atm_home`
+    - canonicalized runtime path for the daemon whose owner disappeared
+  - `launch_class`
+    - `isolated-test`
+  - `token_id`
+    - launch token nonce / UUID when known
+  - `timestamp`
+    - RFC3339 UTC emission time
+- `janitor_reap`
+  - `event_name`
+    - fixed string `janitor_reap`
+  - `atm_home`
+    - canonicalized runtime path for the reaped isolated runtime
+  - `launch_class`
+    - omitted when janitor cleanup is operating only from persisted runtime
+      metadata
+  - `token_id`
+    - omitted when no launch token is present during janitor cleanup
+  - `timestamp`
+    - RFC3339 UTC emission time
+
 ## QA / CI Contract
 
 - Any non-canonical daemon spawn path is a blocking violation.
