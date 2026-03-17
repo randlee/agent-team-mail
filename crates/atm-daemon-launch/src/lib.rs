@@ -119,11 +119,10 @@ mod tests {
 
     #[test]
     fn encode_decode_roundtrip_preserves_token() {
-        let prod_dir = tempfile::tempdir().unwrap();
-        let prod_home = prod_dir.path();
+        let prod_home = std::env::temp_dir().join("prod-home");
         let token = issue_launch_token(
             LaunchClass::ProdShared,
-            prod_home,
+            &prod_home,
             "/opt/homebrew/bin/atm-daemon",
             "launcher-test",
             Duration::from_secs(15),
