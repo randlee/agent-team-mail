@@ -1279,8 +1279,8 @@ fn test_isolated_test_clean_shutdown_emits_lifecycle_events() {
     attach_launch_token(&mut cmd, &token).expect("encode clean-shutdown token");
     let mut child = cmd.spawn().expect("spawn daemon for clean shutdown");
 
-    let daemon_running = wait_for_child_running_elapsed(&mut child, 1_000)
-        .expect("daemon should still be running");
+    let daemon_running =
+        wait_for_child_running_elapsed(&mut child, 1_000).expect("daemon should still be running");
     assert!(
         daemon_running <= Duration::from_secs(1),
         "daemon should still be running: elapsed={daemon_running:?}"
