@@ -1293,8 +1293,15 @@ fn test_isolated_test_clean_shutdown_emits_lifecycle_events() {
     );
     std::thread::sleep(Duration::from_millis(250));
 
-    let signal_result = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
-    assert_eq!(signal_result, 0, "SIGTERM should succeed");
+    #[cfg(unix)]
+    {
+        let signal_result = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+        assert_eq!(signal_result, 0, "SIGTERM should succeed");
+    }
+    #[cfg(windows)]
+    {
+        child.kill().expect("terminate daemon on windows");
+    }
 
     let output = child
         .wait_with_output()
