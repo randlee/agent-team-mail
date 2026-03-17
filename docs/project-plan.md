@@ -2,7 +2,7 @@
 
 **Version**: 0.7
 **Date**: 2026-03-10
-**Status**: Phase AM refactor in progress. Phase AK queued.
+**Status**: Phase AM refactor in progress. Phase AV queued.
 
 ---
 
@@ -179,11 +179,12 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AO | GH Monitor Guardrails + Runtime Admission | Prevent accidental shared-runtime pollers, add isolated-runtime TTL policy, and make GH usage attributable/self-limiting with cached repo-state and operator controls | COMPLETE ([#751](https://github.com/randlee/agent-team-mail/pull/751)) |
 | AP | Test Stability and Harness Hardening | Eliminate hang-prone, flaky, and operationally unsafe test patterns; RAII guard consolidation; daemon lifecycle hardening | COMPLETE ([#756](https://github.com/randlee/agent-team-mail/pull/756), [#767](https://github.com/randlee/agent-team-mail/pull/767), [#768](https://github.com/randlee/agent-team-mail/pull/768)) |
 | AJ | Session-ID SSoT Normalization | Canonical `session_id` naming, shared caller resolver, runtime session resolution closure, doctor/session consistency | PLANNED |
-| AK | Mandatory OTel Rollout | Non-optional OTel across in-scope tools with canonical correlation and health/reporting contracts | PLANNED |
+| AK | Mandatory OTel Rollout | Historical planning placeholder for mandatory OTel rollout; superseded by AV | SUPERSEDED |
 | AQ | Codebase Cleanup + Rogue Daemon Spawn Elimination | Remove cleanup debt from AN/AO/AP reviews, consolidate constants/dead code, and eliminate non-canonical test daemon spawn paths | COMPLETE |
 | AR | Smoke Follow-Up + Lifecycle Timing Corrections | Fix daemon harness flake, drain timeout regression, and EnvGuard::unset gap identified during smoke testing | COMPLETE (PR #795) |
 | AS | Backlog Gap-Filling + GH API Governance | 14 backlog bug/gap fixes + GH API hard firewall, ledgers, and explicit GitHub ownership requirements | ACTIVE |
 | AT | GitHub Boundary Elimination | Remove all remaining audited GitHub-boundary violations so only the gh plugin/provider layer owns GitHub behavior | PLANNED |
+| AV | Live OTel Collector Integration + Architecture Partitioning | Deliver real collector export for in-repo ATM binaries while keeping OTel transport isolated behind one dedicated adapter boundary | PLANNED |
 
 ---
 
@@ -1488,14 +1489,16 @@ the current tranche focused on onboarding contract closure.
 **Completed**: 133+ sprints across 29 phases (CI green)
 **Current version**: v0.42.0
 **Current planning phase**: Phase AJ
-**Next planned phase**: Phase AK (mandatory OTel rollout)
+**Next planned phase**: Phase AV (live OTel collector integration + partitioning)
 
 ---
 
 ## 17.17 Phase AH: Observability Unification + AG Deferred Closure (Historical)
 
-_Historical record: AH delivered logging unification baseline. OTel/scmux/schook
-rollout is deferred and planned in AJ/AK._
+_Historical record: AH delivered logging unification baseline. The old AK
+placeholder is superseded by Phase AV, which narrows scope to in-repo ATM
+binaries and adds explicit OTel transport partitioning. `scmux`/`schook`
+follow-on remains queued in their own repositories._
 
 **Goal**: Extract `sc-observability` as a shared logging platform across ATM
 tools and close deferred AG observability/render/docs gaps.
@@ -1555,6 +1558,8 @@ identity/session ambiguity by standardizing on `session_id` across ATM surfaces.
 
 ## 17.20 Phase AK: Mandatory OTel Rollout
 
+**Status**: SUPERSEDED by Phase AV.
+
 **Goal**: Ship non-optional OpenTelemetry across in-scope tools while keeping
 local structured logging always-on and fail-open.
 **Prerequisites**: Phase AH and Phase AJ complete.
@@ -1572,6 +1577,56 @@ local structured logging always-on and fail-open.
 | AK.3 | Producer integration (`atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `scmux`, `schook`, `sc-compose`, `sc-composer`) | OTel rollout | PLANNED |
 | AK.4 | Doctor/status observability health + runbook finalization | health/reporting | PLANNED |
 | AK.5 | End-to-end QA, release gates, and cross-platform validation | release confidence | PLANNED |
+
+---
+
+## 17.30 Phase AV: Live OTel Collector Integration + Partitioning
+
+**Goal**: get OpenTelemetry live for the ATM repository itself while keeping
+collector/export plumbing isolated from the rest of the codebase.
+**Prerequisites**: Phase AH complete, Phase AJ complete, and current
+`sc-observability` baseline present on `develop`.
+
+**Planning doc**: `docs/phase-av-otel-planning.md`
+**Requirements**: `docs/observability/requirements.md`
+**Architecture**: `docs/observability/architecture.md`
+
+### Sprint Map
+| Sprint | Focus | Status |
+|---|---|---|
+| AV.1 | Architecture boundary + config contract: define the dedicated OTel transport adapter seam, collector config surface, and in-repo scope | PLANNED |
+| AV.2 | Transport adapter implementation: add OTLP/HTTP exporter path, stdout debug exporter, and fail-open collector transport behind the dedicated adapter boundary | PLANNED |
+| AV.3 | High-value daemon/CLI instrumentation: `atm`, `atm-daemon`, `atm-core`, GitHub firewall/ledger paths, and daemon lifecycle/request spans/metrics | PLANNED |
+| AV.4 | In-repo producer rollout: `atm-tui`, `atm-agent-mcp`, `sc-compose`, `sc-composer`, plus doctor/status health and troubleshooting closure | PLANNED |
+| AV.5 | Dogfood, QA, and release confidence: collector-backed smoke, fail-open outage tests, and explicit external follow-on handoff for `scmux`/`schook` | PLANNED |
+
+### Execution Contract
+- `sc-observability` remains provider-neutral; it must not become the place
+  where OTLP clients, auth, or collector-specific policy accumulate.
+- One dedicated adapter layer owns all `opentelemetry*` / OTLP SDK
+  dependencies and collector transport wiring.
+- Application crates must use the generic observability facade and must not
+  instantiate exporters directly.
+- AV scope is limited to the code that ships from this repository. External
+  repo follow-on work (`scmux`, `schook`) must be documented, not silently
+  assumed complete.
+
+### Exit Criteria
+1. ATM binaries in this repository can export to a real OTLP collector without
+   losing local JSONL/`.otel.jsonl` fail-open behavior.
+2. OTel transport dependencies are isolated behind one dedicated adapter
+   boundary instead of being spread through CLI/daemon/application crates.
+3. High-value traces and metrics are present for daemon requests, CLI command
+   flows, GitHub governance paths, and MCP/session lifecycle paths.
+4. `atm doctor --json` and `atm status --json` expose canonical OTel health
+   information for collector connectivity and local mirror state.
+5. QA confirms the collector path, local fail-open path, and outage behavior
+   all work without blocking normal command flow.
+
+### Follow-on Notes
+- Issue `#624` remains the external follow-up for `scmux` and `schook`.
+- Issue `#640` remains the docs cross-reference closure item and should be
+  closed as part of AV.4/AV.5, not left as silent drift.
 
 ---
 
