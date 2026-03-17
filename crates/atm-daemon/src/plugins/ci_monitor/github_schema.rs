@@ -120,9 +120,17 @@ pub(crate) struct GhPrLookupView {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GhPrView {
     #[serde(default)]
+    pub(crate) number: u64,
+    #[serde(default)]
     pub(crate) merge_state_status: Option<String>,
     #[serde(default)]
     pub(crate) url: Option<String>,
+    #[serde(default)]
+    pub(crate) head_ref_name: Option<String>,
+    #[serde(default)]
+    pub(crate) head_ref_oid: Option<String>,
+    #[serde(default)]
+    pub(crate) created_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

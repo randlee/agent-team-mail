@@ -1117,6 +1117,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[test]
     fn test_spool_write() {
         let dir = TempDir::new().expect("temp dir");

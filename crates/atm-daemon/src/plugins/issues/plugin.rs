@@ -117,6 +117,8 @@ impl IssuesPlugin {
         &self,
         registry: &ProviderRegistry,
         git_provider: &GitProviderType,
+        home_dir: &std::path::Path,
+        target_team: &str,
         config_table: Option<&toml::Table>,
     ) -> Result<Box<dyn ErasedIssueProvider>, PluginError> {
         // If config specifies a provider, use it
@@ -126,7 +128,13 @@ impl IssuesPlugin {
             // Special case: GitHub built-in needs owner/repo from git context
             if provider_name == "github" {
                 if let GitProviderType::GitHub { owner, repo } = git_provider {
-                    return Ok(Box::new(GitHubProvider::new(owner.clone(), repo.clone())));
+                    return Ok(Box::new(GitHubProvider::new_with_context(
+                        owner.clone(),
+                        repo.clone(),
+                        target_team.to_string(),
+                        home_dir.to_path_buf(),
+                        "issues-plugin".to_string(),
+                    )));
                 }
                 return Err(PluginError::Provider {
                     message: "Configured provider 'github' but git remote is not GitHub"
@@ -143,7 +151,13 @@ impl IssuesPlugin {
         match git_provider {
             GitProviderType::GitHub { owner, repo } => {
                 debug!("Auto-detected GitHub provider from git remote");
-                Ok(Box::new(GitHubProvider::new(owner.clone(), repo.clone())))
+                Ok(Box::new(GitHubProvider::new_with_context(
+                    owner.clone(),
+                    repo.clone(),
+                    target_team.to_string(),
+                    home_dir.to_path_buf(),
+                    "issues-plugin".to_string(),
+                )))
             }
             GitProviderType::AzureDevOps { org, project, repo } => {
                 // Try to find azure-devops provider in registry
@@ -297,20 +311,27 @@ impl Plugin for IssuesPlugin {
         })?;
 
         // Determine ATM config root from canonical home resolution.
-        let atm_home = agent_team_mail_core::home::get_home_dir()
-            .map_err(|e| PluginError::Init {
+        let home_dir =
+            agent_team_mail_core::home::get_home_dir().map_err(|e| PluginError::Init {
                 message: format!("Could not determine home directory: {e}"),
                 source: None,
-            })?
-            .join(".config/atm");
+            })?;
+        let atm_config_root = home_dir.join(".config/atm");
 
         // Build the provider registry
-        let registry = self.build_registry(&atm_home);
+        let registry = self.build_registry(&atm_config_root);
         debug!(
             "Provider registry initialized with {} providers: {:?}",
             registry.len(),
             registry.list_providers()
         );
+
+        // Determine target team (use default_team from config if not specified)
+        let target_team = if self.config.team.is_empty() {
+            ctx.config.core.default_team.clone()
+        } else {
+            self.config.team.clone()
+        };
 
         // Create provider if not already injected (for testing)
         if self.provider.is_none() {
@@ -320,19 +341,17 @@ impl Plugin for IssuesPlugin {
             })?;
 
             // Create the issue provider from the registry
-            self.provider =
-                Some(self.create_provider_from_registry(&registry, git_provider, config_table)?);
+            self.provider = Some(self.create_provider_from_registry(
+                &registry,
+                git_provider,
+                &home_dir,
+                &target_team,
+                config_table,
+            )?);
         }
 
         // Store registry for potential runtime use
         self.registry = Some(registry);
-
-        // Determine target team (use default_team from config if not specified)
-        let target_team = if self.config.team.is_empty() {
-            ctx.config.core.default_team.clone()
-        } else {
-            self.config.team.clone()
-        };
 
         // Register synthetic member
         let now_ms = SystemTime::now()

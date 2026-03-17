@@ -3,6 +3,7 @@
 //! This crate owns the CI-monitor production surface that can be reused without
 //! depending on ATM daemon bootstrap, plugin lifecycle, or socket transport code.
 
+pub mod consts;
 mod gh_ledger;
 #[cfg(any(test, feature = "test-support"))]
 mod mock_provider;
