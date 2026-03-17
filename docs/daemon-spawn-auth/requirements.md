@@ -84,23 +84,27 @@ No other crate may define or issue a competing launch token schema.
 - Required format:
   - `// AU-BYPASS: migrate <description> to atm-daemon-launch in AU.5`
 - Complete bypass inventory for the current AU plan:
-  - `crates/atm-core/src/daemon_client.rs:2102`
-  - `crates/atm-tui/src/main.rs:493`
+  - `crates/atm-core/src/daemon_client.rs:2131`
+  - `crates/atm-tui/src/main.rs:497`
 - Any additional bypass sites found during the AU.5 final audit MUST be added
   to this inventory before that sprint is considered complete.
 
 ## Isolated-Test Lease
 
-- Every isolated test daemon MUST carry:
+- When `launch_class == isolated-test`, every launch token and persisted runtime
+  lease MUST carry:
   - `test_identifier`
   - `owner_pid`
   - `issued_at`
   - `expires_at`
   - `atm_home`
   - token id / nonce
+- Clean fixture-owned shutdown is the normative success path for test daemons.
 - TTL expiry and dead-owner shutdown are fail-safe conditions only.
-- The owning fixture remains responsible for clean shutdown before TTL expiry or
-  owner loss.
+- If an isolated-test daemon reaches TTL expiry or dead-owner shutdown, QA MUST
+  treat that as a blocking harness gap rather than an acceptable cleanup path.
+- Janitor/sweep cleanup may remove stale isolated-test runtimes only after the
+  lease has expired and the recorded `owner_pid` is no longer alive.
 
 ## Lifecycle Logging
 
