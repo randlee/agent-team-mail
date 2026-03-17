@@ -3,7 +3,7 @@
 **Integration branch**: `integrate/phase-AU` off `develop`
 **Prerequisites**: Phase AT merged to `develop` AND `docs/arch-boundary.md`
 records the zero-violation audit state
-**Status**: PLANNED
+**Status**: IN PROGRESS
 
 ## Overview
 
@@ -39,8 +39,13 @@ teardown. Clean shutdown by the owning test fixture remains mandatory.
 
 **Status**: COMPLETE
 Implementation note: canonical daemon launch now routes through
-`agent-team-mail-daemon-launch`, which owns launch-class token issuance and the
-shared launcher surface used by the migrated spawn/adopt callsites.
+`agent-team-mail-daemon-launch`, which owns the `DaemonLaunchToken` 7-field
+struct (`launch_class`, `atm_home`, `binary_identity`, `issuer`, `token_id`,
+`issued_at`, `expires_at`), the `LaunchClass` enum (`ProdShared |
+DevShared | IsolatedTest`), the `issue_launch_token()` issuance surface in
+`crates/atm-daemon-launch`, and the temporary `AU-BYPASS` annotations at
+`crates/atm-core/src/daemon_client.rs:2131` and
+`crates/atm-tui/src/main.rs:497` that track the remaining AU.5 reroutes.
 
 **Scope**: define the only allowed daemon launcher and its token model.
 
