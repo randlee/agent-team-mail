@@ -303,8 +303,11 @@ pub fn persist_runtime_metadata_from_token(home: &Path, token: &DaemonLaunchToke
             .as_ref()
             .map(|value| value.created_at.clone())
             .unwrap_or_else(|| Utc::now().to_rfc3339()),
-        expires_at: matches!(runtime_kind, agent_team_mail_core::daemon_client::RuntimeKind::Isolated)
-            .then(|| token.expires_at.clone()),
+        expires_at: matches!(
+            runtime_kind,
+            agent_team_mail_core::daemon_client::RuntimeKind::Isolated
+        )
+        .then(|| token.expires_at.clone()),
         allow_live_github_polling: existing
             .as_ref()
             .map(|value| value.allow_live_github_polling)

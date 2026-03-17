@@ -1,6 +1,4 @@
-use agent_team_mail_daemon_launch::{
-    attach_launch_token, issue_isolated_test_launch_token,
-};
+use agent_team_mail_daemon_launch::{attach_launch_token, issue_isolated_test_launch_token};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};

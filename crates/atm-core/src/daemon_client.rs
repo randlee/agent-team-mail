@@ -922,10 +922,7 @@ fn reap_expired_isolated_runtime_roots_with_base(base_root: &Path) -> anyhow::Re
             continue;
         }
 
-        if metadata
-            .owner_pid
-            .is_some_and(crate::pid::is_pid_alive)
-        {
+        if metadata.owner_pid.is_some_and(crate::pid::is_pid_alive) {
             continue;
         }
 
