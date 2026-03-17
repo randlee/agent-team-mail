@@ -522,6 +522,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn missing_token_is_rejected() {
         clear_seen_tokens_for_tests();
         let temp = TempDir::new().unwrap();
@@ -530,6 +531,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn invalid_token_is_rejected() {
         clear_seen_tokens_for_tests();
         let temp = TempDir::new().unwrap();
@@ -538,6 +540,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn expired_token_is_rejected() {
         clear_seen_tokens_for_tests();
         let temp = TempDir::new().unwrap();
@@ -559,6 +562,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn isolated_test_token_missing_lease_is_rejected() {
         clear_seen_tokens_for_tests();
         let temp = TempDir::new().unwrap();
@@ -571,6 +575,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn wrong_home_is_rejected() {
         clear_seen_tokens_for_tests();
         let temp = TempDir::new().unwrap();
@@ -582,6 +587,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn wrong_class_is_rejected() {
         clear_seen_tokens_for_tests();
         let temp = TempDir::new().unwrap();
@@ -604,6 +610,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn valid_token_is_accepted() {
         clear_seen_tokens_for_tests();
         let temp = TempDir::new().unwrap();
@@ -621,6 +628,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn non_isolated_tokens_may_omit_lease_fields() {
         clear_seen_tokens_for_tests();
         let temp = agent_team_mail_core::home::get_os_home_dir().unwrap();
