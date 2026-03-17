@@ -2132,13 +2132,15 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     }
 
     let home = crate::home::get_home_dir()?;
-    let daemon_running = daemon_is_running();
     let socket_connectable = daemon_socket_connectable(&home);
-    if daemon_running || socket_connectable {
+    if daemon_is_running() || socket_connectable {
         if let Some(reason) = detect_daemon_identity_mismatch(&home, socket_connectable) {
             restart_mismatched_daemon(&home, &reason)?;
-        } else {
+        } else if socket_connectable {
+            // Command paths require a live daemon socket, not just a PID file.
             return Ok(());
+        } else {
+            cleanup_stale_daemon_runtime_files(&home);
         }
     }
 
@@ -2156,7 +2158,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
             // Another process likely holds the startup lock and is spawning the daemon.
             // Wait briefly for that startup attempt to converge.
             for _ in 0..10 {
-                if daemon_is_running() || daemon_socket_connectable(&home) {
+                if daemon_socket_connectable(&home) {
                     return Ok(());
                 }
                 std::thread::sleep(Duration::from_millis(RETRY_SLEEP_MS));
@@ -2177,13 +2179,14 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         ),
     };
 
-    let daemon_running = daemon_is_running();
     let socket_connectable = daemon_socket_connectable(&home);
-    if daemon_running || socket_connectable {
+    if daemon_is_running() || socket_connectable {
         if let Some(reason) = detect_daemon_identity_mismatch(&home, socket_connectable) {
             restart_mismatched_daemon(&home, &reason)?;
-        } else {
+        } else if socket_connectable {
             return Ok(());
+        } else {
+            cleanup_stale_daemon_runtime_files(&home);
         }
     }
 
@@ -2270,7 +2273,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
 
     let deadline = Instant::now() + Duration::from_secs(STARTUP_DEADLINE_SECS);
     while Instant::now() < deadline {
-        if daemon_is_running() || daemon_socket_connectable(&home) {
+        if daemon_socket_connectable(&home) {
             emit_event_best_effort(EventFields {
                 level: "info",
                 source: "atm",
