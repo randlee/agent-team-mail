@@ -71,8 +71,8 @@ No other crate may define or issue a competing launch token schema.
 - Required format:
   - `// AU-BYPASS: migrate <description> to atm-daemon-launch in AU.5`
 - Complete bypass inventory for the current AU plan:
-  - `crates/atm-core/src/daemon_client.rs:2102`
-  - `crates/atm-tui/src/main.rs:493`
+  - `crates/atm-core/src/daemon_client.rs:2131`
+  - `crates/atm-tui/src/main.rs:497`
 - Any additional bypass sites found during the AU.5 final audit MUST be added
   to this inventory before that sprint is considered complete.
 

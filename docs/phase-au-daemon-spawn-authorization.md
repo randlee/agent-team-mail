@@ -3,7 +3,7 @@
 **Integration branch**: `integrate/phase-AU` off `develop`
 **Prerequisites**: Phase AT merged to `develop` AND `docs/arch-boundary.md`
 records the zero-violation audit state
-**Status**: PLANNED
+**Status**: IN PROGRESS
 
 ## Overview
 
@@ -37,6 +37,11 @@ teardown. Clean shutdown by the owning test fixture remains mandatory.
 
 ### AU.1 — Canonical Launcher + Token Issuance
 
+**Status**: COMPLETE
+Implementation note: canonical daemon launch now routes through
+`agent-team-mail-daemon-launch`, which owns launch-class token issuance and the
+shared launcher surface used by the migrated spawn/adopt callsites.
+
 **Scope**: define the only allowed daemon launcher and its token model.
 
 **Deliverables**:
@@ -67,6 +72,11 @@ teardown. Clean shutdown by the owning test fixture remains mandatory.
 - every known daemon launch site is mapped to migrate to the canonical launcher
 
 ### AU.2 — Daemon Startup Firewall
+
+**Status**: COMPLETE
+Implementation note: `atm-daemon` now validates launch tokens at startup,
+rejects missing/invalid/replayed/wrong-class launches, emits structured
+rejection records, and hard-fails duplicate shared-runtime starts.
 
 **Scope**: make `atm-daemon` reject unauthorized startup.
 
