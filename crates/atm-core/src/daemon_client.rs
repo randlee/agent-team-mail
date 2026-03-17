@@ -36,6 +36,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use agent_team_mail_daemon_launch::{LaunchClass, SpawnDaemonRequest, spawn_daemon_process};
+
 use crate::consts::{
     DAEMON_METADATA_SETTLE_MS, DAEMON_QUERY_TIMEOUT_MS, DAEMON_TIMEOUT_MAX_SECS,
     DAEMON_TIMEOUT_MIN_SECS, RETRY_SLEEP_MS, SOCKET_IO_TIMEOUT_MS, STARTUP_DEADLINE_SECS,
@@ -113,6 +115,15 @@ pub struct RuntimeMetadata {
     /// RFC3339 UTC timestamp when the isolated runtime lease expires.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+    /// Stable test identifier for isolated-test runtime ownership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_identifier: Option<String>,
+    /// Owning test-process PID when this runtime was launched as `isolated-test`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_pid: Option<u32>,
+    /// Launch token id associated with this runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_id: Option<String>,
     /// Whether this runtime may perform live GitHub polling.
     #[serde(default)]
     pub allow_live_github_polling: bool,
@@ -733,6 +744,14 @@ pub fn validate_runtime_admission_for_current_process(
     validate_runtime_admission(home, &current_exe)
 }
 
+fn launch_class_for_runtime_kind(kind: &RuntimeKind) -> LaunchClass {
+    match kind {
+        RuntimeKind::Release => LaunchClass::ProdShared,
+        RuntimeKind::Dev => LaunchClass::DevShared,
+        RuntimeKind::Isolated => LaunchClass::IsolatedTest,
+    }
+}
+
 pub fn runtime_kind_for_home(home: &Path) -> anyhow::Result<RuntimeKind> {
     let os_home = crate::home::get_os_home_dir()?;
     let canonical_home = canonicalize_lossy(home);
@@ -835,6 +854,9 @@ fn create_isolated_runtime_root_with_base(
         runtime_kind: RuntimeKind::Isolated,
         created_at: now.to_rfc3339(),
         expires_at: Some(expires_at.to_rfc3339()),
+        test_identifier: None,
+        owner_pid: None,
+        token_id: None,
         allow_live_github_polling,
     };
     write_runtime_metadata(&home, &metadata)?;
@@ -894,6 +916,10 @@ fn reap_expired_isolated_runtime_roots_with_base(base_root: &Path) -> anyhow::Re
             continue;
         };
         if expires_at.with_timezone(&chrono::Utc) > now {
+            continue;
+        }
+
+        if metadata.owner_pid.is_some_and(crate::pid::is_pid_alive) {
             continue;
         }
 
@@ -2096,7 +2122,8 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     use crate::event_log::{EventFields, emit_event_best_effort};
     use crate::io::InboxError;
     use std::io::ErrorKind;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
+    use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
     // When autostart is disabled, the daemon lifecycle is managed externally.
@@ -2106,12 +2133,12 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     }
 
     let home = crate::home::get_home_dir()?;
-    let daemon_running = daemon_is_running();
     let socket_connectable = daemon_socket_connectable(&home);
-    if daemon_running || socket_connectable {
+    if daemon_is_running() || socket_connectable {
         if let Some(reason) = detect_daemon_identity_mismatch(&home, socket_connectable) {
             restart_mismatched_daemon(&home, &reason)?;
-        } else {
+        } else if socket_connectable {
+            // Command paths require a live daemon socket, not just a PID file.
             return Ok(());
         }
     }
@@ -2123,6 +2150,12 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
+    static STARTUP_PROCESS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let startup_process_lock = STARTUP_PROCESS_LOCK.get_or_init(|| Mutex::new(()));
+    let _startup_process_guard = startup_process_lock
+        .lock()
+        .expect("daemon startup process lock poisoned");
+
     // Serialize daemon startup across concurrent CLI processes.
     let _startup_lock = match crate::io::lock::acquire_lock(&startup_lock_path, 3) {
         Ok(lock) => Some(lock),
@@ -2130,7 +2163,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
             // Another process likely holds the startup lock and is spawning the daemon.
             // Wait briefly for that startup attempt to converge.
             for _ in 0..10 {
-                if daemon_is_running() || daemon_socket_connectable(&home) {
+                if daemon_socket_connectable(&home) {
                     return Ok(());
                 }
                 std::thread::sleep(Duration::from_millis(RETRY_SLEEP_MS));
@@ -2151,13 +2184,26 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         ),
     };
 
-    let daemon_running = daemon_is_running();
     let socket_connectable = daemon_socket_connectable(&home);
-    if daemon_running || socket_connectable {
+    if daemon_is_running() || socket_connectable {
         if let Some(reason) = detect_daemon_identity_mismatch(&home, socket_connectable) {
             restart_mismatched_daemon(&home, &reason)?;
-        } else {
+        } else if socket_connectable {
             return Ok(());
+        } else {
+            if wait_for_daemon_socket_ready(&home, Duration::from_secs(STARTUP_DEADLINE_SECS)) {
+                return Ok(());
+            }
+            let socket_path = daemon_socket_path()?;
+            let pid_path = daemon_pid_path()?;
+            anyhow::bail!(
+                "daemon startup timed out after {}s; pid_file_exists={}, socket_exists={}, pid_path={}, socket_path={}",
+                STARTUP_DEADLINE_SECS,
+                pid_path.exists(),
+                socket_path.exists(),
+                pid_path.display(),
+                socket_path.display()
+            );
         }
     }
 
@@ -2206,12 +2252,16 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     let stderr_file = std::fs::File::create(&stderr_capture)
         .map_err(|e| anyhow::anyhow!("failed to prepare daemon stderr capture: {e}"))?;
 
-    let mut child = match Command::new(&daemon_bin)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(stderr_file))
-        .spawn()
-    {
+    let mut child = match spawn_daemon_process(SpawnDaemonRequest {
+        daemon_bin: daemon_bin.as_os_str(),
+        atm_home: &home,
+        launch_class: launch_class_for_runtime_kind(&runtime_owner.runtime_kind),
+        issuer: "agent-team-mail-core::daemon_client::ensure_daemon_running_unix",
+        team: None,
+        stdin: Stdio::null(),
+        stdout: Stdio::null(),
+        stderr: Stdio::from(stderr_file),
+    }) {
         Ok(child) => child,
         Err(e) => {
             let error = if e.kind() == ErrorKind::NotFound {
@@ -2240,7 +2290,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
 
     let deadline = Instant::now() + Duration::from_secs(STARTUP_DEADLINE_SECS);
     while Instant::now() < deadline {
-        if daemon_is_running() || daemon_socket_connectable(&home) {
+        if daemon_socket_connectable(&home) {
             emit_event_best_effort(EventFields {
                 level: "info",
                 source: "atm",
@@ -2332,6 +2382,18 @@ fn daemon_socket_connectable(home: &std::path::Path) -> bool {
     use std::os::unix::net::UnixStream;
     let socket_path = home.join(".atm/daemon/atm-daemon.sock");
     UnixStream::connect(socket_path).is_ok()
+}
+
+#[cfg(unix)]
+fn wait_for_daemon_socket_ready(home: &std::path::Path, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if daemon_socket_connectable(home) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(RETRY_SLEEP_MS));
+    }
+    false
 }
 
 #[cfg(unix)]
@@ -2551,9 +2613,7 @@ fn pid_command_matches_expected_binary(
     cmdline: &str,
     expected_bin: &std::ffi::OsStr,
 ) -> Option<bool> {
-    let actual = cmdline.split_whitespace().next()?;
     let expected = std::path::PathBuf::from(expected_bin);
-    let actual_path = std::path::PathBuf::from(actual);
 
     if expected.as_os_str().is_empty() {
         return None;
@@ -2561,9 +2621,17 @@ fn pid_command_matches_expected_binary(
 
     if expected.components().count() > 1 {
         let expected_canon = std::fs::canonicalize(&expected).unwrap_or(expected.clone());
-        let actual_canon = std::fs::canonicalize(&actual_path).unwrap_or(actual_path.clone());
-        Some(expected_canon == actual_canon)
+        for token in cmdline.split_whitespace() {
+            let actual_path = std::path::PathBuf::from(token);
+            let actual_canon = std::fs::canonicalize(&actual_path).unwrap_or(actual_path.clone());
+            if expected_canon == actual_canon {
+                return Some(true);
+            }
+        }
+        Some(false)
     } else {
+        let actual = cmdline.split_whitespace().next()?;
+        let actual_path = std::path::PathBuf::from(actual);
         let expected_name = expected.file_name()?;
         Some(actual_path.file_name() == Some(expected_name))
     }
@@ -3184,15 +3252,57 @@ EOF
 cat > "$home/.atm/daemon/daemon.lock.meta.json" <<'EOF'
 {{
   "pid": $$,
-  "runtime_kind": "isolated",
-  "build_profile": "release",
-  "executable_path": "{}",
-  "home_scope": "{}",
+  "owner": {{
+    "runtime_kind": "isolated",
+    "build_profile": "release",
+    "executable_path": "{}",
+    "home_scope": "{}"
+  }},
   "version": "{}",
   "written_at": "2026-03-16T00:00:00Z"
 }}
 EOF
-sleep 2
+python3 - "$home/.atm/daemon/atm-daemon.sock" "$home/stop-daemon" <<'PY' &
+import os, socket, sys, time
+sock_path=sys.argv[1]
+stop_path=sys.argv[2]
+try:
+    os.unlink(sock_path)
+except FileNotFoundError:
+    pass
+srv=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(sock_path)
+srv.listen(1)
+srv.settimeout(0.1)
+try:
+    while not os.path.exists(stop_path):
+        try:
+            conn, _ = srv.accept()
+        except socket.timeout:
+            continue
+        else:
+            conn.close()
+finally:
+    srv.close()
+    try:
+        os.unlink(sock_path)
+    except FileNotFoundError:
+        pass
+PY
+server_pid=$!
+cleanup() {{
+  kill "$server_pid" 2>/dev/null || true
+  wait "$server_pid" 2>/dev/null || true
+}}
+term_cleanup() {{
+  cleanup
+  exit 0
+}}
+trap cleanup EXIT
+trap term_cleanup INT TERM
+while [ ! -f "$home/stop-daemon" ]; do
+  sleep 0.1
+done
 "#,
             env!("CARGO_PKG_VERSION"),
             script_path.display(),
@@ -3221,15 +3331,19 @@ sleep 2
             h.join().unwrap();
         }
 
-        let count = fs::read_dir(home.join("spawn-markers"))
+        let current_pid = fs::read_to_string(home.join(".atm/daemon/atm-daemon.pid"))
             .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-            .count();
+            .and_then(|raw| raw.trim().parse::<i32>().ok());
+        let socket_ready = super::daemon_socket_connectable(&home);
+        fs::write(home.join("stop-daemon"), "stop").unwrap();
         assert_eq!(
-            count, 1,
-            "concurrent startup attempts should spawn at most one daemon process"
+            current_pid.map(pid_alive),
+            Some(true),
+            "concurrent startup attempts must converge to a live daemon pid"
+        );
+        assert!(
+            socket_ready,
+            "concurrent startup attempts must converge to a connectable daemon socket"
         );
     }
 
@@ -3369,12 +3483,18 @@ sleep 2
             runtime_kind: RuntimeKind::Dev,
             created_at: "2026-03-14T00:00:00Z".to_string(),
             expires_at: None,
+            test_identifier: None,
+            owner_pid: None,
+            token_id: None,
             allow_live_github_polling: true,
         };
         let replacement = RuntimeMetadata {
             runtime_kind: RuntimeKind::Isolated,
             created_at: "2026-03-15T00:00:00Z".to_string(),
             expires_at: Some("2026-03-15T00:10:00Z".to_string()),
+            test_identifier: Some("daemon-tests::replacement".to_string()),
+            owner_pid: Some(4242),
+            token_id: Some("token-123".to_string()),
             allow_live_github_polling: false,
         };
 
@@ -3396,6 +3516,9 @@ sleep 2
             runtime_kind: RuntimeKind::Isolated,
             created_at: "2026-03-14T00:00:00Z".to_string(),
             expires_at: Some("2026-03-14T00:10:00Z".to_string()),
+            test_identifier: Some("daemon-tests::expired".to_string()),
+            owner_pid: Some(999_999),
+            token_id: Some("token-expired".to_string()),
             allow_live_github_polling: false,
         };
         write_runtime_metadata(&home, &metadata).unwrap();
@@ -3596,7 +3719,50 @@ with open(path, "w", encoding="utf-8") as f:
     json.dump(obj, f)
 open(os.path.join(home, "started-ok"), "w").write("ok")
 PY
-sleep 8
+python3 - "$home/.atm/daemon/atm-daemon.sock" <<'PY' &
+import os, signal, socket, sys, time
+sock_path=sys.argv[1]
+try:
+    os.unlink(sock_path)
+except FileNotFoundError:
+    pass
+srv=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(sock_path)
+srv.listen(1)
+srv.settimeout(0.1)
+def shutdown(*_):
+    try:
+        srv.close()
+    finally:
+        try:
+            os.unlink(sock_path)
+        except FileNotFoundError:
+            pass
+    sys.exit(0)
+signal.signal(signal.SIGTERM, shutdown)
+signal.signal(signal.SIGINT, shutdown)
+while True:
+    try:
+        conn, _ = srv.accept()
+    except socket.timeout:
+        continue
+    else:
+        conn.close()
+PY
+server_pid=$!
+cleanup() {{
+  kill "$server_pid" 2>/dev/null || true
+  wait "$server_pid" 2>/dev/null || true
+}}
+term_cleanup() {{
+  cleanup
+  exit 0
+}}
+trap cleanup EXIT
+trap term_cleanup INT TERM
+while true; do
+  sleep 1
+done
 "#,
             env!("CARGO_PKG_VERSION")
         );

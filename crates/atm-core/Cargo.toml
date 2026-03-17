@@ -12,6 +12,7 @@ keywords = ["ai-agents", "messaging", "team-communication", "claude", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
+agent-team-mail-daemon-launch.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -3,7 +3,7 @@
 **Integration branch**: `integrate/phase-AU` off `develop`
 **Prerequisites**: Phase AT merged to `develop` AND `docs/arch-boundary.md`
 records the zero-violation audit state
-**Status**: PLANNED
+**Status**: COMPLETE
 
 ## Overview
 
@@ -37,6 +37,16 @@ teardown. Clean shutdown by the owning test fixture remains mandatory.
 
 ### AU.1 — Canonical Launcher + Token Issuance
 
+**Status**: COMPLETE
+Implementation note: canonical daemon launch now routes through
+`agent-team-mail-daemon-launch`, which owns the `DaemonLaunchToken` 7-field
+struct (`launch_class`, `atm_home`, `binary_identity`, `issuer`, `token_id`,
+`issued_at`, `expires_at`), the `LaunchClass` enum (`ProdShared |
+DevShared | IsolatedTest`), the `issue_launch_token()` issuance surface in
+`crates/atm-daemon-launch`, and the temporary `AU-BYPASS` annotations at
+`crates/atm-core/src/daemon_client.rs:2131` and
+`crates/atm-tui/src/main.rs:497` that track the remaining AU.5 reroutes.
+
 **Scope**: define the only allowed daemon launcher and its token model.
 
 **Deliverables**:
@@ -68,6 +78,11 @@ teardown. Clean shutdown by the owning test fixture remains mandatory.
 
 ### AU.2 — Daemon Startup Firewall
 
+**Status**: COMPLETE
+Implementation note: `atm-daemon` now validates launch tokens at startup,
+rejects missing/invalid/replayed/wrong-class launches, emits structured
+rejection records, and hard-fails duplicate shared-runtime starts.
+
 **Scope**: make `atm-daemon` reject unauthorized startup.
 
 **Deliverables**:
@@ -81,12 +96,26 @@ teardown. Clean shutdown by the owning test fixture remains mandatory.
 - structured startup rejection logging
 - shared-runtime singleton checks integrated with launch-class validation
 
+**Implementation Note**:
+- implemented `validate_startup_token()` with 6 rejection conditions:
+  missing, invalid, expired, wrong-atm-home, wrong-class, and replayed
+- implemented `emit_startup_rejection()` with the 5-field structured event
+  contract
+- implemented `SharedRuntimeAlreadyRunning` rejection for `ProdShared` and
+  `DevShared`
+
 **Acceptance Criteria**:
 - raw `atm-daemon` execution outside the authorized launcher fails immediately
 - `prod-shared` and `dev-shared` second launches hard-fail
 - rejection records are queryable and attributable in logs
 
 ### AU.3 — Isolated-Test Lease + Clean Shutdown Contract
+
+**Status**: COMPLETE
+Implementation note: isolated-test launch tokens now carry `test_identifier` +
+`owner_pid`, runtime metadata persists the lease, the daemon self-terminates on
+TTL/dead-owner fail-safe conditions, and startup janitoring reaps stale
+isolated runtimes only after lease expiry plus dead-owner confirmation.
 
 **Scope**: give test daemons a real lease model and make clean fixture teardown
 the normative success path.
@@ -112,6 +141,8 @@ the normative success path.
 
 ### AU.4 — Lifecycle Logging + QA Enforcement
 
+**Status**: COMPLETE
+
 **Scope**: make launch/termination reasons observable and actionable.
 
 **Deliverables**:
@@ -126,12 +157,30 @@ the normative success path.
 - QA rule: TTL/dead-owner shutdown in tests is a blocking harness-gap finding
 - CI/QA preflight/postflight rogue-daemon checks bound to launch metadata
 
+**Implementation Note**:
+- added structured lifecycle events for `launch_accepted`,
+  `clean_owner_shutdown`, `ttl_expiry_shutdown`, `dead_owner_shutdown`, and
+  `janitor_reap`, with `daemon_start_rejected` retained as the authoritative
+  firewall denial event
+- wired daemon startup and clean exit through those lifecycle records so
+  `daemon-spawn-qa` can treat them as the source of truth
+- updated `daemon-spawn-qa` to use lifecycle event names directly and to report
+  TTL/dead-owner terminations without `clean_owner_shutdown` as blocking
+  harness gaps
+
 **Acceptance Criteria**:
 - `daemon-spawn-qa` can explain forgotten daemons using logged facts
 - CI/QA fails when a daemon lacks canonical launch metadata
 - CI/QA fails when a test daemon ends by TTL/dead-owner instead of clean teardown
 
 ### AU.5 — Bypass Removal + Final Audit
+
+**Status**: COMPLETE
+**Implementation Note**: the remaining `daemon_client` and `atm-tui` product
+launch bypasses now route through `agent-team-mail-daemon-launch`, the
+repository audit found no remaining raw `Command::new("atm-daemon")` spawn
+sites under `crates/`, only approved operational script references remain in
+`scripts/`, and the CI boundary check now blocks that regression shape.
 
 **Scope**: remove remaining non-canonical daemon launch paths and prove the
 authorization model is the only one left.

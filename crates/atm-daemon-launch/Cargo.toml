@@ -1,0 +1,22 @@
+[package]
+name = "agent-team-mail-daemon-launch"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Canonical daemon launch token issuance for agent-team-mail"
+keywords = ["daemon", "launch", "authorization", "atm"]
+categories = ["command-line-utilities", "development-tools"]
+
+[lib]
+name = "agent_team_mail_daemon_launch"
+path = "src/lib.rs"
+
+[dependencies]
+chrono = "0.4"
+serde.workspace = true
+serde_json.workspace = true
+uuid = { version = "1", features = ["v4"] }

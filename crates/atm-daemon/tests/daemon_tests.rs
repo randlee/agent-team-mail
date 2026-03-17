@@ -3,6 +3,7 @@
 use agent_team_mail_core::config::Config;
 use agent_team_mail_core::context::SystemContext;
 use agent_team_mail_core::daemon_client::{BuildProfile, RuntimeKind, RuntimeOwnerMetadata};
+use agent_team_mail_core::logging_event::{LogEventV1, spool_dir};
 use agent_team_mail_daemon::daemon;
 use agent_team_mail_daemon::daemon::{
     SessionRegistry, StatusWriter, new_dedup_store, new_launch_sender, new_log_event_queue,
@@ -13,6 +14,10 @@ use agent_team_mail_daemon::plugin::{
     Capability, MailService, Plugin, PluginContext, PluginError, PluginMetadata, PluginRegistry,
 };
 use agent_team_mail_daemon::roster::RosterService;
+use agent_team_mail_daemon_launch::{
+    DaemonLaunchToken, attach_launch_token,
+    issue_isolated_test_launch_token as issue_isolated_test_launch_token_inner,
+};
 #[path = "../../atm/tests/support/daemon_process_guard.rs"]
 #[allow(dead_code)]
 mod daemon_process_guard;
@@ -28,9 +33,68 @@ use serial_test::serial;
 use std::path::Path;
 use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
+
+fn read_spool_events(spool: &std::path::Path) -> Vec<LogEventV1> {
+    if !spool.exists() {
+        return Vec::new();
+    }
+    let mut events = Vec::new();
+    let entries = match std::fs::read_dir(spool) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .extension()
+            .and_then(|x| x.to_str())
+            .map(|x| x == "jsonl")
+            != Some(true)
+        {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in content.lines().filter(|line| !line.trim().is_empty()) {
+            if let Ok(event) = serde_json::from_str::<LogEventV1>(line) {
+                events.push(event);
+            }
+        }
+    }
+    events
+}
+
+fn issue_isolated_test_launch_token(home: &Path, issuer: &str) -> DaemonLaunchToken {
+    issue_isolated_test_launch_token_inner(
+        home,
+        env!("CARGO_BIN_EXE_atm-daemon"),
+        issuer,
+        format!("{issuer}:{}", std::process::id()),
+        std::process::id(),
+        Duration::from_secs(600),
+    )
+}
+
+fn issue_isolated_test_launch_token_with_lease(
+    home: &Path,
+    issuer: &str,
+    test_identifier: &str,
+    owner_pid: u32,
+    ttl: Duration,
+) -> DaemonLaunchToken {
+    issue_isolated_test_launch_token_inner(
+        home,
+        env!("CARGO_BIN_EXE_atm-daemon"),
+        issuer,
+        test_identifier.to_string(),
+        owner_pid,
+        ttl,
+    )
+}
 
 /// Mock plugin that tracks lifecycle calls
 struct MockPlugin {
@@ -1097,14 +1161,16 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
     let temp_dir = TempDir::new().unwrap();
     let bin = env!("CARGO_BIN_EXE_atm-daemon");
 
-    let first_child = std::process::Command::new(bin)
+    let mut first_cmd = std::process::Command::new(bin);
+    first_cmd
         .env("ATM_HOME", temp_dir.path())
         .env_remove("ATM_DAEMON_BIN")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("failed to spawn first daemon");
+        .stderr(Stdio::null());
+    let first_token = issue_isolated_test_launch_token(temp_dir.path(), "daemon_tests::first");
+    attach_launch_token(&mut first_cmd, &first_token).expect("encode first daemon token");
+    let first_child = first_cmd.spawn().expect("failed to spawn first daemon");
     let mut first = daemon_process_guard::DaemonProcessGuard::from_child(
         first_child,
         Path::new(bin),
@@ -1130,10 +1196,11 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
         "first daemon should acquire daemon.lock within 8s: elapsed={lock_elapsed:?}"
     );
 
-    let second = std::process::Command::new(bin)
-        .env("ATM_HOME", temp_dir.path())
-        .output()
-        .expect("failed to spawn second daemon");
+    let mut second_cmd = std::process::Command::new(bin);
+    second_cmd.env("ATM_HOME", temp_dir.path());
+    let second_token = issue_isolated_test_launch_token(temp_dir.path(), "daemon_tests::second");
+    attach_launch_token(&mut second_cmd, &second_token).expect("encode second daemon token");
+    let second = second_cmd.output().expect("failed to spawn second daemon");
 
     assert!(
         !second.status.success(),
@@ -1145,4 +1212,169 @@ fn test_second_daemon_start_rejected_when_first_is_running() {
         "second daemon error should indicate lock contention, got: {stderr}"
     );
     drop(first);
+}
+
+#[test]
+#[serial]
+fn test_daemon_start_requires_launch_token() {
+    let temp_dir = TempDir::new().unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"))
+        .env("ATM_HOME", temp_dir.path())
+        .env_remove("ATM_LAUNCH_TOKEN")
+        .output()
+        .expect("spawn daemon without launch token");
+
+    assert!(
+        !output.status.success(),
+        "daemon start without launch token must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("\"rejection_reason\":\"missing_token\"")
+            || stderr.contains("missing launch token"),
+        "stderr should contain structured missing_token rejection, got: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_daemon_exits_when_isolated_test_owner_pid_is_dead() {
+    let temp_dir = TempDir::new().unwrap();
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"));
+    cmd.env("ATM_HOME", temp_dir.path());
+    let token = issue_isolated_test_launch_token_with_lease(
+        temp_dir.path(),
+        "daemon_tests::dead_owner",
+        "daemon_tests::dead_owner",
+        999_999,
+        Duration::from_secs(30),
+    );
+    attach_launch_token(&mut cmd, &token).expect("encode dead-owner token");
+    let output = cmd.output().expect("spawn daemon with dead owner pid");
+
+    assert!(
+        !output.status.success(),
+        "daemon should terminate non-zero when owner_pid is dead"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("\"event_name\":\"dead_owner_shutdown\"")
+            || stderr.contains("dead_owner_shutdown"),
+        "stderr should contain dead_owner_shutdown event, got: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_daemon_exits_when_isolated_test_ttl_expires() {
+    let temp_dir = TempDir::new().unwrap();
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"));
+    cmd.env("ATM_HOME", temp_dir.path());
+    let token = issue_isolated_test_launch_token_with_lease(
+        temp_dir.path(),
+        "daemon_tests::ttl_expiry",
+        "daemon_tests::ttl_expiry",
+        std::process::id(),
+        Duration::from_secs(1),
+    );
+    attach_launch_token(&mut cmd, &token).expect("encode ttl-expiry token");
+    let output = cmd.output().expect("spawn daemon with short TTL");
+
+    assert!(
+        !output.status.success(),
+        "daemon should terminate non-zero when TTL expires"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("\"event_name\":\"ttl_expiry_shutdown\"")
+            || stderr.contains("ttl_expiry_shutdown"),
+        "stderr should contain ttl_expiry_shutdown event, got: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_isolated_test_clean_shutdown_emits_lifecycle_events() {
+    let temp_dir = TempDir::new().unwrap();
+    let daemon_bin = Path::new(env!("CARGO_BIN_EXE_atm-daemon"));
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"));
+    cmd.env("ATM_HOME", temp_dir.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let token = issue_isolated_test_launch_token_with_lease(
+        temp_dir.path(),
+        "daemon_tests::clean_shutdown",
+        "daemon_tests::clean_shutdown",
+        std::process::id(),
+        Duration::from_secs(30),
+    );
+    attach_launch_token(&mut cmd, &token).expect("encode clean-shutdown token");
+    let child = cmd.spawn().expect("spawn daemon for clean shutdown");
+    let mut guard =
+        daemon_process_guard::DaemonProcessGuard::from_child(child, daemon_bin, temp_dir.path());
+
+    let daemon_running = wait_for_child_running_elapsed(guard.child_mut(), 1_000)
+        .expect("daemon should still be running");
+    assert!(
+        daemon_running <= Duration::from_secs(1),
+        "daemon should still be running: elapsed={daemon_running:?}"
+    );
+    let lock_elapsed = wait_for_lock_file_acquired_elapsed(temp_dir.path(), 8_000)
+        .expect("daemon should acquire daemon.lock");
+    assert!(
+        lock_elapsed <= Duration::from_secs(8),
+        "daemon should acquire daemon.lock within 8s: elapsed={lock_elapsed:?}"
+    );
+    std::thread::sleep(Duration::from_millis(250));
+
+    #[cfg(unix)]
+    {
+        let signal_result = unsafe { libc::kill(guard.pid() as i32, libc::SIGTERM) };
+        assert_eq!(signal_result, 0, "SIGTERM should succeed");
+    }
+    #[cfg(windows)]
+    {
+        guard
+            .child_mut()
+            .kill()
+            .expect("terminate daemon on windows");
+    }
+
+    let output = guard
+        .wait_with_output()
+        .expect("wait for clean shutdown daemon output");
+    assert!(
+        output.status.success(),
+        "daemon should exit cleanly after SIGTERM: status={:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let spool = spool_dir(temp_dir.path());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        let events = read_spool_events(&spool);
+        let saw_clean_shutdown = events.iter().any(|event| {
+            event.action == "clean_owner_shutdown"
+                && event
+                    .fields
+                    .get("event_name")
+                    .and_then(|value| value.as_str())
+                    == Some("clean_owner_shutdown")
+        });
+        if saw_clean_shutdown {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let events = read_spool_events(&spool);
+    panic!(
+        "expected clean_owner_shutdown event in spool, got events: {:?}",
+        events
+            .iter()
+            .map(|event| (&event.action, event.fields.get("event_name")))
+            .collect::<Vec<_>>()
+    );
 }

@@ -86,6 +86,9 @@ Prioritize:
    - `owner_pid`
    - `expires_at`
    - termination reason
+   - whether the lifecycle contained `launch_accepted`, `clean_owner_shutdown`,
+     `ttl_expiry_shutdown`, `dead_owner_shutdown`, `janitor_reap`, or
+     `daemon_start_rejected`
 6. Treat `ttl_expired`, `owner_pid_gone`, or equivalent self-termination
    reasons as blocking findings for test-owned daemons. The intended success
    path is clean owner/fixture shutdown before either condition fires.
@@ -98,6 +101,15 @@ same blocking class of finding as a Rust-side rogue spawn.
 Discarded daemon-adoption results are also blocking-class findings. If a path
 uses `adopt_running_pid`, `adopt_registered_pid`, or a successor API and then
 throws away the result, report it as a teardown-gap or harness-bypass finding.
+
+When lifecycle logs exist, prefer them over inference:
+- `launch_accepted` proves the daemon was authorized and started through the
+  canonical launch path
+- `clean_owner_shutdown` is the expected success terminal event for a
+  test-owned daemon
+- `ttl_expiry_shutdown` or `dead_owner_shutdown` without a preceding
+  `clean_owner_shutdown` is a blocking harness-gap finding
+- `daemon_start_rejected` is the authoritative firewall denial event
 
 ## Output
 
