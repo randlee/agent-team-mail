@@ -36,7 +36,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use agent_team_mail_daemon_launch::{LaunchClass, spawn_daemon_process};
+use agent_team_mail_daemon_launch::{LaunchClass, SpawnDaemonRequest, spawn_daemon_process};
 
 use crate::consts::{
     DAEMON_METADATA_SETTLE_MS, DAEMON_QUERY_TIMEOUT_MS, DAEMON_TIMEOUT_MAX_SECS,
@@ -2232,16 +2232,16 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     let stderr_file = std::fs::File::create(&stderr_capture)
         .map_err(|e| anyhow::anyhow!("failed to prepare daemon stderr capture: {e}"))?;
 
-    let mut child = match spawn_daemon_process(
-        &daemon_bin,
-        &home,
-        launch_class_for_runtime_kind(&runtime_owner.runtime_kind),
-        "agent-team-mail-core::daemon_client::ensure_daemon_running_unix",
-        None,
-        Stdio::null(),
-        Stdio::null(),
-        Stdio::from(stderr_file),
-    ) {
+    let mut child = match spawn_daemon_process(SpawnDaemonRequest {
+        daemon_bin: daemon_bin.as_os_str(),
+        atm_home: &home,
+        launch_class: launch_class_for_runtime_kind(&runtime_owner.runtime_kind),
+        issuer: "agent-team-mail-core::daemon_client::ensure_daemon_running_unix",
+        team: None,
+        stdin: Stdio::null(),
+        stdout: Stdio::null(),
+        stderr: Stdio::from(stderr_file),
+    }) {
         Ok(child) => child,
         Err(e) => {
             let error = if e.kind() == ErrorKind::NotFound {

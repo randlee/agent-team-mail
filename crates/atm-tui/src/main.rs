@@ -38,7 +38,7 @@ use std::{
     process::Stdio,
 };
 
-use agent_team_mail_daemon_launch::{LaunchClass, spawn_daemon_process};
+use agent_team_mail_daemon_launch::{LaunchClass, SpawnDaemonRequest, spawn_daemon_process};
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
@@ -504,16 +504,16 @@ fn ensure_daemon_running(team: &str) -> Option<String> {
             agent_team_mail_core::daemon_client::RuntimeKind::Dev => LaunchClass::DevShared,
             agent_team_mail_core::daemon_client::RuntimeKind::Isolated => LaunchClass::IsolatedTest,
         };
-    if spawn_daemon_process(
-        "atm-daemon",
-        &home,
+    if spawn_daemon_process(SpawnDaemonRequest {
+        daemon_bin: std::ffi::OsStr::new("atm-daemon"),
+        atm_home: &home,
         launch_class,
-        "agent-team-mail-tui::ensure_daemon_running",
-        Some(team),
-        Stdio::null(),
-        Stdio::null(),
-        Stdio::null(),
-    )
+        issuer: "agent-team-mail-tui::ensure_daemon_running",
+        team: Some(team),
+        stdin: Stdio::null(),
+        stdout: Stdio::null(),
+        stderr: Stdio::null(),
+    })
     .is_err()
     {
         return Some(format!(
