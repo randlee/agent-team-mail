@@ -314,6 +314,7 @@ fn rotation_path(base: &Path, n: u32) -> PathBuf {
 mod tests {
     use super::*;
     use agent_team_mail_core::logging_event::new_log_event;
+    use crate::daemon::observability::{clear_otel_export_hook, install_otel_export_hook};
     use serial_test::serial;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -566,6 +567,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_write_events_exports_otel_for_each_producer_source() {
         let dir = TempDir::new().expect("temp dir");
         let log_path = dir.path().join("atm.log.jsonl");
@@ -575,6 +577,9 @@ mod tests {
             max_files: 5,
             flush_interval_ms: 100,
         };
+        install_otel_export_hook(Arc::new(|log_path, event| {
+            sc_observability::export_otel_best_effort_from_path(log_path, event);
+        }));
         let mut events = Vec::new();
         for (idx, source, action) in [
             (1u8, "atm", "send"),
@@ -634,5 +639,6 @@ mod tests {
                 Some("sess-123")
             );
         }
+        clear_otel_export_hook();
     }
 }
