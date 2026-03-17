@@ -163,6 +163,7 @@ pub fn spawn_daemon_process(request: SpawnDaemonRequest<'_>) -> io::Result<Child
         command.arg("--team").arg(team);
     }
     command
+        .env("ATM_HOME", request.atm_home)
         .stdin(request.stdin)
         .stdout(request.stdout)
         .stderr(request.stderr);
