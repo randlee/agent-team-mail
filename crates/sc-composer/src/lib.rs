@@ -16,8 +16,6 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use agent_team_mail_core::home::get_home_dir;
-use agent_team_mail_core::logging_event::LogEventV1;
 use pipeline::compose_blocks;
 use render::render_template;
 use validate::{evaluate_context, prepare_template, validate_request};
@@ -304,6 +302,7 @@ pub fn discover_template_variables(content: &str) -> Vec<String> {
 mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
 
     use serial_test::serial;
     use tempfile::TempDir;
@@ -559,13 +558,15 @@ mod tests {
         let captured = Arc::new(Mutex::new(Vec::<(String, String, serde_json::Value)>::new()));
         install_observability_emitter({
             let captured = Arc::clone(&captured);
-            Arc::new(move |action, outcome, fields| {
-                captured.lock().expect("capture lock poisoned").push((
-                    action.to_string(),
-                    outcome.to_string(),
-                    fields,
-                ));
-            })
+            Arc::new(
+                move |action: &str, outcome: &str, fields: serde_json::Value| {
+                    captured.lock().expect("capture lock poisoned").push((
+                        action.to_string(),
+                        outcome.to_string(),
+                        fields,
+                    ));
+                },
+            )
         });
 
         emit_observability("compose", "ok", serde_json::json!({"mode": "file"}));
