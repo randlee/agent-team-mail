@@ -1648,7 +1648,6 @@ version = "0.45.2"
 dependencies = [
  "agent-team-mail-core",
  "minijinja",
- "sc-observability",
  "serde",
  "serde_json",
  "serde_yaml",
