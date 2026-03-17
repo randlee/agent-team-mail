@@ -1895,7 +1895,7 @@ blocking CI/QA failure.
 
 **Integration branch**: `integrate/phase-AU`
 
-**Status**: IN PROGRESS
+**Status**: COMPLETE
 
 ### Sprint Map
 | Sprint | Focus | Branch | Status |
