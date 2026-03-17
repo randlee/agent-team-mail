@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-team-mail"
-version = "0.44.9"
+version = "0.45.0"
 dependencies = [
  "agent-team-mail-ci-monitor",
  "agent-team-mail-core",
@@ -37,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-ci-monitor"
-version = "0.44.9"
+version = "0.45.0"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
@@ -53,7 +53,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-core"
-version = "0.44.9"
+version = "0.45.0"
 dependencies = [
  "agent-team-mail-daemon-launch",
  "anyhow",
@@ -77,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-daemon"
-version = "0.44.9"
+version = "0.45.0"
 dependencies = [
  "agent-team-mail-ci-monitor",
  "agent-team-mail-core",
@@ -112,7 +112,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-daemon-launch"
-version = "0.44.9"
+version = "0.45.0"
 dependencies = [
  "chrono",
  "serde",
@@ -122,7 +122,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-mcp"
-version = "0.44.9"
+version = "0.45.0"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
@@ -145,7 +145,7 @@ dependencies = [
 
 [[package]]
 name = "agent-team-mail-tui"
-version = "0.44.9"
+version = "0.45.0"
 dependencies = [
  "agent-team-mail-core",
  "agent-team-mail-daemon-launch",
@@ -363,9 +363,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.56"
+version = "1.2.57"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aebf35691d1bfb0ac386a69bac2fde4dd276fb618cf8bf4f5318fe285e821bb2"
+checksum = "7a0dd1ca384932ff3641c8718a02769f1698e7563dc6974ffd03346116310423"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -993,9 +993,9 @@ dependencies = [
 
 [[package]]
 name = "instability"
-version = "0.3.11"
+version = "0.3.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "357b7205c6cd18dd2c86ed312d1e70add149aea98e7ef72b9fdf0270e555c11d"
+checksum = "5eb2d60ef19920a3a9193c3e371f726ec1dafc045dac788d0fb3704272458971"
 dependencies = [
  "darling",
  "indoc",
@@ -1179,11 +1179,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
-name = "minijinja"
-version = "2.17.1"
+name = "memo-map"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ea5ea1e90055f200af6b8e52a4a34e05e77e7fee953a9fb40c631efdc43cab1"
+checksum = "38d1115007560874e373613744c6fba374c17688327a71c1476d1a5954cc857b"
+
+[[package]]
+name = "minijinja"
+version = "2.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "328251e58ad8e415be6198888fc207502727dc77945806421ab34f35bf012e7d"
 dependencies = [
+ "memo-map",
  "serde",
 ]
 
@@ -1618,7 +1625,7 @@ dependencies = [
 
 [[package]]
 name = "sc-compose"
-version = "0.44.9"
+version = "0.45.0"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
@@ -1637,7 +1644,7 @@ dependencies = [
 
 [[package]]
 name = "sc-composer"
-version = "0.44.9"
+version = "0.45.0"
 dependencies = [
  "agent-team-mail-core",
  "minijinja",
@@ -1652,7 +1659,7 @@ dependencies = [
 
 [[package]]
 name = "sc-observability"
-version = "0.44.9"
+version = "0.45.0"
 dependencies = [
  "agent-team-mail-core",
  "anyhow",
