@@ -158,6 +158,26 @@ logging remains continuously available.
   replaceable layer so future backend changes do not leak through the rest of
   the codebase.
 
+## 9.2 Config Contract
+
+Phase AV uses one canonical collector configuration surface for all in-repo
+producers and daemon wiring.
+
+| Field | Canonical surface | Required policy |
+|---|---|---|
+| Collector endpoint | `ATM_OTEL_ENDPOINT` | Single OTLP collector base endpoint for the process. Empty or unset keeps remote export disabled unless a debug-only local mirror is explicitly enabled. |
+| Protocol | `ATM_OTEL_PROTOCOL` | `otlp_http` is the committed AV transport. Other values are rejected until explicitly added by requirements. |
+| Auth header injection | `ATM_OTEL_AUTH_HEADER` | Optional single header value injected only by `sc-observability-otlp`; application crates must never build transport headers themselves. |
+| TLS / CA material | `ATM_OTEL_CA_FILE`, `ATM_OTEL_INSECURE_SKIP_VERIFY` | CA bundle path is the only approved custom trust input. Skip-verify is debug-only and must be surfaced as degraded diagnostics when enabled. |
+| Request timeout | `ATM_OTEL_TIMEOUT_MS` | One transport-wide timeout budget owned by the adapter; callers may not override per callsite. |
+| Retry policy | `ATM_OTEL_RETRY_MAX_ATTEMPTS`, `ATM_OTEL_RETRY_BACKOFF_MS`, `ATM_OTEL_RETRY_MAX_BACKOFF_MS` | Retry/backoff is adapter-owned, bounded, and fail-open with local structured logging preserved. |
+| Local debug exporter | `ATM_OTEL_DEBUG_LOCAL_EXPORT` | Enables local debug mirroring only. It must not change collector routing or bypass the adapter boundary. |
+
+This table is the required config contract for AV.2 and later. New producer
+code must consume this shared contract through `sc-observability` facade
+configuration, not by inventing binary-local environment variables or transport
+options.
+
 ## 10. Diagnostics JSON Contract Lock
 
 `atm doctor --json` and `atm status --json` share one locked `logging_health`

@@ -47,7 +47,7 @@ while IFS= read -r match; do
   esac
   matches+=("${match}::ARCH-BOUNDARY-002 violation: direct opentelemetry import outside dedicated adapter crate")
 done < <(
-  grep -RInE '\bopentelemetry(_sdk|_otlp)?\b' "$ROOT/crates" --include='*.rs' --include='Cargo.toml' \
+  grep -RInE '(^|[^A-Za-z0-9])opentelemetry([_-][A-Za-z0-9_]+)?([^A-Za-z0-9]|$)' "$ROOT/crates" --include='*.rs' --include='Cargo.toml' \
     | sed "s#^$ROOT/##" || true
 )
 

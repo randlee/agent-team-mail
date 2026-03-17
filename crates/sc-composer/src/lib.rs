@@ -339,6 +339,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn compose_plain_text_passthrough() {
         let tmp = TempDir::new().expect("tempdir");
         write_file(&tmp, "plain.txt", "hello world");
@@ -348,6 +349,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn compose_template_substitutes_vars() {
         let tmp = TempDir::new().expect("tempdir");
         write_file(&tmp, "template.md.j2", "hello {{ name }}");
@@ -360,6 +362,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn compose_missing_required_var_returns_missing_var_diagnostic() {
         let tmp = TempDir::new().expect("tempdir");
         write_file(
@@ -381,6 +384,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn compose_missing_required_var_from_include_reports_include_chain() {
         let tmp = TempDir::new().expect("tempdir");
         write_file(
@@ -419,6 +423,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn compose_unknown_var_policy_error_warn_ignore() {
         let tmp = TempDir::new().expect("tempdir");
         write_file(
@@ -451,6 +456,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn compose_frontmatter_defaults_are_applied() {
         let tmp = TempDir::new().expect("tempdir");
         write_file(
@@ -463,6 +469,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn validate_reports_missing_vars_without_rendering() {
         let tmp = TempDir::new().expect("tempdir");
         write_file(
@@ -477,6 +484,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn compose_profile_mode_resolves_and_applies_pipeline_order() {
         let tmp = TempDir::new().expect("tempdir");
         write_file(&tmp, ".codex/agents/rust-dev.md.j2", "role={{ role }}");
@@ -506,6 +514,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn validate_profile_resolution_failure_reports_search_trace() {
         let tmp = TempDir::new().expect("tempdir");
         let req = ComposeRequest {
@@ -534,6 +543,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn compose_expands_includes_and_merges_include_frontmatter() {
         let tmp = TempDir::new().expect("tempdir");
         write_file(

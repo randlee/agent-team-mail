@@ -58,6 +58,21 @@ Examples of blocking violations:
   observability boundary in the same way `ARCH-BOUNDARY-001` governs GitHub
   subprocess ownership.
 
+### Approved Entry-Point Files
+
+The following files are the allowlisted entry-point wiring surfaces for
+`ARCH-BOUNDARY-002`:
+
+| File | Rationale |
+|---|---|
+| `crates/atm-daemon/src/main.rs` | Daemon process entry point; owns process-level observability initialization and injected export-hook wiring. |
+| `crates/sc-compose/src/main.rs` | Standalone binary entry point; allowed to initialize generic observability for the process. |
+| Integration test files under `crates/*/tests/` | Test-only harness entry points that may validate facade wiring behavior without turning internal library modules into transport owners. |
+
+All other non-entry-point modules must stay on the generic facade side of the
+boundary and must not import `sc-observability-otlp` or raw `opentelemetry*`
+symbols directly.
+
 ## Allowed Dependency Direction
 
 | From | Allowed imports / dependencies | Forbidden imports / dependencies |

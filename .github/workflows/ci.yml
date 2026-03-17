@@ -301,7 +301,7 @@ jobs:
   test:
     # `cli-publishability` is intentionally skipped in regular PR/push CI; keep
     # test matrix independent so integration tests still run on every PR.
-    needs: [clippy, gh-boundary, core-isolation, manifest-validation, parity-contract, parity-adapter, parity-render, mcp-inspector-smoke]
+    needs: [clippy, gh-boundary, observability-boundary, core-isolation, manifest-validation, parity-contract, parity-adapter, parity-render, mcp-inspector-smoke]
     strategy:
       fail-fast: false
       matrix:
