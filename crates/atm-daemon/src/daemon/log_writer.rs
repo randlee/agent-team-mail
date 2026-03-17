@@ -313,8 +313,11 @@ fn rotation_path(base: &Path, n: u32) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::observability::{clear_otel_export_hook, install_otel_export_hook};
     use agent_team_mail_core::logging_event::new_log_event;
     use serial_test::serial;
+    use std::fs::OpenOptions;
+    use std::io::Write;
     use std::time::Duration;
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
@@ -329,6 +332,52 @@ mod tests {
 
     fn make_event() -> LogEventV1 {
         new_log_event("atm-daemon", "test_event", "atm_daemon::test", "info")
+    }
+
+    fn append_test_otel_record(log_path: &Path, event: &LogEventV1) {
+        let mut otel_path = log_path.to_path_buf();
+        let stem = log_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("telemetry");
+        otel_path.set_file_name(format!("{stem}.otel.jsonl"));
+
+        let mut attributes = serde_json::Map::new();
+        if let Some(team) = &event.team {
+            attributes.insert("team".to_string(), serde_json::Value::String(team.clone()));
+        }
+        if let Some(agent) = &event.agent {
+            attributes.insert(
+                "agent".to_string(),
+                serde_json::Value::String(agent.clone()),
+            );
+        }
+        if let Some(runtime) = &event.runtime {
+            attributes.insert(
+                "runtime".to_string(),
+                serde_json::Value::String(runtime.clone()),
+            );
+        }
+        if let Some(session_id) = &event.session_id {
+            attributes.insert(
+                "session_id".to_string(),
+                serde_json::Value::String(session_id.clone()),
+            );
+        }
+
+        let line = serde_json::json!({
+            "name": event.action,
+            "trace_id": event.trace_id,
+            "span_id": event.span_id,
+            "attributes": attributes,
+        });
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&otel_path)
+            .expect("open test otel output");
+        writeln!(file, "{line}").expect("append test otel output");
     }
 
     // ── BoundedQueue unit tests ───────────────────────────────────────────────
@@ -566,6 +615,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_write_events_exports_otel_for_each_producer_source() {
         let dir = TempDir::new().expect("temp dir");
         let log_path = dir.path().join("atm.log.jsonl");
@@ -575,6 +625,7 @@ mod tests {
             max_files: 5,
             flush_interval_ms: 100,
         };
+        install_otel_export_hook(Arc::new(append_test_otel_record));
         let mut events = Vec::new();
         for (idx, source, action) in [
             (1u8, "atm", "send"),
@@ -634,5 +685,6 @@ mod tests {
                 Some("sess-123")
             );
         }
+        clear_otel_export_hook();
     }
 }

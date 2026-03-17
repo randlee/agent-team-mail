@@ -17,6 +17,13 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+fn export_otel_from_entrypoint(
+    log_path: &std::path::Path,
+    event: &agent_team_mail_core::logging_event::LogEventV1,
+) {
+    sc_observability::export_otel_best_effort_from_path(log_path, event);
+}
+
 /// ATM Daemon - Background service for agent team mail plugins
 #[derive(Parser, Debug)]
 #[command(name = "atm-daemon")]
@@ -380,6 +387,7 @@ async fn main() -> Result<()> {
     // Create the bounded log event queue and async writer task.
     let log_event_queue = new_log_event_queue();
     let log_cancel = cancel_token.clone();
+    daemon::observability::install_otel_export_hook(Arc::new(export_otel_from_entrypoint));
     tokio::spawn(run_log_writer_task(
         log_event_queue.clone(),
         log_writer_config,

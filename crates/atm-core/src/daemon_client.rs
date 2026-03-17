@@ -4577,12 +4577,11 @@ sleep 8
     }
 
     #[test]
+    #[serial]
     fn test_send_control_no_daemon_returns_err() {
-        if daemon_is_running() {
-            // Shared dev machines may have daemon active; this test validates
-            // no-daemon behavior only.
-            return;
-        }
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let _home_guard = EnvGuard::set("ATM_HOME", tmp.path().to_str().unwrap());
+        let _autostart_guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "0");
         // Without a running daemon, send_control must return Err (not None or panic).
         use crate::control::{CONTROL_SCHEMA_VERSION, ControlAction, ControlRequest};
 
