@@ -37,6 +37,33 @@ Each launch class MUST bind:
 - expiry
 - nonce / token id
 
+## Token Schema
+
+`DaemonLaunchToken` is the canonical cross-process launch contract. It is
+serialized with `serde` and currently represented as JSON-safe data.
+
+- `launch_class`
+  - enum: `prod-shared`, `dev-shared`, `isolated-test`
+  - selects singleton policy, lease rules, and startup validation behavior
+- `atm_home`
+  - target `ATM_HOME` bound to this launch
+  - daemon startup MUST reject tokens whose bound runtime does not match the
+    requested runtime
+- `binary_identity`
+  - binary path or release channel identifier used to explain which launcher
+    surface issued the token
+- `issuer`
+  - product-owned launcher identity issuing the token
+  - used for auditability and rejection diagnostics
+- `token_id`
+  - nonce / UUID for replay detection and event correlation
+- `issued_at`
+  - RFC3339 UTC timestamp when the token was created
+- `expires_at`
+  - RFC3339 UTC timestamp after which startup MUST be rejected
+
+No other crate may define or issue a competing launch token schema.
+
 ## Isolated-Test Lease
 
 - Every isolated test daemon MUST carry:

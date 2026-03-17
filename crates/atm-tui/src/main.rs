@@ -490,6 +490,7 @@ fn build_member_rows(
 }
 
 fn ensure_daemon_running(team: &str) -> Option<String> {
+    // AU-BYPASS: migrate this private TUI launcher to atm-daemon-launch in AU.5.
     let socket_path =
         daemon_socket_path().unwrap_or_else(|_| std::env::temp_dir().join("atm-daemon.sock"));
     if daemon_is_running() && socket_path.exists() {
