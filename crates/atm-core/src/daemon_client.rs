@@ -3341,8 +3341,8 @@ done
             Some(true),
             "concurrent startup attempts must converge to a live daemon pid"
         );
-        assert_eq!(
-            socket_ready, true,
+        assert!(
+            socket_ready,
             "concurrent startup attempts must converge to a connectable daemon socket"
         );
     }
