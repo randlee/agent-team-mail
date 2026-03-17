@@ -37,6 +37,11 @@ teardown. Clean shutdown by the owning test fixture remains mandatory.
 
 ### AU.1 — Canonical Launcher + Token Issuance
 
+**Status**: COMPLETE
+Implementation note: canonical daemon launch now routes through
+`agent-team-mail-daemon-launch`, which owns launch-class token issuance and the
+shared launcher surface used by the migrated spawn/adopt callsites.
+
 **Scope**: define the only allowed daemon launcher and its token model.
 
 **Deliverables**:
