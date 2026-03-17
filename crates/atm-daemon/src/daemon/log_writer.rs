@@ -22,7 +22,6 @@
 //! starts a fresh base file. The oldest rotation file (`.N`) is removed.
 
 use agent_team_mail_core::logging_event::{LogEventV1, configured_log_path};
-use sc_observability::{DEFAULT_QUEUE_CAPACITY, export_otel_best_effort_from_path};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -32,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::daemon::consts::LOG_WARNING_RATE_LIMIT_SECS;
+use crate::daemon::observability::{LOG_EVENT_QUEUE_CAPACITY, export_otel_best_effort};
 
 // ── Queue ─────────────────────────────────────────────────────────────────────
 
@@ -115,7 +115,7 @@ pub type LogEventQueue = Arc<Mutex<BoundedQueue>>;
 
 /// Create a new [`LogEventQueue`] with the default capacity of 4096.
 pub fn new_log_event_queue() -> LogEventQueue {
-    Arc::new(Mutex::new(BoundedQueue::new(DEFAULT_QUEUE_CAPACITY)))
+    Arc::new(Mutex::new(BoundedQueue::new(LOG_EVENT_QUEUE_CAPACITY)))
 }
 
 // ── Writer configuration ──────────────────────────────────────────────────────
@@ -270,7 +270,7 @@ fn write_events(config: &LogWriterConfig, events: &[LogEventV1]) {
                     warn!("log_writer: write error: {e}");
                     continue;
                 }
-                export_otel_best_effort_from_path(&config.log_path, event);
+                export_otel_best_effort(&config.log_path, event);
             }
             Err(e) => {
                 warn!("log_writer: failed to serialize event: {e}");
@@ -314,11 +314,18 @@ fn rotation_path(base: &Path, n: u32) -> PathBuf {
 mod tests {
     use super::*;
     use agent_team_mail_core::logging_event::new_log_event;
-    use sc_observability::OtelRecord;
     use serial_test::serial;
     use std::time::Duration;
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
+
+    #[derive(Debug, serde::Deserialize)]
+    struct ExportedOtelRecord {
+        name: String,
+        trace_id: Option<String>,
+        span_id: Option<String>,
+        attributes: serde_json::Map<String, serde_json::Value>,
+    }
 
     fn make_event() -> LogEventV1 {
         new_log_event("atm-daemon", "test_event", "atm_daemon::test", "info")
@@ -592,7 +599,7 @@ mod tests {
             .map(str::to_string)
             .collect();
         assert_eq!(lines.len(), 3);
-        let exported: Vec<OtelRecord> = lines
+        let exported: Vec<ExportedOtelRecord> = lines
             .iter()
             .map(|line| serde_json::from_str(line).expect("valid otel record json"))
             .collect();

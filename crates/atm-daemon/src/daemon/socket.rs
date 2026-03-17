@@ -21,6 +21,9 @@
 //! The socket server is only compiled and active on Unix platforms.
 //! On non-Unix platforms the module exposes stub functions that do nothing.
 
+use crate::daemon::observability::{
+    SOCKET_ERROR_INTERNAL_ERROR, SOCKET_ERROR_INVALID_PAYLOAD, SOCKET_ERROR_VERSION_MISMATCH,
+};
 use agent_team_mail_core::control::{
     CONTROL_SCHEMA_VERSION, ContentRef, ControlAck, ControlAction, ControlRequest, ControlResult,
 };
@@ -31,9 +34,6 @@ use agent_team_mail_core::schema::AgentMember;
 use agent_team_mail_core::team_config_store::TeamConfigStore;
 use agent_team_mail_core::text::DEFAULT_MAX_MESSAGE_BYTES;
 use anyhow::Result;
-use sc_observability::{
-    SOCKET_ERROR_INTERNAL_ERROR, SOCKET_ERROR_INVALID_PAYLOAD, SOCKET_ERROR_VERSION_MISMATCH,
-};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
@@ -801,8 +801,10 @@ async fn handle_log_event_command(
     request_str: &str,
     log_event_queue: &LogEventQueue,
 ) -> SocketResponse {
+    use crate::daemon::observability::{
+        SOCKET_ERROR_INVALID_PAYLOAD, SOCKET_ERROR_VERSION_MISMATCH,
+    };
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
-    use sc_observability::{SOCKET_ERROR_INVALID_PAYLOAD, SOCKET_ERROR_VERSION_MISMATCH};
 
     let request: SocketRequest = match serde_json::from_str(request_str) {
         Ok(r) => r,

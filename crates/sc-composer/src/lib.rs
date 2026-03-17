@@ -14,17 +14,19 @@ mod validate;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use agent_team_mail_core::home::get_home_dir;
 use agent_team_mail_core::logging_event::LogEventV1;
 use pipeline::compose_blocks;
 use render::render_template;
-use sc_observability::{LogConfig as SharedLogConfig, Logger as SharedLogger};
 use validate::{evaluate_context, prepare_template, validate_request};
 
 pub use diagnostics::Diagnostic;
 pub use resolver::ResolveResult;
 pub use validate::ValidationReport;
+
+pub type ObservabilityEmitter = Arc<dyn Fn(&str, &str, serde_json::Value) + Send + Sync>;
 
 /// Supported runtime profiles for default agent file resolution policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,61 +151,31 @@ pub enum ComposerError {
     },
 }
 
+pub fn install_observability_emitter(emitter: ObservabilityEmitter) {
+    *observability_slot()
+        .lock()
+        .expect("sc-composer observability emitter lock poisoned") = Some(emitter);
+}
+
+#[cfg(test)]
+fn clear_observability_emitter() {
+    *observability_slot()
+        .lock()
+        .expect("sc-composer observability emitter lock poisoned") = None;
+}
+
+fn observability_slot() -> &'static Mutex<Option<ObservabilityEmitter>> {
+    static OBSERVABILITY: OnceLock<Mutex<Option<ObservabilityEmitter>>> = OnceLock::new();
+    OBSERVABILITY.get_or_init(|| Mutex::new(None))
+}
+
 fn emit_observability(action: &str, outcome: &str, fields: serde_json::Value) {
-    let Some(home_dir) = get_home_dir().ok() else {
-        return;
-    };
-    let mut cfg = SharedLogConfig::from_home(&home_dir);
-    cfg.log_path = home_dir
-        .join(".config")
-        .join("sc-composer")
-        .join("logs")
-        .join("sc-composer.log.jsonl");
-    cfg.spool_dir = home_dir
-        .join(".config")
-        .join("sc-composer")
-        .join("logs")
-        .join("spool");
-    let logger = SharedLogger::new(cfg);
-    let mut event = LogEventV1::builder("sc-composer", action, "sc_composer::lib")
-        .level("info")
-        .build();
-    event.outcome = Some(outcome.to_string());
-    event.fields = json_to_map(fields);
-    if let Some(team) = env_nonempty("ATM_TEAM") {
-        event.team = Some(team);
-    }
-    if let Some(agent) = env_nonempty("ATM_IDENTITY") {
-        event.agent = Some(agent);
-    }
-    if let Some(runtime) = env_nonempty("ATM_RUNTIME") {
-        event.runtime = Some(runtime);
-    }
-    if let Some(session_id) = env_nonempty("ATM_SESSION_ID") {
-        event.session_id = Some(session_id);
-    }
-    let _ = logger.emit(&event);
-}
-
-fn env_nonempty(key: &str) -> Option<String> {
-    std::env::var(key).ok().and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    })
-}
-
-fn json_to_map(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
-    match value {
-        serde_json::Value::Object(map) => map,
-        other => {
-            let mut map = serde_json::Map::new();
-            map.insert("value".to_string(), other);
-            map
-        }
+    let emitter = observability_slot()
+        .lock()
+        .expect("sc-composer observability emitter lock poisoned")
+        .clone();
+    if let Some(emitter) = emitter {
+        emitter(action, outcome, fields);
     }
 }
 
@@ -333,13 +305,13 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
-    use agent_team_mail_core::logging_event::LogEventV1;
     use serial_test::serial;
     use tempfile::TempDir;
 
     use super::{
         ComposeMode, ComposePolicy, ComposeRequest, ComposerError, ProfileKind, RuntimeKind,
-        UnknownVariablePolicy, compose, emit_observability, validate,
+        UnknownVariablePolicy, clear_observability_emitter, compose, emit_observability,
+        install_observability_emitter, validate,
     };
 
     fn write_file(root: &TempDir, rel_path: &str, content: &str) -> PathBuf {
@@ -583,54 +555,27 @@ mod tests {
 
     #[test]
     #[serial]
-    fn emit_observability_includes_env_correlation_fields() {
-        let tmp = TempDir::new().expect("tempdir");
-        let probe_id = format!(
-            "probe-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time before unix epoch")
-                .as_nanos()
-        );
-        // SAFETY: test-scoped env overrides.
-        unsafe {
-            std::env::set_var("ATM_HOME", tmp.path());
-            std::env::set_var("ATM_TEAM", "atm-dev");
-            std::env::set_var("ATM_IDENTITY", "arch-ctm");
-            std::env::set_var("ATM_RUNTIME", "codex");
-            std::env::set_var("ATM_SESSION_ID", "sess-123");
-        }
-
-        emit_observability(
-            "compose",
-            "ok",
-            serde_json::json!({"mode": "file", "probe_id": probe_id}),
-        );
-        let log_path = tmp
-            .path()
-            .join(".config/sc-composer/logs/sc-composer.log.jsonl");
-        let raw = std::fs::read_to_string(&log_path).expect("log file should exist");
-        let event: LogEventV1 = raw
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .filter_map(|line| serde_json::from_str::<LogEventV1>(line).ok())
-            .find(|event| {
-                event.fields.get("probe_id").and_then(|v| v.as_str()) == Some(probe_id.as_str())
+    fn emit_observability_calls_installed_emitter() {
+        let captured = Arc::new(Mutex::new(Vec::<(String, String, serde_json::Value)>::new()));
+        install_observability_emitter({
+            let captured = Arc::clone(&captured);
+            Arc::new(move |action, outcome, fields| {
+                captured.lock().expect("capture lock poisoned").push((
+                    action.to_string(),
+                    outcome.to_string(),
+                    fields,
+                ));
             })
-            .expect("probe event should be present");
-        assert_eq!(event.team.as_deref(), Some("atm-dev"));
-        assert_eq!(event.agent.as_deref(), Some("arch-ctm"));
-        assert_eq!(event.runtime.as_deref(), Some("codex"));
-        assert_eq!(event.session_id.as_deref(), Some("sess-123"));
-        assert_eq!(event.outcome.as_deref(), Some("ok"));
+        });
 
-        // SAFETY: cleanup after test.
-        unsafe {
-            std::env::remove_var("ATM_HOME");
-            std::env::remove_var("ATM_TEAM");
-            std::env::remove_var("ATM_IDENTITY");
-            std::env::remove_var("ATM_RUNTIME");
-            std::env::remove_var("ATM_SESSION_ID");
-        }
+        emit_observability("compose", "ok", serde_json::json!({"mode": "file"}));
+
+        let captured = captured.lock().expect("capture lock poisoned");
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].0, "compose");
+        assert_eq!(captured[0].1, "ok");
+        assert_eq!(captured[0].2["mode"], "file");
+        drop(captured);
+        clear_observability_emitter();
     }
 }

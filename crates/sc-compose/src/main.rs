@@ -1,18 +1,20 @@
-mod observability;
-
+use agent_team_mail_core::home::get_home_dir;
 use anyhow::{Context, Result};
 use clap::error::ErrorKind;
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use sc_composer::{
-    ComposeMode, ComposePolicy, ComposeRequest, ComposerError, ProfileKind, RuntimeKind,
-    UnknownVariablePolicy,
+    ComposeMode, ComposePolicy, ComposeRequest, ComposerError, ObservabilityEmitter, ProfileKind,
+    RuntimeKind, UnknownVariablePolicy,
 };
+use sc_observability::{LogConfig as SharedLogConfig, LogLevel, Logger as SharedLogger};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::str::FromStr;
+use std::sync::Arc;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -112,7 +114,8 @@ fn main() -> ExitCode {
             return ExitCode::from(code);
         }
     };
-    let logger = observability::Logger::new();
+    let logger = Arc::new(Logger::new());
+    sc_composer::install_observability_emitter(composer_emitter(Arc::clone(&logger)));
     logger.emit(
         "command_start",
         "started",
@@ -120,7 +123,7 @@ fn main() -> ExitCode {
     );
 
     let json_output = cli.json;
-    let result = run(&cli, &logger);
+    let result = run(&cli, logger.as_ref());
     match result {
         Ok(()) => {
             logger.emit("command_end", "success", json!({"code": 0}));
@@ -140,7 +143,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: &Cli, logger: &observability::Logger) -> Result<()> {
+fn run(cli: &Cli, logger: &Logger) -> Result<()> {
     match &cli.command {
         CommandArg::Render {
             template,
@@ -154,12 +157,183 @@ fn run(cli: &Cli, logger: &observability::Logger) -> Result<()> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogFormat {
+    Jsonl,
+    Human,
+}
+
+impl LogFormat {
+    fn from_env() -> Self {
+        match std::env::var("SC_COMPOSE_LOG_FORMAT")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("human") => Self::Human,
+            _ => Self::Jsonl,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Logger {
+    inner: SharedLogger,
+    threshold: LogLevel,
+    format: LogFormat,
+}
+
+impl Logger {
+    fn new() -> Self {
+        let mut cfg = sc_compose_config();
+        let threshold = parse_level_env().unwrap_or(cfg.level);
+        cfg.level = threshold;
+        let format = LogFormat::from_env();
+        Self {
+            inner: SharedLogger::new(cfg),
+            threshold,
+            format,
+        }
+    }
+
+    fn emit(&self, action: &str, result: &str, fields: serde_json::Value) {
+        let level = event_level(action, result);
+        if !should_emit(level, self.threshold) {
+            return;
+        }
+
+        match self.format {
+            LogFormat::Jsonl => {
+                let _ = self.inner.emit_action(
+                    "sc-compose",
+                    "sc_compose::cli",
+                    action,
+                    Some(result),
+                    fields,
+                );
+            }
+            LogFormat::Human => {
+                let _ = self
+                    .inner
+                    .emit_human(level.as_str(), action, result, &fields);
+            }
+        }
+    }
+}
+
+fn composer_emitter(logger: Arc<Logger>) -> ObservabilityEmitter {
+    Arc::new(move |action, outcome, fields| logger.emit(action, outcome, fields))
+}
+
+fn sc_compose_config() -> SharedLogConfig {
+    let home_dir = resolve_home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let mut cfg = SharedLogConfig::from_home(&home_dir);
+    cfg.log_path = default_log_path().unwrap_or_else(|| {
+        home_dir
+            .join(".config")
+            .join("sc-compose")
+            .join("logs")
+            .join("sc-compose.log")
+    });
+    cfg.spool_dir = default_spool_dir(&cfg.log_path);
+    cfg
+}
+
+fn resolve_home_dir() -> Option<PathBuf> {
+    get_home_dir().ok()
+}
+
+fn default_log_path() -> Option<PathBuf> {
+    if let Ok(explicit) = std::env::var("SC_COMPOSE_LOG_FILE")
+        && !explicit.trim().is_empty()
+    {
+        return Some(PathBuf::from(explicit));
+    }
+    if let Ok(home) = std::env::var("ATM_HOME")
+        && !home.trim().is_empty()
+    {
+        return Some(
+            PathBuf::from(home)
+                .join(".config")
+                .join("sc-compose")
+                .join("logs")
+                .join("sc-compose.log"),
+        );
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(app_data) = std::env::var("APPDATA")
+            && !app_data.trim().is_empty()
+        {
+            return Some(
+                PathBuf::from(app_data)
+                    .join("sc-compose")
+                    .join("logs")
+                    .join("sc-compose.log"),
+            );
+        }
+    }
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
+        && !xdg.trim().is_empty()
+    {
+        return Some(PathBuf::from(xdg).join("sc-compose/logs/sc-compose.log"));
+    }
+    resolve_home_dir().map(|home| home.join(".config/sc-compose/logs/sc-compose.log"))
+}
+
+fn default_spool_dir(log_path: &Path) -> PathBuf {
+    let parent = log_path.parent().unwrap_or_else(|| Path::new("."));
+    if parent
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("logs"))
+        .unwrap_or(false)
+    {
+        parent
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("log-spool")
+    } else {
+        parent.join("log-spool")
+    }
+}
+
+fn parse_level_env() -> Option<LogLevel> {
+    std::env::var("SC_COMPOSE_LOG_LEVEL")
+        .ok()
+        .and_then(|v| LogLevel::from_str(&v).ok())
+}
+
+fn event_level(action: &str, result: &str) -> LogLevel {
+    if result.eq_ignore_ascii_case("error") {
+        return LogLevel::Error;
+    }
+    if action == "resolver_decision" {
+        return LogLevel::Debug;
+    }
+    LogLevel::Info
+}
+
+fn should_emit(level: LogLevel, threshold: LogLevel) -> bool {
+    level_rank(level) >= level_rank(threshold)
+}
+
+fn level_rank(level: LogLevel) -> u8 {
+    match level {
+        LogLevel::Trace => 0,
+        LogLevel::Debug => 1,
+        LogLevel::Info => 2,
+        LogLevel::Warn => 3,
+        LogLevel::Error => 4,
+    }
+}
+
 fn run_render(
     cli: &Cli,
     template: Option<PathBuf>,
     output: Option<PathBuf>,
     write: bool,
-    logger: &observability::Logger,
+    logger: &Logger,
 ) -> Result<()> {
     let request = build_request(cli, template, None)?;
     if cli.mode == ModeArg::Profile && request.agent.is_none() {
@@ -298,7 +472,7 @@ fn sanitize_prompt_name(raw: &str) -> String {
     }
 }
 
-fn emit_include_expansion_success(logger: &observability::Logger, resolved_files: &[PathBuf]) {
+fn emit_include_expansion_success(logger: &Logger, resolved_files: &[PathBuf]) {
     let included_files: Vec<String> = resolved_files
         .iter()
         .skip(1)
@@ -314,7 +488,7 @@ fn emit_include_expansion_success(logger: &observability::Logger, resolved_files
     );
 }
 
-fn emit_include_expansion_failure(logger: &observability::Logger, err: &anyhow::Error) {
+fn emit_include_expansion_failure(logger: &Logger, err: &anyhow::Error) {
     let Some(compose_err) = err.downcast_ref::<ComposerError>() else {
         return;
     };
@@ -349,7 +523,7 @@ fn emit_include_expansion_failure(logger: &observability::Logger, err: &anyhow::
     }
 }
 
-fn run_resolve(cli: &Cli, target: Option<String>, logger: &observability::Logger) -> Result<()> {
+fn run_resolve(cli: &Cli, target: Option<String>, logger: &Logger) -> Result<()> {
     let request = build_request(cli, None, target)?;
     let resolved = sc_composer::resolve(&request)?;
 
@@ -372,11 +546,7 @@ fn run_resolve(cli: &Cli, target: Option<String>, logger: &observability::Logger
     Ok(())
 }
 
-fn run_validate(
-    cli: &Cli,
-    template: Option<PathBuf>,
-    logger: &observability::Logger,
-) -> Result<()> {
+fn run_validate(cli: &Cli, template: Option<PathBuf>, logger: &Logger) -> Result<()> {
     let request = build_request(cli, template, None)?;
     let report = sc_composer::validate(&request)?;
 
