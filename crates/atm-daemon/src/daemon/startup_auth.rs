@@ -127,8 +127,6 @@ fn emit_lifecycle_event(
         "timestamp": Utc::now().to_rfc3339(),
         "detail": detail,
     });
-    eprintln!("{payload}");
-
     let mut extra = serde_json::Map::new();
     extra.insert(
         "event_name".to_string(),
@@ -221,8 +219,6 @@ fn emit_startup_rejection(
         "timestamp": Utc::now().to_rfc3339(),
         "detail": detail,
     });
-    eprintln!("{payload}");
-
     let mut extra = serde_json::Map::new();
     extra.insert(
         "rejection_reason".to_string(),
