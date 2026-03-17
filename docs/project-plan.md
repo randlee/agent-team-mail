@@ -1787,11 +1787,10 @@ with two-layer observability to eliminate runaway token consumption.
 **Integration branch**: `integrate/phase-AS`
 
 **Planning docs**:
-- `docs/phase-as-backlog-planning.md` — backlog sprints (AS.1–AS.3, team-lead)
 - `docs/requirements.md` + `docs/ci-monitoring/requirements.md` — GH governance
   requirements and ownership rules hardened during AS.4–AS.7
 
-**Status**: ACTIVE
+**Status**: COMPLETE
 
 ### Sprint Map
 | Sprint | Focus | Branch | Status |
@@ -1827,7 +1826,7 @@ execution, and `atm gh` command processing.
 
 **Integration branch**: `integrate/phase-AT`
 
-**Status**: IN PROGRESS
+**Status**: COMPLETE
 
 ### Sprint Map
 | Sprint | Focus | Branch | Status |
