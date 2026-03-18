@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use std::{
     collections::{BTreeMap, VecDeque},
-    ffi::{OsStr, OsString},
+    ffi::OsStr,
     process::{Child, Stdio},
 };
 
@@ -1081,7 +1081,7 @@ mod tests {
 
     struct TestEnvGuard {
         key: &'static str,
-        old: Option<OsString>,
+        old: Option<std::ffi::OsString>,
     }
 
     impl TestEnvGuard {
