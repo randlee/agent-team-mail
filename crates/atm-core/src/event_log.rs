@@ -3,6 +3,9 @@
 //! This module provides a compact, cross-process event sink used by `atm`,
 //! `atm-daemon`, and `atm-agent-mcp`.
 
+use crate::logging_event::LogEventV1;
+use std::sync::{Arc, Mutex, OnceLock};
+
 #[derive(Clone, Debug, Default)]
 pub struct EventFields {
     pub level: &'static str,
@@ -98,6 +101,35 @@ fn logging_enabled() -> bool {
             .map(|v| v.trim().to_ascii_lowercase()),
         Some(ref v) if v == "0" || v == "false" || v == "off" || v == "disabled" || v == "no"
     )
+}
+
+pub type EventObserverHook = Arc<dyn Fn(&LogEventV1) + Send + Sync>;
+
+fn event_observer_hook_slot() -> &'static Mutex<Option<EventObserverHook>> {
+    static EVENT_OBSERVER_HOOK: OnceLock<Mutex<Option<EventObserverHook>>> = OnceLock::new();
+    EVENT_OBSERVER_HOOK.get_or_init(|| Mutex::new(None))
+}
+
+pub fn install_event_observer_hook(hook: EventObserverHook) {
+    *event_observer_hook_slot()
+        .lock()
+        .expect("event observer hook lock poisoned") = Some(hook);
+}
+
+pub fn clear_event_observer_hook() {
+    *event_observer_hook_slot()
+        .lock()
+        .expect("event observer hook lock poisoned") = None;
+}
+
+fn notify_event_observer(event: &LogEventV1) {
+    let hook = event_observer_hook_slot()
+        .lock()
+        .expect("event observer hook lock poisoned")
+        .clone();
+    if let Some(hook) = hook {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook(event)));
+    }
 }
 
 /// Map [`EventFields`] to a [`LogEventV1`] for the unified pipeline.
@@ -280,6 +312,7 @@ fn fields_to_log_event(fields: &EventFields) -> crate::logging_event::LogEventV1
 /// cannot be resolved.
 pub fn emit_event_to_spool_direct(fields: &EventFields, home_dir: &std::path::Path) {
     let event = fields_to_log_event(fields);
+    notify_event_observer(&event);
     crate::logging_event::write_to_spool(&event, home_dir);
 }
 
@@ -322,6 +355,7 @@ pub fn emit_event_best_effort(mut fields: EventFields) {
     }
 
     let event = fields_to_log_event(&fields);
+    notify_event_observer(&event);
     forward_to_unified(event);
 }
 

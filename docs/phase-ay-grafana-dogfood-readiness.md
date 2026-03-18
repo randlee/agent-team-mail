@@ -61,3 +61,34 @@ real smoke testing so ATM can:
   - one daemon trace visible in Tempo
   - one canonical metric visible in Mimir
 - The dogfood smoke is documented and repeatable on `develop`.
+- `scripts/dogfood-smoke.py` performs the canonical AY.2 operator flow:
+  - stop the shared daemon
+  - restart the shared daemon with inherited `ATM_OTEL_*`
+  - emit a CLI command plus a daemon lifecycle event carrying the shared session tag
+  - query Loki with `service_name="atm"` plus detected-field filters
+  - query Tempo with `resource.service.name="atm-daemon"` and
+    `resource.session_id`
+  - query Mimir with canonical metric names such as
+    `atm_commands_count_total`
+
+## AY.2 Implementation Notes
+
+- Shared-runtime launcher startup must preserve `ATM_OTEL_*` and carry the
+  operator smoke session via `ATM_SESSION_ID` without restoring the full shared
+  owner identity environment.
+- CLI command paths export logs through the shared event pipeline via an
+  entrypoint-installed OTel observer hook; AY.2 must not add a direct
+  `sc-observability` dependency to `atm-core`.
+- Tempo dogfood queries rely on `session_id` being present as an OTLP resource
+  attribute on daemon traces, not only as a span attribute.
+
+## AY.2 Verification Results
+
+- Loki: `PASS`
+  - live dogfood validation returned `8` streams for
+    `session_id=ay2-1773873451`
+- Tempo: `PASS`
+  - live dogfood validation returned `1` trace for
+    `resource.session_id=ay2-1773873451` after a shared daemon stop/start
+- Mimir: `PASS`
+  - live dogfood validation returned `2` canonical ATM metric series

@@ -377,10 +377,25 @@ fn normalize_signal_endpoint(endpoint: &str, signal: &str) -> String {
 }
 
 fn build_logs_payload(record: &TransportRecord) -> Value {
-    let resource_attributes = vec![json!({
-        "key": "service.name",
-        "value": { "stringValue": record.source_binary },
-    })];
+    let resource_attributes = resource_attributes(
+        &record.source_binary,
+        record
+            .attributes
+            .get("team")
+            .and_then(|value| value.as_str()),
+        record
+            .attributes
+            .get("agent")
+            .and_then(|value| value.as_str()),
+        record
+            .attributes
+            .get("runtime")
+            .and_then(|value| value.as_str()),
+        record
+            .attributes
+            .get("session_id")
+            .and_then(|value| value.as_str()),
+    );
     let mut attributes = vec![];
     attributes.push(json!({
         "key": "service_name",
@@ -475,10 +490,13 @@ fn build_traces_payload(records: &[TraceTransportRecord]) -> Value {
 
             json!({
                 "resource": {
-                    "attributes": [{
-                        "key": "service.name",
-                        "value": { "stringValue": record.source_binary },
-                    }]
+                    "attributes": resource_attributes(
+                        &record.source_binary,
+                        record.team.as_deref(),
+                        record.agent.as_deref(),
+                        record.runtime.as_deref(),
+                        record.session_id.as_deref(),
+                    )
                 },
                 "scopeSpans": [{
                     "scope": { "name": "sc-observability-otlp" },
@@ -558,10 +576,13 @@ fn build_metrics_payload(records: &[MetricTransportRecord]) -> Value {
 
             json!({
                 "resource": {
-                    "attributes": [{
-                        "key": "service.name",
-                        "value": { "stringValue": record.source_binary },
-                    }]
+                    "attributes": resource_attributes(
+                        &record.source_binary,
+                        record.team.as_deref(),
+                        record.agent.as_deref(),
+                        record.runtime.as_deref(),
+                        record.session_id.as_deref(),
+                    )
                 },
                 "scopeMetrics": [{
                     "scope": { "name": "sc-observability-otlp" },
@@ -597,6 +618,33 @@ fn correlation_attributes(
         ("session_id", session_id.as_ref()),
     ] {
         if let Some(value) = value {
+            attributes.push(json!({
+                "key": key,
+                "value": { "stringValue": value },
+            }));
+        }
+    }
+    attributes
+}
+
+fn resource_attributes(
+    service_name: &str,
+    team: Option<&str>,
+    agent: Option<&str>,
+    runtime: Option<&str>,
+    session_id: Option<&str>,
+) -> Vec<Value> {
+    let mut attributes = vec![json!({
+        "key": "service.name",
+        "value": { "stringValue": service_name },
+    })];
+    for (key, value) in [
+        ("team", team),
+        ("agent", agent),
+        ("runtime", runtime),
+        ("session_id", session_id),
+    ] {
+        if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
             attributes.push(json!({
                 "key": key,
                 "value": { "stringValue": value },

@@ -17,21 +17,43 @@ This plan intentionally expands beyond the AW.5 automated Loki smoke:
   - live Grafana query returned `0` streams for `service_name="atm"`
   - root cause: CLI commands are not wiring the OTel log pipeline for all
     command paths; follow-up is in `AY.2`
+  - root cause addressed in `AY.2`; live dogfood validation now returns
+    `8` Loki streams for `session_id=ay2-1773873451`
 - Tempo: `FAIL`
   - Grafana Cloud Tempo search does not accept `session_id` as a searchable
     top-level identifier
   - shared-runtime stop/start smoke still returned `0` `atm-daemon` traces
   - follow-up is in `AY.2`
+  - root cause addressed in `AY.2`; live dogfood validation now returns
+    `1` `atm-daemon` trace for `resource.session_id=ay2-1773873451`
 - Mimir: `PASS`
   - canonical series are present, including `atm_commands_count_total` and
     `atm_messages_sent_count_total`
+
+## AY.2 Dogfood Flow
+
+Use the operator smoke entrypoint after the AY.2 fixes land:
+
+```bash
+python3 scripts/dogfood-smoke.py --session-id "ay2-dogfood-$(date +%s)"
+```
+
+The script performs the exact supported live flow:
+
+- stop the existing shared daemon
+- restart the shared daemon with the current shell's `ATM_OTEL_*` config
+- emit one CLI command plus one daemon lifecycle event carrying the shared session tag
+- query Loki using `service_name="atm"` plus detected-field filters
+- query Tempo using `resource.service.name="atm-daemon"` and
+  `resource.session_id`
+- query Mimir using canonical exported series such as
+  `atm_commands_count_total`
 
 ## Preconditions
 
 - `develop` contains the merged AW work.
 - AW-capable binaries are built from `develop`.
 - Grafana Cloud credentials are available from `.private/grafana-otel-config.md`.
-- A local team/runtime is available for a daemon-backed `send`/`read` flow.
 
 Build from the current repo:
 
@@ -182,7 +204,7 @@ sleep 10
 ```bash
 curl -s -G "$ATM_LOKI_URL/loki/api/v1/query_range" \
   -H "$ATM_LOKI_READ_AUTH" \
-  --data-urlencode "query={service_name=\"atm\"} | logfmt | session_id=\"$SESSION_TAG\"" \
+  --data-urlencode "query={service_name=\"atm\"} | session_id=\"$SESSION_TAG\"" \
   --data-urlencode "limit=20" \
   --data-urlencode "start=$(python3 -c 'import time; print(int((time.time()-600)*1e9))')" \
   | python3 -c "
@@ -200,8 +222,9 @@ for s in streams[:3]:
 **PASS criteria**:
 
 - at least one ATM log stream is returned
-- the event exposes `service_name=atm` via label or detected field
-- the event exposes `team`, `agent`, `runtime`, and `session_id` as labels or detected fields
+- the event exposes `service_name=atm`
+- the event exposes `team`, `agent`, `runtime`, and `session_id` as detected
+  fields or resource-derived fields
 - the event exposes a concrete level mapping rather than `unknown`
 
 ## Area D — Traces and Metrics in Grafana
@@ -241,8 +264,6 @@ print(json.dumps(d, indent=2)[:2000])
 "
 ```
 
-Note: current Grafana Cloud Tempo search rejects `session_id` as a top-level TraceQL identifier. For live verification, search on `resource.service.name` plus span name and inspect returned attributes if you need session confirmation.
-
 **PASS criteria**:
 
 - at least one trace is returned for `resource.service.name="atm"`
@@ -262,7 +283,7 @@ export ATM_OTEL_ENDPOINT=https://otlp-gateway-prod-us-west-0.grafana.net/otlp
 export ATM_OTEL_PROTOCOL=otlp_http
 export ATM_OTEL_AUTH_HEADER="Authorization: Basic <grafana-write-header>"
 
-$AW_ATM daemon start >/dev/null 2>&1
+$AW_ATM daemon restart >/dev/null 2>&1
 
 CLAUDE_SESSION_ID="$DAEMON_SESSION_TAG" \
 ATM_TEAM=atm-dev \
@@ -284,7 +305,7 @@ Query Tempo:
 ```bash
 curl -s -G "$ATM_TEMPO_SEARCH_ENDPOINT/api/search" \
   -H "$ATM_TEMPO_READ_AUTH" \
-  --data-urlencode 'q={ resource.service.name = "atm-daemon" && name =~ "atm-daemon.(dispatch_message|plugin..*)" }' \
+  --data-urlencode 'q={ resource.service.name = "atm-daemon" && resource.session_id = "'"$DAEMON_SESSION_TAG"'" && name =~ "atm-daemon.(dispatch_message|plugin..*)" }' \
   --data-urlencode "limit=20" \
   | python3 -c "
 import json,sys
@@ -293,11 +314,10 @@ print(json.dumps(d, indent=2)[:2000])
 "
 ```
 
-Note: current Grafana Cloud Tempo search rejects `session_id` as a top-level TraceQL identifier. If session scoping is needed, inspect returned span/resource attributes rather than assuming `session_id` is directly searchable.
-
 **PASS criteria**:
 
-- at least one trace is returned for `resource.service.name="atm-daemon"` after the stop/start sequence
+- at least one trace is returned for `resource.service.name="atm-daemon"` and
+  `resource.session_id="$DAEMON_SESSION_TAG"` after the stop/start sequence
 - a daemon-owned span such as `atm-daemon.dispatch_message` is present
 
 ### D.4 — Query Mimir for metrics

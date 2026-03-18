@@ -96,7 +96,7 @@ fn build_metric_record(
         team: env_nonempty("ATM_TEAM"),
         agent: env_nonempty("ATM_IDENTITY"),
         runtime: env_nonempty("ATM_RUNTIME"),
-        session_id: env_nonempty("CLAUDE_SESSION_ID"),
+        session_id: crate::daemon::observability::current_session_id(),
         name: name.to_string(),
         kind,
         value,
