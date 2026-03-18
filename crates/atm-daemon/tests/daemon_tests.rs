@@ -3,7 +3,7 @@
 use agent_team_mail_core::config::Config;
 use agent_team_mail_core::context::SystemContext;
 use agent_team_mail_core::daemon_client::{BuildProfile, RuntimeKind, RuntimeOwnerMetadata};
-use agent_team_mail_core::logging_event::{LogEventV1, spool_dir};
+use agent_team_mail_core::logging_event::LogEventV1;
 use agent_team_mail_daemon::daemon;
 use agent_team_mail_daemon::daemon::{
     SessionRegistry, StatusWriter, new_dedup_store, new_launch_sender, new_log_event_queue,
@@ -1297,9 +1297,14 @@ fn test_daemon_exits_when_isolated_test_ttl_expires() {
 #[serial]
 fn test_isolated_test_clean_shutdown_emits_lifecycle_events() {
     let temp_dir = TempDir::new().unwrap();
+    let isolated_log_file = temp_dir
+        .path()
+        .join(".config/atm/logs/atm-daemon/atm-daemon.log.jsonl");
     let daemon_bin = Path::new(env!("CARGO_BIN_EXE_atm-daemon"));
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"));
     cmd.env("ATM_HOME", temp_dir.path())
+        .env("ATM_LOG_FILE", &isolated_log_file)
+        .env("ATM_OTEL_ENABLED", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -1351,7 +1356,7 @@ fn test_isolated_test_clean_shutdown_emits_lifecycle_events() {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
-    let spool = spool_dir(temp_dir.path());
+    let spool = isolated_log_file.parent().unwrap().join("spool");
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
         let events = read_spool_events(&spool);
