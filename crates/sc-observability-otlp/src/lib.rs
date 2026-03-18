@@ -249,6 +249,9 @@ fn build_logs_payload(record: &TransportRecord) -> Value {
         "value": { "stringValue": record.source_binary },
     })];
     let mut attributes = vec![];
+    // Callers are responsible for honoring the co-presence rule for
+    // team/agent/runtime when session_id is emitted; the OTLP adapter only
+    // forwards the already-shaped canonical correlation attributes.
     for (key, value) in &record.attributes {
         attributes.push(json!({
             "key": key,
