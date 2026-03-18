@@ -21,9 +21,9 @@
   health evaluator, default init path.
 - AV-era collector export stays behind the neutral `OtelExporter` seam inside
   `sc-observability`.
-- `sc-observability-otlp` is a planned dedicated AW-era transport adapter crate:
-  it will own OTLP/collector transport, auth/TLS, batching, retry, and SDK
-  dependency integration once traces and metrics land.
+- `sc-observability-otlp` shipped in Phase AV as the dedicated OTLP logs
+  transport adapter crate. Phase AW expands the same crate with traces and
+  metrics transport support.
 - Producers: `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `sc-compose`,
   `sc-composer`, `scmux` (follow-on, not in Phase AV scope), `schook`
   (follow-on, not in Phase AV scope).
@@ -60,8 +60,8 @@ status does not expand this repository's AV implementation scope.
    OTLP-ready log records.
 7. The AV-era exporter path inside `sc-observability` sends those records to
    the configured collector target and optional debug mirrors.
-8. Phase AW introduces `sc-observability-otlp` as the dedicated transport crate
-   and extends the same boundary to traces and metrics.
+8. Phase AW expands `sc-observability-otlp` beyond logs so the same transport
+   boundary also covers traces and metrics.
 
 ## 4. Canonical State and Health Computation
 
