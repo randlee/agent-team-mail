@@ -104,7 +104,11 @@ impl OtelConfig {
             let norm = raw.trim().to_ascii_lowercase();
             cfg.debug_local_export = matches!(norm.as_str(), "1" | "true" | "on" | "yes");
         }
-        if let Ok(raw) = std::env::var("ATM_OTEL_MAX_RETRIES")
+        if let Ok(raw) = std::env::var("ATM_OTEL_RETRY_MAX_ATTEMPTS")
+            && let Ok(parsed) = raw.parse::<u32>()
+        {
+            cfg.max_retries = parsed;
+        } else if let Ok(raw) = std::env::var("ATM_OTEL_MAX_RETRIES")
             && let Ok(parsed) = raw.parse::<u32>()
         {
             cfg.max_retries = parsed;

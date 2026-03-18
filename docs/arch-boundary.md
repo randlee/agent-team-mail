@@ -35,7 +35,7 @@ The observability stack is split into three layers:
 
 | From | Allowed imports / dependencies | Forbidden imports / dependencies |
 |---|---|---|
-| `sc-observability` | shared Rust deps, neutral exporter traits | direct OTLP SDK/client dependencies except through `sc-observability-otlp` |
+| `sc-observability` | shared Rust deps, neutral exporter traits, the dedicated `sc-observability-otlp` adapter seam | direct OTLP SDK/client dependencies except through `sc-observability-otlp` |
 | `sc-observability-otlp` | `sc-observability`, OTLP/collector SDKs | reverse dependency from `sc-observability` back into entry-point crates |
 | entry-point crates/modules | `sc-observability`; logger-init wiring that may call the shared adapter seam | direct imports of `sc-observability-otlp` from non-entry-point modules; ad hoc OTLP exporter construction |
 | internal feature modules/helpers/libraries | `sc-observability` facade only | `sc-observability-otlp`, collector SDKs, exporter construction |
