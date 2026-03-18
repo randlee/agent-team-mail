@@ -153,8 +153,8 @@ from pathlib import Path
 home = Path(os.environ["ATM_HOME"])
 daemon_dir = home / ".atm" / "daemon"
 daemon_dir.mkdir(parents=True, exist_ok=True)
-state_path = daemon_dir / "gh-state.json"
-health_path = daemon_dir / "gh-health.json"
+state_path = daemon_dir / "gh-monitor-state.json"
+health_path = daemon_dir / "gh-monitor-health.json"
 request_log_path = os.environ.get("ATM_FAKE_GH_REQUEST_LOG")
 configured = os.environ.get("ATM_FAKE_GH_CONFIGURED", "1") == "1"
 enabled = os.environ.get("ATM_FAKE_GH_ENABLED", "1") == "1"
@@ -1552,6 +1552,54 @@ fn test_gh_monitor_list_human_output_has_one_line_rollups() {
     assert!(text.contains(
         "#102 [draft] [ci:BLOCKED — merge conflict] [merge:CONFLICT ⚠] [review:changes_requested]"
     ));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_pr_list_writes_budget_state_under_overridden_atm_home() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "acme", "agent-team-mail");
+    let gh_bin = write_fake_gh_cli_script(temp_dir.path(), "acme/agent-team-mail");
+    let path = format!(
+        "{}:{}",
+        gh_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    cmd.env("ATM_TEAM", "test-team")
+        .env("PATH", path)
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("pr")
+        .arg("list")
+        .arg("--limit")
+        .arg("1")
+        .assert()
+        .success();
+
+    let state_path = temp_dir
+        .path()
+        .join(".atm/daemon/gh-monitor-repo-state.json");
+    assert!(
+        state_path.exists(),
+        "gh repo-state file must be written under overridden ATM_HOME"
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let record = json["records"]
+        .as_array()
+        .and_then(|records| records.first())
+        .expect("repo-state record");
+    assert_eq!(record["team"].as_str(), Some("test-team"));
+    assert_eq!(record["repo"].as_str(), Some("acme/agent-team-mail"));
+    assert_eq!(record["budget_limit_per_hour"].as_u64(), Some(100));
+    assert_eq!(record["budget_used_in_window"].as_u64(), Some(1));
 }
 
 #[test]
