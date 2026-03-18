@@ -118,25 +118,25 @@ impl GitHubActionsProvider {
             created_at: gh_run.created_at.clone(),
             updated_at: gh_run.updated_at.clone(),
             attempt: gh_run.attempt,
-            pull_requests: gh_run.pull_requests.as_ref().map(|prs: &Vec<CiPullRequest>| {
-                prs.iter()
-                    .map(|pr| CiPullRequest {
-                        number: pr.number.unwrap_or_default(),
-                        url: pr.url.clone(),
-                        head_ref_name: None,
-                        head_ref_oid: None,
-                        created_at: None,
-                        merge_state_status: None,
-                    })
-                    .collect()
-            }),
+            pull_requests: gh_run
+                .pull_requests
+                .as_ref()
+                .map(|prs: &Vec<CiPullRequest>| {
+                    prs.iter()
+                        .map(|pr| CiPullRequest {
+                            number: pr.number.unwrap_or_default(),
+                            url: pr.url.clone(),
+                            head_ref_name: None,
+                            head_ref_oid: None,
+                            created_at: None,
+                            merge_state_status: None,
+                        })
+                        .collect()
+                }),
             jobs: if include_jobs {
-                gh_run
-                    .jobs
-                    .as_ref()
-                    .map(|jobs: &Vec<GhJob>| {
-                        jobs.iter().map(|gh_job| self.parse_job(gh_job)).collect()
-                    })
+                gh_run.jobs.as_ref().map(|jobs: &Vec<GhJob>| {
+                    jobs.iter().map(|gh_job| self.parse_job(gh_job)).collect()
+                })
             } else {
                 None
             },
@@ -152,17 +152,20 @@ impl GitHubActionsProvider {
             started_at: gh_job.started_at.clone(),
             completed_at: gh_job.completed_at.clone(),
             url: gh_job.url.clone(),
-            steps: gh_job.steps.as_ref().map(|steps: &Vec<agent_team_mail_ci_monitor::GhStep>| {
-                steps
-                    .iter()
-                    .map(|gh_step| CiStep {
-                        name: gh_step.name.clone(),
-                        status: Self::parse_status(&gh_step.status),
-                        conclusion: Self::parse_conclusion(gh_step.conclusion.as_deref()),
-                        number: gh_step.number,
-                    })
-                    .collect()
-            }),
+            steps: gh_job
+                .steps
+                .as_ref()
+                .map(|steps: &Vec<agent_team_mail_ci_monitor::GhStep>| {
+                    steps
+                        .iter()
+                        .map(|gh_step| CiStep {
+                            name: gh_step.name.clone(),
+                            status: Self::parse_status(&gh_step.status),
+                            conclusion: Self::parse_conclusion(gh_step.conclusion.as_deref()),
+                            number: gh_step.number,
+                        })
+                        .collect()
+                }),
         }
     }
 }
