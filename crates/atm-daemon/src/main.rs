@@ -28,6 +28,8 @@ fn current_otel_health_from_entrypoint(
     log_path: &std::path::Path,
 ) -> agent_team_mail_daemon::daemon::observability::OtelHealthSnapshot {
     let health = sc_observability::current_otel_health(log_path);
+    // Intentional mirror of sc_observability::OtelHealthSnapshot — sc-observability
+    // imports are confined to entry-point main.rs per ARCH-BOUNDARY-002.
     agent_team_mail_daemon::daemon::observability::OtelHealthSnapshot {
         schema_version: health.schema_version,
         enabled: health.enabled,

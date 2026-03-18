@@ -17,6 +17,20 @@ pub(crate) struct LoggingHealthSnapshot {
     pub(crate) oldest_spool_age: Option<u64>,
 }
 
+impl Default for LoggingHealthSnapshot {
+    fn default() -> Self {
+        Self {
+            state: "unavailable".to_string(),
+            dropped_counter: 0,
+            spool_path: String::new(),
+            last_error: None,
+            canonical_log_path: String::new(),
+            spool_count: 0,
+            oldest_spool_age: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct OtelHealthSnapshot {
@@ -45,20 +59,6 @@ impl Default for OtelHealthSnapshot {
             debug_local_export: false,
             debug_local_state: "disabled".to_string(),
             last_error: OtelLastError::default(),
-        }
-    }
-}
-
-impl Default for LoggingHealthSnapshot {
-    fn default() -> Self {
-        Self {
-            state: "unavailable".to_string(),
-            dropped_counter: 0,
-            spool_path: String::new(),
-            last_error: None,
-            canonical_log_path: String::new(),
-            spool_count: 0,
-            oldest_spool_age: None,
         }
     }
 }
