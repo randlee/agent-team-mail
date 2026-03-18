@@ -112,13 +112,33 @@ distinct from collector-failure fail-open behavior:
 External consumers should use the neutral facade exported by
 `crates/sc-observability/src/lib.rs`:
 
-- `export_trace_records_best_effort`:
-  `crates/sc-observability/src/trace.rs`
-- `export_metric_records_best_effort`:
-  `crates/sc-observability/src/metrics.rs`
+- `pub fn export_trace_records_best_effort(
+    records: &[TraceRecord],
+    config: &OtelConfig,
+  )`
+  Source: `crates/sc-observability/src/trace.rs`
+- `pub fn export_metric_records_best_effort(
+    records: &[MetricRecord],
+    config: &OtelConfig,
+  )`
+  Source: `crates/sc-observability/src/metrics.rs`
+- `pub fn export_otel_best_effort(
+    event: &LogEventV1,
+    config: &OtelConfig,
+    exporter: &dyn OtelExporter,
+  )`
+  Source: `crates/sc-observability/src/lib.rs`
+- `pub fn export_otel_best_effort_from_path(
+    log_path: &Path,
+    event: &LogEventV1,
+  )`
+  Source: `crates/sc-observability/src/lib.rs`
+- `pub fn current_otel_health(log_path: &Path) -> OtelHealthSnapshot`
+  Source: `crates/sc-observability/src/health.rs`
 
-These are the concrete API entry points for best-effort trace and metric export
-without importing transport-specific code.
+These are the concrete public API entry points for best-effort trace, metric,
+and log export plus health inspection without importing transport-specific
+code.
 
 ## Versioning and Compatibility
 
