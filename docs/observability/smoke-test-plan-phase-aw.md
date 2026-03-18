@@ -9,7 +9,7 @@ This plan intentionally expands beyond the AW.5 automated Loki smoke:
 
 - `scripts/grafana-verify-smoke.py` remains the lowest-friction log-path check.
 - This manual plan adds the missing daemon trace/metric verification and the Grafana read-path checks that AW.5 did not automate.
-- Grafana Cloud read endpoints must be operator-supplied. Do not hardcode guessed Tempo or Mimir hostnames in the live run.
+- Grafana Cloud reads use backend-specific Basic auth. Use the exact per-backend instance IDs from `~/.zshrc` or `.private/grafana-otel-config.md`; do not guess or reuse one precomputed read header across Loki, Tempo, and Mimir.
 
 ## Preconditions
 
@@ -39,15 +39,20 @@ export ATM_OTEL_AUTH_HEADER="Authorization: Basic <grafana-write-header>"
 Export the read/query path separately:
 
 ```bash
-export ATM_LOKI_ENDPOINT="https://logs-prod-us-west-0.grafana.net/loki/v1/query_range"
-export ATM_LOKI_AUTH_HEADER="Authorization: Basic <grafana-read-header>"
+export ATM_GRAFANA_READ_TOKEN="<access-policy-token with logs:read,traces:read,metrics:read>"
 
-# Confirm these from Grafana Cloud -> Connections -> Data sources before use.
-export ATM_TEMPO_SEARCH_ENDPOINT="<tempo-search-endpoint>"
-export ATM_TEMPO_AUTH_HEADER="Authorization: Basic <grafana-read-header>"
-export ATM_MIMIR_QUERY_ENDPOINT="<mimir-query-endpoint>"
-export ATM_MIMIR_AUTH_HEADER="Authorization: Basic <grafana-read-header>"
-export ATM_MIMIR_SCOPE_ORGID="1551041"
+# Backend-specific Grafana Cloud instance IDs.
+export ATM_LOKI_INSTANCE_ID="1508830"
+export ATM_TEMPO_INSTANCE_ID="1503135"
+export ATM_MIMIR_INSTANCE_ID="3026310"
+
+export ATM_LOKI_URL="https://logs-prod-021.grafana.net"
+export ATM_TEMPO_SEARCH_ENDPOINT="https://tempo-prod-15-prod-us-west-0.grafana.net/tempo"
+export ATM_MIMIR_QUERY_ENDPOINT="https://prometheus-prod-67-prod-us-west-0.grafana.net/api/prom"
+
+export ATM_LOKI_READ_AUTH="Authorization: Basic $(printf '%s' \"$ATM_LOKI_INSTANCE_ID:$ATM_GRAFANA_READ_TOKEN\" | base64)"
+export ATM_TEMPO_READ_AUTH="Authorization: Basic $(printf '%s' \"$ATM_TEMPO_INSTANCE_ID:$ATM_GRAFANA_READ_TOKEN\" | base64)"
+export ATM_MIMIR_READ_AUTH="Authorization: Basic $(printf '%s' \"$ATM_MIMIR_INSTANCE_ID:$ATM_GRAFANA_READ_TOKEN\" | base64)"
 ```
 
 ## Area A — No Rogue Daemon Spawns
@@ -160,9 +165,9 @@ sleep 10
 ### C.2 — Query Loki with the read endpoint
 
 ```bash
-curl -s -G "$ATM_LOKI_ENDPOINT" \
-  -H "$ATM_LOKI_AUTH_HEADER" \
-  --data-urlencode "query={service_name=\"atm\",team=\"atm-dev\",agent=\"arch-ctm\",runtime=\"codex\",session_id=\"$SESSION_TAG\"} | json" \
+curl -s -G "$ATM_LOKI_URL/loki/api/v1/query_range" \
+  -H "$ATM_LOKI_READ_AUTH" \
+  --data-urlencode "query={service_name=\"atm\"} | logfmt | session_id=\"$SESSION_TAG\"" \
   --data-urlencode "limit=20" \
   --data-urlencode "start=$(python3 -c 'import time; print(int((time.time()-180)*1e9))')" \
   | python3 -c "
@@ -181,7 +186,7 @@ for s in streams[:3]:
 
 - at least one ATM log stream is returned
 - the event exposes `service_name=atm` via label or detected field
-- the event exposes `team`, `agent`, `runtime`, and `session_id`
+- the event exposes `team`, `agent`, `runtime`, and `session_id` as labels or detected fields
 - the event exposes a concrete level mapping rather than `unknown`
 
 ## Area D — Traces and Metrics in Grafana
@@ -191,17 +196,13 @@ for s in streams[:3]:
 ### D.1 — Emit CLI and daemon-backed signals
 
 ```bash
-SESSION_TAG="aw-smoke-signals-$(date +%s)"
+SESSION_TAG="aw-smoke-cli-$(date +%s)"
 export CLAUDE_SESSION_ID="$SESSION_TAG"
 export ATM_TEAM=atm-dev
 export ATM_IDENTITY=arch-ctm
 export ATM_RUNTIME=codex
 
 $AW_ATM status --json >/dev/null
-$AW_ATM send arch-ctm "aw smoke $SESSION_TAG" >/dev/null 2>&1 || true
-$AW_ATM read >/dev/null 2>&1 || true
-
-sleep 20
 ```
 
 This sequence is intended to cover:
@@ -214,9 +215,9 @@ This sequence is intended to cover:
 ### D.2 — Query Tempo for CLI traces
 
 ```bash
-curl -s -G "$ATM_TEMPO_SEARCH_ENDPOINT" \
-  -H "$ATM_TEMPO_AUTH_HEADER" \
-  --data-urlencode 'q={ resource.service.name = "atm" && session_id = "'"$SESSION_TAG"'" && name =~ "atm.command.(status|send|read)" }' \
+curl -s -G "$ATM_TEMPO_SEARCH_ENDPOINT/api/search" \
+  -H "$ATM_TEMPO_READ_AUTH" \
+  --data-urlencode 'q={ resource.service.name = "atm" && name =~ "atm.command.(status|send|read)" }' \
   --data-urlencode "limit=20" \
   | python3 -c "
 import json,sys
@@ -224,6 +225,8 @@ d=json.load(sys.stdin)
 print(json.dumps(d, indent=2)[:2000])
 "
 ```
+
+Note: current Grafana Cloud Tempo search rejects `session_id` as a top-level TraceQL identifier. For live verification, search on `resource.service.name` plus span name and inspect returned attributes if you need session confirmation.
 
 **PASS criteria**:
 
@@ -233,10 +236,33 @@ print(json.dumps(d, indent=2)[:2000])
 
 ### D.3 — Query Tempo for daemon traces
 
+Stop any existing daemon and force a fresh daemon-owned flow before the query:
+
 ```bash
-curl -s -G "$ATM_TEMPO_SEARCH_ENDPOINT" \
-  -H "$ATM_TEMPO_AUTH_HEADER" \
-  --data-urlencode 'q={ resource.service.name = "atm-daemon" && session_id = "'"$SESSION_TAG"'" && name =~ "atm-daemon.(dispatch_message|plugin..*)" }' \
+DAEMON_SESSION_TAG="aw-smoke-daemon-$(date +%s)"
+$AW_ATM daemon stop >/dev/null 2>&1 || true
+
+CLAUDE_SESSION_ID="$DAEMON_SESSION_TAG" \
+ATM_TEAM=atm-dev \
+ATM_IDENTITY=arch-ctm \
+ATM_RUNTIME=codex \
+$AW_ATM send arch-ctm "aw smoke $DAEMON_SESSION_TAG" >/dev/null 2>&1 || true
+
+CLAUDE_SESSION_ID="$DAEMON_SESSION_TAG" \
+ATM_TEAM=atm-dev \
+ATM_IDENTITY=arch-ctm \
+ATM_RUNTIME=codex \
+$AW_ATM read >/dev/null 2>&1 || true
+
+sleep 20
+```
+
+Query Tempo:
+
+```bash
+curl -s -G "$ATM_TEMPO_SEARCH_ENDPOINT/api/search" \
+  -H "$ATM_TEMPO_READ_AUTH" \
+  --data-urlencode 'q={ resource.service.name = "atm-daemon" && name =~ "atm-daemon.(dispatch_message|plugin..*)" }' \
   --data-urlencode "limit=20" \
   | python3 -c "
 import json,sys
@@ -245,9 +271,11 @@ print(json.dumps(d, indent=2)[:2000])
 "
 ```
 
+Note: current Grafana Cloud Tempo search rejects `session_id` as a top-level TraceQL identifier. If session scoping is needed, inspect returned span/resource attributes rather than assuming `session_id` is directly searchable.
+
 **PASS criteria**:
 
-- at least one trace is returned for `resource.service.name="atm-daemon"`
+- at least one trace is returned for `resource.service.name="atm-daemon"` after the stop/start sequence
 - a daemon-owned span such as `atm-daemon.dispatch_message` is present
 
 ### D.4 — Query Mimir for metrics
@@ -255,9 +283,8 @@ print(json.dumps(d, indent=2)[:2000])
 Use the confirmed Mimir metric names directly.
 
 ```bash
-curl -s -G "$ATM_MIMIR_QUERY_ENDPOINT" \
-  -H "$ATM_MIMIR_AUTH_HEADER" \
-  -H "X-Scope-OrgID: $ATM_MIMIR_SCOPE_ORGID" \
+curl -s -G "$ATM_MIMIR_QUERY_ENDPOINT/api/v1/query" \
+  -H "$ATM_MIMIR_READ_AUTH" \
   --data-urlencode 'query={__name__=~"(atm_command_duration_ms_milliseconds_(bucket|count|sum)|atm_commands_count_total|atm_dropped_events_total_count|atm_messages_read_count_total|atm_messages_sent_count_total|atm_spool_file_count|atm_daemon_request_count_total|atm_daemon_request_duration_ms_milliseconds_(bucket|count|sum))",session_id="'"$SESSION_TAG"'"}' \
   | python3 -c "
 import json,sys
@@ -310,10 +337,10 @@ ATM_OTEL_AUTH_HEADER="Authorization: Basic deliberately-bad" \
 $AW_ATM status --json >/tmp/aw-failopen-auth.json
 ```
 
-Then inspect logging health:
+Then inspect OTel health from status:
 
 ```bash
-$AW_ATM logging-health --json | python3 -c "
+$AW_ATM status --json | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 print(json.dumps(d.get('otel_health',{}), indent=2))
@@ -341,6 +368,6 @@ print(json.dumps(d.get('otel_health',{}), indent=2))
 
 ## Known Constraints
 
-- The Loki read endpoint is documented in `.private/grafana-otel-config.md`; Tempo and Mimir read endpoints must be confirmed from Grafana Cloud before running D.2-D.4.
-- Use read credentials for Loki/Tempo/Mimir queries. Do not reuse the OTLP write header for read APIs.
+- Use backend-specific read credentials for Loki/Tempo/Mimir queries. Do not reuse the OTLP write header or a single shared Basic username across read APIs.
+- Grafana Cloud read APIs do not require `X-Scope-OrgID` when valid backend-specific Basic auth is used.
 - `sc-compose` remains part of the logs rollout, but the AW trace/metric smoke for this phase should focus on the signals actually emitted today by `atm` and `atm-daemon`.
