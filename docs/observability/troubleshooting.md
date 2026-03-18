@@ -48,7 +48,7 @@ blocking ATM workflows.
   - remote export stays disabled by design.
   - canonical local logging remains available.
 - Spool growth / dropped queue signals:
-  - Expect `status=degraded`; commands continue.
+  - Expect `state=degraded_spooling` or `state=degraded_dropping`; commands continue.
   - Remediate daemon availability and reduce burst log pressure.
 
 ## Operator Commands

@@ -127,7 +127,9 @@ Verify:
 
 ### 7. Dogfood Dev Install
 
-After `scripts/dev-install`, run:
+Planned — scripts not yet available in AV. This check will be delivered in AW.5.
+
+After the AW.5 dogfood scripts land, run:
 
 - `scripts/otel-dev-install-smoke.py`
 

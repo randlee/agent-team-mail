@@ -10,7 +10,7 @@ Expand the AV logs-only rollout into full OTel traces and metrics while keeping
 the architecture partition clean:
 
 - `sc-observability`: neutral event, span, and metric abstractions
-- `sc-observability-otlp`: OTLP transport only
+- `sc-observability-otlp`: AW-created OTLP transport only
 - entry-point binaries: process-level wiring only
 
 ## Problem Statement
@@ -50,8 +50,8 @@ What AV does not yet deliver:
 
 | Sprint | Focus | Deliverables |
 |---|---|---|
-| AW.1 | Signal contracts | Neutral `TraceRecord` / `MetricRecord` types, required correlation fields, schema rules, and import-boundary updates |
-| AW.2 | OTLP transport expansion | `sc-observability-otlp` support for `/v1/traces` and `/v1/metrics`, shared batching/timeout/retry policy |
+| AW.1 | Signal contracts + transport crate creation | Create `crates/sc-observability-otlp` as a new workspace member crate; define neutral `TraceRecord` / `MetricRecord` types, required correlation fields, schema rules, and import-boundary updates |
+| AW.2 | OTLP transport expansion | Expand the new `sc-observability-otlp` crate with `/v1/traces` and `/v1/metrics` support plus shared batching/timeout/retry policy |
 | AW.3 | Producer trace rollout | Instrument ATM/daemon/selected producers with real spans and span lifecycle coverage |
 | AW.4 | Metrics rollout | Counters/histograms/gauges for ATM health and activity, export wiring, and diagnostics coverage |
 | AW.5 | Grafana dashboards + smoke | Dashboards/query recipes for logs/traces/metrics plus end-to-end smoke verification |

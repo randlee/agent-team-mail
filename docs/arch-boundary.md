@@ -21,6 +21,43 @@ Supporting layers:
 | `atm-daemon` issues plugin | non-monitor plugin behavior | may call gh plugin/provider helpers, must not execute raw `gh` |
 | `scripts/dev-daemon-smoke.py` | manual smoke harness | must use ATM-owned surfaces only; no direct `gh` shell calls |
 
+## ARCH-BOUNDARY-002 Observability Import Boundary
+
+The observability stack is split into three layers:
+
+| Layer | Responsibility | OTel transport-specific code allowed? |
+|---|---|---|
+| `sc-observability` | generic event schema, validation, redaction, local logging, neutral `OtelRecord`, exporter traits | `No` |
+| `sc-observability-otlp` | planned AW transport adapter crate for OTLP protocol/client wiring, auth/TLS, batching/retry | `Yes` |
+| entry-point binaries/modules | process-level logger initialization and wiring | `Limited to facade use only` |
+
+### Allowed Dependency Direction
+
+| From | Allowed imports / dependencies | Forbidden imports / dependencies |
+|---|---|---|
+| `sc-observability` | shared Rust deps, neutral exporter traits | direct OTLP SDK/client dependencies except through `sc-observability-otlp` |
+| `sc-observability-otlp` | `sc-observability`, OTLP/collector SDKs | reverse dependency from `sc-observability` back into entry-point crates |
+| entry-point crates/modules | `sc-observability`; logger-init wiring that may call the shared adapter seam | direct imports of `sc-observability-otlp` from non-entry-point modules; ad hoc OTLP exporter construction |
+| internal feature modules/helpers/libraries | `sc-observability` facade only | `sc-observability-otlp`, collector SDKs, exporter construction |
+
+### What Counts As A Boundary Violation
+
+Examples of blocking violations:
+- direct `sc-observability` imports from modules that should consume a local/shared facade instead of the entry-point wiring path
+- direct `sc-observability-otlp` import outside approved entry-point modules
+- any non-entry-point import of `opentelemetry*` or `opentelemetry-otlp`
+- constructing collector exporters inside CLI/daemon/feature modules instead of the dedicated transport adapter
+
+### AV Cleanup Gate
+
+- AV.0 is the mandatory cleanup sprint for the currently known direct
+  `sc-observability` import violations.
+- AV.1 must deliver `scripts/ci/observability_boundary_check.sh` plus a CI
+  workflow step that runs it before AV.2 begins.
+- QA/CI should use this section as the enforcement reference for the
+  observability boundary in the same way `ARCH-BOUNDARY-001` governs GitHub
+  subprocess ownership.
+
 ## Allowed Dependency Direction
 
 | From | Allowed imports / dependencies | Forbidden imports / dependencies |

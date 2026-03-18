@@ -1,6 +1,6 @@
 # Observability Architecture
 
-**Status**: Active (Phase AH baseline; Phase AV rollout planned; Phase AW expansion planned)
+**Status**: Active (Phase AH baseline; Phase AV complete; Phase AW expansion planned)
 **Primary crate**: `sc-observability`
 **See also**:
 - `docs/observability/requirements.md`
@@ -13,17 +13,22 @@
 - Deterministic, structured event schema.
 - Default-on logging with fail-open behavior.
 - Mandatory OpenTelemetry export with local file logging always available.
+- OTel collector transport remains partitioned from generic observability logic.
 
 ## 2. Components
 
 - `sc-observability` (library): event model, validators, redaction, sink traits,
   health evaluator, default init path.
-- `sc-observability-otlp` (planned dedicated OTLP transport adapter crate):
-  collector transport for logs in AV; traces and metrics expand there in AW.
+- AV-era collector export stays behind the neutral `OtelExporter` seam inside
+  `sc-observability`.
+- `sc-observability-otlp` is a planned dedicated AW-era transport adapter crate:
+  it will own OTLP/collector transport, auth/TLS, batching, retry, and SDK
+  dependency integration once traces and metrics land.
 - Producers: `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `sc-compose`,
-  `sc-composer`, `scmux`, `schook`.
+  `sc-composer`, `scmux` (follow-on, not in Phase AV scope), `schook`
+  (follow-on, not in Phase AV scope).
 - Daemon writer path: `atm-daemon` canonical sink for ATM producer traffic.
-- Mandatory OTel exporter path for in-scope tools (non-optional AK rollout).
+- Mandatory OTel exporter path for in-scope tools (non-optional AV rollout).
 
 ## 3. Data Flow
 
@@ -32,10 +37,12 @@
 3. ATM producers send `log-event` to daemon.
 4. Daemon validates, redacts, queues, and writes canonical JSONL.
 5. If daemon unavailable, producer writes spool event; daemon merges on startup.
-6. In Phase AV, `sc-observability` shapes neutral OTLP-ready log records.
-7. `sc-observability-otlp` exports those records to a Grafana-compatible OTLP
-   HTTP logs receiver.
-8. Phase AW extends the same adapter boundary to traces and metrics.
+6. In Phase AV, `sc-observability` maps structured events into neutral
+   OTLP-ready log records.
+7. The AV-era exporter path inside `sc-observability` sends those records to
+   the configured collector target and optional debug mirrors.
+8. Phase AW introduces `sc-observability-otlp` as the dedicated transport crate
+   and extends the same boundary to traces and metrics.
 
 ## 4. Canonical State and Health Computation
 
