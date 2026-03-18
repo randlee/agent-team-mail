@@ -123,6 +123,36 @@ enum Commands {
 }
 
 impl Cli {
+    pub fn command_name(&self) -> &'static str {
+        match &self.command {
+            Commands::Ack(_) => "ack",
+            Commands::Send(_) => "send",
+            Commands::Broadcast(_) => "broadcast",
+            Commands::Read(_) => "read",
+            Commands::Request(_) => "request",
+            Commands::Inbox(_) => "inbox",
+            Commands::Teams(_) => "teams",
+            Commands::Members(_) => "members",
+            Commands::Status(_) => "status",
+            Commands::Spawn(_) => "spawn",
+            Commands::Doctor(_) => "doctor",
+            Commands::Gh(_) => "gh",
+            Commands::Monitor(_) => "monitor",
+            Commands::Config(_) => "config",
+            Commands::Cleanup(_) => "cleanup",
+            Commands::Bridge(_) => "bridge",
+            Commands::Daemon(_) => "daemon",
+            Commands::Subscribe(_) => "subscribe",
+            Commands::Unsubscribe(_) => "unsubscribe",
+            Commands::Tail(_) => "tail",
+            Commands::Launch(_) => "launch",
+            Commands::Logs(_) => "logs",
+            Commands::Register(_) => "register",
+            Commands::Mcp(_) => "mcp",
+            Commands::Init(_) => "init",
+        }
+    }
+
     /// Execute the CLI command
     pub fn execute(self) -> Result<()> {
         match self.command {

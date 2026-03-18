@@ -66,6 +66,14 @@ fn generate_span_id(seed_parts: &[&str]) -> String {
     hex.chars().take(16).collect()
 }
 
+pub fn trace_id_for_request(source: &str, request_id: &str) -> String {
+    generate_trace_id(&[source, request_id])
+}
+
+pub fn span_id_for_action(trace_id: &str, action: &str) -> String {
+    generate_span_id(&[action, trace_id])
+}
+
 /// Forward `event` to the unified producer channel if a sender is registered.
 fn fallback_home_dir() -> Option<std::path::PathBuf> {
     crate::home::get_home_dir().ok()
@@ -254,6 +262,25 @@ fn fields_to_log_event(fields: &EventFields) -> crate::logging_event::LogEventV1
         },
         spans: vec![],
     }
+}
+
+/// Write a single structured event synchronously to the spool directory,
+/// bypassing the background log-forwarder thread entirely.
+///
+/// This is the correct path for events emitted just before process exit, where
+/// the forwarder thread may be reclaimed by the OS before it can flush its
+/// channel. Unlike [`emit_event_best_effort`], this function:
+///
+/// - Does **not** check `ATM_LOG` (the event is always persisted).
+/// - Does **not** attempt to send via the producer channel.
+/// - Writes the spool file synchronously in the calling thread before returning.
+///
+/// If `home_dir` is `None`, the home directory is resolved via
+/// [`crate::home::get_home_dir`]. The call is a no-op when the home directory
+/// cannot be resolved.
+pub fn emit_event_to_spool_direct(fields: &EventFields, home_dir: &std::path::Path) {
+    let event = fields_to_log_event(fields);
+    crate::logging_event::write_to_spool(&event, home_dir);
 }
 
 /// Emit a single structured event to the unified logging channel.
