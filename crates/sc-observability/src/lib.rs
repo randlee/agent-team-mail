@@ -118,10 +118,6 @@ impl OtelConfig {
             && let Ok(parsed) = raw.parse::<u64>()
         {
             cfg.max_backoff_ms = parsed;
-        } else if let Ok(raw) = std::env::var("ATM_OTEL_MAX_BACKOFF_MS")
-            && let Ok(parsed) = raw.parse::<u64>()
-        {
-            cfg.max_backoff_ms = parsed;
         }
         if cfg.max_backoff_ms < cfg.initial_backoff_ms {
             cfg.max_backoff_ms = cfg.initial_backoff_ms;
