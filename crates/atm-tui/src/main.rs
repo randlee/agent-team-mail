@@ -30,16 +30,11 @@
 //!
 //! All input events are handled between ticks with a non-blocking poll.
 
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use std::{
-    collections::{BTreeMap, VecDeque},
-    ffi::OsStr,
-    process::{Child, Stdio},
-};
 
-use agent_team_mail_daemon_launch::{LaunchClass, SpawnDaemonRequest, spawn_daemon_process};
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
@@ -53,10 +48,7 @@ use tokio::time::interval;
 
 use agent_team_mail_core::{
     control::{CONTROL_SCHEMA_VERSION, ControlAck, ControlAction, ControlRequest, ControlResult},
-    daemon_client::{
-        AgentSummary, daemon_is_running, daemon_socket_path, query_agent_stream_state,
-        query_list_agents, send_control,
-    },
+    daemon_client::{AgentSummary, query_agent_stream_state, query_list_agents, send_control},
     event_log::{EventFields, emit_event_best_effort},
     home::get_home_dir,
     logging,
@@ -70,6 +62,9 @@ use agent_team_mail_tui::dashboard::{
     read_team_members, session_log_path,
 };
 use agent_team_mail_tui::{events, ui};
+
+mod daemon_launch;
+use daemon_launch::ensure_daemon_running;
 
 // ── Module-level statics ──────────────────────────────────────────────────────
 
@@ -489,135 +484,6 @@ fn build_member_rows(
             state,
         })
         .collect()
-}
-
-fn ensure_daemon_running(team: &str) -> Option<String> {
-    let socket_path =
-        daemon_socket_path().unwrap_or_else(|_| std::env::temp_dir().join("atm-daemon.sock"));
-    if daemon_is_running() && socket_path.exists() {
-        return None;
-    }
-
-    let home = get_home_dir().ok()?;
-    let daemon_bin = resolve_daemon_binary_for_home(&home)?;
-    let launch_class =
-        match agent_team_mail_core::daemon_client::runtime_kind_for_home(&home).ok()? {
-            agent_team_mail_core::daemon_client::RuntimeKind::Release => LaunchClass::ProdShared,
-            agent_team_mail_core::daemon_client::RuntimeKind::Dev => LaunchClass::DevShared,
-            agent_team_mail_core::daemon_client::RuntimeKind::Isolated => LaunchClass::IsolatedTest,
-        };
-    let child = match spawn_daemon_process(SpawnDaemonRequest {
-        daemon_bin: daemon_bin.as_os_str(),
-        atm_home: &home,
-        launch_class,
-        issuer: "agent-team-mail-tui::ensure_daemon_running",
-        team: Some(team),
-        stdin: Stdio::null(),
-        stdout: Stdio::null(),
-        stderr: Stdio::null(),
-    }) {
-        Ok(child) => child,
-        Err(_) => {
-            return Some(format!(
-                "daemon unavailable: failed to start via '{}'; run `{} --team {team}`",
-                daemon_bin.display(),
-                daemon_bin.display()
-            ));
-        }
-    };
-    let mut child_guard = SpawnedDaemonGuard::new(child);
-
-    for _ in 0..20 {
-        if let Some(status) = child_guard.try_wait() {
-            return Some(format!(
-                "daemon startup failed via '{}': exited with {status}",
-                daemon_bin.display()
-            ));
-        }
-        if daemon_is_running() && socket_path.exists() {
-            child_guard.disarm();
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    Some("daemon startup incomplete: socket unavailable".to_string())
-}
-
-struct SpawnedDaemonGuard {
-    child: Option<Child>,
-}
-
-impl SpawnedDaemonGuard {
-    fn new(child: Child) -> Self {
-        Self { child: Some(child) }
-    }
-
-    fn try_wait(&mut self) -> Option<std::process::ExitStatus> {
-        self.child
-            .as_mut()
-            .and_then(|child| child.try_wait().ok().flatten())
-    }
-
-    fn disarm(&mut self) {
-        self.child.take();
-    }
-}
-
-impl Drop for SpawnedDaemonGuard {
-    fn drop(&mut self) {
-        if let Some(child) = self.child.as_mut()
-            && child.try_wait().ok().flatten().is_none()
-        {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
-
-fn resolve_daemon_binary_for_home(home: &Path) -> Option<PathBuf> {
-    if let Some(override_bin) = std::env::var_os("ATM_DAEMON_BIN")
-        && !override_bin.is_empty()
-    {
-        return Some(PathBuf::from(override_bin));
-    }
-
-    let runtime_kind = agent_team_mail_core::daemon_client::runtime_kind_for_home(home).ok()?;
-    match runtime_kind {
-        agent_team_mail_core::daemon_client::RuntimeKind::Dev => {
-            Some(dev_runtime_daemon_binary_path().unwrap_or_else(|| PathBuf::from("atm-daemon")))
-        }
-        agent_team_mail_core::daemon_client::RuntimeKind::Release
-        | agent_team_mail_core::daemon_client::RuntimeKind::Isolated => {
-            scoped_daemon_binary_from_current_exe()
-                .or_else(|| Some(PathBuf::from(OsStr::new("atm-daemon"))))
-        }
-    }
-}
-
-fn scoped_daemon_binary_from_current_exe() -> Option<PathBuf> {
-    let current_exe = std::env::current_exe().ok()?;
-    Some(current_exe.parent()?.join("atm-daemon"))
-}
-
-fn dev_runtime_daemon_binary_path() -> Option<PathBuf> {
-    let os_home = agent_team_mail_core::home::get_os_home_dir().ok()?;
-    Some(
-        default_dev_runtime_root_for(&os_home)
-            .join("bin")
-            .join("atm-daemon"),
-    )
-}
-
-fn default_dev_runtime_root_for(os_home: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        os_home.join("AppData").join("Local").join("atm-dev")
-    }
-
-    #[cfg(not(windows))]
-    {
-        os_home.join(".local").join("atm-dev")
-    }
 }
 
 /// Read new bytes from a log file since `pos`, returning new lines and the
@@ -1078,6 +944,7 @@ mod tests {
     use super::*;
     use agent_team_mail_core::control::{ControlAck, ControlResult};
     use serial_test::serial;
+    use std::{ffi::OsStr, process::Stdio};
 
     struct TestEnvGuard {
         key: &'static str,
@@ -1503,7 +1370,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let custom = dir.path().join("custom-atm-daemon");
         let _guard = TestEnvGuard::set("ATM_DAEMON_BIN", custom.as_os_str());
-        let resolved = resolve_daemon_binary_for_home(dir.path()).unwrap();
+        let resolved = daemon_launch::resolve_daemon_binary_for_home(dir.path()).unwrap();
         assert_eq!(resolved, custom);
     }
 
@@ -1513,17 +1380,9 @@ mod tests {
         let root = tempfile::TempDir::new().unwrap();
         let os_home = root.path().join("os-home");
         std::fs::create_dir_all(&os_home).unwrap();
-        let dev_home = os_home
-            .join(".local")
-            .join("share")
-            .join("atm-dev")
-            .join("home");
-        std::fs::create_dir_all(&dev_home).unwrap();
-        let _home_guard = TestEnvGuard::set("HOME", os_home.as_os_str());
-        let _atm_guard = TestEnvGuard::set("ATM_HOME", dev_home.as_os_str());
-        let _bin_guard = TestEnvGuard::set("ATM_DAEMON_BIN", "");
-
-        let resolved = resolve_daemon_binary_for_home(&dev_home).unwrap();
+        let resolved = daemon_launch::default_dev_runtime_root_for(&os_home)
+            .join("bin")
+            .join("atm-daemon");
         assert_eq!(
             resolved,
             os_home
@@ -1547,7 +1406,7 @@ mod tests {
             .unwrap();
         let pid = child.id();
         {
-            let _guard = SpawnedDaemonGuard::new(child);
+            let _guard = daemon_launch::SpawnedDaemonGuard::new(child);
         }
 
         let status = std::process::Command::new("sh")
