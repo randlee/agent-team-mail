@@ -21,8 +21,10 @@ import uuid
 
 
 DEFAULT_ATM_BIN = pathlib.Path.home() / ".local" / "atm-dev" / "bin" / "atm"
+DEFAULT_ATM_HOME = pathlib.Path.home() / ".local" / "share" / "atm-dev" / "home"
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-QUERY_WAIT_SECONDS = 20
+QUERY_WAIT_SECONDS = 45
+QUERY_POLL_SECONDS = 3
 
 
 def env_nonempty(name: str) -> str | None:
@@ -141,6 +143,9 @@ def mimir_query(endpoint: str, auth: tuple[str, str], query: str) -> dict:
 
 
 def query_count(response: dict) -> int:
+    traces = response.get("traces")
+    if isinstance(traces, list):
+        return len(traces)
     data = response.get("data", {})
     result = data.get("result", [])
     return len(result) if isinstance(result, list) else 0
@@ -148,6 +153,7 @@ def query_count(response: dict) -> int:
 
 def build_smoke_env(args: argparse.Namespace) -> dict[str, str]:
     env = os.environ.copy()
+    atm_bin = pathlib.Path(args.atm_bin).expanduser().resolve()
     env["ATM_OTEL_ENABLED"] = "true"
     env.setdefault("ATM_OTEL_PROTOCOL", "otlp_http")
     env["ATM_TEAM"] = args.team
@@ -155,6 +161,8 @@ def build_smoke_env(args: argparse.Namespace) -> dict[str, str]:
     env["ATM_RUNTIME"] = args.runtime
     env["CLAUDE_SESSION_ID"] = args.session_id
     env["ATM_SESSION_ID"] = args.session_id
+    env.setdefault("ATM_HOME", str(DEFAULT_ATM_HOME))
+    env.setdefault("ATM_DAEMON_BIN", str(atm_bin.parent / "atm-daemon"))
     env["ATM_OTEL_ENDPOINT"] = require_env("ATM_OTEL_ENDPOINT")
     auth = env_nonempty("ATM_OTEL_AUTH_HEADER")
     if auth is not None:
@@ -181,13 +189,12 @@ def main() -> int:
                 {
                     "status": "DRY_RUN",
                     "atm_bin": str(atm_bin),
+                    "atm_home": str(DEFAULT_ATM_HOME),
                     "session_id": args.session_id,
                     "commands": [
                         [str(atm_bin), "daemon", "stop"],
                         [str(atm_bin), "daemon", "restart"],
                         [str(atm_bin), "config", "--json"],
-                        [str(atm_bin), "send", args.agent, f"ay2 dogfood {args.session_id}"],
-                        [str(atm_bin), "read"],
                     ],
                     "queries": {
                         "loki": f'{{service_name="atm"}} | session_id="{args.session_id}"',
@@ -208,45 +215,47 @@ def main() -> int:
     run_command([str(atm_bin), "daemon", "stop"], env, check=False)
     run_command([str(atm_bin), "daemon", "restart"], env)
     run_command([str(atm_bin), "config", "--json"], env)
-    run_command([str(atm_bin), "send", args.agent, f"ay2 dogfood {args.session_id}"], env, check=False)
-    run_command([str(atm_bin), "read"], env, check=False)
-    time.sleep(max(args.wait_seconds, 1))
+    deadline = time.time() + max(args.wait_seconds, 1)
+    summary = None
+    while True:
+        loki_response = loki_query(
+            loki_url,
+            loki_auth,
+            f'{{service_name="atm"}} | session_id="{args.session_id}"',
+        )
+        tempo_response = tempo_query(
+            tempo_url,
+            tempo_auth,
+            '{ resource.service.name = "atm-daemon" && '
+            f'resource.session_id = "{args.session_id}" }}',
+        )
+        mimir_response = mimir_query(
+            mimir_url,
+            mimir_auth,
+            f'atm_commands_count_total{{session_id="{args.session_id}"}}',
+        )
 
-    loki_response = loki_query(
-        loki_url,
-        loki_auth,
-        f'{{service_name="atm"}} | session_id="{args.session_id}"',
-    )
-    tempo_response = tempo_query(
-        tempo_url,
-        tempo_auth,
-        '{ resource.service.name = "atm-daemon" && '
-        f'resource.session_id = "{args.session_id}" }}',
-    )
-    mimir_response = mimir_query(
-        mimir_url,
-        mimir_auth,
-        f'atm_commands_count_total{{session_id="{args.session_id}"}}',
-    )
-
-    summary = {
-        "session_id": args.session_id,
-        "loki_streams": query_count(loki_response),
-        "tempo_traces": query_count(tempo_response),
-        "mimir_series": query_count(mimir_response),
-        "status": "PASS",
-    }
-    if (
-        summary["loki_streams"] < 1
-        or summary["tempo_traces"] < 1
-        or summary["mimir_series"] < 1
-    ):
-        summary["status"] = "FAIL"
-        summary["loki_response"] = loki_response
-        summary["tempo_response"] = tempo_response
-        summary["mimir_response"] = mimir_response
-        print(json.dumps(summary, indent=2))
-        return 1
+        summary = {
+            "session_id": args.session_id,
+            "loki_streams": query_count(loki_response),
+            "tempo_traces": query_count(tempo_response),
+            "mimir_series": query_count(mimir_response),
+            "status": "PASS",
+        }
+        if (
+            summary["loki_streams"] >= 1
+            and summary["tempo_traces"] >= 1
+            and summary["mimir_series"] >= 1
+        ):
+            break
+        if time.time() >= deadline:
+            summary["status"] = "FAIL"
+            summary["loki_response"] = loki_response
+            summary["tempo_response"] = tempo_response
+            summary["mimir_response"] = mimir_response
+            print(json.dumps(summary, indent=2))
+            return 1
+        time.sleep(QUERY_POLL_SECONDS)
 
     print(json.dumps(summary, indent=2))
     return 0

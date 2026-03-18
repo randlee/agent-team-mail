@@ -64,7 +64,7 @@ real smoke testing so ATM can:
 - `scripts/dogfood-smoke.py` performs the canonical AY.2 operator flow:
   - stop the shared daemon
   - restart the shared daemon with inherited `ATM_OTEL_*`
-  - emit a CLI command plus a daemon-backed send/read flow
+  - emit a CLI command plus a daemon lifecycle event carrying the shared session tag
   - query Loki with `service_name="atm"` plus detected-field filters
   - query Tempo with `resource.service.name="atm-daemon"` and
     `resource.session_id`

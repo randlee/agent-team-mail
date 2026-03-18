@@ -38,7 +38,7 @@ The script performs the exact supported live flow:
 
 - stop the existing shared daemon
 - restart the shared daemon with the current shell's `ATM_OTEL_*` config
-- emit one CLI command plus one daemon-backed send/read cycle
+- emit one CLI command plus one daemon lifecycle event carrying the shared session tag
 - query Loki using `service_name="atm"` plus detected-field filters
 - query Tempo using `resource.service.name="atm-daemon"` and
   `resource.session_id`
@@ -50,7 +50,6 @@ The script performs the exact supported live flow:
 - `develop` contains the merged AW work.
 - AW-capable binaries are built from `develop`.
 - Grafana Cloud credentials are available from `.private/grafana-otel-config.md`.
-- A local team/runtime is available for a daemon-backed `send`/`read` flow.
 
 Build from the current repo:
 
