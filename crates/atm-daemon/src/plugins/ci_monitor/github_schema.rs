@@ -2,7 +2,7 @@
 
 //! Shared GitHub CLI response schemas used by the CI monitor subsystem.
 
-use agent_team_mail_ci_monitor::{GhJob, GhRun, GhStep};
+pub(crate) use agent_team_mail_ci_monitor::{GhJob, GhRun};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
