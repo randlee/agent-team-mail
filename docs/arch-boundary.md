@@ -69,6 +69,7 @@ The following files are the allowlisted entry-point wiring surfaces for
 
 | File | Rationale |
 |---|---|
+| `crates/atm/src/main.rs` | CLI process entry point; allowed to initialize generic observability and process-level command lifecycle wiring. |
 | `crates/atm-daemon/src/main.rs` | Daemon process entry point; owns process-level observability initialization and injected export-hook wiring. |
 | `crates/sc-compose/src/main.rs` | Standalone binary entry point; allowed to initialize generic observability for the process. |
 | Integration test files under `crates/*/tests/` | Test-only harness entry points that may validate facade wiring behavior without turning internal library modules into transport owners. |
