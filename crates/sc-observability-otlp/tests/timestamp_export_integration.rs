@@ -68,8 +68,8 @@ fn export_traces_uses_real_unix_nanos_for_span_times() {
     export_traces(&config, &[record]).expect("export traces");
 
     let request = handle.join().expect("join server thread");
-    assert!(request.contains("\"startTimeUnixNano\":\"1736942400000000000\""));
-    assert!(request.contains("\"endTimeUnixNano\":\"1736942400100000000\""));
+    assert!(request.contains("\"startTimeUnixNano\":\"1768478400000000000\""));
+    assert!(request.contains("\"endTimeUnixNano\":\"1768478400100000000\""));
 }
 
 #[test]
@@ -99,5 +99,5 @@ fn export_metrics_uses_real_unix_nanos_for_data_points() {
     export_metrics(&config, &[record]).expect("export metrics");
 
     let request = handle.join().expect("join server thread");
-    assert!(request.contains("\"timeUnixNano\":\"1736942400000000000\""));
+    assert!(request.contains("\"timeUnixNano\":\"1768478400000000000\""));
 }
