@@ -288,7 +288,7 @@ AY closes this contract after the AW stack lands.
   - worker/session lifecycle log coverage already represented in local JSONL logs
   - MCP request/session log correlation within `atm-agent-mcp`
 
-### 9.1 In-Repo Scope Lock
+### 9.1.1 In-Repo Scope Lock
 
 Phase AV implementation scope for this repository is limited to:
 - `atm`
@@ -303,7 +303,7 @@ Phase AV implementation scope for this repository is limited to:
 `scmux` and `schook` are explicit follow-on work in their own repositories.
 They must not be treated as delivered by this repository's AV implementation.
 
-### 9.2 Import Boundary Enforcement
+### 9.1.2 Import Boundary Enforcement
 
 - `scripts/ci/observability_boundary_check.sh` is the canonical CI/review gate
   for `ARCH-BOUNDARY-002`.
@@ -315,7 +315,7 @@ They must not be treated as delivered by this repository's AV implementation.
 - CI must run the observability boundary check before AV.2 begins, and the rule
   remains mandatory after AV.2 lands.
 
-## 9.1 Phase AV Grafana Rollout Requirements
+## 9.2 Phase AV Grafana Rollout Requirements
 
 - Phase AV is the logs-first rollout to a Grafana-compatible OTLP HTTP logs
   receiver.
@@ -333,7 +333,7 @@ They must not be treated as delivered by this repository's AV implementation.
 - This AV rollout is sufficient for centralized logs in Grafana but is not yet
   sufficient to claim full traces/metrics support.
 
-## 9.2 Phase AW Traces + Metrics Expansion Requirements
+## 9.3 Phase AW Traces + Metrics Expansion Requirements
 
 - Phase AW extends AV from logs-only collector export to native traces and
   metrics.

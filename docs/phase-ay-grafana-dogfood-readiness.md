@@ -6,6 +6,8 @@
 - Phase AW complete and merged
 - `develop` baseline includes `ec94e2e1` (AW smoke follow-up merges, including
   the B.4 state-path fix and Loki/metric shaping work)
+- Phase AS is independent of AY. AY does not depend on the GH governance/firewall
+  work from AS and may proceed once the required `develop` baseline is present.
 
 ## Goal
 
@@ -88,9 +90,9 @@ AY turns those findings into a short execution plan.
 
 | Sprint | Focus | Deliverables |
 |---|---|---|
-| AY.0 | Flaky test hardening | Small, parallel reliability fixes for already-known flaky tests uncovered during AW smoke/CI so AY implementation work stops paying incidental test fallout |
-| AY.1 | Live signal correctness | Verify Loki `service_name="atm"` on live data, verify daemon traces after a fresh OTel-configured start, align smoke/docs/scripts to backend-specific read auth and canonical metric names, and close any remaining signal-shaping gaps discovered during that verification |
-| AY.2 | Shared dev-daemon dogfood readiness | Make canonical shared daemon/dev-install startup preserve OTel config, add an operator-safe dogfood smoke for live Grafana data, and document the exact install/start/query flow needed for ongoing dogfooding |
+| AY.0 | Flaky test hardening | Parallel with AY.1. Small reliability fixes for already-known flaky tests uncovered during AW smoke/CI so AY implementation work stops paying incidental test fallout |
+| AY.1 | Live signal correctness | Runs in parallel with AY.0. Verify Loki `service_name="atm"` on live data, verify daemon traces after a fresh OTel-configured start, align smoke/docs/scripts to backend-specific read auth and canonical metric names, and close any remaining signal-shaping gaps discovered during that verification |
+| AY.2 | Shared dev-daemon dogfood readiness | Sequential after AY.1. Make canonical shared daemon/dev-install startup preserve OTel config, add an operator-safe dogfood smoke for live Grafana data, and document the exact install/start/query flow needed for ongoing dogfooding |
 | AY.3a | OTel struct and operator-smoke cleanup | Small follow-up boundary cleanup: move mirror structs into `atm-core` and add the operator `otel-dev-install-smoke.py` script |
 | AY.3b | OTel type/boundary extraction | Medium follow-up boundary work: create `sc-observability-types` and relocate `otlp_adapter` wiring to entry-point crates |
 
@@ -141,12 +143,27 @@ gaps:
 
 ### Deliverables
 
-- live Loki verification using the real query contract:
-  - `service_name="atm"`
-  - live session correlation fields present
+- live Loki verification using the real query contract from
+  `docs/observability/smoke-test-plan-phase-aw.md` Area C with:
+  - session tag pattern: `ay-smoke-log-<unix-seconds>`
+  - LogQL selector: `{service_name="atm"}`
+  - query window: `start=now-10m`
+  - curl pattern:
+    `curl -s -G "$ATM_LOKI_ENDPOINT" -H "$ATM_LOKI_AUTH_HEADER" --data-urlencode 'query={service_name="atm"} | json | session_id="<tag>"' --data-urlencode "start=<now-10m nanos>"`
 - live Tempo verification for daemon-owned traces after a controlled fresh
-  daemon start
-- live Mimir verification using the canonical exported metric names
+  daemon start, using the Area D model with:
+  - session tag pattern: `ay-smoke-daemon-<unix-seconds>`
+  - controlled lifecycle:
+    `atm daemon stop || true`, export `ATM_OTEL_*`, run `atm send`/`atm read`,
+    wait `20s`, then query Tempo
+  - TraceQL selector:
+    `{ resource.service.name = "atm-daemon" && session_id = "<tag>" && name =~ "atm-daemon.(dispatch_message|plugin..*)" }`
+- live Mimir verification using the canonical exported metric names:
+  - `atm_commands_count_total`
+  - `atm_messages_sent_count_total`
+  - `atm_daemon_request_count_total`
+  - PromQL/curl pattern from Area D.4 in
+    `docs/observability/smoke-test-plan-phase-aw.md`
 - smoke/docs/script updates so:
   - per-backend read auth is explicit
   - daemon-trace smoke stops/restarts the daemon when required
@@ -155,12 +172,22 @@ gaps:
 ### Acceptance
 
 - Loki returns at least one recent ATM log stream under `service_name="atm"`
+  for an AY session tag in a `10m` window using the concrete LogQL/curl flow
+  above
 - Tempo returns at least one recent `atm-daemon` trace for the smoke session
-- Mimir returns the canonical ATM metric series used by the smoke
+  using the concrete TraceQL query above, after the smoke-controlled daemon
+  stop/start sequence
+- Mimir returns at least one of the canonical ATM metric series listed above
+  using the documented PromQL query pattern
 - all read-path smoke commands use backend-specific instance IDs and the shared
   read token correctly
 
 ## AY.2: Shared Dev-Daemon Dogfood Readiness
+
+### Dependency
+
+AY.1 must be complete and live Grafana signal correctness confirmed before
+AY.2 begins.
 
 ### Problem
 
@@ -171,10 +198,19 @@ reliably start the daemon in the desired observability mode.
 ### Deliverables
 
 - canonical launcher/shared daemon startup consumes the same OTel config surface
-  used by the CLI/dev-install flow
+  used by the CLI/dev-install flow, with concrete work expected in:
+  - `scripts/dev-install`
+  - `crates/atm-daemon-launch/src/lib.rs`
+  - any daemon-starting caller that must preserve the launcher contract
 - `scripts/dev-install` and the shared dev-daemon restart path are verified as
-  preserving OTel config for dogfood use
-- one operator-safe live Grafana dogfood smoke that proves:
+  preserving OTel config for dogfood use, where “preserving OTel config” means
+  a freshly restarted shared daemon process shows `ATM_OTEL_ENABLED=true`
+  (and the expected endpoint/auth env) in its effective environment after the
+  dev-install restart flow
+- one operator-safe live Grafana dogfood smoke that extends
+  `scripts/grafana-verify-smoke.py` during AY.2; AY.3a may later formalize the
+  operator workflow into `scripts/otel-dev-install-smoke.py`
+- the AY.2 dogfood smoke proves:
   - CLI logs visible in Loki
   - CLI and daemon traces visible in Tempo
   - canonical metrics visible in Mimir
@@ -184,6 +220,10 @@ reliably start the daemon in the desired observability mode.
 
 - a fresh shared dev daemon started through the canonical dev-install flow emits
   live Grafana telemetry without manual post-start patching
+- the AY.2 dogfood smoke passes with at minimum:
+  - one CLI log visible in Loki
+  - one daemon trace visible in Tempo
+  - one canonical metric visible in Mimir
 - the dogfood smoke is documented and repeatable on `develop`
 - live Grafana data is sufficient to begin routine dev-daemon dogfooding
 
@@ -221,6 +261,12 @@ reliably start the daemon in the desired observability mode.
 
 This is not required to begin dogfooding, but it is the right follow-on cleanup
 once the live Grafana and dev-daemon path are stable.
+
+### Merge-Gate Note
+
+AY.3b is explicitly excluded from the AY merge gate. If `#876` / `#867` grow in
+scope or threaten to delay AY dogfood readiness, they may be deferred to a
+follow-on phase without blocking AY completion.
 
 ## Risks
 

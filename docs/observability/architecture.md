@@ -171,7 +171,7 @@ logging remains continuously available.
 - Canonical enforcement reference: `docs/arch-boundary.md`
   ("ARCH-BOUNDARY-002 Observability Import Boundary").
 
-## 9.2 Config Contract
+## 9.3 Config Contract
 
 Phase AV uses one canonical collector configuration surface for all in-repo
 producers and daemon wiring.
@@ -192,7 +192,7 @@ code must consume this shared contract through `sc-observability` facade
 configuration, not by inventing binary-local environment variables or transport
 options.
 
-## 9.3 Live Grafana and Shared-Daemon Contract
+## 9.4 Live Grafana and Shared-Daemon Contract
 
 Phase AY closes the gap between a working in-repo OTel stack and reliable live
 Grafana dogfooding.
