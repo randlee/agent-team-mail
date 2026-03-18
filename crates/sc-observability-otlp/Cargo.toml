@@ -12,6 +12,7 @@ keywords = ["otel", "otlp", "observability", "telemetry"]
 categories = ["development-tools", "network-programming"]
 
 [dependencies]
+chrono.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

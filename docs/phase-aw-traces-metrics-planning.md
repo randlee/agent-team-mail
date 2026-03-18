@@ -57,6 +57,53 @@ What AV does not yet deliver:
 | AW.5 | Grafana dashboards + smoke | Dashboards/query recipes for logs/traces/metrics plus end-to-end smoke verification |
 | AW.6 | External consumer rollout | `scmux` / `schook` adoption contract, checklist, and handoff validation |
 
+## AW.5 Status
+
+AW.5 deliverables are implemented as:
+
+- `docs/observability/grafana-dashboards.md`
+  - Grafana LogQL, TraceQL, and PromQL recipes for ATM observability signals
+- `scripts/grafana-verify-smoke.py`
+  - live Loki-backed smoke with `--dry-run` support and env-driven auth
+- `docs/observability/grafana-rollout-smoke.md`
+  - rollout/operator smoke contract for Grafana-compatible collector setups
+
+The automated AW.5 smoke intentionally validates the log ingestion path first:
+
+- ATM commands run with `ATM_OTEL_ENABLED=true`
+- remote verification happens through the Loki read endpoint
+- PASS requires a matching stream keyed by `service_name` or `source_binary`
+  plus the canonical correlation fields `team`, `agent`, `runtime`, and
+  `session_id`
+
+Trace and metric query recipes are documented for dashboard rollout, but the
+smoke script remains logs-focused because that is the least brittle remote
+verification surface across Grafana-compatible OTLP deployments.
+
+AW.5 smoke therefore covers the logs endpoint only, in both dry-run and live
+connectivity modes. Full traces-and-metrics smoke against Tempo/Mimir-class
+backends requires live endpoints and is deferred to AW.7 and later.
+
+## AW.6 Status
+
+AW.6 rollout artifacts are:
+
+- `docs/observability/external-consumer-contract.md`
+- `docs/observability/external-consumer-checklist.md`
+- `scripts/validate-external-consumer.sh`
+
+Those artifacts define and validate the external-repo contract:
+
+- feature code uses `sc-observability` only
+- collector transport stays behind approved entry-point setup
+- `sc_observability_otlp` and raw `opentelemetry*` imports are forbidden
+  outside that setup boundary
+- local fail-open logging remains mandatory
+
+The validator provides a `--dry-run` mode so a rollout owner can confirm the
+enforcement surface before running the real repo scan against `scmux`,
+`schook`, or a new consumer repo.
+
 ## Dependencies
 
 - AV must be merged and stable as a logs rollout.
@@ -99,5 +146,7 @@ AW should deliver:
 1. ATM emits native OTLP traces and metrics in addition to logs.
 2. Logs/traces/metrics all remain fail-open with local logging preserved.
 3. `sc-observability-otlp` remains the only transport-owning crate.
-4. Grafana smoke covers logs, traces, and metrics end-to-end.
+4. Grafana smoke covers the logs endpoint end-to-end, with trace and metric
+   dashboard recipes published and full live traces-and-metrics smoke deferred
+   to AW.7+.
 5. External consumer repos have a concrete adoption contract and checklist.

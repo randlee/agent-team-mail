@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use reqwest::blocking::{Client, ClientBuilder};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,9 @@ use thiserror::Error;
 
 pub const OTLP_HTTP_PROTOCOL: &str = "otlp_http";
 pub const DEFAULT_TIMEOUT_MS: u64 = 1_500;
+pub const DEFAULT_MAX_RETRIES: u32 = 2;
+pub const DEFAULT_INITIAL_BACKOFF_MS: u64 = 25;
+pub const DEFAULT_MAX_BACKOFF_MS: u64 = 250;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportExporterKind {
@@ -27,6 +31,9 @@ pub struct TransportConfig {
     pub insecure_skip_verify: bool,
     pub timeout_ms: u64,
     pub debug_local_export: bool,
+    pub max_retries: u32,
+    pub initial_backoff_ms: u64,
+    pub max_backoff_ms: u64,
 }
 
 impl Default for TransportConfig {
@@ -39,6 +46,9 @@ impl Default for TransportConfig {
             insecure_skip_verify: false,
             timeout_ms: DEFAULT_TIMEOUT_MS,
             debug_local_export: false,
+            max_retries: DEFAULT_MAX_RETRIES,
+            initial_backoff_ms: DEFAULT_INITIAL_BACKOFF_MS,
+            max_backoff_ms: DEFAULT_MAX_BACKOFF_MS,
         }
     }
 }
@@ -51,6 +61,60 @@ pub struct TransportRecord {
     pub trace_id: Option<String>,
     pub span_id: Option<String>,
     pub attributes: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceTransportRecord {
+    pub timestamp: String,
+    pub team: Option<String>,
+    pub agent: Option<String>,
+    pub runtime: Option<String>,
+    pub session_id: Option<String>,
+    pub trace_id: String,
+    pub span_id: String,
+    pub parent_span_id: Option<String>,
+    pub name: String,
+    pub status: TraceStatus,
+    pub duration_ms: u64,
+    pub source_binary: String,
+    pub attributes: Map<String, Value>,
+}
+
+// These signal enums intentionally mirror the canonical sc-observability
+// contracts so this transport crate can shape OTLP payloads without creating a
+// Cargo cycle back into sc-observability. Replace this duplication with a
+// neutral shared types crate once GH-876 lands.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceStatus {
+    Ok,
+    Error,
+    Unset,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MetricTransportRecord {
+    pub timestamp: String,
+    pub team: Option<String>,
+    pub agent: Option<String>,
+    pub runtime: Option<String>,
+    pub session_id: Option<String>,
+    pub name: String,
+    pub kind: MetricKind,
+    pub value: f64,
+    pub unit: Option<String>,
+    pub source_binary: String,
+    pub attributes: Map<String, Value>,
+}
+
+// Mirrored from sc-observability for the same cycle-avoidance reason as
+// TraceStatus above. GH-876 tracks the shared-types extraction.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricKind {
+    Counter,
+    Gauge,
+    Histogram,
 }
 
 #[derive(Debug, Error)]
@@ -108,9 +172,52 @@ pub fn build_exporters(
     Ok(exporters)
 }
 
+pub fn export_traces(
+    config: &TransportConfig,
+    records: &[TraceTransportRecord],
+) -> Result<(), TransportError> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    let endpoint = config
+        .endpoint
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            TransportError::ExportFailed("collector endpoint not configured".to_string())
+        })?;
+    let exporter = OtlpHttpExporter::new(endpoint, config)?;
+    exporter.export_json(
+        &normalize_signal_endpoint(endpoint, "traces"),
+        build_traces_payload(records),
+    )
+}
+
+pub fn export_metrics(
+    config: &TransportConfig,
+    records: &[MetricTransportRecord],
+) -> Result<(), TransportError> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    let endpoint = config
+        .endpoint
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            TransportError::ExportFailed("collector endpoint not configured".to_string())
+        })?;
+    let exporter = OtlpHttpExporter::new(endpoint, config)?;
+    exporter.export_json(
+        &normalize_signal_endpoint(endpoint, "metrics"),
+        build_metrics_payload(records),
+    )
+}
+
 #[derive(Debug)]
 pub struct OtlpHttpExporter {
     client: Client,
+    config: TransportConfig,
     endpoint: String,
 }
 
@@ -144,8 +251,45 @@ impl OtlpHttpExporter {
 
         Ok(Self {
             client,
+            config: config.clone(),
             endpoint: normalize_logs_endpoint(endpoint),
         })
+    }
+
+    fn export_json(&self, endpoint: &str, body: Value) -> Result<(), TransportError> {
+        let body = body.to_string();
+        let mut attempt: u32 = 0;
+        let mut backoff = self.config.initial_backoff_ms;
+        loop {
+            let response = self
+                .client
+                .post(endpoint)
+                .header(CONTENT_TYPE, "application/json")
+                .body(body.clone())
+                .send()
+                .map_err(|err| TransportError::ExportFailed(err.to_string()));
+
+            match response {
+                Ok(response) if response.status().is_success() => return Ok(()),
+                Ok(response) => {
+                    if attempt >= self.config.max_retries {
+                        return Err(TransportError::ExportFailed(format!(
+                            "collector returned {}",
+                            response.status()
+                        )));
+                    }
+                }
+                Err(err) => {
+                    if attempt >= self.config.max_retries {
+                        return Err(err);
+                    }
+                }
+            }
+
+            std::thread::sleep(Duration::from_millis(backoff));
+            backoff = backoff.saturating_mul(2).min(self.config.max_backoff_ms);
+            attempt = attempt.saturating_add(1);
+        }
     }
 }
 
@@ -155,23 +299,7 @@ impl TransportExporter for OtlpHttpExporter {
     }
 
     fn export(&self, record: &TransportRecord) -> Result<(), TransportError> {
-        let body = build_logs_payload(record);
-        let response = self
-            .client
-            .post(&self.endpoint)
-            .header(CONTENT_TYPE, "application/json")
-            .body(body.to_string())
-            .send()
-            .map_err(|err| TransportError::ExportFailed(err.to_string()))?;
-
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            Err(TransportError::ExportFailed(format!(
-                "collector returned {}",
-                response.status()
-            )))
-        }
+        self.export_json(&self.endpoint, build_logs_payload(record))
     }
 }
 
@@ -235,11 +363,16 @@ fn parse_auth_header(
 }
 
 fn normalize_logs_endpoint(endpoint: &str) -> String {
+    normalize_signal_endpoint(endpoint, "logs")
+}
+
+fn normalize_signal_endpoint(endpoint: &str, signal: &str) -> String {
     let endpoint = endpoint.trim_end_matches('/');
-    if endpoint.ends_with("/v1/logs") {
+    let suffix = format!("/v1/{signal}");
+    if endpoint.ends_with(&suffix) {
         endpoint.to_string()
     } else {
-        format!("{endpoint}/v1/logs")
+        format!("{endpoint}{suffix}")
     }
 }
 
@@ -289,6 +422,180 @@ fn build_logs_payload(record: &TransportRecord) -> Value {
             }]
         }]
     })
+}
+
+fn build_traces_payload(records: &[TraceTransportRecord]) -> Value {
+    let spans = records
+        .iter()
+        .map(|record| {
+            let mut attributes = correlation_attributes(
+                &record.team,
+                &record.agent,
+                &record.runtime,
+                &record.session_id,
+            );
+            for (key, value) in &record.attributes {
+                attributes.push(json!({
+                    "key": key,
+                    "value": json_value_to_otlp_any(value),
+                }));
+            }
+
+            let mut span = json!({
+                "traceId": record.trace_id,
+                "spanId": record.span_id,
+                "name": record.name,
+                "status": {
+                    "code": match record.status {
+                        TraceStatus::Ok => "STATUS_CODE_OK",
+                        TraceStatus::Error => "STATUS_CODE_ERROR",
+                        TraceStatus::Unset => "STATUS_CODE_UNSET",
+                    }
+                },
+                "attributes": attributes,
+            });
+
+            if let Some(parent_span_id) = &record.parent_span_id {
+                span["parentSpanId"] = json!(parent_span_id);
+            }
+            if let Some(start_unix_nanos) = parse_timestamp_to_unix_nanos(&record.timestamp) {
+                span["startTimeUnixNano"] = json!(start_unix_nanos.to_string());
+                let end_unix_nanos =
+                    start_unix_nanos.saturating_add(record.duration_ms.saturating_mul(1_000_000));
+                span["endTimeUnixNano"] = json!(end_unix_nanos.to_string());
+            }
+
+            json!({
+                "resource": {
+                    "attributes": [{
+                        "key": "service.name",
+                        "value": { "stringValue": record.source_binary },
+                    }]
+                },
+                "scopeSpans": [{
+                    "scope": { "name": "sc-observability-otlp" },
+                    "spans": [span]
+                }]
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({ "resourceSpans": spans })
+}
+
+fn build_metrics_payload(records: &[MetricTransportRecord]) -> Value {
+    let metrics = records
+        .iter()
+        .map(|record| {
+            let attributes = correlation_attributes(
+                &record.team,
+                &record.agent,
+                &record.runtime,
+                &record.session_id,
+            )
+            .into_iter()
+            .chain(record.attributes.iter().map(|(key, value)| {
+                json!({
+                    "key": key,
+                    "value": json_value_to_otlp_any(value),
+                })
+            }))
+            .collect::<Vec<_>>();
+
+            let time_unix_nano =
+                parse_timestamp_to_unix_nanos(&record.timestamp).map(|value| value.to_string());
+
+            let mut data_point = json!({
+                "attributes": attributes.clone(),
+                "asDouble": record.value,
+            });
+            if let Some(time_unix_nano) = &time_unix_nano {
+                data_point["timeUnixNano"] = json!(time_unix_nano);
+            }
+
+            let mut metric = json!({
+                "name": record.name,
+                "unit": record.unit.clone().unwrap_or_default(),
+            });
+            match record.kind {
+                MetricKind::Counter => {
+                    metric["sum"] = json!({
+                        "aggregationTemporality": 2,
+                        "isMonotonic": true,
+                        "dataPoints": [data_point],
+                    });
+                }
+                MetricKind::Gauge => {
+                    metric["gauge"] = json!({
+                        "dataPoints": [data_point],
+                    });
+                }
+                MetricKind::Histogram => {
+                    metric["histogram"] = json!({
+                        "aggregationTemporality": 2,
+                        "dataPoints": [{
+                            "attributes": attributes,
+                            "count": "1",
+                            "sum": record.value,
+                            "bucketCounts": ["1"],
+                            "explicitBounds": [],
+                        }],
+                    });
+                    if let Some(time_unix_nano) = &time_unix_nano {
+                        metric["histogram"]["dataPoints"][0]["timeUnixNano"] =
+                            json!(time_unix_nano);
+                    }
+                }
+            }
+
+            json!({
+                "resource": {
+                    "attributes": [{
+                        "key": "service.name",
+                        "value": { "stringValue": record.source_binary },
+                    }]
+                },
+                "scopeMetrics": [{
+                    "scope": { "name": "sc-observability-otlp" },
+                    "metrics": [metric]
+                }]
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({ "resourceMetrics": metrics })
+}
+
+fn parse_timestamp_to_unix_nanos(timestamp: &str) -> Option<u64> {
+    let parsed = DateTime::parse_from_rfc3339(timestamp).ok()?;
+    parsed
+        .with_timezone(&Utc)
+        .timestamp_nanos_opt()?
+        .try_into()
+        .ok()
+}
+
+fn correlation_attributes(
+    team: &Option<String>,
+    agent: &Option<String>,
+    runtime: &Option<String>,
+    session_id: &Option<String>,
+) -> Vec<Value> {
+    let mut attributes = Vec::new();
+    for (key, value) in [
+        ("team", team.as_ref()),
+        ("agent", agent.as_ref()),
+        ("runtime", runtime.as_ref()),
+        ("session_id", session_id.as_ref()),
+    ] {
+        if let Some(value) = value {
+            attributes.push(json!({
+                "key": key,
+                "value": { "stringValue": value },
+            }));
+        }
+    }
+    attributes
 }
 
 fn severity_fields(level: &str) -> (u32, &'static str) {
@@ -368,6 +675,44 @@ mod tests {
             level: "info".to_string(),
             trace_id: Some("trace-123".to_string()),
             span_id: Some("span-123".to_string()),
+            attributes,
+        }
+    }
+
+    fn sample_trace_record() -> TraceTransportRecord {
+        let mut attributes = Map::new();
+        attributes.insert("target".to_string(), Value::String("daemon".to_string()));
+        TraceTransportRecord {
+            timestamp: "2026-03-18T00:00:00Z".to_string(),
+            team: Some("atm-dev".to_string()),
+            agent: Some("arch-ctm".to_string()),
+            runtime: Some("codex".to_string()),
+            session_id: Some("sess-123".to_string()),
+            trace_id: "trace-123".to_string(),
+            span_id: "span-456".to_string(),
+            parent_span_id: Some("span-000".to_string()),
+            name: "daemon.request".to_string(),
+            status: TraceStatus::Ok,
+            duration_ms: 25,
+            source_binary: "atm-daemon".to_string(),
+            attributes,
+        }
+    }
+
+    fn sample_metric_record() -> MetricTransportRecord {
+        let mut attributes = Map::new();
+        attributes.insert("scope".to_string(), Value::String("mail".to_string()));
+        MetricTransportRecord {
+            timestamp: "2026-03-18T00:00:00Z".to_string(),
+            team: Some("atm-dev".to_string()),
+            agent: None,
+            runtime: Some("codex".to_string()),
+            session_id: None,
+            name: "atm_messages_total".to_string(),
+            kind: MetricKind::Counter,
+            value: 7.0,
+            unit: Some("count".to_string()),
+            source_binary: "atm".to_string(),
             attributes,
         }
     }
@@ -455,6 +800,102 @@ mod tests {
         assert!(request.starts_with("POST /v1/logs HTTP/1.1"));
         assert!(request.contains("authorization: Bearer secret"));
         assert!(request.contains("\"atm.send\""));
+    }
+
+    #[test]
+    fn export_traces_posts_traces_endpoint() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            let mut request = Vec::new();
+            let mut header_buf = [0_u8; 4096];
+            let header_len = stream.read(&mut header_buf).expect("read request");
+            request.extend_from_slice(&header_buf[..header_len]);
+            let header_text = String::from_utf8_lossy(&request);
+            let content_length = header_text
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    (name.eq_ignore_ascii_case("content-length"))
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            let header_end = header_text
+                .find("\r\n\r\n")
+                .map(|idx| idx + 4)
+                .unwrap_or(request.len());
+            let body_read = request.len().saturating_sub(header_end);
+            if body_read < content_length {
+                let mut body = vec![0_u8; content_length - body_read];
+                stream.read_exact(&mut body).expect("read request body");
+                request.extend_from_slice(&body);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .expect("write response");
+            String::from_utf8_lossy(&request).to_string()
+        });
+
+        let config = TransportConfig {
+            endpoint: Some(format!("http://{addr}")),
+            ..TransportConfig::default()
+        };
+        export_traces(&config, &[sample_trace_record()]).expect("export traces");
+
+        let request = handle.join().expect("join server thread");
+        assert!(request.starts_with("POST /v1/traces HTTP/1.1"));
+        assert!(request.contains("\"daemon.request\""));
+        assert!(request.contains("\"trace-123\""));
+    }
+
+    #[test]
+    fn export_metrics_posts_metrics_endpoint() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            let mut request = Vec::new();
+            let mut header_buf = [0_u8; 4096];
+            let header_len = stream.read(&mut header_buf).expect("read request");
+            request.extend_from_slice(&header_buf[..header_len]);
+            let header_text = String::from_utf8_lossy(&request);
+            let content_length = header_text
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    (name.eq_ignore_ascii_case("content-length"))
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            let header_end = header_text
+                .find("\r\n\r\n")
+                .map(|idx| idx + 4)
+                .unwrap_or(request.len());
+            let body_read = request.len().saturating_sub(header_end);
+            if body_read < content_length {
+                let mut body = vec![0_u8; content_length - body_read];
+                stream.read_exact(&mut body).expect("read request body");
+                request.extend_from_slice(&body);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .expect("write response");
+            String::from_utf8_lossy(&request).to_string()
+        });
+
+        let config = TransportConfig {
+            endpoint: Some(format!("http://{addr}")),
+            ..TransportConfig::default()
+        };
+        export_metrics(&config, &[sample_metric_record()]).expect("export metrics");
+
+        let request = handle.join().expect("join server thread");
+        assert!(request.starts_with("POST /v1/metrics HTTP/1.1"));
+        assert!(request.contains("\"atm_messages_total\""));
+        assert!(request.contains("\"count\""));
     }
 
     #[test]

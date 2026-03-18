@@ -14,7 +14,7 @@ mod gh;
 mod inbox;
 mod init;
 pub mod launch;
-mod logging_health;
+pub(crate) mod logging_health;
 mod logs;
 mod mcp;
 mod members;

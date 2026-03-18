@@ -1,6 +1,11 @@
-use crate::{OtelConfig, OtelError, OtelExporter, OtelExporterKind, OtelRecord};
+use crate::{
+    MetricKind, MetricRecord, OtelConfig, OtelError, OtelExporter, OtelExporterKind, OtelRecord,
+    TraceRecord, TraceStatus,
+};
 use sc_observability_otlp::{
-    TransportConfig, TransportError, TransportExporter, TransportExporterKind, TransportRecord,
+    MetricKind as TransportMetricKind, MetricTransportRecord, TraceStatus as TransportTraceStatus,
+    TraceTransportRecord, TransportConfig, TransportError, TransportExporter,
+    TransportExporterKind, TransportRecord,
 };
 use std::sync::Arc;
 
@@ -15,6 +20,9 @@ pub fn build_transport_exporters(
         insecure_skip_verify: config.insecure_skip_verify,
         timeout_ms: config.timeout_ms,
         debug_local_export: config.debug_local_export,
+        max_retries: config.max_retries,
+        initial_backoff_ms: config.initial_backoff_ms,
+        max_backoff_ms: config.max_backoff_ms,
     };
 
     let exporters = sc_observability_otlp::build_exporters(&transport_config)
@@ -52,6 +60,83 @@ fn to_transport_record(record: &OtelRecord) -> TransportRecord {
         trace_id: record.trace_id.clone(),
         span_id: record.span_id.clone(),
         attributes: record.attributes.clone(),
+    }
+}
+
+pub fn export_traces(config: &OtelConfig, records: &[TraceRecord]) -> Result<(), OtelError> {
+    let transport_config = build_transport_config(config);
+    let records = records
+        .iter()
+        .cloned()
+        .map(to_trace_transport_record)
+        .collect::<Vec<_>>();
+    sc_observability_otlp::export_traces(&transport_config, &records).map_err(map_transport_error)
+}
+
+pub fn export_metrics(config: &OtelConfig, records: &[MetricRecord]) -> Result<(), OtelError> {
+    let transport_config = build_transport_config(config);
+    let records = records
+        .iter()
+        .cloned()
+        .map(to_metric_transport_record)
+        .collect::<Vec<_>>();
+    sc_observability_otlp::export_metrics(&transport_config, &records).map_err(map_transport_error)
+}
+
+fn build_transport_config(config: &OtelConfig) -> TransportConfig {
+    TransportConfig {
+        endpoint: config.endpoint.clone(),
+        protocol: config.protocol.clone(),
+        auth_header: config.auth_header.clone(),
+        ca_file: config.ca_file.clone(),
+        insecure_skip_verify: config.insecure_skip_verify,
+        timeout_ms: config.timeout_ms,
+        debug_local_export: config.debug_local_export,
+        max_retries: config.max_retries,
+        initial_backoff_ms: config.initial_backoff_ms,
+        max_backoff_ms: config.max_backoff_ms,
+    }
+}
+
+fn to_trace_transport_record(record: TraceRecord) -> TraceTransportRecord {
+    TraceTransportRecord {
+        timestamp: record.timestamp,
+        team: record.team,
+        agent: record.agent,
+        runtime: record.runtime,
+        session_id: record.session_id,
+        trace_id: record.trace_id,
+        span_id: record.span_id,
+        parent_span_id: record.parent_span_id,
+        name: record.name,
+        status: match record.status {
+            TraceStatus::Ok => TransportTraceStatus::Ok,
+            TraceStatus::Error => TransportTraceStatus::Error,
+            TraceStatus::Unset => TransportTraceStatus::Unset,
+        },
+        duration_ms: record.duration_ms,
+        source_binary: record.source_binary,
+        attributes: record.attributes,
+    }
+}
+
+fn to_metric_transport_record(record: MetricRecord) -> MetricTransportRecord {
+    MetricTransportRecord {
+        timestamp: record.timestamp,
+        team: record.team,
+        agent: record.agent,
+        runtime: record.runtime,
+        session_id: record.session_id,
+        name: record.name,
+        kind: match record.kind {
+            MetricKind::Counter => TransportMetricKind::Counter,
+            MetricKind::Gauge => TransportMetricKind::Gauge,
+            MetricKind::Histogram => TransportMetricKind::Histogram,
+        },
+        value: record.value,
+        unit: record.unit,
+        source_binary: record.source_binary,
+        attributes: record.attributes,
     }
 }
 

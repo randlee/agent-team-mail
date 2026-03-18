@@ -16,9 +16,13 @@ use std::time::Duration;
 use thiserror::Error;
 
 mod health;
+mod metrics;
 mod otlp_adapter;
+mod trace;
 
 pub use health::{OtelHealthSnapshot, OtelLastError, current_otel_health};
+pub use metrics::{MetricKind, MetricRecord, export_metric_records_best_effort};
+pub use trace::{TraceRecord, TraceStatus, export_trace_records_best_effort};
 
 pub const DEFAULT_QUEUE_CAPACITY: usize = 4096;
 pub const DEFAULT_MAX_EVENT_BYTES: usize = 64 * 1024;
@@ -933,11 +937,11 @@ mod tests {
     use agent_team_mail_core::logging_event::new_log_event;
     use serial_test::serial;
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::OnceLock;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::thread;
     use std::time::Instant;
     use tempfile::TempDir;
@@ -962,6 +966,8 @@ mod tests {
     struct TestCollector {
         endpoint: String,
         requests: Arc<Mutex<Vec<String>>>,
+        shutdown: Arc<AtomicBool>,
+        wake_addr: String,
         join: Option<thread::JoinHandle<()>>,
     }
 
@@ -974,11 +980,16 @@ mod tests {
             let addr = listener.local_addr().expect("collector addr");
             let requests = Arc::new(Mutex::new(Vec::new()));
             let shared = Arc::clone(&requests);
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let shutdown_flag = Arc::clone(&shutdown);
             let join = thread::spawn(move || {
                 let deadline = Instant::now() + Duration::from_secs(5);
-                while Instant::now() < deadline {
+                while !shutdown_flag.load(Ordering::SeqCst) && Instant::now() < deadline {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
+                            if shutdown_flag.load(Ordering::SeqCst) {
+                                break;
+                            }
                             let mut request = Vec::new();
                             let mut header_buf = [0_u8; 4096];
                             let header_len = stream.read(&mut header_buf).expect("read request");
@@ -1024,6 +1035,8 @@ mod tests {
             Self {
                 endpoint: format!("http://{addr}"),
                 requests,
+                shutdown,
+                wake_addr: addr.to_string(),
                 join: Some(join),
             }
         }
@@ -1035,6 +1048,8 @@ mod tests {
 
     impl Drop for TestCollector {
         fn drop(&mut self) {
+            self.shutdown.store(true, Ordering::SeqCst);
+            let _ = TcpStream::connect(&self.wake_addr);
             if let Some(join) = self.join.take() {
                 join.join().expect("collector thread should join");
             }
@@ -1437,7 +1452,12 @@ mod tests {
         );
         logger.emit(&event).expect("emit should succeed");
 
-        let requests = collector.requests();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut requests = collector.requests();
+        while requests.is_empty() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(25));
+            requests = collector.requests();
+        }
         assert_eq!(requests.len(), 1, "collector should receive one request");
         assert!(
             requests[0].starts_with("POST /v1/logs HTTP/1.1"),
