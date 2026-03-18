@@ -1,34 +1,5 @@
 use crate::{OtelConfig, health, otlp_adapter};
-
-/// Neutral metric signal contract for producer-side observability code.
-///
-/// Correlation fields are intentionally optional and fail-open in AW.1 so
-/// metric rollout can happen before every producer is fully correlated.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-pub struct MetricRecord {
-    pub timestamp: String,
-    pub team: Option<String>,
-    pub agent: Option<String>,
-    pub runtime: Option<String>,
-    pub session_id: Option<String>,
-    pub name: String,
-    pub kind: MetricKind,
-    pub value: f64,
-    pub unit: Option<String>,
-    pub source_binary: String,
-    pub attributes: serde_json::Map<String, serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-/// Mirrored as `TransportMetricKind` in `sc-observability-otlp` to avoid a
-/// Cargo dependency cycle. GH-876 tracks extraction to a shared
-/// `sc-observability-types` crate.
-pub enum MetricKind {
-    Counter,
-    Gauge,
-    Histogram,
-}
+use sc_observability_types::MetricRecord;
 
 /// Export metric records without allowing exporter failures to affect callers.
 pub fn export_metric_records_best_effort(records: &[MetricRecord], config: &OtelConfig) {

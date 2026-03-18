@@ -8,10 +8,8 @@ use agent_team_mail_core::event_log::{
 };
 use agent_team_mail_core::logging;
 use clap::Parser;
-use sc_observability::{
-    LogConfig, MetricKind, MetricRecord, OtelConfig, TraceRecord, TraceStatus,
-    export_metric_records_best_effort, export_trace_records_best_effort,
-};
+use sc_observability::LogConfig;
+use sc_observability_types::{MetricKind, MetricRecord, OtelConfig, TraceRecord, TraceStatus};
 use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
@@ -210,6 +208,14 @@ fn install_cli_otel_event_hook() {
     }));
 }
 
+fn export_trace_records_from_entrypoint(records: &[TraceRecord], config: &OtelConfig) {
+    let _ = sc_observability_otlp::export_traces(config, records);
+}
+
+fn export_metric_records_from_entrypoint(records: &[MetricRecord], config: &OtelConfig) {
+    let _ = sc_observability_otlp::export_metrics(config, records);
+}
+
 fn main() {
     // Enable daemon auto-start for daemon-backed ATM commands.
     // Respect explicit caller override (e.g., tests setting "0").
@@ -290,7 +296,7 @@ fn main() {
             },
             ..Default::default()
         });
-        export_trace_records_best_effort(
+        export_trace_records_from_entrypoint(
             &[build_command_trace_record(
                 &command_name,
                 &request_id,
@@ -302,7 +308,7 @@ fn main() {
             )],
             &otel_config,
         );
-        export_metric_records_best_effort(
+        export_metric_records_from_entrypoint(
             &build_command_metric_records(&command_name, "error", duration_ms),
             &otel_config,
         );
@@ -339,7 +345,7 @@ fn main() {
             },
             ..Default::default()
         });
-        export_trace_records_best_effort(
+        export_trace_records_from_entrypoint(
             &[build_command_trace_record(
                 &command_name,
                 &request_id,
@@ -351,7 +357,7 @@ fn main() {
             )],
             &otel_config,
         );
-        export_metric_records_best_effort(
+        export_metric_records_from_entrypoint(
             &build_command_metric_records(&command_name, "ok", duration_ms),
             &otel_config,
         );

@@ -22,6 +22,7 @@
 //! On non-Unix platforms the module exposes stub functions that do nothing.
 
 use crate::daemon::observability::{
+    export_metric_records_best_effort, otel_config_from_env,
     SOCKET_ERROR_INTERNAL_ERROR, SOCKET_ERROR_INVALID_PAYLOAD, SOCKET_ERROR_VERSION_MISMATCH,
 };
 use agent_team_mail_core::control::{
@@ -35,7 +36,7 @@ use agent_team_mail_core::team_config_store::TeamConfigStore;
 use agent_team_mail_core::text::DEFAULT_MAX_MESSAGE_BYTES;
 use anyhow::Result;
 use chrono::Utc;
-use sc_observability::{MetricKind, MetricRecord, OtelConfig, export_metric_records_best_effort};
+use sc_observability_types::{MetricKind, MetricRecord};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -2806,7 +2807,7 @@ fn parse_and_dispatch(
     let duration_ms = request_started.elapsed().as_millis() as u64;
     export_metric_records_best_effort(
         &build_daemon_request_metric_records(&request.command, &response.status, duration_ms),
-        &OtelConfig::from_env(),
+        &otel_config_from_env(),
     );
 
     Ok(response)

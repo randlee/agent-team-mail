@@ -1,8 +1,7 @@
 use chrono::{DateTime, Utc};
 use reqwest::blocking::{Client, ClientBuilder};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -10,111 +9,19 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 
-pub const OTLP_HTTP_PROTOCOL: &str = "otlp_http";
-pub const DEFAULT_TIMEOUT_MS: u64 = 1_500;
-pub const DEFAULT_MAX_RETRIES: u32 = 2;
-pub const DEFAULT_INITIAL_BACKOFF_MS: u64 = 25;
-pub const DEFAULT_MAX_BACKOFF_MS: u64 = 250;
+pub use sc_observability_types::{
+    DEFAULT_OTEL_INITIAL_BACKOFF_MS as DEFAULT_INITIAL_BACKOFF_MS,
+    DEFAULT_OTEL_MAX_BACKOFF_MS as DEFAULT_MAX_BACKOFF_MS,
+    DEFAULT_OTEL_MAX_RETRIES as DEFAULT_MAX_RETRIES,
+    DEFAULT_OTEL_TIMEOUT_MS as DEFAULT_TIMEOUT_MS, MetricKind, MetricRecord as MetricTransportRecord,
+    MetricRecord, OTEL_PROTOCOL_HTTP, OtelConfig as TransportConfig,
+    OtelRecord as TransportRecord, TraceRecord, TraceRecord as TraceTransportRecord, TraceStatus,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportExporterKind {
     Collector,
     DebugLocal,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TransportConfig {
-    pub endpoint: Option<String>,
-    pub protocol: String,
-    pub auth_header: Option<String>,
-    pub ca_file: Option<PathBuf>,
-    pub insecure_skip_verify: bool,
-    pub timeout_ms: u64,
-    pub debug_local_export: bool,
-    pub max_retries: u32,
-    pub initial_backoff_ms: u64,
-    pub max_backoff_ms: u64,
-}
-
-impl Default for TransportConfig {
-    fn default() -> Self {
-        Self {
-            endpoint: None,
-            protocol: OTLP_HTTP_PROTOCOL.to_string(),
-            auth_header: None,
-            ca_file: None,
-            insecure_skip_verify: false,
-            timeout_ms: DEFAULT_TIMEOUT_MS,
-            debug_local_export: false,
-            max_retries: DEFAULT_MAX_RETRIES,
-            initial_backoff_ms: DEFAULT_INITIAL_BACKOFF_MS,
-            max_backoff_ms: DEFAULT_MAX_BACKOFF_MS,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct TransportRecord {
-    pub name: String,
-    pub source_binary: String,
-    pub level: String,
-    pub trace_id: Option<String>,
-    pub span_id: Option<String>,
-    pub attributes: Map<String, Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct TraceTransportRecord {
-    pub timestamp: String,
-    pub team: Option<String>,
-    pub agent: Option<String>,
-    pub runtime: Option<String>,
-    pub session_id: Option<String>,
-    pub trace_id: String,
-    pub span_id: String,
-    pub parent_span_id: Option<String>,
-    pub name: String,
-    pub status: TraceStatus,
-    pub duration_ms: u64,
-    pub source_binary: String,
-    pub attributes: Map<String, Value>,
-}
-
-// These signal enums intentionally mirror the canonical sc-observability
-// contracts so this transport crate can shape OTLP payloads without creating a
-// Cargo cycle back into sc-observability. Replace this duplication with a
-// neutral shared types crate once GH-876 lands.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TraceStatus {
-    Ok,
-    Error,
-    Unset,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct MetricTransportRecord {
-    pub timestamp: String,
-    pub team: Option<String>,
-    pub agent: Option<String>,
-    pub runtime: Option<String>,
-    pub session_id: Option<String>,
-    pub name: String,
-    pub kind: MetricKind,
-    pub value: f64,
-    pub unit: Option<String>,
-    pub source_binary: String,
-    pub attributes: Map<String, Value>,
-}
-
-// Mirrored from sc-observability for the same cycle-avoidance reason as
-// TraceStatus above. GH-876 tracks the shared-types extraction.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum MetricKind {
-    Counter,
-    Gauge,
-    Histogram,
 }
 
 #[derive(Debug, Error)]
@@ -159,7 +66,7 @@ pub fn build_exporters(
         .filter(|value| !value.trim().is_empty())
     {
         let protocol = config.protocol.trim();
-        if protocol != OTLP_HTTP_PROTOCOL {
+        if protocol != OTEL_PROTOCOL_HTTP {
             return Err(TransportError::UnsupportedProtocol(protocol.to_string()));
         }
         exporters.push(Arc::new(OtlpHttpExporter::new(endpoint, config)?));

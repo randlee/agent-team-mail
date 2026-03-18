@@ -1,0 +1,17 @@
+[package]
+name = "sc-observability-types"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Shared OTel type surface for ATM observability producers and transports"
+keywords = ["otel", "observability", "telemetry", "types"]
+categories = ["development-tools"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
