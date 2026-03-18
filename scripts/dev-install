@@ -200,10 +200,25 @@ def restart_daemon() -> None:
         die(f"atm binary not found at {atm_bin}")
     if daemon_bin.exists():
         kill_matching_daemons(daemon_bin)
+    restart_env = os.environ.copy()
+    restart_env["ATM_DEV_MODE"] = "1"
+    for key in ("CLAUDE_SESSION_ID", "ATM_IDENTITY", "ATM_TEAM"):
+        restart_env.pop(key, None)
     try:
-        run([str(atm_bin), "daemon", "restart"])
+        subprocess.run(
+            [str(atm_bin), "daemon", "restart"],
+            check=True,
+            env=restart_env,
+            start_new_session=True,
+            text=True,
+        )
     except SystemExit:
         print("  note: daemon restart returned non-zero (first-time start ok)")
+    except subprocess.CalledProcessError as exc:
+        print(
+            "  note: daemon restart returned non-zero "
+            f"(exit {exc.returncode}; first-time start ok)"
+        )
 
 
 def matching_pids_for_binary(binary_path: Path) -> list[int]:
