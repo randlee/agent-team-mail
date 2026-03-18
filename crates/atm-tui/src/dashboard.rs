@@ -272,8 +272,8 @@ mod tests {
             fs::create_dir_all(&inbox_dir).unwrap();
             let inbox_path = inbox_dir.join("arch-ctm.json");
 
-            // Write a valid JSON array with 3 messages.
-            let payload = r#"[{"message_id":"m1"},{"message_id":"m2"},{"message_id":"m3"}]"#;
+            // Write a valid JSON array with 3 minimally valid messages.
+            let payload = r#"[{"message_id":"m1","from":"a","text":"one","timestamp":"2026-01-01T00:00:00Z"},{"message_id":"m2","from":"b","text":"two","timestamp":"2026-01-01T00:00:01Z"},{"message_id":"m3","from":"c","text":"three","timestamp":"2026-01-01T00:00:02Z"}]"#;
             fs::write(&inbox_path, payload).unwrap();
 
             let count = get_inbox_count(home, "atm-dev", "arch-ctm");
