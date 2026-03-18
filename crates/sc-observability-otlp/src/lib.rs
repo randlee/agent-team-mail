@@ -329,6 +329,22 @@ mod tests {
     }
 
     #[test]
+    fn normalize_logs_endpoint_appends_logs_suffix() {
+        assert_eq!(
+            normalize_logs_endpoint("https://collector.example"),
+            "https://collector.example/v1/logs"
+        );
+    }
+
+    #[test]
+    fn normalize_logs_endpoint_preserves_existing_logs_suffix() {
+        assert_eq!(
+            normalize_logs_endpoint("https://collector.example/v1/logs"),
+            "https://collector.example/v1/logs"
+        );
+    }
+
+    #[test]
     fn stdout_exporter_writes_json_line() {
         let shared = SharedBuffer::default();
         let exporter = StdoutDebugExporter::with_writer(Box::new(shared.clone()));

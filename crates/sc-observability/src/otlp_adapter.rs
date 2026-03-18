@@ -1,12 +1,8 @@
 use crate::{OtelConfig, OtelError, OtelExporter, OtelRecord};
 use sc_observability_otlp::{TransportConfig, TransportError, TransportExporter, TransportRecord};
-use std::path::Path;
 use std::sync::Arc;
 
-pub fn build_transport_exporters(
-    log_path: &Path,
-    config: &OtelConfig,
-) -> Result<Vec<Arc<dyn OtelExporter>>, OtelError> {
+pub fn build_transport_exporters(config: &OtelConfig) -> Result<Vec<Arc<dyn OtelExporter>>, OtelError> {
     let transport_config = TransportConfig {
         endpoint: config.endpoint.clone(),
         protocol: config.protocol.clone(),
@@ -21,18 +17,12 @@ pub fn build_transport_exporters(
         .map_err(|err| OtelError::ExportFailed(err.to_string()))?;
     Ok(exporters
         .into_iter()
-        .map(|exporter| {
-            Arc::new(BridgeExporter {
-                exporter,
-                _log_path: log_path.to_path_buf(),
-            }) as Arc<dyn OtelExporter>
-        })
+        .map(|exporter| Arc::new(BridgeExporter { exporter }) as Arc<dyn OtelExporter>)
         .collect())
 }
 
 struct BridgeExporter {
     exporter: Arc<dyn TransportExporter>,
-    _log_path: std::path::PathBuf,
 }
 
 impl OtelExporter for BridgeExporter {

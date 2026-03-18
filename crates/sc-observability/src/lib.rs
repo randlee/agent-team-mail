@@ -108,21 +108,8 @@ impl OtelConfig {
             && let Ok(parsed) = raw.parse::<u32>()
         {
             cfg.max_retries = parsed;
-        } else if let Ok(raw) = std::env::var("ATM_OTEL_MAX_RETRIES")
-            && let Ok(parsed) = raw.parse::<u32>()
-        {
-            cfg.max_retries = parsed;
         }
         if let Ok(raw) = std::env::var("ATM_OTEL_RETRY_BACKOFF_MS")
-            && let Ok(parsed) = raw.parse::<u64>()
-        {
-            cfg.initial_backoff_ms = parsed;
-        } else if let Ok(raw) = std::env::var("ATM_OTEL_INITIAL_BACKOFF_MS")
-            && let Ok(parsed) = raw.parse::<u64>()
-        {
-            cfg.initial_backoff_ms = parsed;
-        }
-        if let Ok(raw) = std::env::var("ATM_OTEL_INITIAL_BACKOFF_MS")
             && let Ok(parsed) = raw.parse::<u64>()
         {
             cfg.initial_backoff_ms = parsed;
@@ -217,7 +204,7 @@ impl OtelPipeline {
         let mut exporters: Vec<Arc<dyn OtelExporter>> =
             vec![Arc::new(FileOtelExporter::new(default_otel_path(log_path)))];
         if let Ok(mut transport_exporters) =
-            otlp_adapter::build_transport_exporters(log_path, &config)
+            otlp_adapter::build_transport_exporters(&config)
         {
             exporters.append(&mut transport_exporters);
         }
