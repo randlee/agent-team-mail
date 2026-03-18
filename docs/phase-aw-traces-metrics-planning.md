@@ -57,6 +57,29 @@ What AV does not yet deliver:
 | AW.5 | Grafana dashboards + smoke | Dashboards/query recipes for logs/traces/metrics plus end-to-end smoke verification |
 | AW.6 | External consumer rollout | `scmux` / `schook` adoption contract, checklist, and handoff validation |
 
+## AW.5 Status
+
+AW.5 deliverables are implemented as:
+
+- `docs/observability/grafana-dashboards.md`
+  - Grafana LogQL, TraceQL, and PromQL recipes for ATM observability signals
+- `scripts/grafana-verify-smoke.py`
+  - live Loki-backed smoke with `--dry-run` support and env-driven auth
+- `docs/observability/grafana-rollout-smoke.md`
+  - rollout/operator smoke contract for Grafana-compatible collector setups
+
+The automated AW.5 smoke intentionally validates the log ingestion path first:
+
+- ATM commands run with `ATM_OTEL_ENABLED=true`
+- remote verification happens through the Loki read endpoint
+- PASS requires a matching stream keyed by `service_name` or `source_binary`
+  plus the canonical correlation fields `team`, `agent`, `runtime`, and
+  `session_id`
+
+Trace and metric query recipes are documented for dashboard rollout, but the
+smoke script remains logs-focused because that is the least brittle remote
+verification surface across Grafana-compatible OTLP deployments.
+
 ## Dependencies
 
 - AV must be merged and stable as a logs rollout.
