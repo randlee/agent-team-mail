@@ -221,10 +221,11 @@ while running:
         if request_log_path:
             request_log_file = Path(request_log_path)
             request_log_file.parent.mkdir(parents=True, exist_ok=True)
-            request_log_file.write_text(json.dumps({
-                "command": command,
-                "payload": payload,
-            }))
+            with request_log_file.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({
+                    "command": command,
+                    "payload": payload,
+                }) + "\n")
 
         if command == "gh-monitor":
             if monitor_delay_ms > 0:
@@ -411,6 +412,18 @@ fn start_fake_gh_daemon(home: &Path) -> Child {
 #[cfg(unix)]
 fn start_fake_gh_daemon_with_mode(home: &Path, configured: bool, enabled: bool) -> Child {
     start_fake_gh_daemon_with_mode_and_delays(home, configured, enabled, 0, 0, None)
+}
+
+#[cfg(unix)]
+fn read_last_request_matching(request_log: &std::path::Path, command: &str) -> serde_json::Value {
+    std::fs::read_to_string(request_log)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .rev()
+        .find(|request| request["command"].as_str() == Some(command))
+        .unwrap_or_else(|| panic!("missing {command} request in {}", request_log.display()))
 }
 
 /// Start the fake daemon with an explicit request log path.
@@ -1170,8 +1183,7 @@ fn test_gh_monitor_infers_repo_scope_from_git_remote() {
         .stdout
         .clone();
     let _json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let request: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&request_log).unwrap()).unwrap();
+    let request = read_last_request_matching(&request_log, "gh-monitor");
     assert_eq!(request["command"].as_str(), Some("gh-monitor"));
     assert_eq!(
         request["payload"]["repo"].as_str(),
@@ -1223,8 +1235,7 @@ fn test_gh_monitor_repo_override_accepts_github_url_and_cc() {
         .stdout
         .clone();
     let _json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let request: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&request_log).unwrap()).unwrap();
+    let request = read_last_request_matching(&request_log, "gh-monitor");
     assert_eq!(
         request["payload"]["repo"].as_str(),
         Some("example/other-repo")
