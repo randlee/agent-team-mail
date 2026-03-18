@@ -1383,14 +1383,21 @@ mod tests {
         let resolved = daemon_launch::default_dev_runtime_root_for(&os_home)
             .join("bin")
             .join("atm-daemon");
-        assert_eq!(
-            resolved,
+        let expected = if cfg!(windows) {
+            os_home
+                .join("AppData")
+                .join("Local")
+                .join("atm-dev")
+                .join("bin")
+                .join("atm-daemon")
+        } else {
             os_home
                 .join(".local")
                 .join("atm-dev")
                 .join("bin")
                 .join("atm-daemon")
-        );
+        };
+        assert_eq!(resolved, expected);
     }
 
     #[cfg(unix)]
