@@ -154,24 +154,7 @@ where
         source: e,
     })?;
 
-    {
-        let mut tmp_file = fs::File::create(&tmp_path).map_err(|e| InboxError::Io {
-            path: tmp_path.clone(),
-            source: e,
-        })?;
-
-        tmp_file
-            .write_all(&new_content)
-            .map_err(|e| InboxError::Io {
-                path: tmp_path.clone(),
-                source: e,
-            })?;
-
-        tmp_file.sync_all().map_err(|e| InboxError::Io {
-            path: tmp_path.clone(),
-            source: e,
-        })?;
-    }
+    write_synced_file(&tmp_path, &new_content)?;
 
     // Step 5: Atomic swap
     if !inbox_path.exists() {
@@ -210,10 +193,7 @@ where
             source: e,
         })?;
 
-        fs::write(&tmp_path, &merged_content).map_err(|e| InboxError::Io {
-            path: tmp_path.clone(),
-            source: e,
-        })?;
+        write_synced_file(&tmp_path, &merged_content)?;
 
         // Re-swap
         atomic_swap(inbox_path, &tmp_path)?;
@@ -230,6 +210,25 @@ where
     let _ = fs::remove_file(&tmp_path); // Ignore errors on cleanup
 
     Ok(outcome)
+}
+
+fn write_synced_file(path: &Path, content: &[u8]) -> Result<(), InboxError> {
+    let mut file = fs::File::create(path).map_err(|e| InboxError::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+
+    file.write_all(content).map_err(|e| InboxError::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+
+    file.sync_all().map_err(|e| InboxError::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+
+    Ok(())
 }
 
 fn parse_inbox_messages_tolerant(
