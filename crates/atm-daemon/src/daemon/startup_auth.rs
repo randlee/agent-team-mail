@@ -769,7 +769,21 @@ mod tests {
         assert!(!runtime_home.exists(), "stale runtime should be removed");
 
         let spool = spool_dir(temp.path());
-        let events = read_jsonl_events(&spool);
+        let mut events = Vec::new();
+        for _ in 0..20 {
+            events = read_jsonl_events(&spool);
+            if events.iter().any(|event| {
+                event.action == "janitor_reap"
+                    && event
+                        .fields
+                        .get("event_name")
+                        .and_then(|value| value.as_str())
+                        == Some("janitor_reap")
+            }) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
         assert!(
             events.iter().any(|event| {
                 event.action == "janitor_reap"
