@@ -19,10 +19,12 @@ use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::schema::TeamConfig;
 use agent_team_mail_core::team_config_store::TeamConfigStore;
 use anyhow::{Context, Result};
+use chrono::Utc;
+use sc_observability::{OtelConfig, TraceRecord, TraceStatus, export_trace_records_best_effort};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -74,6 +76,129 @@ fn emit_plugin_lifecycle_event(
         error,
         ..Default::default()
     });
+}
+
+fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key).ok().and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn dispatch_trace_id(event: &InboxEvent, message_id: Option<&str>) -> String {
+    let seed = message_id.unwrap_or_else(|| event.path.to_str().unwrap_or("unknown-dispatch"));
+    agent_team_mail_core::event_log::trace_id_for_request("atm-daemon", seed)
+}
+
+fn build_dispatch_root_trace_record(
+    event: &InboxEvent,
+    message_id: Option<&str>,
+    trace_id: &str,
+    root_span_id: &str,
+    duration_ms: u64,
+    status: TraceStatus,
+) -> TraceRecord {
+    let mut attributes = serde_json::Map::new();
+    attributes.insert(
+        "operation".to_string(),
+        serde_json::Value::String("dispatch_message".to_string()),
+    );
+    attributes.insert(
+        "path".to_string(),
+        serde_json::Value::String(event.path.display().to_string()),
+    );
+    if let Some(message_id) = message_id {
+        attributes.insert(
+            "message_id".to_string(),
+            serde_json::Value::String(message_id.to_string()),
+        );
+    }
+
+    TraceRecord {
+        timestamp: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        team: Some(event.team.clone()),
+        agent: Some(event.agent.clone()),
+        runtime: env_nonempty("ATM_RUNTIME"),
+        session_id: env_nonempty("CLAUDE_SESSION_ID"),
+        trace_id: trace_id.to_string(),
+        span_id: root_span_id.to_string(),
+        parent_span_id: None,
+        name: "atm-daemon.dispatch_message".to_string(),
+        status,
+        duration_ms,
+        source_binary: "atm-daemon".to_string(),
+        attributes,
+    }
+}
+
+struct PluginDispatchTrace<'a> {
+    plugin_name: &'a str,
+    operation: &'a str,
+    duration_ms: u64,
+    status: TraceStatus,
+    error: Option<&'a str>,
+}
+
+fn build_plugin_dispatch_trace_record(
+    event: &InboxEvent,
+    message_id: Option<&str>,
+    trace_id: &str,
+    parent_span_id: &str,
+    plugin_trace: PluginDispatchTrace<'_>,
+) -> TraceRecord {
+    let span_action = format!(
+        "plugin_dispatch_{}_{}",
+        plugin_trace.plugin_name, plugin_trace.operation
+    );
+    let span_id = agent_team_mail_core::event_log::span_id_for_action(trace_id, &span_action);
+    let mut attributes = serde_json::Map::new();
+    attributes.insert(
+        "plugin".to_string(),
+        serde_json::Value::String(plugin_trace.plugin_name.to_string()),
+    );
+    attributes.insert(
+        "operation".to_string(),
+        serde_json::Value::String(plugin_trace.operation.to_string()),
+    );
+    attributes.insert(
+        "path".to_string(),
+        serde_json::Value::String(event.path.display().to_string()),
+    );
+    if let Some(message_id) = message_id {
+        attributes.insert(
+            "message_id".to_string(),
+            serde_json::Value::String(message_id.to_string()),
+        );
+    }
+    if let Some(error) = plugin_trace.error {
+        attributes.insert(
+            "error".to_string(),
+            serde_json::Value::String(error.to_string()),
+        );
+    }
+
+    TraceRecord {
+        timestamp: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        team: Some(event.team.clone()),
+        agent: Some(event.agent.clone()),
+        runtime: env_nonempty("ATM_RUNTIME"),
+        session_id: env_nonempty("CLAUDE_SESSION_ID"),
+        trace_id: trace_id.to_string(),
+        span_id,
+        parent_span_id: Some(parent_span_id.to_string()),
+        name: format!(
+            "atm-daemon.plugin.{}.{}",
+            plugin_trace.plugin_name, plugin_trace.operation
+        ),
+        status: plugin_trace.status,
+        duration_ms: plugin_trace.duration_ms,
+        source_binary: "atm-daemon".to_string(),
+        attributes,
+    }
 }
 
 /// Wait for a daemon shutdown task to finish within `timeout`.
@@ -423,6 +548,17 @@ pub async fn run(
                     }
 
                     for mut inbox_msg in inbox_msgs {
+                        let dispatch_started_at = Instant::now();
+                        let message_id = inbox_msg.message_id.clone();
+                        let dispatch_trace_id = dispatch_trace_id(&event, message_id.as_deref());
+                        let dispatch_root_span_id =
+                            agent_team_mail_core::event_log::span_id_for_action(
+                                &dispatch_trace_id,
+                                "dispatch_message",
+                            );
+                        let otel_config = OtelConfig::from_env();
+                        let mut dispatch_failed = false;
+
                         emit_event_best_effort(EventFields {
                             level: "info",
                             source: "atm-daemon",
@@ -457,10 +593,35 @@ pub async fn run(
                         // Dispatch to all plugins with EventListener capability
                         for (metadata, plugin_arc) in &dispatch_plugins {
                             if metadata.capabilities.contains(&Capability::EventListener) {
+                                let plugin_dispatch_started_at = Instant::now();
                                 // Await lock to avoid dropping events under load
                                 let mut plugin = plugin_arc.lock().await;
                                 debug!("Dispatching to plugin: {}", metadata.name);
-                                if let Err(e) = plugin.handle_message(&inbox_msg).await {
+                                let dispatch_result = plugin.handle_message(&inbox_msg).await;
+                                let (trace_status, trace_error) = match &dispatch_result {
+                                    Ok(_) => (TraceStatus::Ok, None),
+                                    Err(e) => (TraceStatus::Error, Some(e.to_string())),
+                                };
+                                export_trace_records_best_effort(
+                                    &[build_plugin_dispatch_trace_record(
+                                        &event,
+                                        message_id.as_deref(),
+                                        &dispatch_trace_id,
+                                        &dispatch_root_span_id,
+                                        PluginDispatchTrace {
+                                            plugin_name: metadata.name,
+                                            operation: "handle_message",
+                                            duration_ms: plugin_dispatch_started_at.elapsed()
+                                                .as_millis()
+                                                as u64,
+                                            status: trace_status,
+                                            error: trace_error.as_deref(),
+                                        },
+                                    )],
+                                    &otel_config,
+                                );
+                                if let Err(e) = dispatch_result {
+                                    dispatch_failed = true;
                                     emit_event_best_effort(EventFields {
                                         level: "error",
                                         source: "atm-daemon",
@@ -479,6 +640,22 @@ pub async fn run(
                                 }
                             }
                         }
+
+                        export_trace_records_best_effort(
+                            &[build_dispatch_root_trace_record(
+                                &event,
+                                message_id.as_deref(),
+                                &dispatch_trace_id,
+                                &dispatch_root_span_id,
+                                dispatch_started_at.elapsed().as_millis() as u64,
+                                if dispatch_failed {
+                                    TraceStatus::Error
+                                } else {
+                                    TraceStatus::Ok
+                                },
+                            )],
+                            &otel_config,
+                        );
                     }
                 }
             }
@@ -1741,13 +1918,21 @@ fn format_timestamp(time: SystemTime) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{InboxCursor, build_logging_health_snapshot, read_new_inbox_messages};
+    use super::{
+        InboxCursor, PluginDispatchTrace, build_dispatch_root_trace_record,
+        build_logging_health_snapshot, build_plugin_dispatch_trace_record, dispatch_trace_id,
+        read_new_inbox_messages,
+    };
+    use crate::daemon::InboxEventKind;
     use crate::daemon::session_registry::new_session_registry;
     use crate::daemon::socket::new_state_store;
     use crate::plugins::worker_adapter::AgentState;
+    use agent_team_mail_core::event_log::span_id_for_action;
     use agent_team_mail_core::schema::InboxMessage;
+    use sc_observability::TraceStatus;
     use std::collections::HashMap;
     use std::fs as stdfs;
+    use std::path::PathBuf;
     use std::time::Duration;
     use tempfile::TempDir;
     use tokio::fs;
@@ -1755,6 +1940,16 @@ mod tests {
     async fn write_inbox(path: &std::path::Path, msgs: &[InboxMessage]) {
         let content = serde_json::to_string_pretty(msgs).unwrap();
         fs::write(path, content).await.unwrap();
+    }
+
+    fn sample_inbox_event() -> crate::daemon::InboxEvent {
+        crate::daemon::InboxEvent {
+            team: "atm-dev".to_string(),
+            agent: "arch-ctm".to_string(),
+            path: PathBuf::from("/tmp/atm-dev/arch-ctm/inbox.json"),
+            kind: InboxEventKind::MessageReceived,
+            origin: None,
+        }
     }
 
     #[test]
@@ -1828,6 +2023,68 @@ mod tests {
                 .unwrap_or_default()
                 .contains("disabled"),
             "expected disabled reason in last_error"
+        );
+    }
+
+    #[test]
+    fn test_build_plugin_dispatch_trace_record_links_to_parent_span() {
+        let event = sample_inbox_event();
+        let trace_id = dispatch_trace_id(&event, Some("msg-123"));
+        let root_span_id = span_id_for_action(&trace_id, "dispatch_message");
+
+        let record = build_plugin_dispatch_trace_record(
+            &event,
+            Some("msg-123"),
+            &trace_id,
+            &root_span_id,
+            PluginDispatchTrace {
+                plugin_name: "ci-monitor",
+                operation: "handle_message",
+                duration_ms: 17,
+                status: TraceStatus::Ok,
+                error: None,
+            },
+        );
+
+        assert_eq!(record.trace_id, trace_id);
+        assert_eq!(
+            record.parent_span_id.as_deref(),
+            Some(root_span_id.as_str())
+        );
+        assert_eq!(record.status, TraceStatus::Ok);
+        assert_eq!(record.name, "atm-daemon.plugin.ci-monitor.handle_message");
+        assert_eq!(
+            record.attributes.get("plugin").and_then(|v| v.as_str()),
+            Some("ci-monitor")
+        );
+        assert_eq!(
+            record.attributes.get("operation").and_then(|v| v.as_str()),
+            Some("handle_message")
+        );
+    }
+
+    #[test]
+    fn test_build_dispatch_root_trace_record_uses_message_context() {
+        let event = sample_inbox_event();
+        let trace_id = dispatch_trace_id(&event, Some("msg-456"));
+        let root_span_id = span_id_for_action(&trace_id, "dispatch_message");
+
+        let record = build_dispatch_root_trace_record(
+            &event,
+            Some("msg-456"),
+            &trace_id,
+            &root_span_id,
+            42,
+            TraceStatus::Error,
+        );
+
+        assert_eq!(record.trace_id, trace_id);
+        assert_eq!(record.span_id, root_span_id);
+        assert_eq!(record.status, TraceStatus::Error);
+        assert_eq!(record.name, "atm-daemon.dispatch_message");
+        assert_eq!(
+            record.attributes.get("message_id").and_then(|v| v.as_str()),
+            Some("msg-456")
         );
     }
 

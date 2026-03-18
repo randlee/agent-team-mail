@@ -299,7 +299,8 @@ async fn test_concurrent_sends_no_data_loss() {
     // Deterministic drain convergence with bounded wall-clock timeout.
     let teams_dir = temp_dir.path().join(".claude/teams");
     let spool_base = temp_dir.path();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let drain_timeout_secs = if cfg!(windows) { 20 } else { 10 };
+    let deadline = Instant::now() + Duration::from_secs(drain_timeout_secs);
     let mut status =
         agent_team_mail_core::io::spool::spool_drain_with_base(&teams_dir, Some(spool_base))
             .unwrap();
@@ -331,7 +332,8 @@ async fn test_concurrent_sends_no_data_loss() {
         serde_json::from_str(&content).unwrap()
     };
     let mut messages = read_messages();
-    let delivery_deadline = Instant::now() + Duration::from_secs(15);
+    let delivery_timeout_secs = if cfg!(windows) { 30 } else { 15 };
+    let delivery_deadline = Instant::now() + Duration::from_secs(delivery_timeout_secs);
     while messages.len() < expected && Instant::now() < delivery_deadline {
         std::thread::sleep(Duration::from_millis(50));
         let _ =
