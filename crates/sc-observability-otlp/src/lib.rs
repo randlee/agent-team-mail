@@ -382,6 +382,14 @@ fn build_logs_payload(record: &TransportRecord) -> Value {
         "value": { "stringValue": record.source_binary },
     })];
     let mut attributes = vec![];
+    attributes.push(json!({
+        "key": "service_name",
+        "value": { "stringValue": record.source_binary },
+    }));
+    attributes.push(json!({
+        "key": "service.name",
+        "value": { "stringValue": record.source_binary },
+    }));
     // Callers are responsible for honoring the co-presence rule for
     // team/agent/runtime when session_id is emitted; the OTLP adapter only
     // forwards the already-shaped canonical correlation attributes.
@@ -932,6 +940,8 @@ mod tests {
 
         let attrs = record["attributes"].as_array().expect("attributes array");
         for expected in [
+            ("service_name", "atm"),
+            ("service.name", "atm"),
             ("team", "atm-dev"),
             ("agent", "arch-ctm"),
             ("runtime", "codex"),

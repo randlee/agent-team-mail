@@ -180,7 +180,7 @@ for s in streams[:3]:
 **PASS criteria**:
 
 - at least one ATM log stream is returned
-- `service_name=atm`
+- the event exposes `service_name=atm` via label or detected field
 - the event exposes `team`, `agent`, `runtime`, and `session_id`
 - the event exposes a concrete level mapping rather than `unknown`
 
@@ -207,9 +207,9 @@ sleep 20
 This sequence is intended to cover:
 
 - CLI trace root spans such as `atm.command.status`, `atm.command.send`, `atm.command.read`
-- CLI metrics such as `atm.commands_total`, `atm.command_duration_ms`, and message counters
+- CLI metrics such as `atm_commands_count_total`, `atm_command_duration_ms_milliseconds_{bucket,count,sum}`, `atm_messages_sent_count_total`, `atm_messages_read_count_total`, `atm_spool_file_count`, and `atm_dropped_events_total_count`
 - daemon trace spans such as `atm-daemon.dispatch_message`
-- daemon metrics such as `atm_daemon.request_count` and `atm_daemon.request_duration_ms`
+- daemon metrics such as `atm_daemon_request_count_total` and `atm_daemon_request_duration_ms_milliseconds_{bucket,count,sum}`
 
 ### D.2 — Query Tempo for CLI traces
 
@@ -252,13 +252,13 @@ print(json.dumps(d, indent=2)[:2000])
 
 ### D.4 — Query Mimir for metrics
 
-Use regexes so the smoke stays resilient if the backend normalizes dotted names to underscored equivalents.
+Use the confirmed Mimir metric names directly.
 
 ```bash
 curl -s -G "$ATM_MIMIR_QUERY_ENDPOINT" \
   -H "$ATM_MIMIR_AUTH_HEADER" \
   -H "X-Scope-OrgID: $ATM_MIMIR_SCOPE_ORGID" \
-  --data-urlencode 'query={__name__=~"atm[._](commands_total|command_duration_ms|messages_sent_total|messages_read_total)|atm_daemon[._](request_count|request_duration_ms|spool_size|dropped_events_total|export_failures_total)",session_id="'"$SESSION_TAG"'"}' \
+  --data-urlencode 'query={__name__=~"(atm_command_duration_ms_milliseconds_(bucket|count|sum)|atm_commands_count_total|atm_dropped_events_total_count|atm_messages_read_count_total|atm_messages_sent_count_total|atm_spool_file_count|atm_daemon_request_count_total|atm_daemon_request_duration_ms_milliseconds_(bucket|count|sum))",session_id="'"$SESSION_TAG"'"}' \
   | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
@@ -271,6 +271,19 @@ print(json.dumps(d, indent=2)[:2400])
 - at least one CLI metric series is present for the session
 - at least one daemon metric series is present for the session or runtime
 - metric labels expose the expected correlation dimensions where applicable
+
+### D.4.a — Confirmed metric reference
+
+| Signal | Confirmed Mimir series |
+|---|---|
+| CLI command count | `atm_commands_count_total` |
+| CLI command duration | `atm_command_duration_ms_milliseconds_{bucket,count,sum}` |
+| CLI messages sent | `atm_messages_sent_count_total` |
+| CLI messages read | `atm_messages_read_count_total` |
+| CLI spool gauge | `atm_spool_file_count` |
+| CLI dropped-events gauge | `atm_dropped_events_total_count` |
+| Daemon request count | `atm_daemon_request_count_total` |
+| Daemon request duration | `atm_daemon_request_duration_ms_milliseconds_{bucket,count,sum}` |
 
 ### D.5 — Fail-open on unreachable collector
 
