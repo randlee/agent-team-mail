@@ -123,7 +123,7 @@ fn build_command_metric_records(
     );
 
     records.push(build_metric_record(
-        "atm.commands_total",
+        "atm.commands_count",
         MetricKind::Counter,
         1.0,
         Some("count"),
@@ -139,14 +139,14 @@ fn build_command_metric_records(
 
     match command_name {
         "send" | "broadcast" | "request" => records.push(build_metric_record(
-            "atm.messages_sent_total",
+            "atm.messages_sent_count",
             MetricKind::Counter,
             1.0,
             Some("count"),
             base_attrs.clone(),
         )),
         "read" | "inbox" => records.push(build_metric_record(
-            "atm.messages_read_total",
+            "atm.messages_read_count",
             MetricKind::Counter,
             1.0,
             Some("count"),
@@ -186,7 +186,7 @@ fn build_command_metric_records(
                 serde_json::Value::String(otel.collector_state),
             );
             records.push(build_metric_record(
-                "atm.export_failures_total",
+                "atm.export_failures_count",
                 MetricKind::Counter,
                 1.0,
                 Some("count"),
