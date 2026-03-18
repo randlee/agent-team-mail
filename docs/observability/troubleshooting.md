@@ -5,7 +5,8 @@ blocking ATM workflows.
 
 ## Mandatory Behavior
 
-- Local structured logging is always considered available (`local_structured=true`).
+- Canonical local structured logging remains the source-of-truth sink for
+  operator diagnostics.
 - OTel export is fail-open: exporter issues must not fail `atm` commands.
 - `atm doctor --json` and `atm status --json` expose the locked
   `logging_health` object from
@@ -41,7 +42,7 @@ blocking ATM workflows.
 
 ## Common Error Conditions
 
-- `logging_health.last_export_error` present:
+- `logging_health.last_error.*` present:
   - Treat as non-fatal exporter/local-health signal.
   - Continue normal operations; investigate exporter/env/path configuration.
 - `ATM_OTEL_ENABLED=false|0|off|disabled|no`:
@@ -56,3 +57,15 @@ blocking ATM workflows.
 - `atm doctor --json`
 - `atm status --json`
 - `atm logs --limit 50`
+
+## Dogfood Smoke
+
+After `scripts/dev-install`, run:
+
+- `scripts/otel-dev-install-smoke.py`
+
+This validates:
+
+- live OTLP/HTTP collector export from the installed dev binaries
+- preserved canonical local logging and `.otel.jsonl` mirror
+- fail-open behavior when the collector becomes unavailable

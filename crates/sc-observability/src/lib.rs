@@ -928,9 +928,14 @@ mod tests {
     use super::*;
     use agent_team_mail_core::logging_event::new_log_event;
     use serial_test::serial;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
+    use std::time::Instant;
     use tempfile::TempDir;
 
     #[derive(Default)]
@@ -946,6 +951,88 @@ mod tests {
                 attempts: AtomicUsize::new(0),
                 fail_for: AtomicUsize::new(failures),
                 records: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    struct TestCollector {
+        endpoint: String,
+        requests: Arc<Mutex<Vec<String>>>,
+        join: Option<thread::JoinHandle<()>>,
+    }
+
+    impl TestCollector {
+        fn start(status_line: &'static str) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind collector");
+            listener
+                .set_nonblocking(true)
+                .expect("collector nonblocking");
+            let addr = listener.local_addr().expect("collector addr");
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let shared = Arc::clone(&requests);
+            let join = thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while Instant::now() < deadline {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let mut request = Vec::new();
+                            let mut header_buf = [0_u8; 4096];
+                            let header_len = stream.read(&mut header_buf).expect("read request");
+                            request.extend_from_slice(&header_buf[..header_len]);
+                            let header_text = String::from_utf8_lossy(&request);
+                            let content_length = header_text
+                                .lines()
+                                .find_map(|line| {
+                                    let (name, value) = line.split_once(':')?;
+                                    (name.eq_ignore_ascii_case("content-length"))
+                                        .then(|| value.trim().parse::<usize>().ok())
+                                        .flatten()
+                                })
+                                .unwrap_or(0);
+                            let header_end = header_text
+                                .find("\r\n\r\n")
+                                .map(|idx| idx + 4)
+                                .unwrap_or(request.len());
+                            let body_read = request.len().saturating_sub(header_end);
+                            if body_read < content_length {
+                                let mut body = vec![0_u8; content_length - body_read];
+                                stream.read_exact(&mut body).expect("read request body");
+                                request.extend_from_slice(&body);
+                            }
+                            shared
+                                .lock()
+                                .expect("collector lock")
+                                .push(String::from_utf8_lossy(&request).to_string());
+                            let response = format!(
+                                "HTTP/1.1 {status_line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            );
+                            stream
+                                .write_all(response.as_bytes())
+                                .expect("write response");
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(err) => panic!("collector accept failed: {err}"),
+                    }
+                }
+            });
+            Self {
+                endpoint: format!("http://{addr}"),
+                requests,
+                join: Some(join),
+            }
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.requests.lock().expect("collector lock").clone()
+        }
+    }
+
+    impl Drop for TestCollector {
+        fn drop(&mut self) {
+            if let Some(join) = self.join.take() {
+                join.join().expect("collector thread should join");
             }
         }
     }
@@ -1314,6 +1401,121 @@ mod tests {
         assert_eq!(parsed.action, "command_end");
         assert_eq!(parsed.outcome.as_deref(), Some("success"));
         assert_eq!(parsed.fields.get("code").and_then(|v| v.as_u64()), Some(0));
+    }
+
+    #[test]
+    #[serial]
+    fn logger_emit_exports_to_http_collector_and_local_mirror() {
+        let collector = TestCollector::start("200 OK");
+        let tmp = TempDir::new().expect("temp dir");
+        let cfg = LogConfig {
+            log_path: tmp.path().join("atm.log.jsonl"),
+            spool_dir: tmp.path().join("log-spool"),
+            level: LogLevel::Info,
+            message_preview_enabled: false,
+            max_bytes: DEFAULT_MAX_BYTES,
+            max_files: DEFAULT_MAX_FILES,
+            retention_days: DEFAULT_RETENTION_DAYS,
+            queue_capacity: DEFAULT_QUEUE_CAPACITY,
+            max_event_bytes: DEFAULT_MAX_EVENT_BYTES,
+        };
+
+        unsafe {
+            std::env::set_var("ATM_OTEL_ENABLED", "true");
+            std::env::set_var("ATM_OTEL_ENDPOINT", &collector.endpoint);
+        }
+
+        let logger = Logger::new(cfg.clone());
+        let mut event = new_log_event("atm", "command_success", "atm::config", "info");
+        event.fields.insert(
+            "command".to_string(),
+            serde_json::Value::String("config".to_string()),
+        );
+        logger.emit(&event).expect("emit should succeed");
+
+        let requests = collector.requests();
+        assert_eq!(requests.len(), 1, "collector should receive one request");
+        assert!(
+            requests[0].starts_with("POST /v1/logs HTTP/1.1"),
+            "collector request should target OTLP logs endpoint: {requests:?}"
+        );
+        assert!(
+            requests[0].contains("\"command_success\""),
+            "collector payload should include the emitted action: {requests:?}"
+        );
+
+        let canonical = fs::read_to_string(&cfg.log_path).expect("canonical log should exist");
+        assert!(canonical.contains("\"command_success\""));
+        let sidecar_path = default_otel_path(&cfg.log_path);
+        let sidecar = fs::read_to_string(sidecar_path).expect("otel sidecar should exist");
+        assert!(sidecar.contains("\"command_success\""));
+
+        unsafe {
+            std::env::remove_var("ATM_OTEL_ENABLED");
+            std::env::remove_var("ATM_OTEL_ENDPOINT");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn logger_emit_remains_fail_open_when_collector_returns_error() {
+        let collector = TestCollector::start("503 Service Unavailable");
+        let tmp = TempDir::new().expect("temp dir");
+        let cfg = LogConfig {
+            log_path: tmp.path().join("atm.log.jsonl"),
+            spool_dir: tmp.path().join("log-spool"),
+            level: LogLevel::Info,
+            message_preview_enabled: false,
+            max_bytes: DEFAULT_MAX_BYTES,
+            max_files: DEFAULT_MAX_FILES,
+            retention_days: DEFAULT_RETENTION_DAYS,
+            queue_capacity: DEFAULT_QUEUE_CAPACITY,
+            max_event_bytes: DEFAULT_MAX_EVENT_BYTES,
+        };
+
+        unsafe {
+            std::env::set_var("ATM_OTEL_ENABLED", "true");
+            std::env::set_var("ATM_OTEL_ENDPOINT", &collector.endpoint);
+            std::env::set_var("ATM_OTEL_RETRY_MAX_ATTEMPTS", "0");
+        }
+
+        let logger = Logger::new(cfg.clone());
+        let start = Instant::now();
+        logger
+            .emit(&new_log_event(
+                "atm",
+                "command_error",
+                "atm::config",
+                "error",
+            ))
+            .expect("emit should remain fail-open");
+
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "collector outage should not block logging"
+        );
+        let requests = collector.requests();
+        assert_eq!(
+            requests.len(),
+            1,
+            "collector outage should still attempt one POST"
+        );
+        assert!(
+            requests[0].contains("\"command_error\""),
+            "collector outage payload should preserve the emitted action: {requests:?}"
+        );
+
+        let canonical = fs::read_to_string(&cfg.log_path).expect("canonical log should exist");
+        assert!(canonical.contains("\"command_error\""));
+        let sidecar_path = default_otel_path(&cfg.log_path);
+        let sidecar = fs::read_to_string(sidecar_path).expect("otel sidecar should exist");
+        assert!(sidecar.contains("\"command_error\""));
+
+        unsafe {
+            std::env::remove_var("ATM_OTEL_ENABLED");
+            std::env::remove_var("ATM_OTEL_ENDPOINT");
+            std::env::remove_var("ATM_OTEL_RETRY_MAX_ATTEMPTS");
+        }
     }
 
     #[test]
