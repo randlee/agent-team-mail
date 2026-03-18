@@ -2998,17 +2998,17 @@ mod tests {
   "version": "0.44.1",
   "written_at": "2026-03-02T00:00:00Z"
 }}"#,
-                executable_path = executable_path.display(),
-                home_scope = home_scope.display(),
+                executable_path = executable_path.to_string_lossy().replace('\\', "/"),
+                home_scope = home_scope.to_string_lossy().replace('\\', "/"),
             ),
         )
         .unwrap();
 
         let findings = check_daemon_ownership_mismatch(tmp.path());
+        let home_scope_str = home_scope.to_string_lossy().replace('\\', "/");
         assert!(
             findings.iter().any(|f| {
-                f.code == "DAEMON_OWNERSHIP_MISMATCH"
-                    && f.message.contains(home_scope.to_string_lossy().as_ref())
+                f.code == "DAEMON_OWNERSHIP_MISMATCH" && f.message.contains(home_scope_str.as_str())
             }),
             "expected home-scope mismatch finding, got: {findings:?}"
         );
@@ -3034,7 +3034,7 @@ mod tests {
   }}
 }}"#,
                 std::process::id(),
-                binary = binary.display(),
+                binary = binary.to_string_lossy().replace('\\', "/"),
             ),
         )
         .unwrap();
