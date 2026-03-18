@@ -75,6 +75,7 @@ pub(crate) fn notify_gh_monitor_health_transition(
         }
         let message = InboxMessage {
             from: from_agent.clone(),
+            source_team: None,
             text: text.clone(),
             timestamp: chrono::Utc::now().to_rfc3339(),
             read: false,

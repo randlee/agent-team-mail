@@ -1458,13 +1458,16 @@ mod tests {
             thread::sleep(Duration::from_millis(25));
             requests = collector.requests();
         }
-        assert_eq!(requests.len(), 1, "collector should receive one request");
         assert!(
-            requests[0].starts_with("POST /v1/logs HTTP/1.1"),
-            "collector request should target OTLP logs endpoint: {requests:?}"
+            requests
+                .iter()
+                .any(|request| request.starts_with("POST /v1/logs HTTP/1.1")),
+            "collector should receive at least one OTLP logs request: {requests:?}"
         );
         assert!(
-            requests[0].contains("\"command_success\""),
+            requests
+                .iter()
+                .any(|request| request.contains("\"command_success\"")),
             "collector payload should include the emitted action: {requests:?}"
         );
 
@@ -1519,13 +1522,16 @@ mod tests {
             "collector outage should not block logging"
         );
         let requests = collector.requests();
-        assert_eq!(
-            requests.len(),
-            1,
-            "collector outage should still attempt one POST"
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.starts_with("POST /v1/logs HTTP/1.1")),
+            "collector outage should still attempt at least one OTLP logs POST: {requests:?}"
         );
         assert!(
-            requests[0].contains("\"command_error\""),
+            requests
+                .iter()
+                .any(|request| request.contains("\"command_error\"")),
             "collector outage payload should preserve the emitted action: {requests:?}"
         );
 

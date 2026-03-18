@@ -166,6 +166,7 @@ fn register_team_lead(
         let inbox_path = inboxes_dir.join(format!("{}.json", member.name));
         let msg = InboxMessage {
             from: "team-lead".to_string(),
+            source_team: None,
             text: notify_text.to_string(),
             timestamp: Utc::now().to_rfc3339(),
             read: false,

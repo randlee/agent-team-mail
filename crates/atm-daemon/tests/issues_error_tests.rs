@@ -238,6 +238,7 @@ async fn test_handle_message_with_invalid_format() {
     // Test with message that doesn't have [issue:NUMBER] prefix
     let msg = InboxMessage {
         from: "test-user".to_string(),
+        source_team: None,
         text: "This is not an issue reply".to_string(),
         timestamp: chrono::Utc::now().to_rfc3339(),
         read: false,
@@ -256,6 +257,7 @@ async fn test_handle_message_with_invalid_format() {
     // Test with invalid issue number
     let msg2 = InboxMessage {
         from: "test-user".to_string(),
+        source_team: None,
         text: "[issue:abc] Invalid number".to_string(),
         timestamp: chrono::Utc::now().to_rfc3339(),
         read: false,
@@ -292,6 +294,7 @@ async fn test_handle_message_with_empty_body() {
     // Test with message that has [issue:NUMBER] but empty body
     let msg = InboxMessage {
         from: "test-user".to_string(),
+        source_team: None,
         text: "[issue:42]".to_string(), // No reply body
         timestamp: chrono::Utc::now().to_rfc3339(),
         read: false,

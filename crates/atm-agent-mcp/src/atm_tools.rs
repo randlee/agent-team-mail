@@ -171,6 +171,7 @@ fn build_message(from: &str, text: String, summary: Option<String>) -> InboxMess
     let auto_sum = auto_summary(&text);
     InboxMessage {
         from: from.to_string(),
+        source_team: None,
         text,
         timestamp: now_iso8601(),
         read: false,
@@ -978,6 +979,7 @@ mod tests {
     fn make_msg(from: &str, text: &str, read: bool, msg_id: Option<&str>) -> InboxMessage {
         InboxMessage {
             from: from.to_string(),
+            source_team: None,
             text: text.to_string(),
             timestamp: "2026-02-18T10:00:00Z".to_string(),
             read,
@@ -1423,6 +1425,7 @@ mod tests {
         // Seed 3 messages with distinct timestamps
         let old_msg = InboxMessage {
             from: "sender".to_string(),
+            source_team: None,
             text: "old message".to_string(),
             timestamp: "2026-01-01T00:00:00Z".to_string(),
             read: false,
@@ -1432,6 +1435,7 @@ mod tests {
         };
         let middle_msg = InboxMessage {
             from: "sender".to_string(),
+            source_team: None,
             text: "middle message".to_string(),
             timestamp: "2026-02-01T00:00:00Z".to_string(),
             read: false,
@@ -1441,6 +1445,7 @@ mod tests {
         };
         let future_msg = InboxMessage {
             from: "sender".to_string(),
+            source_team: None,
             text: "future message".to_string(),
             timestamp: "2026-03-01T00:00:00Z".to_string(),
             read: false,

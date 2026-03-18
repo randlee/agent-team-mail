@@ -516,6 +516,7 @@ fn test_spool_drain_delivery_cycle() {
     // Step 2: Try to append message - should be queued
     let message = InboxMessage {
         from: "tester".to_string(),
+        source_team: None,
         text: "Spooled message".to_string(),
         timestamp: chrono::Utc::now().to_rfc3339(),
         read: false,

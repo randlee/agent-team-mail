@@ -281,6 +281,7 @@ fn send_shutdown_request(home_dir: &Path, team_name: &str, agent_name: &str) -> 
 
     let msg = InboxMessage {
         from: "atm".to_string(),
+        source_team: None,
         text: shutdown_payload.to_string(),
         timestamp: Utc::now().to_rfc3339(),
         read: false,

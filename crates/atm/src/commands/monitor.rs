@@ -212,6 +212,7 @@ fn send_alerts(
         }
         let msg = InboxMessage {
             from: "atm-monitor".to_string(),
+            source_team: None,
             text: human.clone(),
             timestamp: timestamp.clone(),
             read: false,
