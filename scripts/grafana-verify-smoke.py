@@ -166,8 +166,10 @@ def main() -> int:
                     "atm_bin": str(atm_bin),
                     "required_env": [
                         "ATM_OTEL_ENDPOINT",
-                        "ATM_OTEL_AUTH_HEADER",
                         "ATM_LOKI_ENDPOINT",
+                    ],
+                    "optional_env": [
+                        "ATM_OTEL_AUTH_HEADER",
                         "ATM_LOKI_AUTH_HEADER",
                     ],
                     "commands": [
