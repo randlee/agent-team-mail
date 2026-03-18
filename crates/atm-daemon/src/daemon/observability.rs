@@ -99,3 +99,15 @@ pub fn current_otel_health(log_path: &Path) -> OtelHealthSnapshot {
         .clone();
     hook.map(|hook| hook(log_path)).unwrap_or_default()
 }
+
+pub fn current_session_id() -> Option<String> {
+    for key in ["CLAUDE_SESSION_ID", "ATM_SESSION_ID", "CODEX_THREAD_ID"] {
+        if let Ok(value) = std::env::var(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
