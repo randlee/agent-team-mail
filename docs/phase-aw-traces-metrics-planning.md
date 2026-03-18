@@ -80,6 +80,10 @@ Trace and metric query recipes are documented for dashboard rollout, but the
 smoke script remains logs-focused because that is the least brittle remote
 verification surface across Grafana-compatible OTLP deployments.
 
+AW.5 smoke therefore covers the logs endpoint only, in both dry-run and live
+connectivity modes. Full traces-and-metrics smoke against Tempo/Mimir-class
+backends requires live endpoints and is deferred to AW.7 and later.
+
 ## Dependencies
 
 - AV must be merged and stable as a logs rollout.
@@ -122,5 +126,7 @@ AW should deliver:
 1. ATM emits native OTLP traces and metrics in addition to logs.
 2. Logs/traces/metrics all remain fail-open with local logging preserved.
 3. `sc-observability-otlp` remains the only transport-owning crate.
-4. Grafana smoke covers logs, traces, and metrics end-to-end.
+4. Grafana smoke covers the logs endpoint end-to-end, with trace and metric
+   dashboard recipes published and full live traces-and-metrics smoke deferred
+   to AW.7+.
 5. External consumer repos have a concrete adoption contract and checklist.

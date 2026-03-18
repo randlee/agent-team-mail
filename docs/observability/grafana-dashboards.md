@@ -105,6 +105,9 @@ Purpose:
 Use these against Tempo or another Grafana-compatible trace backend after AW
 trace rollout is enabled.
 
+Span names in the recipes below match the instrumentation in
+`crates/sc-observability/src/trace.rs`.
+
 ### 1. ATM command traces
 
 ```traceql
@@ -164,6 +167,41 @@ histogram_quantile(0.95, sum by (le) (rate(subagent_run_duration_ms_bucket[5m]))
 sum(rate(errors_total[5m]))
 ```
 
+### 6. Export failures
+
+```promql
+sum by (service_name) (rate(otel_export_errors_total[5m]))
+```
+
+Purpose:
+- track OTLP exporter failures by emitting binary or service
+- distinguish collector/backoff problems from healthy local fail-open logging
+
+### 7. Spool growth
+
+```promql
+max by (runtime) (atm_spool_dir_bytes) or max by (runtime) (atm_spool_dir_entries)
+```
+
+Purpose:
+- detect sustained local spool growth when remote export is degraded
+- spot runtimes that are accumulating fail-open backlog instead of draining
+
+### 8. Daemon request volume and latency
+
+```promql
+sum by (plugin, method) (rate(atm_daemon_requests_total[5m]))
+or
+histogram_quantile(
+  0.95,
+  sum by (le, plugin, method) (rate(atm_daemon_request_duration_ms_bucket[5m]))
+)
+```
+
+Purpose:
+- monitor daemon plugin request volume by route
+- surface p95 latency regressions in daemon request handling
+
 ## Suggested Dashboard Panels
 
 ### Logs
@@ -184,6 +222,9 @@ sum(rate(errors_total[5m]))
 - subagent activity by `runtime`
 - error/warning rates
 - duration percentiles for subagent runs
+- OTLP export failures by `service_name`
+- spool growth by `runtime`
+- daemon request volume and p95 latency by `plugin` / `method`
 
 ## Smoke Expectations
 
