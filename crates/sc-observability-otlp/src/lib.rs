@@ -12,6 +12,12 @@ use thiserror::Error;
 pub const OTLP_HTTP_PROTOCOL: &str = "otlp_http";
 pub const DEFAULT_TIMEOUT_MS: u64 = 1_500;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportExporterKind {
+    Collector,
+    DebugLocal,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransportConfig {
     pub endpoint: Option<String>,
@@ -72,6 +78,7 @@ pub enum TransportError {
 }
 
 pub trait TransportExporter: Send + Sync {
+    fn kind(&self) -> TransportExporterKind;
     fn export(&self, record: &TransportRecord) -> Result<(), TransportError>;
 }
 
@@ -141,6 +148,10 @@ impl OtlpHttpExporter {
 }
 
 impl TransportExporter for OtlpHttpExporter {
+    fn kind(&self) -> TransportExporterKind {
+        TransportExporterKind::Collector
+    }
+
     fn export(&self, record: &TransportRecord) -> Result<(), TransportError> {
         let body = build_logs_payload(record);
         let response = self
@@ -189,6 +200,10 @@ impl StdoutDebugExporter {
 }
 
 impl TransportExporter for StdoutDebugExporter {
+    fn kind(&self) -> TransportExporterKind {
+        TransportExporterKind::DebugLocal
+    }
+
     fn export(&self, record: &TransportRecord) -> Result<(), TransportError> {
         let line =
             serde_json::to_string(record).map_err(|err| TransportError::Stdout(err.to_string()))?;

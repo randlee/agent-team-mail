@@ -1,7 +1,9 @@
 //! Main daemon event loop
 
 use crate::daemon::pid_backend_validation::{roster_process_id, validate_pid_backend};
-use crate::daemon::status::{LoggingHealth, PluginStatus, PluginStatusKind, StatusWriter};
+use crate::daemon::status::{
+    LoggingHealth, OtelHealth, PluginStatus, PluginStatusKind, StatusWriter,
+};
 use crate::daemon::{
     InboxEvent, InboxEventKind, LogEventQueue, SharedDedupeStore, SharedPubSubStore,
     SharedSessionRegistry, SharedStateStore, SharedStreamEventSender,
@@ -1433,10 +1435,13 @@ async fn status_writer_loop(
     let plugin_statuses = build_plugin_statuses(&plugins, &init_failed_plugins, &ctx).await;
     let teams = get_active_teams(&ctx).await;
     let logging = build_logging_health(&ctx, &log_event_queue).await;
+    let otel = build_otel_health(&ctx);
     if let Err(e) = status_writer.write_daemon_touch(&teams) {
         error!("Failed to write daemon touch sidecar: {}", e);
     }
-    if let Err(e) = status_writer.write_status(plugin_statuses.clone(), teams.clone(), logging) {
+    if let Err(e) =
+        status_writer.write_status(plugin_statuses.clone(), teams.clone(), logging, otel)
+    {
         error!("Failed to write initial daemon status: {}", e);
     }
 
@@ -1456,8 +1461,9 @@ async fn status_writer_loop(
                     build_plugin_statuses(&plugins, &init_failed_plugins, &ctx).await;
                 let teams = get_active_teams(&ctx).await;
                 let logging = build_logging_health(&ctx, &log_event_queue).await;
+                let otel = build_otel_health(&ctx);
 
-                if let Err(e) = status_writer.write_status(plugin_statuses, teams, logging) {
+                if let Err(e) = status_writer.write_status(plugin_statuses, teams, logging, otel) {
                     error!("Failed to write daemon status: {}", e);
                 }
             }
@@ -1521,6 +1527,17 @@ fn build_logging_health_snapshot(
         spool_count,
         oldest_spool_age,
     }
+}
+
+fn build_otel_health(ctx: &PluginContext) -> OtelHealth {
+    let home_dir = ctx
+        .system
+        .claude_root
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let canonical_log_path = agent_team_mail_core::logging_event::configured_log_path(&home_dir);
+    sc_observability::current_otel_health(&canonical_log_path).into()
 }
 
 fn derive_logging_state(

@@ -7,6 +7,7 @@
 //! - socket error-code constants for the `log-event` contract
 
 use agent_team_mail_core::logging_event::{LogEventV1, ValidationError};
+use chrono::{SecondsFormat, Utc};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -143,7 +144,15 @@ pub enum OtelError {
 }
 
 pub trait OtelExporter: Send + Sync {
+    fn kind(&self) -> OtelExporterKind;
     fn export(&self, record: &OtelRecord) -> Result<(), OtelError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OtelExporterKind {
+    LocalMirror,
+    Collector,
+    DebugLocal,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -166,6 +175,10 @@ impl FileOtelExporter {
 }
 
 impl OtelExporter for FileOtelExporter {
+    fn kind(&self) -> OtelExporterKind {
+        OtelExporterKind::LocalMirror
+    }
+
     fn export(&self, record: &OtelRecord) -> Result<(), OtelError> {
         if let Some(parent) = self.path.parent()
             && let Err(err) = fs::create_dir_all(parent)
@@ -187,6 +200,7 @@ impl OtelExporter for FileOtelExporter {
 struct OtelPipeline {
     config: OtelConfig,
     exporters: Vec<Arc<dyn OtelExporter>>,
+    log_path: PathBuf,
     sleeper: fn(Duration),
 }
 
@@ -209,12 +223,217 @@ impl OtelPipeline {
         Self {
             config,
             exporters,
+            log_path: log_path.to_path_buf(),
             sleeper: std::thread::sleep,
         }
     }
 
     fn export_event(&self, event: &LogEventV1) -> Result<(), OtelError> {
-        export_otel_with_retry(event, &self.config, &self.exporters, self.sleeper)
+        export_otel_with_retry(
+            event,
+            &self.config,
+            &self.exporters,
+            &self.log_path,
+            self.sleeper,
+        )
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+pub struct OtelLastError {
+    pub code: Option<String>,
+    pub message: Option<String>,
+    pub at: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct OtelHealthSnapshot {
+    pub schema_version: String,
+    pub enabled: bool,
+    pub collector_endpoint: Option<String>,
+    pub protocol: String,
+    pub collector_state: String,
+    pub local_mirror_state: String,
+    pub local_mirror_path: String,
+    pub debug_local_export: bool,
+    pub debug_local_state: String,
+    pub last_error: OtelLastError,
+}
+
+impl Default for OtelHealthSnapshot {
+    fn default() -> Self {
+        Self {
+            schema_version: "v1".to_string(),
+            enabled: true,
+            collector_endpoint: None,
+            protocol: OTEL_PROTOCOL_HTTP.to_string(),
+            collector_state: "not_configured".to_string(),
+            local_mirror_state: "healthy".to_string(),
+            local_mirror_path: String::new(),
+            debug_local_export: false,
+            debug_local_state: "disabled".to_string(),
+            last_error: OtelLastError::default(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct OtelRuntimeHealth {
+    collector_error: Option<String>,
+    collector_error_at: Option<String>,
+    collector_success_at: Option<String>,
+    local_mirror_error: Option<String>,
+    local_mirror_error_at: Option<String>,
+    local_mirror_success_at: Option<String>,
+    debug_local_error: Option<String>,
+    debug_local_error_at: Option<String>,
+    debug_local_success_at: Option<String>,
+}
+
+fn otel_runtime_health_slot() -> &'static Mutex<OtelRuntimeHealth> {
+    static OTEL_RUNTIME_HEALTH: OnceLock<Mutex<OtelRuntimeHealth>> = OnceLock::new();
+    OTEL_RUNTIME_HEALTH.get_or_init(|| Mutex::new(OtelRuntimeHealth::default()))
+}
+
+fn now_rfc3339() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+fn note_export_success(kind: OtelExporterKind) {
+    let mut health = otel_runtime_health_slot()
+        .lock()
+        .expect("sc-observability otel health lock poisoned");
+    let now = now_rfc3339();
+    match kind {
+        OtelExporterKind::Collector => {
+            health.collector_error = None;
+            health.collector_error_at = None;
+            health.collector_success_at = Some(now);
+        }
+        OtelExporterKind::LocalMirror => {
+            health.local_mirror_error = None;
+            health.local_mirror_error_at = None;
+            health.local_mirror_success_at = Some(now);
+        }
+        OtelExporterKind::DebugLocal => {
+            health.debug_local_error = None;
+            health.debug_local_error_at = None;
+            health.debug_local_success_at = Some(now);
+        }
+    }
+}
+
+fn note_export_failure(kind: OtelExporterKind, err: &OtelError) {
+    let mut health = otel_runtime_health_slot()
+        .lock()
+        .expect("sc-observability otel health lock poisoned");
+    let now = now_rfc3339();
+    match kind {
+        OtelExporterKind::Collector => {
+            health.collector_error = Some(err.to_string());
+            health.collector_error_at = Some(now);
+        }
+        OtelExporterKind::LocalMirror => {
+            health.local_mirror_error = Some(err.to_string());
+            health.local_mirror_error_at = Some(now);
+        }
+        OtelExporterKind::DebugLocal => {
+            health.debug_local_error = Some(err.to_string());
+            health.debug_local_error_at = Some(now);
+        }
+    }
+}
+
+fn health_state(
+    configured: bool,
+    success_at: &Option<String>,
+    error_at: &Option<String>,
+) -> String {
+    if !configured {
+        return "disabled".to_string();
+    }
+    match (success_at, error_at) {
+        (Some(success), Some(error)) => {
+            if error > success {
+                "degraded".to_string()
+            } else {
+                "healthy".to_string()
+            }
+        }
+        (Some(_), None) => "healthy".to_string(),
+        (None, Some(_)) => "degraded".to_string(),
+        (None, None) => "configured".to_string(),
+    }
+}
+
+pub fn current_otel_health(log_path: &Path) -> OtelHealthSnapshot {
+    let config = OtelConfig::from_env();
+    let local_mirror_path = default_otel_path(log_path);
+    let health = otel_runtime_health_slot()
+        .lock()
+        .expect("sc-observability otel health lock poisoned");
+
+    let collector_configured = config.enabled
+        && config
+            .endpoint
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+    let debug_local_configured = config.enabled && config.debug_local_export;
+    let local_mirror_configured = config.enabled;
+
+    let last_error = if health.collector_error.is_some() {
+        OtelLastError {
+            code: Some("COLLECTOR_EXPORT_FAILED".to_string()),
+            message: health.collector_error.clone(),
+            at: health.collector_error_at.clone(),
+        }
+    } else if health.local_mirror_error.is_some() {
+        OtelLastError {
+            code: Some("LOCAL_MIRROR_EXPORT_FAILED".to_string()),
+            message: health.local_mirror_error.clone(),
+            at: health.local_mirror_error_at.clone(),
+        }
+    } else if health.debug_local_error.is_some() {
+        OtelLastError {
+            code: Some("DEBUG_LOCAL_EXPORT_FAILED".to_string()),
+            message: health.debug_local_error.clone(),
+            at: health.debug_local_error_at.clone(),
+        }
+    } else {
+        OtelLastError::default()
+    };
+
+    let collector_state = if !config.enabled {
+        "disabled".to_string()
+    } else if !collector_configured {
+        "not_configured".to_string()
+    } else {
+        health_state(
+            true,
+            &health.collector_success_at,
+            &health.collector_error_at,
+        )
+    };
+
+    OtelHealthSnapshot {
+        schema_version: "v1".to_string(),
+        enabled: config.enabled,
+        collector_endpoint: config.endpoint.clone(),
+        protocol: config.protocol.clone(),
+        collector_state,
+        local_mirror_state: health_state(
+            local_mirror_configured,
+            &health.local_mirror_success_at,
+            &health.local_mirror_error_at,
+        ),
+        local_mirror_path: local_mirror_path.to_string_lossy().into_owned(),
+        debug_local_export: config.debug_local_export,
+        debug_local_state: health_state(
+            debug_local_configured,
+            &health.debug_local_success_at,
+            &health.debug_local_error_at,
+        ),
+        last_error,
     }
 }
 
@@ -222,6 +441,7 @@ fn export_otel_with_retry(
     event: &LogEventV1,
     config: &OtelConfig,
     exporters: &[Arc<dyn OtelExporter>],
+    _log_path: &Path,
     sleeper: fn(Duration),
 ) -> Result<(), OtelError> {
     if !config.enabled {
@@ -239,8 +459,11 @@ fn export_otel_with_retry(
         let mut any_failed = false;
         for exporter in exporters {
             if let Err(err) = exporter.export(&record) {
+                note_export_failure(exporter.kind(), &err);
                 any_failed = true;
                 last_err = Some(err);
+            } else {
+                note_export_success(exporter.kind());
             }
         }
         if !any_failed {
@@ -276,8 +499,13 @@ pub fn export_otel_best_effort(
     let mut backoff = config.initial_backoff_ms;
     loop {
         if exporter.export(&record).is_ok() {
+            note_export_success(exporter.kind());
             return;
         }
+        note_export_failure(
+            exporter.kind(),
+            &OtelError::ExportFailed("best-effort exporter failed".to_string()),
+        );
         if attempt >= config.max_retries {
             return;
         }
@@ -382,6 +610,11 @@ fn build_otel_record(event: &LogEventV1) -> Result<OtelRecord, OtelError> {
         "action".to_string(),
         serde_json::Value::String(event.action.clone()),
     );
+    for (key, value) in &event.fields {
+        attributes
+            .entry(key.clone())
+            .or_insert_with(|| value.clone());
+    }
 
     Ok(OtelRecord {
         name: event.action.clone(),
@@ -578,6 +811,7 @@ impl Logger {
             otel: OtelPipeline {
                 config: otel_config,
                 exporters: vec![exporter],
+                log_path: PathBuf::new(),
                 sleeper: std::thread::sleep,
             },
         }
@@ -917,6 +1151,10 @@ mod tests {
     }
 
     impl OtelExporter for CountingExporter {
+        fn kind(&self) -> OtelExporterKind {
+            OtelExporterKind::Collector
+        }
+
         fn export(&self, record: &OtelRecord) -> Result<(), OtelError> {
             let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
             let fail_for = self.fail_for.load(Ordering::SeqCst);
@@ -1505,6 +1743,7 @@ mod tests {
                 ..OtelConfig::default()
             },
             &exporters,
+            Path::new("/tmp/atm.log.jsonl"),
             record_sleep,
         )
         .expect_err("should return final export error");
@@ -1595,6 +1834,40 @@ mod tests {
                 .get("subagent_id")
                 .and_then(|v| v.as_str()),
             Some("subagent-7")
+        );
+    }
+
+    #[test]
+    fn build_otel_record_projects_event_fields_without_overwriting_core_attributes() {
+        let mut event = new_log_event("sc-compose", "compose", "sc_compose::cli", "info");
+        event.fields.insert(
+            "runtime".to_string(),
+            serde_json::Value::String("claude".to_string()),
+        );
+        event.fields.insert(
+            "resolved_files".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(2)),
+        );
+        event.fields.insert(
+            "action".to_string(),
+            serde_json::Value::String("wrong".to_string()),
+        );
+
+        let record = build_otel_record(&event).expect("record should build");
+        assert_eq!(
+            record.attributes.get("runtime").and_then(|v| v.as_str()),
+            Some("claude")
+        );
+        assert_eq!(
+            record
+                .attributes
+                .get("resolved_files")
+                .and_then(|v| v.as_u64()),
+            Some(2)
+        );
+        assert_eq!(
+            record.attributes.get("action").and_then(|v| v.as_str()),
+            Some("compose")
         );
     }
 }

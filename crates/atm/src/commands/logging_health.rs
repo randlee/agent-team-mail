@@ -17,6 +17,38 @@ pub(crate) struct LoggingHealthSnapshot {
     pub(crate) oldest_spool_age: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct OtelHealthSnapshot {
+    pub(crate) schema_version: String,
+    pub(crate) enabled: bool,
+    pub(crate) collector_endpoint: Option<String>,
+    pub(crate) protocol: String,
+    pub(crate) collector_state: String,
+    pub(crate) local_mirror_state: String,
+    pub(crate) local_mirror_path: String,
+    pub(crate) debug_local_export: bool,
+    pub(crate) debug_local_state: String,
+    pub(crate) last_error: OtelLastError,
+}
+
+impl Default for OtelHealthSnapshot {
+    fn default() -> Self {
+        Self {
+            schema_version: "v1".to_string(),
+            enabled: true,
+            collector_endpoint: None,
+            protocol: "otlp_http".to_string(),
+            collector_state: "not_configured".to_string(),
+            local_mirror_state: "healthy".to_string(),
+            local_mirror_path: String::new(),
+            debug_local_export: false,
+            debug_local_state: "disabled".to_string(),
+            last_error: OtelLastError::default(),
+        }
+    }
+}
+
 impl Default for LoggingHealthSnapshot {
     fn default() -> Self {
         Self {
@@ -38,6 +70,13 @@ pub(crate) struct LastError {
     pub(crate) at: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct OtelLastError {
+    pub(crate) code: Option<String>,
+    pub(crate) message: Option<String>,
+    pub(crate) at: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct LoggingHealthContract {
     pub(crate) schema_version: String,
@@ -49,6 +88,37 @@ pub(crate) struct LoggingHealthContract {
     pub(crate) spool_file_count: u64,
     pub(crate) oldest_spool_age_seconds: Option<u64>,
     pub(crate) last_error: LastError,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OtelHealthContract {
+    pub(crate) schema_version: String,
+    pub(crate) enabled: bool,
+    pub(crate) collector_endpoint: Option<String>,
+    pub(crate) protocol: String,
+    pub(crate) collector_state: String,
+    pub(crate) local_mirror_state: String,
+    pub(crate) local_mirror_path: String,
+    pub(crate) debug_local_export: bool,
+    pub(crate) debug_local_state: String,
+    pub(crate) last_error: OtelLastError,
+}
+
+impl Default for OtelHealthContract {
+    fn default() -> Self {
+        Self {
+            schema_version: "v1".to_string(),
+            enabled: true,
+            collector_endpoint: None,
+            protocol: "otlp_http".to_string(),
+            collector_state: "not_configured".to_string(),
+            local_mirror_state: "healthy".to_string(),
+            local_mirror_path: String::new(),
+            debug_local_export: false,
+            debug_local_state: "disabled".to_string(),
+            last_error: OtelLastError::default(),
+        }
+    }
 }
 
 impl Default for LoggingHealthContract {
@@ -71,6 +141,8 @@ impl Default for LoggingHealthContract {
 struct DaemonStatusSnapshot {
     #[serde(default)]
     logging: LoggingHealthSnapshot,
+    #[serde(default)]
+    otel: OtelHealthSnapshot,
 }
 
 pub(crate) fn read_daemon_logging_health(home_dir: &Path) -> LoggingHealthSnapshot {
@@ -80,6 +152,16 @@ pub(crate) fn read_daemon_logging_health(home_dir: &Path) -> LoggingHealthSnapsh
     };
     serde_json::from_str::<DaemonStatusSnapshot>(&content)
         .map(|status| status.logging)
+        .unwrap_or_default()
+}
+
+pub(crate) fn read_daemon_otel_health(home_dir: &Path) -> OtelHealthSnapshot {
+    let status_path = daemon_status_path_for(home_dir);
+    let Ok(content) = fs::read_to_string(status_path) else {
+        return OtelHealthSnapshot::default();
+    };
+    serde_json::from_str::<DaemonStatusSnapshot>(&content)
+        .map(|status| status.otel)
         .unwrap_or_default()
 }
 
@@ -99,6 +181,21 @@ pub(crate) fn build_logging_health_contract(
         spool_file_count: logging.spool_count,
         oldest_spool_age_seconds: logging.oldest_spool_age,
         last_error,
+    }
+}
+
+pub(crate) fn build_otel_health_contract(otel: &OtelHealthSnapshot) -> OtelHealthContract {
+    OtelHealthContract {
+        schema_version: otel.schema_version.clone(),
+        enabled: otel.enabled,
+        collector_endpoint: otel.collector_endpoint.clone(),
+        protocol: otel.protocol.clone(),
+        collector_state: otel.collector_state.clone(),
+        local_mirror_state: otel.local_mirror_state.clone(),
+        local_mirror_path: otel.local_mirror_path.clone(),
+        debug_local_export: otel.debug_local_export,
+        debug_local_state: otel.debug_local_state.clone(),
+        last_error: otel.last_error.clone(),
     }
 }
 

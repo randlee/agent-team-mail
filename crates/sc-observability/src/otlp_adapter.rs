@@ -1,5 +1,7 @@
-use crate::{OtelConfig, OtelError, OtelExporter, OtelRecord};
-use sc_observability_otlp::{TransportConfig, TransportError, TransportExporter, TransportRecord};
+use crate::{OtelConfig, OtelError, OtelExporter, OtelExporterKind, OtelRecord};
+use sc_observability_otlp::{
+    TransportConfig, TransportError, TransportExporter, TransportExporterKind, TransportRecord,
+};
 use std::sync::Arc;
 
 pub fn build_transport_exporters(
@@ -28,6 +30,13 @@ struct BridgeExporter {
 }
 
 impl OtelExporter for BridgeExporter {
+    fn kind(&self) -> OtelExporterKind {
+        match self.exporter.kind() {
+            TransportExporterKind::Collector => OtelExporterKind::Collector,
+            TransportExporterKind::DebugLocal => OtelExporterKind::DebugLocal,
+        }
+    }
+
     fn export(&self, record: &OtelRecord) -> Result<(), OtelError> {
         self.exporter
             .export(&to_transport_record(record))

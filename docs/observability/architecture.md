@@ -4,7 +4,7 @@
 **Primary crate**: `sc-observability`
 **See also**:
 - `docs/observability/requirements.md`
-- `docs/observability/troubleshooting.md`
+- `docs/logging-troubleshooting.md`
 - `docs/project-plan.md` (Phase AJ and Phase AV sections)
 
 ## 1. Architecture Goals
