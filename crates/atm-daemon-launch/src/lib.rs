@@ -213,6 +213,7 @@ pub fn spawn_daemon_process(request: SpawnDaemonRequest<'_>) -> io::Result<Child
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn issue_launch_token_populates_required_fields() {
@@ -316,6 +317,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn shared_runtime_spawn_preserves_runtime_session_and_otel_env() {
         let atm_home = std::env::temp_dir().join("shared-home");
         let token = issue_launch_token(

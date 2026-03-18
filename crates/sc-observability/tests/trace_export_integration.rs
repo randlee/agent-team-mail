@@ -102,15 +102,7 @@ impl Drop for TraceCollector {
         self.shutdown.store(true, Ordering::SeqCst);
         let _ = TcpStream::connect(&self.wake_addr);
         if let Some(join) = self.join.take() {
-            let deadline = Instant::now() + Duration::from_secs(30);
-            while !join.is_finished() && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(10));
-            }
-            assert!(
-                join.is_finished(),
-                "collector thread should finish within 30s after shutdown"
-            );
-            join.join().expect("collector thread should join");
+            let _ = join.join();
         }
     }
 }

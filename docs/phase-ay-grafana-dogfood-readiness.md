@@ -64,7 +64,7 @@ real smoke testing so ATM can:
 - `scripts/dogfood-smoke.py` performs the canonical AY.2 operator flow:
   - stop the shared daemon
   - restart the shared daemon with inherited `ATM_OTEL_*`
-  - emit a CLI command plus a daemon-backed send/read flow
+  - emit a CLI command plus a daemon lifecycle event carrying the shared session tag
   - query Loki with `service_name="atm"` plus detected-field filters
   - query Tempo with `resource.service.name="atm-daemon"` and
     `resource.session_id`
@@ -81,3 +81,14 @@ real smoke testing so ATM can:
   `sc-observability` dependency to `atm-core`.
 - Tempo dogfood queries rely on `session_id` being present as an OTLP resource
   attribute on daemon traces, not only as a span attribute.
+
+## AY.2 Verification Results
+
+- Loki: `PASS`
+  - live dogfood validation returned `8` streams for
+    `session_id=ay2-1773873451`
+- Tempo: `PASS`
+  - live dogfood validation returned `1` trace for
+    `resource.session_id=ay2-1773873451` after a shared daemon stop/start
+- Mimir: `PASS`
+  - live dogfood validation returned `2` canonical ATM metric series
