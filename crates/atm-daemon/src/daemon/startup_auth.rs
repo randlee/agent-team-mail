@@ -110,6 +110,15 @@ fn emit_lifecycle_event(
     let test_identifier = token.and_then(|value| value.test_identifier.clone());
     let owner_pid = token.and_then(|value| value.owner_pid);
     let atm_home_text = canonicalize_lossy(atm_home).display().to_string();
+    let request_id = token_id
+        .as_ref()
+        .map(|token_id| format!("daemon-launch-{token_id}"));
+    let trace_id = request_id.as_deref().map(|request_id| {
+        agent_team_mail_core::event_log::trace_id_for_request("atm-daemon", request_id)
+    });
+    let span_id = trace_id
+        .as_deref()
+        .map(|trace_id| agent_team_mail_core::event_log::span_id_for_action(trace_id, event_name));
     let lifecycle_phase = lifecycle_phase(event_name);
     let termination_reason = termination_reason(event_name);
     let mut extra = serde_json::Map::new();
@@ -158,6 +167,9 @@ fn emit_lifecycle_event(
         source: "atm-daemon",
         action: event_name,
         result: Some(event_name.to_string()),
+        request_id,
+        trace_id,
+        span_id,
         target: Some(atm_home_text),
         error: detail.map(str::to_string),
         extra_fields: extra,
@@ -193,6 +205,15 @@ fn emit_startup_rejection(
 ) {
     let token_id = token.map(|token| token.token_id.clone());
     let atm_home_text = canonicalize_lossy(atm_home).display().to_string();
+    let request_id = token_id
+        .as_ref()
+        .map(|token_id| format!("daemon-launch-{token_id}"));
+    let trace_id = request_id.as_deref().map(|request_id| {
+        agent_team_mail_core::event_log::trace_id_for_request("atm-daemon", request_id)
+    });
+    let span_id = trace_id.as_deref().map(|trace_id| {
+        agent_team_mail_core::event_log::span_id_for_action(trace_id, "daemon_start_rejected")
+    });
     let mut extra = serde_json::Map::new();
     extra.insert(
         "rejection_reason".to_string(),
@@ -217,6 +238,9 @@ fn emit_startup_rejection(
         source: "atm-daemon",
         action: "daemon_start_rejected",
         result: Some(reason.as_str().to_string()),
+        request_id,
+        trace_id,
+        span_id,
         target: Some(atm_home_text),
         error: detail.map(str::to_string),
         extra_fields: extra,

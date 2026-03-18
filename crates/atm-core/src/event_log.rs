@@ -66,6 +66,14 @@ fn generate_span_id(seed_parts: &[&str]) -> String {
     hex.chars().take(16).collect()
 }
 
+pub fn trace_id_for_request(source: &str, request_id: &str) -> String {
+    generate_trace_id(&[source, request_id])
+}
+
+pub fn span_id_for_action(trace_id: &str, action: &str) -> String {
+    generate_span_id(&[action, trace_id])
+}
+
 /// Forward `event` to the unified producer channel if a sender is registered.
 fn fallback_home_dir() -> Option<std::path::PathBuf> {
     crate::home::get_home_dir().ok()
