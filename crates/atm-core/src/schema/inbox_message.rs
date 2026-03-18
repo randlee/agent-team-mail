@@ -13,12 +13,14 @@ pub struct InboxMessage {
     pub from: String,
 
     /// Message content (markdown supported)
+    #[serde(alias = "content")]
     pub text: String,
 
     /// ISO 8601 UTC timestamp
     pub timestamp: String,
 
     /// Whether the message has been read
+    #[serde(default)]
     pub read: bool,
 
     /// Brief summary (5-10 words)
@@ -145,6 +147,19 @@ mod tests {
             msg.unknown_fields.get("unknownField"),
             reparsed.unknown_fields.get("unknownField")
         );
+    }
+
+    #[test]
+    fn test_inbox_message_accepts_content_alias_and_missing_read() {
+        let json = r#"{
+            "from": "team-lead",
+            "content": "Legacy content key",
+            "timestamp": "2026-02-11T14:30:00.000Z"
+        }"#;
+
+        let msg: InboxMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.text, "Legacy content key");
+        assert!(!msg.read, "missing read should default to false");
     }
 
     #[test]

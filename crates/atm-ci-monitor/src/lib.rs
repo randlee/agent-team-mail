@@ -35,8 +35,8 @@ pub use provider::{
 pub use registry::{CiFactoryFn, CiProviderFactory, CiProviderRegistry};
 pub use types::{
     CiFilter, CiJob, CiProviderError, CiPullRequest, CiRun, CiRunConclusion, CiRunStatus, CiStep,
-    GhBranchRefCount, GhObservedCall, GhRateLimitSnapshot, GhRepoStateFile, GhRepoStateRecord,
-    GhRuntimeOwner,
+    GhBranchRefCount, GhJob, GhObservedCall, GhRateLimitSnapshot, GhRepoStateFile,
+    GhRepoStateRecord, GhRun, GhRuntimeOwner, GhStep,
 };
 #[cfg(unix)]
 pub use types::{
