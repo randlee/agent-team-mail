@@ -99,7 +99,7 @@ impl Drop for TraceCollector {
         self.shutdown.store(true, Ordering::SeqCst);
         let _ = TcpStream::connect(&self.wake_addr);
         if let Some(join) = self.join.take() {
-            join.join().expect("collector thread should join");
+            let _ = join.join();
         }
     }
 }

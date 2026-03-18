@@ -521,7 +521,6 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::time::Duration;
-    use std::time::Instant;
     use tempfile::TempDir;
 
     struct EnvGuard {
@@ -770,24 +769,16 @@ mod tests {
         assert!(!runtime_home.exists(), "stale runtime should be removed");
 
         let spool = spool_dir(temp.path());
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline {
-            let events = read_jsonl_events(&spool);
-            if events.iter().any(|event| {
+        let events = read_jsonl_events(&spool);
+        assert!(
+            events.iter().any(|event| {
                 event.action == "janitor_reap"
                     && event
                         .fields
                         .get("event_name")
                         .and_then(|value| value.as_str())
                         == Some("janitor_reap")
-            }) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-
-        let events = read_jsonl_events(&spool);
-        panic!(
+            }),
             "expected janitor_reap event in daemon spool; saw actions: {:?}",
             events
                 .iter()
