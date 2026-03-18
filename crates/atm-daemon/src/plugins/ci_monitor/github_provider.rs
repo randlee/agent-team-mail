@@ -124,7 +124,7 @@ impl GitHubActionsProvider {
                 .map(|prs: &Vec<CiPullRequest>| {
                     prs.iter()
                         .map(|pr| CiPullRequest {
-                            number: pr.number.unwrap_or_default(),
+                            number: pr.number,
                             url: pr.url.clone(),
                             head_ref_name: None,
                             head_ref_oid: None,
