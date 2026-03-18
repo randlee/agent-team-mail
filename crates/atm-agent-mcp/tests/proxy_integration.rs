@@ -5,6 +5,7 @@
 //! timeout, and crash detection.
 
 use serde_json::{Value, json};
+use serial_test::serial;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
@@ -429,6 +430,7 @@ async fn test_unknown_method_passes_through() {
 // ─── Lazy spawn tests ───────────────────────────────────────────────────
 
 #[tokio::test]
+#[serial]
 async fn test_lazy_spawn_on_first_codex_call() {
     let (mut writer, mut reader, handle) = spawn_proxy(300);
 
