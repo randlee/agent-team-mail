@@ -2946,6 +2946,35 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn wait_for_sigterm_and_reap_pid(pid: i32) {
+        send_signal(pid, 15);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(crate::consts::SHORT_DEADLINE_SECS);
+        while std::time::Instant::now() < deadline {
+            if !pid_alive(pid) {
+                reap_child_pid_best_effort(pid);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::consts::POLL_CHECK_SLEEP_MS,
+            ));
+        }
+        reap_child_pid_best_effort(pid);
+    }
+
+    #[cfg(unix)]
+    fn reap_child_pid_best_effort(pid: i32) {
+        unsafe extern "C" {
+            fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+        }
+
+        const WNOHANG: i32 = 1;
+        let mut status = 0;
+        // SAFETY: Best-effort reap for test children after a bounded SIGTERM wait.
+        let _ = unsafe { waitpid(pid, &mut status, WNOHANG) };
+    }
+
+    #[cfg(unix)]
     fn fake_lock_metadata(home: &str, pid: u32) -> DaemonLockMetadata {
         DaemonLockMetadata {
             pid,
@@ -3819,7 +3848,7 @@ done
             && let Ok(pid) = pid_str.trim().parse::<i32>()
             && pid_alive(pid)
         {
-            send_signal(pid, 15);
+            wait_for_sigterm_and_reap_pid(pid);
         }
     }
 
@@ -3983,7 +4012,7 @@ sleep 8
         assert!(new_pid > 1, "replacement daemon pid must be valid");
 
         if pid_alive(new_pid) {
-            send_signal(new_pid, 15);
+            wait_for_sigterm_and_reap_pid(new_pid);
         }
     }
 
