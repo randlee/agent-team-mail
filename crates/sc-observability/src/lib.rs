@@ -15,6 +15,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use thiserror::Error;
 
+mod otlp_adapter;
+
 pub const DEFAULT_QUEUE_CAPACITY: usize = 4096;
 pub const DEFAULT_MAX_EVENT_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_BYTES: u64 = 50 * 1024 * 1024;
@@ -23,6 +25,8 @@ pub const DEFAULT_RETENTION_DAYS: u32 = 7;
 pub const DEFAULT_OTEL_MAX_RETRIES: u32 = 2;
 pub const DEFAULT_OTEL_INITIAL_BACKOFF_MS: u64 = 25;
 pub const DEFAULT_OTEL_MAX_BACKOFF_MS: u64 = 250;
+pub const DEFAULT_OTEL_TIMEOUT_MS: u64 = 1_500;
+pub const OTEL_PROTOCOL_HTTP: &str = "otlp_http";
 
 pub const SOCKET_ERROR_VERSION_MISMATCH: &str = "VERSION_MISMATCH";
 pub const SOCKET_ERROR_INVALID_PAYLOAD: &str = "INVALID_PAYLOAD";
@@ -31,6 +35,13 @@ pub const SOCKET_ERROR_INTERNAL_ERROR: &str = "INTERNAL_ERROR";
 #[derive(Debug, Clone)]
 pub struct OtelConfig {
     pub enabled: bool,
+    pub endpoint: Option<String>,
+    pub protocol: String,
+    pub auth_header: Option<String>,
+    pub ca_file: Option<PathBuf>,
+    pub insecure_skip_verify: bool,
+    pub timeout_ms: u64,
+    pub debug_local_export: bool,
     pub max_retries: u32,
     pub initial_backoff_ms: u64,
     pub max_backoff_ms: u64,
@@ -40,6 +51,13 @@ impl Default for OtelConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            endpoint: None,
+            protocol: OTEL_PROTOCOL_HTTP.to_string(),
+            auth_header: None,
+            ca_file: None,
+            insecure_skip_verify: false,
+            timeout_ms: DEFAULT_OTEL_TIMEOUT_MS,
+            debug_local_export: false,
             max_retries: DEFAULT_OTEL_MAX_RETRIES,
             initial_backoff_ms: DEFAULT_OTEL_INITIAL_BACKOFF_MS,
             max_backoff_ms: DEFAULT_OTEL_MAX_BACKOFF_MS,
@@ -55,17 +73,61 @@ impl OtelConfig {
             let norm = raw.trim().to_ascii_lowercase();
             cfg.enabled = !matches!(norm.as_str(), "0" | "false" | "off" | "no");
         }
+        if let Ok(raw) = std::env::var("ATM_OTEL_ENDPOINT") {
+            let raw = raw.trim();
+            cfg.endpoint = (!raw.is_empty()).then(|| raw.to_string());
+        }
+        if let Ok(raw) = std::env::var("ATM_OTEL_PROTOCOL") {
+            let raw = raw.trim();
+            if !raw.is_empty() {
+                cfg.protocol = raw.to_string();
+            }
+        }
+        if let Ok(raw) = std::env::var("ATM_OTEL_AUTH_HEADER") {
+            let raw = raw.trim();
+            cfg.auth_header = (!raw.is_empty()).then(|| raw.to_string());
+        }
+        if let Ok(raw) = std::env::var("ATM_OTEL_CA_FILE") {
+            let raw = raw.trim();
+            cfg.ca_file = (!raw.is_empty()).then(|| PathBuf::from(raw));
+        }
+        if let Ok(raw) = std::env::var("ATM_OTEL_INSECURE_SKIP_VERIFY") {
+            let norm = raw.trim().to_ascii_lowercase();
+            cfg.insecure_skip_verify = matches!(norm.as_str(), "1" | "true" | "on" | "yes");
+        }
+        if let Ok(raw) = std::env::var("ATM_OTEL_TIMEOUT_MS")
+            && let Ok(parsed) = raw.parse::<u64>()
+        {
+            cfg.timeout_ms = parsed.max(1);
+        }
+        if let Ok(raw) = std::env::var("ATM_OTEL_DEBUG_LOCAL_EXPORT") {
+            let norm = raw.trim().to_ascii_lowercase();
+            cfg.debug_local_export = matches!(norm.as_str(), "1" | "true" | "on" | "yes");
+        }
         if let Ok(raw) = std::env::var("ATM_OTEL_MAX_RETRIES")
             && let Ok(parsed) = raw.parse::<u32>()
         {
             cfg.max_retries = parsed;
+        }
+        if let Ok(raw) = std::env::var("ATM_OTEL_RETRY_BACKOFF_MS")
+            && let Ok(parsed) = raw.parse::<u64>()
+        {
+            cfg.initial_backoff_ms = parsed;
+        } else if let Ok(raw) = std::env::var("ATM_OTEL_INITIAL_BACKOFF_MS")
+            && let Ok(parsed) = raw.parse::<u64>()
+        {
+            cfg.initial_backoff_ms = parsed;
         }
         if let Ok(raw) = std::env::var("ATM_OTEL_INITIAL_BACKOFF_MS")
             && let Ok(parsed) = raw.parse::<u64>()
         {
             cfg.initial_backoff_ms = parsed;
         }
-        if let Ok(raw) = std::env::var("ATM_OTEL_MAX_BACKOFF_MS")
+        if let Ok(raw) = std::env::var("ATM_OTEL_RETRY_MAX_BACKOFF_MS")
+            && let Ok(parsed) = raw.parse::<u64>()
+        {
+            cfg.max_backoff_ms = parsed;
+        } else if let Ok(raw) = std::env::var("ATM_OTEL_MAX_BACKOFF_MS")
             && let Ok(parsed) = raw.parse::<u64>()
         {
             cfg.max_backoff_ms = parsed;
@@ -133,7 +195,7 @@ impl OtelExporter for FileOtelExporter {
 #[derive(Clone)]
 struct OtelPipeline {
     config: OtelConfig,
-    exporter: Arc<dyn OtelExporter>,
+    exporters: Vec<Arc<dyn OtelExporter>>,
     sleeper: fn(Duration),
 }
 
@@ -147,49 +209,61 @@ impl std::fmt::Debug for OtelPipeline {
 
 impl OtelPipeline {
     fn new_default(log_path: &Path) -> Self {
-        let mut otel_path = log_path.to_path_buf();
-        let stem = log_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("telemetry");
-        otel_path.set_file_name(format!("{stem}.otel.jsonl"));
+        let config = OtelConfig::from_env();
+        let mut exporters: Vec<Arc<dyn OtelExporter>> =
+            vec![Arc::new(FileOtelExporter::new(default_otel_path(log_path)))];
+        if let Ok(mut transport_exporters) =
+            otlp_adapter::build_transport_exporters(log_path, &config)
+        {
+            exporters.append(&mut transport_exporters);
+        }
         Self {
-            config: OtelConfig::from_env(),
-            exporter: Arc::new(FileOtelExporter::new(otel_path)),
+            config,
+            exporters,
             sleeper: std::thread::sleep,
         }
     }
 
     fn export_event(&self, event: &LogEventV1) -> Result<(), OtelError> {
-        export_otel_with_retry(event, &self.config, self.exporter.as_ref(), self.sleeper)
+        export_otel_with_retry(event, &self.config, &self.exporters, self.sleeper)
     }
 }
 
 fn export_otel_with_retry(
     event: &LogEventV1,
     config: &OtelConfig,
-    exporter: &dyn OtelExporter,
+    exporters: &[Arc<dyn OtelExporter>],
     sleeper: fn(Duration),
 ) -> Result<(), OtelError> {
     if !config.enabled {
         return Ok(());
     }
     let record = build_otel_record(event)?;
+    if exporters.is_empty() {
+        return Ok(());
+    }
 
     let mut attempt: u32 = 0;
     let mut backoff = config.initial_backoff_ms;
     loop {
-        match exporter.export(&record) {
-            Ok(()) => return Ok(()),
-            Err(err) => {
-                if attempt >= config.max_retries {
-                    return Err(err);
-                }
-                sleeper(Duration::from_millis(backoff));
-                backoff = backoff.saturating_mul(2).min(config.max_backoff_ms);
-                attempt = attempt.saturating_add(1);
+        let mut last_err = None;
+        let mut any_failed = false;
+        for exporter in exporters {
+            if let Err(err) = exporter.export(&record) {
+                any_failed = true;
+                last_err = Some(err);
             }
         }
+        if !any_failed {
+            return Ok(());
+        }
+        if attempt >= config.max_retries {
+            return Err(last_err
+                .unwrap_or_else(|| OtelError::ExportFailed("unknown export failure".to_string())));
+        }
+        sleeper(Duration::from_millis(backoff));
+        backoff = backoff.saturating_mul(2).min(config.max_backoff_ms);
+        attempt = attempt.saturating_add(1);
     }
 }
 
@@ -202,7 +276,26 @@ pub fn export_otel_best_effort(
     config: &OtelConfig,
     exporter: &dyn OtelExporter,
 ) {
-    let _ = export_otel_with_retry(event, config, exporter, std::thread::sleep);
+    if !config.enabled {
+        return;
+    }
+    let Ok(record) = build_otel_record(event) else {
+        return;
+    };
+
+    let mut attempt: u32 = 0;
+    let mut backoff = config.initial_backoff_ms;
+    loop {
+        if exporter.export(&record).is_ok() {
+            return;
+        }
+        if attempt >= config.max_retries {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(backoff));
+        backoff = backoff.saturating_mul(2).min(config.max_backoff_ms);
+        attempt = attempt.saturating_add(1);
+    }
 }
 
 fn build_otel_record(event: &LogEventV1) -> Result<OtelRecord, OtelError> {
@@ -495,7 +588,7 @@ impl Logger {
             config,
             otel: OtelPipeline {
                 config: otel_config,
-                exporter,
+                exporters: vec![exporter],
                 sleeper: std::thread::sleep,
             },
         }
@@ -778,6 +871,16 @@ fn rotate_log_files(base: &Path, max_files: u32) -> Result<(), LoggerError> {
         fs::rename(base, first)?;
     }
     Ok(())
+}
+
+fn default_otel_path(log_path: &Path) -> PathBuf {
+    let mut otel_path = log_path.to_path_buf();
+    let stem = log_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("telemetry");
+    otel_path.set_file_name(format!("{stem}.otel.jsonl"));
+    otel_path
 }
 
 fn rotation_path(base: &Path, n: u32) -> PathBuf {
@@ -1233,6 +1336,7 @@ mod tests {
                 max_retries: 2,
                 initial_backoff_ms: 0,
                 max_backoff_ms: 0,
+                ..OtelConfig::default()
             },
             exporter.clone(),
         );
@@ -1290,6 +1394,7 @@ mod tests {
                 max_retries: 4,
                 initial_backoff_ms: 0,
                 max_backoff_ms: 0,
+                ..OtelConfig::default()
             },
             exporter.clone(),
         );
@@ -1338,6 +1443,7 @@ mod tests {
                 max_retries: 0,
                 initial_backoff_ms: 0,
                 max_backoff_ms: 0,
+                ..OtelConfig::default()
             },
             exporter.clone(),
         );
@@ -1380,6 +1486,7 @@ mod tests {
                 max_retries: 2,
                 initial_backoff_ms: 0,
                 max_backoff_ms: 0,
+                ..OtelConfig::default()
             },
             &exporter,
         );
@@ -1396,8 +1503,9 @@ mod tests {
         let sleeps = BACKOFF_SLEEPS_MS.get_or_init(|| Mutex::new(Vec::new()));
         sleeps.lock().expect("backoff sleeps lock").clear();
 
-        let exporter = CountingExporter::with_failures(10);
+        let exporter = Arc::new(CountingExporter::with_failures(10));
         let event = new_log_event("atm", "send_message", "atm::send", "info");
+        let exporters: Vec<Arc<dyn OtelExporter>> = vec![exporter.clone()];
         let err = export_otel_with_retry(
             &event,
             &OtelConfig {
@@ -1405,8 +1513,9 @@ mod tests {
                 max_retries: 4,
                 initial_backoff_ms: 5,
                 max_backoff_ms: 12,
+                ..OtelConfig::default()
             },
-            &exporter,
+            &exporters,
             record_sleep,
         )
         .expect_err("should return final export error");
