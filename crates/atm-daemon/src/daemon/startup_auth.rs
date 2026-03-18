@@ -108,6 +108,9 @@ fn emit_lifecycle_event(
     atm_home: &Path,
     detail: Option<&str>,
 ) {
+    #[cfg(test)]
+    note_test_lifecycle_event(event_name);
+
     let token_id = token.map(|value| value.token_id.clone());
     let test_identifier = token.and_then(|value| value.test_identifier.clone());
     let owner_pid = token.and_then(|value| value.owner_pid);
@@ -502,6 +505,40 @@ pub fn spawn_isolated_test_lease_monitor(
 }
 
 #[cfg(test)]
+type TestLifecycleHook = Arc<dyn Fn(&'static str) + Send + Sync>;
+
+#[cfg(test)]
+fn test_lifecycle_hook_slot() -> &'static Mutex<Option<TestLifecycleHook>> {
+    static TEST_LIFECYCLE_HOOK: OnceLock<Mutex<Option<TestLifecycleHook>>> = OnceLock::new();
+    TEST_LIFECYCLE_HOOK.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+fn note_test_lifecycle_event(event_name: &'static str) {
+    let hook = test_lifecycle_hook_slot()
+        .lock()
+        .expect("startup_auth test lifecycle hook lock poisoned")
+        .clone();
+    if let Some(hook) = hook {
+        hook(event_name);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_test_lifecycle_hook(hook: TestLifecycleHook) {
+    *test_lifecycle_hook_slot()
+        .lock()
+        .expect("startup_auth test lifecycle hook lock poisoned") = Some(hook);
+}
+
+#[cfg(test)]
+pub(crate) fn clear_test_lifecycle_hook() {
+    *test_lifecycle_hook_slot()
+        .lock()
+        .expect("startup_auth test lifecycle hook lock poisoned") = None;
+}
+
+#[cfg(test)]
 pub(crate) fn clear_seen_tokens_for_tests() {
     seen_tokens().lock().unwrap().clear();
 }
@@ -513,15 +550,14 @@ mod tests {
         RuntimeKind, RuntimeMetadata, write_runtime_metadata,
     };
     use agent_team_mail_core::logging::{RotationConfig, UnifiedLogMode, init_unified};
-    use agent_team_mail_core::logging_event::{LogEventV1, spool_dir};
     use agent_team_mail_daemon_launch::{
         encode_launch_token, issue_isolated_test_launch_token, issue_launch_token,
     };
     use serial_test::serial;
     use std::fs;
-    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
-    use tempfile::TempDir;
+    use tempfile::{Builder, TempDir};
 
     struct EnvGuard {
         key: &'static str,
@@ -552,42 +588,13 @@ mod tests {
         }
     }
 
-    fn read_jsonl_events(path: &std::path::Path) -> Vec<LogEventV1> {
-        if !path.exists() {
-            return Vec::new();
-        }
-        let mut events = Vec::new();
-        let paths = if path.is_file() {
-            vec![path.to_path_buf()]
-        } else {
-            match fs::read_dir(path) {
-                Ok(entries) => entries.flatten().map(|entry| entry.path()).collect(),
-                Err(_) => return Vec::new(),
-            }
-        };
-        for path in paths {
-            if path
-                .extension()
-                .and_then(|x| x.to_str())
-                .map(|x| x == "jsonl")
-                != Some(true)
-            {
-                continue;
-            }
-            let Ok(content) = fs::read_to_string(&path) else {
-                continue;
-            };
-            for line in content.lines().filter(|line| !line.trim().is_empty()) {
-                if let Ok(event) = serde_json::from_str::<LogEventV1>(line) {
-                    events.push(event);
-                }
-            }
-        }
-        events
-    }
-
-    fn isolated_runtime_root(name: &str) -> PathBuf {
-        std::env::temp_dir().join("atm-isolated").join(name)
+    fn isolated_runtime_root(name: &str) -> TempDir {
+        let root = std::env::temp_dir().join("atm-isolated");
+        fs::create_dir_all(&root).expect("create isolated runtime root parent");
+        Builder::new()
+            .prefix(name)
+            .tempdir_in(root)
+            .expect("create isolated runtime root tempdir")
     }
 
     fn token_for(home: &Path, class: LaunchClass, ttl_secs: i64) -> DaemonLaunchToken {
@@ -746,9 +753,9 @@ mod tests {
         )
         .expect("init daemon-writer logging");
 
-        let runtime_home =
+        let runtime_home_guard =
             isolated_runtime_root(&format!("startup-auth-janitor-{}", uuid::Uuid::new_v4()));
-        let _ = fs::remove_dir_all(&runtime_home);
+        let runtime_home = runtime_home_guard.path().to_path_buf();
         fs::create_dir_all(runtime_home.join(".atm").join("daemon")).unwrap();
         let metadata = RuntimeMetadata {
             runtime_kind: RuntimeKind::Isolated,
@@ -761,43 +768,30 @@ mod tests {
         };
         write_runtime_metadata(&runtime_home, &metadata).unwrap();
 
+        let observed = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        install_test_lifecycle_hook({
+            let observed = Arc::clone(&observed);
+            Arc::new(move |event_name| {
+                observed
+                    .lock()
+                    .expect("capture startup_auth lifecycle events")
+                    .push(event_name);
+            })
+        });
         let reaped = sweep_stale_isolated_runtimes().unwrap();
+        clear_test_lifecycle_hook();
         assert!(
             reaped.contains(&runtime_home),
             "expected janitor sweep to reap test runtime; saw {reaped:?}"
         );
         assert!(!runtime_home.exists(), "stale runtime should be removed");
 
-        let spool = spool_dir(temp.path());
-        let mut events = Vec::new();
-        for _ in 0..20 {
-            events = read_jsonl_events(&spool);
-            if events.iter().any(|event| {
-                event.action == "janitor_reap"
-                    && event
-                        .fields
-                        .get("event_name")
-                        .and_then(|value| value.as_str())
-                        == Some("janitor_reap")
-            }) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
         assert!(
-            events.iter().any(|event| {
-                event.action == "janitor_reap"
-                    && event
-                        .fields
-                        .get("event_name")
-                        .and_then(|value| value.as_str())
-                        == Some("janitor_reap")
-            }),
-            "expected janitor_reap event in daemon spool; saw actions: {:?}",
-            events
-                .iter()
-                .map(|event| event.action.as_str())
-                .collect::<Vec<_>>()
+            observed
+                .lock()
+                .expect("read observed lifecycle events")
+                .contains(&"janitor_reap"),
+            "expected janitor_reap lifecycle event to be emitted synchronously"
         );
     }
 }
