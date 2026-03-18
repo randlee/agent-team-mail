@@ -157,6 +157,8 @@ mod tests {
     use crate::roster::RosterService;
     use agent_team_mail_core::config::Config;
     use agent_team_mail_core::context::{Platform, SystemContext};
+    use futures_util::FutureExt;
+    use std::panic::AssertUnwindSafe;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio_util::sync::CancellationToken;
@@ -369,7 +371,7 @@ identity = "team-lead"
         assert_eq!(runnable[0].0.name, "ok_plugin");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_runtime_faults_are_isolated_to_failing_plugins() {
         let mut registry = PluginRegistry::new();
         registry.register(RuntimeErrPlugin);
@@ -388,9 +390,16 @@ identity = "team-lead"
         for (meta, plugin_arc) in runnable {
             let name = meta.name.to_string();
             handles.push(tokio::spawn(async move {
-                let mut plugin = plugin_arc.lock().await;
-                let result = plugin.run(CancellationToken::new()).await;
-                (name, result.map_err(|e| e.to_string()))
+                let result = AssertUnwindSafe(async move {
+                    let mut plugin = plugin_arc.lock().await;
+                    plugin.run(CancellationToken::new()).await
+                })
+                .catch_unwind()
+                .await;
+                (
+                    name,
+                    result.map(|outcome| outcome.map_err(|e| e.to_string())),
+                )
             }));
         }
 
@@ -399,9 +408,9 @@ identity = "team-lead"
         let mut panic_plugins = 0usize;
         for handle in handles {
             match handle.await {
-                Ok((name, Ok(()))) => ok_plugins.push(name),
-                Ok((name, Err(_))) => err_plugins.push(name),
-                Err(join_err) if join_err.is_panic() => panic_plugins += 1,
+                Ok((name, Ok(Ok(())))) => ok_plugins.push(name),
+                Ok((name, Ok(Err(_)))) => err_plugins.push(name),
+                Ok((_name, Err(_panic))) => panic_plugins += 1,
                 Err(join_err) => panic!("unexpected runtime join error: {join_err}"),
             }
         }

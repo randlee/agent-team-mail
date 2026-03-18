@@ -17,11 +17,15 @@ This plan intentionally expands beyond the AW.5 automated Loki smoke:
   - live Grafana query returned `0` streams for `service_name="atm"`
   - root cause: CLI commands are not wiring the OTel log pipeline for all
     command paths; follow-up is in `AY.2`
+  - root cause addressed in `AY.2`; live dogfood validation now returns
+    `8` Loki streams for `session_id=ay2-1773873451`
 - Tempo: `FAIL`
   - Grafana Cloud Tempo search does not accept `session_id` as a searchable
     top-level identifier
   - shared-runtime stop/start smoke still returned `0` `atm-daemon` traces
   - follow-up is in `AY.2`
+  - root cause addressed in `AY.2`; live dogfood validation now returns
+    `1` `atm-daemon` trace for `resource.session_id=ay2-1773873451`
 - Mimir: `PASS`
   - canonical series are present, including `atm_commands_count_total` and
     `atm_messages_sent_count_total`
@@ -38,7 +42,7 @@ The script performs the exact supported live flow:
 
 - stop the existing shared daemon
 - restart the shared daemon with the current shell's `ATM_OTEL_*` config
-- emit one CLI command plus one daemon-backed send/read cycle
+- emit one CLI command plus one daemon lifecycle event carrying the shared session tag
 - query Loki using `service_name="atm"` plus detected-field filters
 - query Tempo using `resource.service.name="atm-daemon"` and
   `resource.session_id`
@@ -50,7 +54,6 @@ The script performs the exact supported live flow:
 - `develop` contains the merged AW work.
 - AW-capable binaries are built from `develop`.
 - Grafana Cloud credentials are available from `.private/grafana-otel-config.md`.
-- A local team/runtime is available for a daemon-backed `send`/`read` flow.
 
 Build from the current repo:
 
