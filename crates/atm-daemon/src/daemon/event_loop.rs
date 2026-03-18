@@ -2027,7 +2027,7 @@ mod tests {
         crate::daemon::InboxEvent {
             team: "atm-dev".to_string(),
             agent: "arch-ctm".to_string(),
-            path: PathBuf::from("/tmp/atm-dev/arch-ctm/inbox.json"),
+            path: std::env::temp_dir().join("atm-dev/arch-ctm/inbox.json"),
             kind: InboxEventKind::MessageReceived,
             origin: None,
         }
