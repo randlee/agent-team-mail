@@ -2,7 +2,7 @@
 
 **Version**: 0.7
 **Date**: 2026-03-10
-**Status**: Phases through AU complete (v0.45.0). Phase AV (OTel) in planning.
+**Status**: Phases through AV complete (v0.45.0). Phase AW traces/metrics planning updated.
 
 ---
 
@@ -178,13 +178,14 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AN | CI Monitor Extraction Readiness | Prepare CI monitor for clean extraction: crate boundaries, multi-repo routing, shared type consolidation | COMPLETE ([#748](https://github.com/randlee/agent-team-mail/pull/748)) |
 | AO | GH Monitor Guardrails + Runtime Admission | Prevent accidental shared-runtime pollers, add isolated-runtime TTL policy, and make GH usage attributable/self-limiting with cached repo-state and operator controls | COMPLETE ([#751](https://github.com/randlee/agent-team-mail/pull/751)) |
 | AP | Test Stability and Harness Hardening | Eliminate hang-prone, flaky, and operationally unsafe test patterns; RAII guard consolidation; daemon lifecycle hardening | COMPLETE ([#756](https://github.com/randlee/agent-team-mail/pull/756), [#767](https://github.com/randlee/agent-team-mail/pull/767), [#768](https://github.com/randlee/agent-team-mail/pull/768)) |
-| AJ | Session-ID SSoT Normalization | Canonical `session_id` naming, shared caller resolver, runtime session resolution closure, doctor/session consistency | PLANNED |
-| AK | Mandatory OTel Rollout | Historical planning placeholder for mandatory OTel rollout; superseded by AV | SUPERSEDED |
+| AJ | Session-ID SSoT Normalization | Canonical `session_id` naming, shared caller resolver, runtime session resolution closure, doctor/session consistency | COMPLETE |
+| AK | Mandatory OTel Rollout | Superseded by Phase AV (logs rollout) and Phase AW (traces + metrics expansion) | SUPERSEDED |
 | AQ | Codebase Cleanup + Rogue Daemon Spawn Elimination | Remove cleanup debt from AN/AO/AP reviews, consolidate constants/dead code, and eliminate non-canonical test daemon spawn paths | COMPLETE |
 | AR | Smoke Follow-Up + Lifecycle Timing Corrections | Fix daemon harness flake, drain timeout regression, and EnvGuard::unset gap identified during smoke testing | COMPLETE (PR #795) |
 | AS | Backlog Gap-Filling + GH API Governance | 14 backlog bug/gap fixes + GH API hard firewall, ledgers, and explicit GitHub ownership requirements | ACTIVE |
 | AT | GitHub Boundary Elimination | Remove all remaining audited GitHub-boundary violations so only the gh plugin/provider layer owns GitHub behavior | PLANNED |
-| AV | Live OTel Collector Integration + Architecture Partitioning | Deliver real collector export for in-repo ATM binaries while keeping OTel transport isolated behind one dedicated adapter boundary | PLANNED |
+| AV | OTel Collector Logs Rollout | Ship OTLP HTTP logs export, dogfood it against a Grafana-compatible receiver, and preserve fail-open local logging | COMPLETE |
+| AW | OTel Traces + Metrics Expansion | Add native traces and metrics, Grafana dashboards/smoke, and external repo rollout on top of AV | PLANNED |
 
 ---
 
@@ -1488,8 +1489,8 @@ the current tranche focused on onboarding contract closure.
 
 **Completed**: 133+ sprints across 29 phases (CI green)
 **Current version**: v0.45.0
-**Current planning phase**: Phase AV
-**Next planned phase**: TBD
+**Current planning phase**: Phase AW
+**Next planned observability phase**: Phase AW (traces + metrics expansion)
 
 ---
 
@@ -1541,6 +1542,7 @@ observability scope.
 **Goal**: Make daemon registry the canonical session authority and eliminate
 identity/session ambiguity by standardizing on `session_id` across ATM surfaces.
 **Prerequisites**: Phase AH baseline complete.
+**Status**: COMPLETE
 
 **Planning doc**: `docs/phase-aj-planning.md`  
 **Test plan**: `docs/test-plan-phase-AJ.md`
@@ -1548,57 +1550,72 @@ identity/session ambiguity by standardizing on `session_id` across ATM surfaces.
 ### Planned Sprint Map
 | Sprint | Focus | Primary Issues | Status |
 |---|---|---|---|
-| AJ.1 | Shared resolver SSoT for `send/read/register/doctor` | #593, #595 | PLANNED |
-| AJ.2 | Codex/Gemini runtime session resolution closure | #597 | PLANNED |
-| AJ.3 | Stale session lifecycle + cleanup reliability | #594 | PLANNED |
-| AJ.4 | Doctor/members session display consistency | #596 | PLANNED |
-| AJ.5 | Spawn env normalization + resume/continue semantics | #593, #597 | PLANNED |
+| AJ.1 | Shared resolver SSoT for `send/read/register/doctor` | #593, #595 | COMPLETE |
+| AJ.2 | Codex/Gemini runtime session resolution closure | #597 | COMPLETE |
+| AJ.3 | Stale session lifecycle + cleanup reliability | #594 | COMPLETE |
+| AJ.4 | Doctor/members session display consistency | #596 | COMPLETE |
+| AJ.5 | Spawn env normalization + resume/continue semantics | #593, #597 | COMPLETE |
 
 ---
 
-## 17.20 Phase AK: Mandatory OTel Rollout
+## 17.20 Phase AV: OTel Collector Logs Rollout
 
-**Status**: SUPERSEDED by Phase AV.
-
-**Goal**: Ship non-optional OpenTelemetry across in-scope tools while keeping
-local structured logging always-on and fail-open.
+**Status**: COMPLETE
+**Goal**: Ship OTLP HTTP logs export across in-scope tools, verify the Grafana
+hookup against a real collector-compatible endpoint, and keep canonical local
+logging always-on and fail-open.
 **Prerequisites**: Phase AH and Phase AJ complete.
 
-**Planning doc**: `docs/phase-ak-planning.md`  
+**Planning docs**:
+- `docs/observability/grafana-rollout-smoke.md`
+- Phase AV implementation and dogfood notes on the AV sprint branches
 **Requirements**: `docs/observability/requirements.md`  
 **Architecture**: `docs/observability/architecture.md`  
-**Test plan**: `docs/test-plan-phase-AK.md`
+**Smoke plan**: `docs/observability/grafana-rollout-smoke.md`
 
 ### Planned Sprint Map
 | Sprint | Focus | Primary Issues | Status |
 |---|---|---|---|
-| AK.1 | Contract reconciliation + schema hardening (`trace_id/span_id/subagent_id`, paths, health JSON keys) | ATM-QA-004, ATM-QA-008, ATM-QA-007, ATM-QA-009 | PLANNED |
-| AK.2 | `sc-observability` mandatory OTel core (`default-on`, retry/fail-open, correlation contract) | OTel baseline | PLANNED |
-| AK.3 | Producer integration (`atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `scmux`, `schook`, `sc-compose`, `sc-composer`) | OTel rollout | PLANNED |
-| AK.4 | Doctor/status observability health + runbook finalization | health/reporting | PLANNED |
-| AK.5 | End-to-end QA, release gates, and cross-platform validation | release confidence | PLANNED |
+| AV.0 | Boundary remediation prerequisite | OTel import/boundary cleanup | COMPLETE |
+| AV.1 | Boundary + config contract | adapter seam and config contract | COMPLETE |
+| AV.2 | OTLP HTTP transport adapter | AW-planned dedicated transport crate seam defined; AV implementation stays behind the `sc-observability` exporter path | COMPLETE |
+| AV.3 | CLI/daemon instrumentation and correlation | request/span lifecycle coverage | COMPLETE |
+| AV.4 | Producer rollout + health/reporting | in-repo producer adoption | COMPLETE |
+| AV.5 | Dogfood + Grafana hookup smoke + external handoff | real collector logs rollout and handoff notes | COMPLETE |
+
+### Exit Criteria
+1. In-repo producers can export OTLP HTTP logs to a Grafana-compatible receiver.
+2. Local canonical JSONL logging remains intact.
+3. Collector outage, auth failure, and TLS failure are fail-open.
+4. The Grafana rollout smoke in `docs/observability/grafana-rollout-smoke.md`
+   passes.
 
 ---
 
-## 17.30 Phase AV: Live OTel Collector Integration + Partitioning
+## 17.21 Phase AW: OTel Traces + Metrics Expansion
 
-**Goal**: get OpenTelemetry live for the ATM repository itself while keeping
-collector/export plumbing isolated from the rest of the codebase.
-**Prerequisites**: Phase AH complete, Phase AJ complete, Phase AT complete, and
-current `sc-observability` baseline present on `develop`.
+**Goal**: Build on AV’s logs rollout to add native traces and metrics while
+keeping transport concerns isolated in `sc-observability-otlp`.
 
-**Planning doc**: `docs/phase-av-otel-planning.md`
+**Planning doc**: `docs/phase-aw-traces-metrics-planning.md`
 **Requirements**: `docs/observability/requirements.md`
 **Architecture**: `docs/observability/architecture.md`
 
-### Sprint Map
-| Sprint | Focus | Status |
-|---|---|---|
-| AV.0 | Boundary remediation prerequisite: remove existing direct `sc-observability` imports that already bypass the intended facade before collector work begins | PLANNED |
-| AV.1 | Architecture boundary + config contract: define the dedicated `sc-observability-otlp` transport adapter seam, canonical collector config surface, in-repo scope, and CI enforcement gate | PLANNED |
-| AV.2 | Transport adapter implementation: add OTLP/HTTP exporter path, stdout debug exporter, and fail-open collector transport behind the dedicated adapter boundary | PLANNED |
-| AV.3 | High-value daemon/CLI log instrumentation: `atm`, `atm-daemon`, `atm-core`, GitHub firewall/ledger paths, and daemon lifecycle/request log correlation (after Phase AT is merged to `develop`) | PLANNED |
-| AV.4 | In-repo producer rollout: `atm-tui`, `atm-agent-mcp`, `sc-compose`, `sc-composer`, plus doctor/status health and troubleshooting closure | PLANNED |
+### Planned Sprint Map
+| Sprint | Focus | Primary Deliverable | Status |
+|---|---|---|---|
+| AW.1 | Signal contracts + transport crate creation | create `crates/sc-observability-otlp` as a workspace member plus neutral `TraceRecord` / `MetricRecord` contracts and correlation rules | PLANNED |
+| AW.2 | OTLP traces + metrics transport | expand the new `sc-observability-otlp` crate beyond AV-era logs export | PLANNED |
+| AW.3 | Producer trace rollout | native spans for key ATM flows | PLANNED |
+| AW.4 | Metrics rollout | counters/histograms/gauges and export | PLANNED |
+| AW.5 | Grafana dashboards + smoke | logs/traces/metrics dashboard and smoke | PLANNED |
+| AW.6 | External repo rollout | `scmux` / `schook` adoption contract and validation | PLANNED |
+
+### Exit Criteria
+1. Native traces and metrics export in addition to logs.
+2. Grafana-ready dashboards and smoke coverage for all three signal types.
+3. `sc-observability-otlp` remains the only OTLP transport-owning crate.
+4. External repo adoption has a concrete contract and rollout checklist.
 | AV.5 | Dogfood, QA, and release confidence: collector-backed smoke, fail-open outage tests, and explicit external follow-on handoff for `scmux`/`schook` | PLANNED |
 
 ### Execution Contract

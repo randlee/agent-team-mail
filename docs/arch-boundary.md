@@ -28,7 +28,7 @@ The observability stack is split into three layers:
 | Layer | Responsibility | OTel transport-specific code allowed? |
 |---|---|---|
 | `sc-observability` | generic event schema, validation, redaction, local logging, neutral `OtelRecord`, exporter traits | `No` |
-| `sc-observability-otlp` | collector transport adapter, OTLP protocol/client wiring, auth/TLS, batching/retry | `Yes` |
+| `sc-observability-otlp` | planned AW transport adapter crate for OTLP protocol/client wiring, auth/TLS, batching/retry | `Yes` |
 | entry-point binaries/modules | process-level logger initialization and wiring | `Limited to facade use only` |
 
 ### Allowed Dependency Direction
