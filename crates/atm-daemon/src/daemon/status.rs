@@ -7,7 +7,6 @@ use agent_team_mail_core::daemon_client::{
     DaemonTouchEntry, DaemonTouchSnapshot, RuntimeOwnerMetadata, daemon_touch_path_for,
 };
 use anyhow::{Context, Result};
-use sc_observability::OtelHealthSnapshot;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -87,7 +86,7 @@ impl Default for OtelHealth {
             schema_version: "v1".to_string(),
             enabled: true,
             collector_endpoint: None,
-            protocol: sc_observability::OTEL_PROTOCOL_HTTP.to_string(),
+            protocol: "otlp_http".to_string(),
             collector_state: "not_configured".to_string(),
             local_mirror_state: "healthy".to_string(),
             local_mirror_path: String::new(),
@@ -98,8 +97,8 @@ impl Default for OtelHealth {
     }
 }
 
-impl From<OtelHealthSnapshot> for OtelHealth {
-    fn from(value: OtelHealthSnapshot) -> Self {
+impl From<crate::daemon::observability::OtelHealthSnapshot> for OtelHealth {
+    fn from(value: crate::daemon::observability::OtelHealthSnapshot) -> Self {
         Self {
             schema_version: value.schema_version,
             enabled: value.enabled,

@@ -55,7 +55,10 @@ Examples of blocking violations:
 - Crate-local facades are allowed only if they are transport-neutral shims
   (for example, storing an injected hook or trait object). A crate-local daemon
   facade must not import `sc-observability` itself; the real exporter wiring
-  belongs in the entry-point binary.
+  belongs in the entry-point binary. In other words: daemon-local facade types
+  and hook slots are allowed, but the facade implementation must be injected
+  from `crates/atm-daemon/src/main.rs` rather than importing `sc_observability`
+  inside daemon internals.
 - AV.1 must deliver `scripts/ci/observability_boundary_check.sh` plus a CI
   workflow step that runs it before AV.2 begins.
 - QA/CI should use this section as the enforcement reference for the

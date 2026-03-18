@@ -4,7 +4,7 @@
 **Primary crate**: `sc-observability`
 **See also**:
 - `docs/observability/requirements.md`
-- `docs/logging-troubleshooting.md`
+- `docs/observability/troubleshooting.md`
 - `docs/project-plan.md` (Phase AJ and Phase AV sections)
 
 ## 1. Architecture Goals
@@ -196,3 +196,6 @@ object contract:
 - `logging_health.last_error.at`
 
 No drift is allowed across these two command surfaces for shared keys.
+
+See [docs/observability/troubleshooting.md](troubleshooting.md) for the
+operator runbook that interprets this locked contract.

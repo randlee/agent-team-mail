@@ -8,6 +8,7 @@ declare -a matches=()
 is_allowed_sc_observability_rust_path() {
   local rel="$1"
   case "$rel" in
+    crates/atm/src/main.rs) return 0 ;;
     crates/sc-compose/src/main.rs) return 0 ;;
     crates/atm-daemon/src/main.rs) return 0 ;;
     *) return 1 ;;
