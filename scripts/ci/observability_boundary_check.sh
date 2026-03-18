@@ -31,6 +31,7 @@ while IFS= read -r match; do
   [[ -z "$match" ]] && continue
   file="${match%%:*}"
   case "$file" in
+    crates/sc-observability/src/otlp_adapter.rs) continue ;;
     crates/sc-observability-otlp/*) continue ;;
   esac
   matches+=("${match}::ARCH-BOUNDARY-002 violation: direct sc-observability-otlp import outside dedicated adapter layer")

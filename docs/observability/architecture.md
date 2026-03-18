@@ -165,6 +165,7 @@ producers and daemon wiring.
 
 | Field | Canonical surface | Required policy |
 |---|---|---|
+| Export enablement | `ATM_OTEL_ENABLED` | One shared on/off gate for remote export. Falsey values disable exporter construction entirely while local structured logging remains active. |
 | Collector endpoint | `ATM_OTEL_ENDPOINT` | Single OTLP collector base endpoint for the process. Empty or unset keeps remote export disabled unless a debug-only local mirror is explicitly enabled. |
 | Protocol | `ATM_OTEL_PROTOCOL` | `otlp_http` is the committed AV transport. Other values are rejected until explicitly added by requirements. |
 | Auth header injection | `ATM_OTEL_AUTH_HEADER` | Optional single header value injected only by `sc-observability-otlp`; application crates must never build transport headers themselves. |
