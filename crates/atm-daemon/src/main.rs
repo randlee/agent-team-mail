@@ -39,6 +39,42 @@ fn export_metric_records_from_entrypoint(records: &[MetricRecord], config: &Otel
     let _ = sc_observability_otlp::export_metrics(config, records);
 }
 
+fn export_lifecycle_trace_from_entrypoint(
+    record: agent_team_mail_daemon::daemon::observability::LifecycleTraceRecord,
+) {
+    let attributes = record
+        .attributes
+        .into_iter()
+        .map(|(key, value)| (key, serde_json::Value::String(value)))
+        .collect();
+    let trace_record = sc_observability::TraceRecord {
+        timestamp: record.timestamp,
+        team: None,
+        agent: None,
+        runtime: None,
+        session_id: record.session_id,
+        trace_id: record.trace_id,
+        span_id: record.span_id,
+        parent_span_id: None,
+        name: record.name,
+        status: match record.status {
+            agent_team_mail_daemon::daemon::observability::LifecycleTraceStatus::Ok => {
+                sc_observability::TraceStatus::Ok
+            }
+            agent_team_mail_daemon::daemon::observability::LifecycleTraceStatus::Error => {
+                sc_observability::TraceStatus::Error
+            }
+        },
+        duration_ms: 0,
+        source_binary: record.source_binary,
+        attributes,
+    };
+    sc_observability::export_trace_records_best_effort(
+        &[trace_record],
+        &sc_observability::OtelConfig::from_env(),
+    );
+}
+
 /// ATM Daemon - Background service for agent team mail plugins
 #[derive(Parser, Debug)]
 #[command(name = "atm-daemon")]
@@ -409,6 +445,9 @@ async fn main() -> Result<()> {
     ));
     daemon::observability::install_metric_export_hook(Arc::new(
         export_metric_records_from_entrypoint,
+    ));
+    daemon::observability::install_lifecycle_trace_hook(Arc::new(
+        export_lifecycle_trace_from_entrypoint,
     ));
     tokio::spawn(run_log_writer_task(
         log_event_queue.clone(),

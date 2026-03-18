@@ -180,6 +180,79 @@ fn emit_lifecycle_event(
         extra_fields: extra,
         ..Default::default()
     });
+
+    export_lifecycle_trace(level, event_name, token, atm_home, detail);
+}
+
+fn export_lifecycle_trace(
+    level: &'static str,
+    event_name: &'static str,
+    token: Option<&DaemonLaunchToken>,
+    atm_home: &Path,
+    detail: Option<&str>,
+) {
+    let request_id = token
+        .map(|value| format!("daemon-launch-{}", value.token_id))
+        .unwrap_or_else(|| {
+            let unique_suffix = Utc::now()
+                .timestamp_nanos_opt()
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| Utc::now().timestamp_micros().to_string());
+            format!("daemon-lifecycle-{event_name}-{}", unique_suffix)
+        });
+    let trace_id = agent_team_mail_core::event_log::trace_id_for_request("atm-daemon", &request_id);
+    let span_id = agent_team_mail_core::event_log::span_id_for_action(&trace_id, event_name);
+    let mut record = crate::daemon::observability::LifecycleTraceRecord::new(
+        format!("atm-daemon.lifecycle.{event_name}"),
+        if level == "warn" {
+            crate::daemon::observability::LifecycleTraceStatus::Error
+        } else {
+            crate::daemon::observability::LifecycleTraceStatus::Ok
+        },
+        trace_id,
+        span_id,
+    );
+    record
+        .attributes
+        .insert("event_name".to_string(), event_name.to_string());
+    record.attributes.insert(
+        "lifecycle_phase".to_string(),
+        lifecycle_phase(event_name).to_string(),
+    );
+    record.attributes.insert(
+        "atm_home".to_string(),
+        canonicalize_lossy(atm_home).display().to_string(),
+    );
+    if let Some(reason) = termination_reason(event_name) {
+        record
+            .attributes
+            .insert("termination_reason".to_string(), reason.to_string());
+    }
+    if let Some(token) = token {
+        record.attributes.insert(
+            "launch_class".to_string(),
+            token.launch_class.as_str().to_string(),
+        );
+        record
+            .attributes
+            .insert("token_id".to_string(), token.token_id.clone());
+        if let Some(test_identifier) = &token.test_identifier {
+            record
+                .attributes
+                .insert("test_identifier".to_string(), test_identifier.clone());
+        }
+        if let Some(owner_pid) = token.owner_pid {
+            record
+                .attributes
+                .insert("owner_pid".to_string(), owner_pid.to_string());
+        }
+    }
+    if let Some(detail) = detail {
+        record
+            .attributes
+            .insert("detail".to_string(), detail.to_string());
+    }
+    crate::daemon::observability::export_lifecycle_trace(record);
 }
 
 pub fn log_launch_accepted(home: &Path, token: &DaemonLaunchToken) {
@@ -260,6 +333,13 @@ pub fn log_clean_owner_shutdown(home: &Path, token: &DaemonLaunchToken) {
         ..Default::default()
     };
     emit_event_to_spool_direct(&fields, home);
+    export_lifecycle_trace(
+        "info",
+        event_name,
+        Some(token),
+        home,
+        fields.error.as_deref(),
+    );
 }
 
 fn emit_startup_rejection(
