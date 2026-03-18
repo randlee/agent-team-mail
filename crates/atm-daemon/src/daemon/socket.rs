@@ -34,8 +34,11 @@ use agent_team_mail_core::schema::AgentMember;
 use agent_team_mail_core::team_config_store::TeamConfigStore;
 use agent_team_mail_core::text::DEFAULT_MAX_MESSAGE_BYTES;
 use anyhow::Result;
+use chrono::Utc;
+use sc_observability::{MetricKind, MetricRecord, OtelConfig, export_metric_records_best_effort};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
+use std::time::Instant;
 use tracing::{debug, error, info, warn};
 
 use crate::daemon::log_writer::LogEventQueue;
@@ -68,6 +71,72 @@ pub type SharedDedupeStore = std::sync::Arc<std::sync::Mutex<DurableDedupeStore>
 pub fn new_dedup_store(home_dir: &std::path::Path) -> Result<SharedDedupeStore> {
     let store = DurableDedupeStore::from_env(home_dir)?;
     Ok(std::sync::Arc::new(std::sync::Mutex::new(store)))
+}
+
+fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key).ok().and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn build_metric_record(
+    name: &str,
+    kind: MetricKind,
+    value: f64,
+    unit: Option<&str>,
+    attributes: serde_json::Map<String, serde_json::Value>,
+) -> MetricRecord {
+    MetricRecord {
+        timestamp: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        team: env_nonempty("ATM_TEAM"),
+        agent: env_nonempty("ATM_IDENTITY"),
+        runtime: env_nonempty("ATM_RUNTIME"),
+        session_id: env_nonempty("CLAUDE_SESSION_ID"),
+        name: name.to_string(),
+        kind,
+        value,
+        unit: unit.map(str::to_string),
+        source_binary: "atm-daemon".to_string(),
+        attributes,
+    }
+}
+
+fn build_daemon_request_metric_records(
+    command_name: &str,
+    outcome: &str,
+    duration_ms: u64,
+) -> Vec<MetricRecord> {
+    let mut attrs = serde_json::Map::new();
+    attrs.insert(
+        "command".to_string(),
+        serde_json::Value::String(command_name.to_string()),
+    );
+    attrs.insert(
+        "outcome".to_string(),
+        serde_json::Value::String(outcome.to_string()),
+    );
+
+    vec![
+        build_metric_record(
+            "atm_daemon.request_count",
+            MetricKind::Counter,
+            1.0,
+            Some("count"),
+            attrs.clone(),
+        ),
+        build_metric_record(
+            "atm_daemon.request_duration_ms",
+            MetricKind::Histogram,
+            duration_ms as f64,
+            Some("ms"),
+            attrs,
+        ),
+    ]
 }
 
 /// Start the Unix socket server and return a handle that cleans up the socket
@@ -2653,6 +2722,7 @@ fn parse_and_dispatch(
     stream_state_store: &SharedStreamStateStore,
 ) -> Result<SocketResponse> {
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+    let request_started = Instant::now();
 
     // Parse request envelope
     let request: SocketRequest = match serde_json::from_str(request_str) {
@@ -2732,6 +2802,12 @@ fn parse_and_dispatch(
             &format!("Unknown command: '{other}'"),
         ),
     };
+
+    let duration_ms = request_started.elapsed().as_millis() as u64;
+    export_metric_records_best_effort(
+        &build_daemon_request_metric_records(&request.command, &response.status, duration_ms),
+        &OtelConfig::from_env(),
+    );
 
     Ok(response)
 }

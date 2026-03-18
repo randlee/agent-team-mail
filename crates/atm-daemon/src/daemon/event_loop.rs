@@ -20,7 +20,10 @@ use agent_team_mail_core::schema::TeamConfig;
 use agent_team_mail_core::team_config_store::TeamConfigStore;
 use anyhow::{Context, Result};
 use chrono::Utc;
-use sc_observability::{OtelConfig, TraceRecord, TraceStatus, export_trace_records_best_effort};
+use sc_observability::{
+    MetricKind, MetricRecord, OtelConfig, TraceRecord, TraceStatus,
+    export_metric_records_best_effort, export_trace_records_best_effort,
+};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -87,6 +90,76 @@ fn env_nonempty(key: &str) -> Option<String> {
             Some(trimmed.to_string())
         }
     })
+}
+
+fn build_daemon_metric_record(
+    name: &str,
+    kind: MetricKind,
+    value: f64,
+    unit: Option<&str>,
+    attributes: serde_json::Map<String, serde_json::Value>,
+) -> MetricRecord {
+    MetricRecord {
+        timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        team: env_nonempty("ATM_TEAM"),
+        agent: env_nonempty("ATM_IDENTITY"),
+        runtime: env_nonempty("ATM_RUNTIME"),
+        session_id: env_nonempty("CLAUDE_SESSION_ID"),
+        name: name.to_string(),
+        kind,
+        value,
+        unit: unit.map(str::to_string),
+        source_binary: "atm-daemon".to_string(),
+        attributes,
+    }
+}
+
+fn build_daemon_health_metric_records(
+    logging: &LoggingHealth,
+    otel: &OtelHealth,
+) -> Vec<MetricRecord> {
+    let mut records = Vec::new();
+
+    let mut logging_attrs = serde_json::Map::new();
+    logging_attrs.insert(
+        "logging_state".to_string(),
+        serde_json::Value::String(logging.state.clone()),
+    );
+    records.push(build_daemon_metric_record(
+        "atm_daemon.spool_size",
+        MetricKind::Gauge,
+        logging.spool_count as f64,
+        Some("count"),
+        logging_attrs.clone(),
+    ));
+    records.push(build_daemon_metric_record(
+        "atm_daemon.dropped_events_total",
+        MetricKind::Gauge,
+        logging.dropped_counter as f64,
+        Some("count"),
+        logging_attrs,
+    ));
+
+    if let Some(code) = &otel.last_error.code {
+        let mut otel_attrs = serde_json::Map::new();
+        otel_attrs.insert(
+            "collector_state".to_string(),
+            serde_json::Value::String(otel.collector_state.clone()),
+        );
+        otel_attrs.insert(
+            "error_code".to_string(),
+            serde_json::Value::String(code.clone()),
+        );
+        records.push(build_daemon_metric_record(
+            "atm_daemon.export_failures_total",
+            MetricKind::Counter,
+            1.0,
+            Some("count"),
+            otel_attrs,
+        ));
+    }
+
+    records
 }
 
 fn dispatch_trace_id(event: &InboxEvent, message_id: Option<&str>) -> String {
@@ -1609,6 +1682,10 @@ async fn status_writer_loop(
     let teams = get_active_teams(&ctx).await;
     let logging = build_logging_health(&ctx, &log_event_queue).await;
     let otel = build_otel_health(&ctx);
+    export_metric_records_best_effort(
+        &build_daemon_health_metric_records(&logging, &otel),
+        &OtelConfig::from_env(),
+    );
     if let Err(e) = status_writer.write_daemon_touch(&teams) {
         error!("Failed to write daemon touch sidecar: {}", e);
     }
@@ -1635,6 +1712,10 @@ async fn status_writer_loop(
                 let teams = get_active_teams(&ctx).await;
                 let logging = build_logging_health(&ctx, &log_event_queue).await;
                 let otel = build_otel_health(&ctx);
+                export_metric_records_best_effort(
+                    &build_daemon_health_metric_records(&logging, &otel),
+                    &OtelConfig::from_env(),
+                );
 
                 if let Err(e) = status_writer.write_status(plugin_statuses, teams, logging, otel) {
                     error!("Failed to write daemon status: {}", e);

@@ -1,4 +1,4 @@
-use sc_observability::{OtelConfig, TraceRecord, TraceStatus, export_trace_records_best_effort};
+use sc_observability::{MetricKind, MetricRecord, OtelConfig, export_metric_records_best_effort};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-struct TraceCollector {
+struct MetricCollector {
     endpoint: String,
     requests: Arc<Mutex<Vec<String>>>,
     shutdown: Arc<AtomicBool>,
@@ -14,7 +14,7 @@ struct TraceCollector {
     join: Option<thread::JoinHandle<()>>,
 }
 
-impl TraceCollector {
+impl MetricCollector {
     fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind collector");
         listener
@@ -94,7 +94,7 @@ impl TraceCollector {
     }
 }
 
-impl Drop for TraceCollector {
+impl Drop for MetricCollector {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
         let _ = TcpStream::connect(&self.wake_addr);
@@ -105,24 +105,22 @@ impl Drop for TraceCollector {
 }
 
 #[test]
-fn trace_record_exports_to_otlp_http_collector() {
-    let collector = TraceCollector::start();
-    let record = TraceRecord {
+fn metric_record_exports_to_otlp_http_collector() {
+    let collector = MetricCollector::start();
+    let record = MetricRecord {
         timestamp: "2026-03-18T08:00:00Z".to_string(),
         team: Some("atm-dev".to_string()),
         agent: Some("arch-ctm".to_string()),
         runtime: Some("codex".to_string()),
         session_id: Some("session-123".to_string()),
-        trace_id: "trace-123".to_string(),
-        span_id: "span-456".to_string(),
-        parent_span_id: Some("span-root".to_string()),
-        name: "atm.send".to_string(),
-        status: TraceStatus::Ok,
-        duration_ms: 12,
+        name: "atm_messages_total".to_string(),
+        kind: MetricKind::Counter,
+        value: 7.0,
+        unit: Some("count".to_string()),
         source_binary: "atm".to_string(),
         attributes: serde_json::Map::from_iter([(
-            "command".to_string(),
-            serde_json::Value::String("send".to_string()),
+            "scope".to_string(),
+            serde_json::Value::String("mail".to_string()),
         )]),
     };
 
@@ -132,20 +130,19 @@ fn trace_record_exports_to_otlp_http_collector() {
         ..OtelConfig::default()
     };
 
-    export_trace_records_best_effort(&[record], &config);
+    export_metric_records_best_effort(&[record], &config);
 
     let requests = collector.wait_for_request();
     assert_eq!(
         requests.len(),
         1,
-        "collector should receive one trace request"
+        "collector should receive one metric request"
     );
     assert!(
-        requests[0].starts_with("POST /v1/traces HTTP/1.1"),
-        "collector request should target OTLP traces endpoint: {requests:?}"
+        requests[0].starts_with("POST /v1/metrics HTTP/1.1"),
+        "collector request should target OTLP metrics endpoint: {requests:?}"
     );
-    assert!(requests[0].contains("\"traceId\":\"trace-123\""));
-    assert!(requests[0].contains("\"spanId\":\"span-456\""));
+    assert!(requests[0].contains("\"atm_messages_total\""));
     assert!(requests[0].contains("\"service.name\""));
     assert!(requests[0].contains("\"atm-dev\""));
     assert!(requests[0].contains("\"arch-ctm\""));

@@ -77,6 +77,10 @@ pub struct TraceTransportRecord {
     pub attributes: Map<String, Value>,
 }
 
+// These signal enums intentionally mirror the canonical sc-observability
+// contracts so this transport crate can shape OTLP payloads without creating a
+// Cargo cycle back into sc-observability. Replace this duplication with a
+// neutral shared types crate once GH-876 lands.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TraceStatus {
@@ -100,6 +104,8 @@ pub struct MetricTransportRecord {
     pub attributes: Map<String, Value>,
 }
 
+// Mirrored from sc-observability for the same cycle-avoidance reason as
+// TraceStatus above. GH-876 tracks the shared-types extraction.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MetricKind {

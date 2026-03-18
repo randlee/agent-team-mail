@@ -10,7 +10,13 @@ is_allowed_sc_observability_rust_path() {
   case "$rel" in
     crates/atm/src/main.rs) return 0 ;;
     crates/sc-compose/src/main.rs) return 0 ;;
+    # All atm-daemon/src/** modules are approved daemon-local observability
+    # wiring points; the boundary rule is about keeping transport ownership out
+    # of non-entrypoint crates, not forcing daemon wiring into main.rs only.
     crates/atm-daemon/src/*) return 0 ;;
+    # The dedicated OTLP adapter crate may depend on the canonical
+    # sc-observability signal contracts while owning transport details.
+    crates/sc-observability-otlp/src/*) return 0 ;;
     *) return 1 ;;
   esac
 }
