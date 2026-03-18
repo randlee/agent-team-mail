@@ -46,6 +46,8 @@ impl Default for TransportConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TransportRecord {
     pub name: String,
+    pub source_binary: String,
+    pub level: String,
     pub trace_id: Option<String>,
     pub span_id: Option<String>,
     pub attributes: Map<String, Value>,
@@ -242,6 +244,10 @@ fn normalize_logs_endpoint(endpoint: &str) -> String {
 }
 
 fn build_logs_payload(record: &TransportRecord) -> Value {
+    let resource_attributes = vec![json!({
+        "key": "service.name",
+        "value": { "stringValue": record.source_binary },
+    })];
     let mut attributes = vec![];
     for (key, value) in &record.attributes {
         attributes.push(json!({
@@ -262,17 +268,35 @@ fn build_logs_payload(record: &TransportRecord) -> Value {
         }));
     }
 
+    let (severity_number, severity_text) = severity_fields(&record.level);
+
     json!({
         "resourceLogs": [{
+            "resource": {
+                "attributes": resource_attributes,
+            },
             "scopeLogs": [{
                 "scope": { "name": "sc-observability-otlp" },
                 "logRecords": [{
                     "body": { "stringValue": record.name },
+                    "severityNumber": severity_number,
+                    "severityText": severity_text,
                     "attributes": attributes,
                 }]
             }]
         }]
     })
+}
+
+fn severity_fields(level: &str) -> (u32, &'static str) {
+    match level.trim().to_ascii_lowercase().as_str() {
+        "trace" => (1, "TRACE"),
+        "debug" => (5, "DEBUG"),
+        "info" => (9, "INFO"),
+        "warn" => (13, "WARN"),
+        "error" => (17, "ERROR"),
+        _ => (0, "UNSPECIFIED"),
+    }
 }
 
 fn json_value_to_otlp_any(value: &Value) -> Value {
@@ -328,9 +352,17 @@ mod tests {
     fn sample_record() -> TransportRecord {
         let mut attributes = Map::new();
         attributes.insert("team".to_string(), Value::String("atm-dev".to_string()));
+        attributes.insert("agent".to_string(), Value::String("arch-ctm".to_string()));
+        attributes.insert("runtime".to_string(), Value::String("codex".to_string()));
+        attributes.insert(
+            "session_id".to_string(),
+            Value::String("sess-123".to_string()),
+        );
         attributes.insert("count".to_string(), Value::Number(2.into()));
         TransportRecord {
             name: "atm.send".to_string(),
+            source_binary: "atm".to_string(),
+            level: "info".to_string(),
             trace_id: Some("trace-123".to_string()),
             span_id: Some("span-123".to_string()),
             attributes,
@@ -438,5 +470,41 @@ mod tests {
             ..TransportConfig::default()
         };
         let _ = OtlpHttpExporter::new(config.endpoint.as_deref().unwrap(), &config);
+    }
+
+    #[test]
+    fn build_logs_payload_maps_service_name_severity_and_correlation_attributes() {
+        let payload = build_logs_payload(&sample_record());
+        let resource_attrs = &payload["resourceLogs"][0]["resource"]["attributes"];
+        assert_eq!(resource_attrs[0]["key"].as_str(), Some("service.name"));
+        assert_eq!(
+            resource_attrs[0]["value"]["stringValue"].as_str(),
+            Some("atm")
+        );
+
+        let record = &payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0];
+        assert_eq!(record["severityNumber"].as_u64(), Some(9));
+        assert_eq!(record["severityText"].as_str(), Some("INFO"));
+
+        let attrs = record["attributes"].as_array().expect("attributes array");
+        for expected in [
+            ("team", "atm-dev"),
+            ("agent", "arch-ctm"),
+            ("runtime", "codex"),
+            ("session_id", "sess-123"),
+        ] {
+            assert!(attrs.iter().any(|entry| {
+                entry["key"].as_str() == Some(expected.0)
+                    && entry["value"]["stringValue"].as_str() == Some(expected.1)
+            }));
+        }
+    }
+
+    #[test]
+    fn severity_fields_map_canonical_levels() {
+        assert_eq!(severity_fields("debug"), (5, "DEBUG"));
+        assert_eq!(severity_fields("info"), (9, "INFO"));
+        assert_eq!(severity_fields("warn"), (13, "WARN"));
+        assert_eq!(severity_fields("error"), (17, "ERROR"));
     }
 }
