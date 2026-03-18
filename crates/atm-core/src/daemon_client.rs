@@ -36,6 +36,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::event_log::EventFields;
 use agent_team_mail_daemon_launch::{LaunchClass, SpawnDaemonRequest, spawn_daemon_process};
 
 use crate::consts::{
@@ -1981,6 +1982,34 @@ fn new_request_id() -> String {
     format!("req-{id}-{nanos}")
 }
 
+fn daemon_autostart_event(
+    request_id: &str,
+    trace_id: &str,
+    action: &'static str,
+    result: &'static str,
+    target: Option<String>,
+    error: Option<String>,
+) -> EventFields {
+    let mut extra_fields = serde_json::Map::new();
+    extra_fields.insert(
+        "autostart_phase".to_string(),
+        serde_json::Value::String(action.to_string()),
+    );
+    EventFields {
+        level: if error.is_some() { "error" } else { "info" },
+        source: "atm",
+        action,
+        result: Some(result.to_string()),
+        request_id: Some(request_id.to_string()),
+        trace_id: Some(trace_id.to_string()),
+        span_id: Some(crate::event_log::span_id_for_action(trace_id, action)),
+        target,
+        error,
+        extra_fields,
+        ..Default::default()
+    }
+}
+
 // ── Unix implementation ──────────────────────────────────────────────────────
 
 #[cfg(unix)]
@@ -2119,7 +2148,7 @@ fn resolve_daemon_binary() -> anyhow::Result<std::ffi::OsString> {
 
 #[cfg(unix)]
 fn ensure_daemon_running_unix() -> anyhow::Result<()> {
-    use crate::event_log::{EventFields, emit_event_best_effort};
+    use crate::event_log::emit_event_best_effort;
     use crate::io::InboxError;
     use std::io::ErrorKind;
     use std::process::Stdio;
@@ -2133,6 +2162,9 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     }
 
     let home = crate::home::get_home_dir()?;
+    let autostart_request_id = new_request_id();
+    let autostart_trace_id =
+        crate::event_log::trace_id_for_request("atm:daemon_autostart", &autostart_request_id);
     let socket_connectable = daemon_socket_connectable(&home);
     if daemon_is_running() || socket_connectable {
         if let Some(reason) = detect_daemon_identity_mismatch(&home, socket_connectable) {
@@ -2209,38 +2241,37 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
 
     let daemon_bin = resolve_daemon_binary().map_err(|e| {
         let error = e.to_string();
-        emit_event_best_effort(EventFields {
-            level: "error",
-            source: "atm",
-            action: "daemon_autostart_failure",
-            result: Some("binary_resolution_error".to_string()),
-            error: Some(error.clone()),
-            ..Default::default()
-        });
+        emit_event_best_effort(daemon_autostart_event(
+            &autostart_request_id,
+            &autostart_trace_id,
+            "daemon_autostart_failure",
+            "binary_resolution_error",
+            None,
+            Some(error.clone()),
+        ));
         anyhow::anyhow!("{error}")
     })?;
     let daemon_bin_path = PathBuf::from(&daemon_bin);
     let runtime_owner = validate_runtime_admission(&home, &daemon_bin_path).map_err(|e| {
         let error = e.to_string();
-        emit_event_best_effort(EventFields {
-            level: "error",
-            source: "atm",
-            action: "daemon_autostart_failure",
-            result: Some("runtime_admission_denied".to_string()),
-            target: Some(daemon_bin_path.display().to_string()),
-            error: Some(error.clone()),
-            ..Default::default()
-        });
+        emit_event_best_effort(daemon_autostart_event(
+            &autostart_request_id,
+            &autostart_trace_id,
+            "daemon_autostart_failure",
+            "runtime_admission_denied",
+            Some(daemon_bin_path.display().to_string()),
+            Some(error.clone()),
+        ));
         anyhow::anyhow!("{error}")
     })?;
-    emit_event_best_effort(EventFields {
-        level: "info",
-        source: "atm",
-        action: "daemon_autostart_attempt",
-        result: Some("attempt".to_string()),
-        target: Some(daemon_bin_path.display().to_string()),
-        ..Default::default()
-    });
+    emit_event_best_effort(daemon_autostart_event(
+        &autostart_request_id,
+        &autostart_trace_id,
+        "daemon_autostart_attempt",
+        "attempt",
+        Some(daemon_bin_path.display().to_string()),
+        None,
+    ));
     let stderr_capture = std::env::temp_dir().join(format!(
         "atm-daemon-stderr-{}-{}.log",
         std::process::id(),
@@ -2275,15 +2306,14 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
                     std::path::PathBuf::from(&daemon_bin).display()
                 )
             };
-            emit_event_best_effort(EventFields {
-                level: "error",
-                source: "atm",
-                action: "daemon_autostart_failure",
-                result: Some("spawn_error".to_string()),
-                target: Some(daemon_bin_path.display().to_string()),
-                error: Some(error.clone()),
-                ..Default::default()
-            });
+            emit_event_best_effort(daemon_autostart_event(
+                &autostart_request_id,
+                &autostart_trace_id,
+                "daemon_autostart_failure",
+                "spawn_error",
+                Some(daemon_bin_path.display().to_string()),
+                Some(error.clone()),
+            ));
             anyhow::bail!("{error}");
         }
     };
@@ -2291,18 +2321,18 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(STARTUP_DEADLINE_SECS);
     while Instant::now() < deadline {
         if daemon_socket_connectable(&home) {
-            emit_event_best_effort(EventFields {
-                level: "info",
-                source: "atm",
-                action: "daemon_autostart_success",
-                result: Some("ok".to_string()),
-                target: Some(format!(
+            emit_event_best_effort(daemon_autostart_event(
+                &autostart_request_id,
+                &autostart_trace_id,
+                "daemon_autostart_success",
+                "ok",
+                Some(format!(
                     "{} {}",
                     daemon_bin_path.display(),
                     format_runtime_owner_summary(&runtime_owner)
                 )),
-                ..Default::default()
-            });
+                None,
+            ));
             return Ok(());
         }
         if let Some(status) = child.try_wait()? {
@@ -2326,15 +2356,14 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
                 }
                 None => format!("daemon process exited during startup with status {status}"),
             };
-            emit_event_best_effort(EventFields {
-                level: "error",
-                source: "atm",
-                action: "daemon_autostart_failure",
-                result: Some("process_exit".to_string()),
-                target: Some(daemon_bin_path.display().to_string()),
-                error: Some(error.clone()),
-                ..Default::default()
-            });
+            emit_event_best_effort(daemon_autostart_event(
+                &autostart_request_id,
+                &autostart_trace_id,
+                "daemon_autostart_failure",
+                "process_exit",
+                Some(daemon_bin_path.display().to_string()),
+                Some(error.clone()),
+            ));
             let _ = std::fs::remove_file(&stderr_capture);
             anyhow::bail!("{error}");
         }
@@ -2352,24 +2381,24 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         pid_path.display(),
         socket_path.display()
     );
-    emit_event_best_effort(EventFields {
-        level: "warn",
-        source: "atm",
-        action: "daemon_autostart_timeout",
-        result: Some("timeout".to_string()),
-        target: Some(daemon_bin_path.display().to_string()),
-        error: Some(timeout_error.clone()),
-        ..Default::default()
-    });
-    emit_event_best_effort(EventFields {
-        level: "error",
-        source: "atm",
-        action: "daemon_autostart_failure",
-        result: Some("timeout".to_string()),
-        target: Some(daemon_bin_path.display().to_string()),
-        error: Some(timeout_error.clone()),
-        ..Default::default()
-    });
+    let mut timeout_event = daemon_autostart_event(
+        &autostart_request_id,
+        &autostart_trace_id,
+        "daemon_autostart_timeout",
+        "timeout",
+        Some(daemon_bin_path.display().to_string()),
+        Some(timeout_error.clone()),
+    );
+    timeout_event.level = "warn";
+    emit_event_best_effort(timeout_event);
+    emit_event_best_effort(daemon_autostart_event(
+        &autostart_request_id,
+        &autostart_trace_id,
+        "daemon_autostart_failure",
+        "timeout",
+        Some(daemon_bin_path.display().to_string()),
+        Some(timeout_error.clone()),
+    ));
     if child.try_wait()?.is_none() {
         let _ = child.kill();
         let _ = child.wait();
@@ -4577,12 +4606,11 @@ sleep 8
     }
 
     #[test]
+    #[serial]
     fn test_send_control_no_daemon_returns_err() {
-        if daemon_is_running() {
-            // Shared dev machines may have daemon active; this test validates
-            // no-daemon behavior only.
-            return;
-        }
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let _home_guard = EnvGuard::set("ATM_HOME", tmp.path().to_str().unwrap());
+        let _autostart_guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "0");
         // Without a running daemon, send_control must return Err (not None or panic).
         use crate::control::{CONTROL_SCHEMA_VERSION, ControlAction, ControlRequest};
 

@@ -1634,7 +1634,7 @@ keeping transport concerns isolated in `sc-observability-otlp`.
    losing local JSONL/`.otel.jsonl` fail-open behavior.
 2. OTel transport dependencies are isolated behind one dedicated adapter
    boundary instead of being spread through CLI/daemon/application crates.
-3. High-value traces and metrics are present for daemon requests, CLI command
+3. High-value OTLP log coverage is present for daemon requests, CLI command
    flows, GitHub governance paths, and MCP/session lifecycle paths.
 4. `atm doctor --json` and `atm status --json` expose canonical OTel health
    information for collector connectivity and local mirror state.

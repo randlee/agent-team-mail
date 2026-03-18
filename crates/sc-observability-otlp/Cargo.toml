@@ -1,5 +1,5 @@
 [package]
-name = "sc-composer"
+name = "sc-observability-otlp"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -7,16 +7,15 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
-description = "Prompt/template composition engine for AI agent pipelines"
+description = "OTLP transport adapter for ATM observability"
+keywords = ["otel", "otlp", "observability", "telemetry"]
+categories = ["development-tools", "network-programming"]
 
 [dependencies]
-agent-team-mail-core.workspace = true
-thiserror.workspace = true
-minijinja.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml = "0.9"
+thiserror.workspace = true
 
 [dev-dependencies]
-serial_test = "3"
-tempfile = "3"
+tempfile = "3.13"

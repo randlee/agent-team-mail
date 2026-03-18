@@ -7,6 +7,10 @@ Last updated: 2026-03-10
 This runbook maps unified logging health states to concrete diagnostics and
 remediation actions.
 
+Related references:
+- `docs/observability/requirements.md`
+- `docs/observability/architecture.md`
+
 ## Health States
 
 ### `healthy`
@@ -134,6 +138,11 @@ Look for:
 - `logging_health.state` in JSON output
 - `logging_health.last_error.code` and `logging_health.last_error.message`
   when exporter or sink paths are degraded
+- `otel_health.collector_state`
+- `otel_health.local_mirror_state`
+- `otel_health.local_mirror_path`
+- `otel_health.last_error.code`
+- `otel_health.last_error.message`
 
 Canonical JSON keys referenced by this runbook:
 - `logging_health.schema_version`
@@ -147,6 +156,18 @@ Canonical JSON keys referenced by this runbook:
 - `logging_health.last_error.code`
 - `logging_health.last_error.message`
 - `logging_health.last_error.at`
+- `otel_health.schema_version`
+- `otel_health.enabled`
+- `otel_health.collector_endpoint`
+- `otel_health.protocol`
+- `otel_health.collector_state`
+- `otel_health.local_mirror_state`
+- `otel_health.local_mirror_path`
+- `otel_health.debug_local_export`
+- `otel_health.debug_local_state`
+- `otel_health.last_error.code`
+- `otel_health.last_error.message`
+- `otel_health.last_error.at`
 
 ### Remediation
 

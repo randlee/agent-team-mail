@@ -35,7 +35,7 @@ The observability stack is split into three layers:
 
 | From | Allowed imports / dependencies | Forbidden imports / dependencies |
 |---|---|---|
-| `sc-observability` | shared Rust deps, neutral exporter traits | direct OTLP SDK/client dependencies except through `sc-observability-otlp` |
+| `sc-observability` | shared Rust deps, neutral exporter traits, the dedicated `sc-observability-otlp` adapter seam | direct OTLP SDK/client dependencies except through `sc-observability-otlp` |
 | `sc-observability-otlp` | `sc-observability`, OTLP/collector SDKs | reverse dependency from `sc-observability` back into entry-point crates |
 | entry-point crates/modules | `sc-observability`; logger-init wiring that may call the shared adapter seam | direct imports of `sc-observability-otlp` from non-entry-point modules; ad hoc OTLP exporter construction |
 | internal feature modules/helpers/libraries | `sc-observability` facade only | `sc-observability-otlp`, collector SDKs, exporter construction |
@@ -52,11 +52,34 @@ Examples of blocking violations:
 
 - AV.0 is the mandatory cleanup sprint for the currently known direct
   `sc-observability` import violations.
+- Crate-local facades are allowed only if they are transport-neutral shims
+  (for example, storing an injected hook or trait object). A crate-local daemon
+  facade must not import `sc-observability` itself; the real exporter wiring
+  belongs in the entry-point binary. In other words: daemon-local facade types
+  and hook slots are allowed, but the facade implementation must be injected
+  from `crates/atm-daemon/src/main.rs` rather than importing `sc_observability`
+  inside daemon internals.
 - AV.1 must deliver `scripts/ci/observability_boundary_check.sh` plus a CI
   workflow step that runs it before AV.2 begins.
 - QA/CI should use this section as the enforcement reference for the
   observability boundary in the same way `ARCH-BOUNDARY-001` governs GitHub
   subprocess ownership.
+
+### Approved Entry-Point Files
+
+The following files are the allowlisted entry-point wiring surfaces for
+`ARCH-BOUNDARY-002`:
+
+| File | Rationale |
+|---|---|
+| `crates/atm/src/main.rs` | CLI process entry point; allowed to initialize generic observability and process-level command lifecycle wiring. |
+| `crates/atm-daemon/src/main.rs` | Daemon process entry point; owns process-level observability initialization and injected export-hook wiring. |
+| `crates/sc-compose/src/main.rs` | Standalone binary entry point; allowed to initialize generic observability for the process. |
+| Integration test files under `crates/*/tests/` | Test-only harness entry points that may validate facade wiring behavior without turning internal library modules into transport owners. |
+
+All other non-entry-point modules must stay on the generic facade side of the
+boundary and must not import `sc-observability-otlp` or raw `opentelemetry*`
+symbols directly.
 
 ## Allowed Dependency Direction
 

@@ -1,7 +1,9 @@
 //! Main daemon event loop
 
 use crate::daemon::pid_backend_validation::{roster_process_id, validate_pid_backend};
-use crate::daemon::status::{LoggingHealth, PluginStatus, PluginStatusKind, StatusWriter};
+use crate::daemon::status::{
+    LoggingHealth, OtelHealth, PluginStatus, PluginStatusKind, StatusWriter,
+};
 use crate::daemon::{
     InboxEvent, InboxEventKind, LogEventQueue, SharedDedupeStore, SharedPubSubStore,
     SharedSessionRegistry, SharedStateStore, SharedStreamEventSender,
@@ -36,6 +38,42 @@ type SharedCycleState = Arc<std::sync::Mutex<ReconcileCycleState>>;
 
 fn new_reconcile_cycle_state() -> SharedCycleState {
     Arc::new(std::sync::Mutex::new(ReconcileCycleState::default()))
+}
+
+fn emit_plugin_lifecycle_event(
+    action: &'static str,
+    plugin_name: &str,
+    result: &'static str,
+    error: Option<String>,
+) {
+    let request_id = format!("plugin-lifecycle-{plugin_name}-{action}");
+    let trace_id = agent_team_mail_core::event_log::trace_id_for_request("atm-daemon", &request_id);
+    emit_event_best_effort(EventFields {
+        level: if error.is_some() { "error" } else { "info" },
+        source: "atm-daemon",
+        action,
+        target: Some(plugin_name.to_string()),
+        result: Some(result.to_string()),
+        request_id: Some(request_id),
+        trace_id: Some(trace_id.clone()),
+        span_id: Some(agent_team_mail_core::event_log::span_id_for_action(
+            &trace_id, action,
+        )),
+        extra_fields: {
+            let mut fields = serde_json::Map::new();
+            fields.insert(
+                "plugin".to_string(),
+                serde_json::Value::String(plugin_name.to_string()),
+            );
+            fields.insert(
+                "lifecycle_scope".to_string(),
+                serde_json::Value::String("daemon_plugin".to_string()),
+            );
+            fields
+        },
+        error,
+        ..Default::default()
+    });
 }
 
 /// Wait for a daemon shutdown task to finish within `timeout`.
@@ -142,6 +180,12 @@ pub async fn run(
     let _ = registry.init_all(ctx).await;
     let init_failed_plugins = registry.failed_init_plugins();
     for failed in &init_failed_plugins {
+        emit_plugin_lifecycle_event(
+            "plugin_init",
+            &failed.name,
+            "error",
+            Some(failed.error.clone()),
+        );
         warn!(
             plugin = %failed.name,
             error = %failed.error,
@@ -190,17 +234,26 @@ pub async fn run(
 
     for (metadata, plugin_arc) in plugins.clone() {
         let plugin_name = metadata.name.to_string();
+        emit_plugin_lifecycle_event("plugin_init", &plugin_name, "ok", None);
         let cancel_clone = cancel.clone();
 
         let task = tokio::spawn(async move {
+            emit_plugin_lifecycle_event("plugin_run_start", &plugin_name, "starting", None);
             info!("Plugin {} run() starting", plugin_name);
             let mut plugin = plugin_arc.lock().await;
 
             match plugin.run(cancel_clone).await {
                 Ok(()) => {
+                    emit_plugin_lifecycle_event("plugin_run_complete", &plugin_name, "ok", None);
                     info!("Plugin {} run() completed", plugin_name);
                 }
                 Err(e) => {
+                    emit_plugin_lifecycle_event(
+                        "plugin_run_complete",
+                        &plugin_name,
+                        "error",
+                        Some(e.to_string()),
+                    );
                     error!("Plugin {} run() failed: {}", plugin_name, e);
                 }
             }
@@ -533,10 +586,16 @@ pub async fn run(
     )
     .await;
 
+    for (metadata, _) in &plugins {
+        emit_plugin_lifecycle_event("plugin_shutdown", metadata.name, "starting", None);
+    }
     // Graceful shutdown of all plugins
     graceful_shutdown(plugins, Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS))
         .await
         .context("Plugin shutdown encountered errors")?;
+    for (plugin_name, _) in &plugin_tasks {
+        emit_plugin_lifecycle_event("plugin_shutdown", plugin_name, "ok", None);
+    }
 
     // Wait for plugin tasks to complete
     for (plugin_name, task) in plugin_tasks {
@@ -1376,10 +1435,13 @@ async fn status_writer_loop(
     let plugin_statuses = build_plugin_statuses(&plugins, &init_failed_plugins, &ctx).await;
     let teams = get_active_teams(&ctx).await;
     let logging = build_logging_health(&ctx, &log_event_queue).await;
+    let otel = build_otel_health(&ctx);
     if let Err(e) = status_writer.write_daemon_touch(&teams) {
         error!("Failed to write daemon touch sidecar: {}", e);
     }
-    if let Err(e) = status_writer.write_status(plugin_statuses.clone(), teams.clone(), logging) {
+    if let Err(e) =
+        status_writer.write_status(plugin_statuses.clone(), teams.clone(), logging, otel)
+    {
         error!("Failed to write initial daemon status: {}", e);
     }
 
@@ -1399,8 +1461,9 @@ async fn status_writer_loop(
                     build_plugin_statuses(&plugins, &init_failed_plugins, &ctx).await;
                 let teams = get_active_teams(&ctx).await;
                 let logging = build_logging_health(&ctx, &log_event_queue).await;
+                let otel = build_otel_health(&ctx);
 
-                if let Err(e) = status_writer.write_status(plugin_statuses, teams, logging) {
+                if let Err(e) = status_writer.write_status(plugin_statuses, teams, logging, otel) {
                     error!("Failed to write daemon status: {}", e);
                 }
             }
@@ -1464,6 +1527,17 @@ fn build_logging_health_snapshot(
         spool_count,
         oldest_spool_age,
     }
+}
+
+fn build_otel_health(ctx: &PluginContext) -> OtelHealth {
+    let home_dir = ctx
+        .system
+        .claude_root
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let canonical_log_path = agent_team_mail_core::logging_event::configured_log_path(&home_dir);
+    crate::daemon::observability::current_otel_health(&canonical_log_path).into()
 }
 
 fn derive_logging_state(

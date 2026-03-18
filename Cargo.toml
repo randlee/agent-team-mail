@@ -9,6 +9,7 @@ members = [
     "crates/atm-agent-mcp",
     "crates/atm-tui",
     "crates/sc-observability",
+    "crates/sc-observability-otlp",
     "crates/sc-composer",
     "crates/sc-compose",
 ]
@@ -33,6 +34,7 @@ toml = { version = "0.8", features = ["parse"] }
 minijinja = "2"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
 # Error handling
 thiserror = "2.0"
@@ -45,3 +47,4 @@ agent-team-mail-daemon-launch = { path = "crates/atm-daemon-launch", version = "
 agent-team-mail-daemon = { path = "crates/atm-daemon", version = "=0.45.2" }
 sc-composer = { path = "crates/sc-composer", version = "=0.45.2" }
 sc-observability = { path = "crates/sc-observability", version = "=0.45.2" }
+sc-observability-otlp = { path = "crates/sc-observability-otlp", version = "=0.45.2" }
