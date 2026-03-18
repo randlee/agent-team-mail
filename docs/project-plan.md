@@ -185,7 +185,8 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AS | Backlog Gap-Filling + GH API Governance | 14 backlog bug/gap fixes + GH API hard firewall, ledgers, and explicit GitHub ownership requirements | ACTIVE |
 | AT | GitHub Boundary Elimination | Remove all remaining audited GitHub-boundary violations so only the gh plugin/provider layer owns GitHub behavior | PLANNED |
 | AV | OTel Collector Logs Rollout | Ship OTLP HTTP logs export, dogfood it against a Grafana-compatible receiver, and preserve fail-open local logging | COMPLETE |
-| AW | OTel Traces + Metrics Expansion | Add native traces and metrics, Grafana dashboards/smoke, and external repo rollout on top of AV | PLANNED |
+| AW | OTel Traces + Metrics Expansion | Add native traces and metrics, Grafana dashboards/smoke, and external repo rollout on top of AV | COMPLETE |
+| AY | OTel Grafana Dogfood Readiness | Close live-smoke gaps after AW: Loki service-name verification, daemon trace startup/config inheritance, metric query alignment, and dev-install dogfood readiness | PLANNED |
 
 ---
 

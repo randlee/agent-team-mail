@@ -1,6 +1,6 @@
 # Observability Architecture
 
-**Status**: Active (Phase AH baseline; Phase AV complete; Phase AW expansion planned)
+**Status**: Active (Phase AH baseline; Phase AV complete; Phase AW complete; Phase AY dogfood-readiness planned)
 **Primary crate**: `sc-observability`
 **See also**:
 - `docs/observability/requirements.md`
@@ -191,6 +191,31 @@ This table is the required config contract for AV.2 and later. New producer
 code must consume this shared contract through `sc-observability` facade
 configuration, not by inventing binary-local environment variables or transport
 options.
+
+## 9.3 Live Grafana and Shared-Daemon Contract
+
+Phase AY closes the gap between a working in-repo OTel stack and reliable live
+Grafana dogfooding.
+
+- `service.name` must be set deterministically from ATM binary ownership for all
+  exported signals so live Loki queries can use `service_name="atm"` and
+  Tempo queries can use `resource.service.name = "atm-daemon"` without fallback
+  guessing like `unknown_service`.
+- Shared daemon startup must consume the same canonical OTel config surface as
+  the invoking CLI/dev-install flow before the daemon backgrounds itself.
+  A stale already-running daemon without OTel config must not silently satisfy
+  smoke flows that are supposed to verify daemon trace export.
+- Live smoke scripts may still stop/restart the daemon to get a fresh process,
+  but that is a verification control, not the long-term architecture answer.
+  The long-term answer is that the canonical launcher/dev-install path starts
+  the shared daemon with the intended OTel config every time.
+- Grafana Cloud read verification is a three-backend contract:
+  - Loki uses its own instance ID
+  - Tempo uses its own instance ID
+  - Mimir/Prometheus uses its own instance ID
+  - the read token may be shared only when it has all required scopes
+- Metrics verification must use the actual exported canonical metric names from
+  `sc-observability` / `sc-observability-otlp`, not dashboard-local shorthand.
 
 ## 10. Diagnostics JSON Contract Lock
 

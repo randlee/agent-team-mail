@@ -1,6 +1,6 @@
 # Phase AW Planning: OTel Traces + Metrics Expansion
 
-**Status**: Planned
+**Status**: Complete
 **Prerequisite**: Phase AV merged and dogfooded against a Grafana-compatible
 OTLP HTTP logs receiver.
 
@@ -150,3 +150,16 @@ AW should deliver:
    dashboard recipes published and full live traces-and-metrics smoke deferred
    to AW.7+.
 5. External consumer repos have a concrete adoption contract and checklist.
+
+## Follow-On
+
+Live Grafana smoke after AW identified deployment/dogfood gaps that are outside
+the original AW implementation scope:
+
+- live Loki verification of `service_name="atm"`
+- fresh-daemon Tempo verification for `atm-daemon` traces
+- canonical Mimir metric-name/query alignment in smoke/docs
+- shared dev-daemon/startup dogfood readiness
+
+Those follow-up fixes are planned in
+`docs/phase-ay-grafana-dogfood-readiness.md`.

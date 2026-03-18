@@ -1,6 +1,6 @@
 # Observability Requirements
 
-**Status**: Active (Phase AH baseline; Phase AV logs rollout planned; Phase AW traces/metrics planned)
+**Status**: Active (Phase AH baseline; Phase AV complete; Phase AW complete; Phase AY dogfood-readiness planned)
 **Scope**: `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `sc-compose`, `sc-composer`
 **See also**:
 - `docs/observability/architecture.md`
@@ -258,6 +258,32 @@ Lifecycle and hook coverage:
 - High-value in-repo telemetry required in Phase AV includes:
   - CLI request/response log correlation for `atm read`, `atm send`, and daemon commands
   - daemon request, plugin dispatch, and lifecycle log coverage
+
+## 9.1 Live Grafana Verification and Dogfood Readiness
+
+After Phase AW, the repository must satisfy a live Grafana verification
+contract before shared dev-daemon dogfooding can be considered ready:
+
+- OTel log records from `atm` must be queryable in Loki via
+  `service_name="atm"` for a live smoke session.
+- OTel trace records from `atm-daemon` must be queryable in Tempo via
+  `resource.service.name = "atm-daemon"` for a fresh daemon start that
+  inherited the active OTel env/config.
+- OTel metrics must be queryable in Mimir/Prometheus using the canonical
+  exported metric names, not dashboard-local aliases or guessed names.
+- Shared dev-daemon startup paths (`scripts/dev-install`, canonical launcher,
+  and operator restart flows) must preserve the active OTel export config so a
+  newly started shared daemon participates in live collector export without ad
+  hoc manual patching after startup.
+- Grafana Cloud read verification must use backend-specific Basic auth
+  usernames (Loki, Tempo, Mimir instance IDs) plus a read token with the
+  required scopes. Reusing one precomputed auth header across all three
+  backends is forbidden.
+- Any smoke requirement that depends on daemon-owned traces must explicitly
+  control daemon lifecycle so an already-running daemon without OTel env does
+  not invalidate the result.
+
+AY closes this contract after the AW stack lands.
   - GitHub firewall/ledger correlation fields in log records
   - worker/session lifecycle log coverage already represented in local JSONL logs
   - MCP request/session log correlation within `atm-agent-mcp`
