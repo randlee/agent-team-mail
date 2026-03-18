@@ -2998,8 +2998,8 @@ mod tests {
   "version": "0.44.1",
   "written_at": "2026-03-02T00:00:00Z"
 }}"#,
-                executable_path = executable_path.display(),
-                home_scope = home_scope.display(),
+                executable_path = executable_path.to_string_lossy().replace('\\', "/"),
+                home_scope = home_scope.to_string_lossy().replace('\\', "/"),
             ),
         )
         .unwrap();
@@ -3034,7 +3034,7 @@ mod tests {
   }}
 }}"#,
                 std::process::id(),
-                binary = binary.display(),
+                binary = binary.to_string_lossy().replace('\\', "/"),
             ),
         )
         .unwrap();

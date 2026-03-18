@@ -1,5 +1,6 @@
 use agent_team_mail_core::logging_event::new_log_event;
 use sc_observability::export_otel_best_effort_from_path;
+use serial_test::serial;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -107,6 +108,7 @@ impl Drop for LogCollector {
 }
 
 #[test]
+#[serial]
 fn log_event_exports_to_otlp_http_collector_with_service_name() {
     let collector = LogCollector::start();
     let temp = TempDir::new().expect("temp dir");
