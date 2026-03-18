@@ -176,7 +176,8 @@ Acceptance:
 Deliver:
 
 - finalize the `sc-observability-otlp` transport adapter boundary
-- define canonical config surface for endpoint/protocol/auth/TLS/debug export
+- define canonical config surface for endpoint/protocol/auth/TLS/debug export,
+  batching/flush, and retry/backoff
 - document in-repo vs out-of-repo scope explicitly
 - add `scripts/ci/observability_boundary_check.sh` as the dedicated
   observability import-boundary enforcement script
@@ -193,6 +194,9 @@ Acceptance:
 - `sc-observability-otlp` is the committed adapter crate name
 - a CI import lint rule exists before AV.2 begins and blocks
   `sc-observability-otlp` imports from non-entry-point modules
+- the same CI import lint rule blocks direct `opentelemetry*` imports outside
+  the dedicated adapter crate and blocks direct `sc-observability` imports from
+  non-entry-point modules
 
 ### AV.2 — Transport Adapter
 

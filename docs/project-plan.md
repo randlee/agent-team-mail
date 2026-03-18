@@ -1595,7 +1595,7 @@ current `sc-observability` baseline present on `develop`.
 | Sprint | Focus | Status |
 |---|---|---|
 | AV.0 | Boundary remediation prerequisite: remove existing direct `sc-observability` imports that already bypass the intended facade before collector work begins | PLANNED |
-| AV.1 | Architecture boundary + config contract: define the dedicated `sc-observability-otlp` transport adapter seam, collector config surface, and in-repo scope | PLANNED |
+| AV.1 | Architecture boundary + config contract: define the dedicated `sc-observability-otlp` transport adapter seam, canonical collector config surface, in-repo scope, and CI enforcement gate | PLANNED |
 | AV.2 | Transport adapter implementation: add OTLP/HTTP exporter path, stdout debug exporter, and fail-open collector transport behind the dedicated adapter boundary | PLANNED |
 | AV.3 | High-value daemon/CLI instrumentation: `atm`, `atm-daemon`, `atm-core`, GitHub firewall/ledger paths, and daemon lifecycle/request spans/metrics (after Phase AT is merged to `develop`) | PLANNED |
 | AV.4 | In-repo producer rollout: `atm-tui`, `atm-agent-mcp`, `sc-compose`, `sc-composer`, plus doctor/status health and troubleshooting closure | PLANNED |
