@@ -119,7 +119,7 @@ fn main() {
         result: Some("starting".to_string()),
         request_id: Some(request_id.clone()),
         trace_id: Some(trace_id.clone()),
-        span_id: Some(start_span_id),
+        span_id: Some(start_span_id.clone()),
         extra_fields: {
             let mut fields = serde_json::Map::new();
             fields.insert(

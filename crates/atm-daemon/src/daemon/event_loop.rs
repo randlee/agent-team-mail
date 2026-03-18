@@ -135,27 +135,34 @@ fn build_dispatch_root_trace_record(
     }
 }
 
+struct PluginDispatchTrace<'a> {
+    plugin_name: &'a str,
+    operation: &'a str,
+    duration_ms: u64,
+    status: TraceStatus,
+    error: Option<&'a str>,
+}
+
 fn build_plugin_dispatch_trace_record(
     event: &InboxEvent,
     message_id: Option<&str>,
     trace_id: &str,
     parent_span_id: &str,
-    plugin_name: &str,
-    operation: &str,
-    duration_ms: u64,
-    status: TraceStatus,
-    error: Option<&str>,
+    plugin_trace: PluginDispatchTrace<'_>,
 ) -> TraceRecord {
-    let span_action = format!("plugin_dispatch_{plugin_name}_{operation}");
+    let span_action = format!(
+        "plugin_dispatch_{}_{}",
+        plugin_trace.plugin_name, plugin_trace.operation
+    );
     let span_id = agent_team_mail_core::event_log::span_id_for_action(trace_id, &span_action);
     let mut attributes = serde_json::Map::new();
     attributes.insert(
         "plugin".to_string(),
-        serde_json::Value::String(plugin_name.to_string()),
+        serde_json::Value::String(plugin_trace.plugin_name.to_string()),
     );
     attributes.insert(
         "operation".to_string(),
-        serde_json::Value::String(operation.to_string()),
+        serde_json::Value::String(plugin_trace.operation.to_string()),
     );
     attributes.insert(
         "path".to_string(),
@@ -167,7 +174,7 @@ fn build_plugin_dispatch_trace_record(
             serde_json::Value::String(message_id.to_string()),
         );
     }
-    if let Some(error) = error {
+    if let Some(error) = plugin_trace.error {
         attributes.insert(
             "error".to_string(),
             serde_json::Value::String(error.to_string()),
@@ -183,9 +190,12 @@ fn build_plugin_dispatch_trace_record(
         trace_id: trace_id.to_string(),
         span_id,
         parent_span_id: Some(parent_span_id.to_string()),
-        name: format!("atm-daemon.plugin.{plugin_name}.{operation}"),
-        status,
-        duration_ms,
+        name: format!(
+            "atm-daemon.plugin.{}.{}",
+            plugin_trace.plugin_name, plugin_trace.operation
+        ),
+        status: plugin_trace.status,
+        duration_ms: plugin_trace.duration_ms,
         source_binary: "atm-daemon".to_string(),
         attributes,
     }
@@ -598,11 +608,15 @@ pub async fn run(
                                         message_id.as_deref(),
                                         &dispatch_trace_id,
                                         &dispatch_root_span_id,
-                                        metadata.name,
-                                        "handle_message",
-                                        plugin_dispatch_started_at.elapsed().as_millis() as u64,
-                                        trace_status,
-                                        trace_error.as_deref(),
+                                        PluginDispatchTrace {
+                                            plugin_name: metadata.name,
+                                            operation: "handle_message",
+                                            duration_ms: plugin_dispatch_started_at.elapsed()
+                                                .as_millis()
+                                                as u64,
+                                            status: trace_status,
+                                            error: trace_error.as_deref(),
+                                        },
                                     )],
                                     &otel_config,
                                 );
@@ -1905,8 +1919,9 @@ fn format_timestamp(time: SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        InboxCursor, build_dispatch_root_trace_record, build_logging_health_snapshot,
-        build_plugin_dispatch_trace_record, dispatch_trace_id, read_new_inbox_messages,
+        InboxCursor, PluginDispatchTrace, build_dispatch_root_trace_record,
+        build_logging_health_snapshot, build_plugin_dispatch_trace_record, dispatch_trace_id,
+        read_new_inbox_messages,
     };
     use crate::daemon::InboxEventKind;
     use crate::daemon::session_registry::new_session_registry;
@@ -2022,11 +2037,13 @@ mod tests {
             Some("msg-123"),
             &trace_id,
             &root_span_id,
-            "ci-monitor",
-            "handle_message",
-            17,
-            TraceStatus::Ok,
-            None,
+            PluginDispatchTrace {
+                plugin_name: "ci-monitor",
+                operation: "handle_message",
+                duration_ms: 17,
+                status: TraceStatus::Ok,
+                error: None,
+            },
         );
 
         assert_eq!(record.trace_id, trace_id);

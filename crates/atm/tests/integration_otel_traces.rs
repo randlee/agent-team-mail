@@ -183,19 +183,25 @@ fn cli_status_exports_trace_record_to_collector() {
     let payload: Value = serde_json::from_str(&body).expect("valid traces payload");
     let span = &payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0];
     assert_eq!(span["name"], "atm.command.status");
-    assert_eq!(span["traceId"].as_str().is_some(), true);
-    assert_eq!(span["spanId"].as_str().is_some(), true);
+    assert!(span["traceId"].as_str().is_some());
+    assert!(span["spanId"].as_str().is_some());
 
-    let attrs = payload["resourceSpans"][0]["resource"]["attributes"]
+    let resource_attrs = payload["resourceSpans"][0]["resource"]["attributes"]
         .as_array()
         .expect("resource attributes");
     assert!(
-        attrs
+        resource_attrs
+            .iter()
+            .any(|item| { item["key"] == "service.name" && item["value"]["stringValue"] == "atm" })
+    );
+    let span_attrs = span["attributes"].as_array().expect("span attributes");
+    assert!(
+        span_attrs
             .iter()
             .any(|item| { item["key"] == "team" && item["value"]["stringValue"] == "atm-dev" })
     );
     assert!(
-        attrs
+        span_attrs
             .iter()
             .any(|item| { item["key"] == "agent" && item["value"]["stringValue"] == "arch-ctm" })
     );
