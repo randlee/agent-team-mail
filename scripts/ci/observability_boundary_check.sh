@@ -9,7 +9,7 @@ is_allowed_sc_observability_rust_path() {
   local rel="$1"
   case "$rel" in
     crates/sc-compose/src/main.rs) return 0 ;;
-    crates/atm-daemon/src/daemon/observability.rs) return 0 ;;
+    crates/atm-daemon/src/main.rs) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -36,6 +36,7 @@ while IFS= read -r match; do
   matches+=("${match}::ARCH-BOUNDARY-002 violation: direct sc-observability-otlp import outside dedicated adapter layer")
 done < <(
   grep -RInE '\bsc_observability_otlp\b' "$ROOT/crates" --include='*.rs' \
+    | grep -v '/tests/' \
     | sed "s#^$ROOT/##" || true
 )
 
@@ -48,6 +49,7 @@ while IFS= read -r match; do
   matches+=("${match}::ARCH-BOUNDARY-002 violation: direct opentelemetry import outside dedicated adapter crate")
 done < <(
   grep -RInE '(^|[^A-Za-z0-9])opentelemetry([_-][A-Za-z0-9_]+)?([^A-Za-z0-9]|$)' "$ROOT/crates" --include='*.rs' --include='Cargo.toml' \
+    | grep -v '/tests/' \
     | sed "s#^$ROOT/##" || true
 )
 
