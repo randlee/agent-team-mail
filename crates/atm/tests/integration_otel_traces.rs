@@ -205,6 +205,23 @@ fn cli_status_exports_trace_record_to_collector() {
             .iter()
             .any(|item| { item["key"] == "agent" && item["value"]["stringValue"] == "arch-ctm" })
     );
+
+    let mut saw_metrics = false;
+    for _ in 0..3 {
+        if let Ok((path, body)) = rx.recv_timeout(Duration::from_secs(5))
+            && path == "/v1/metrics"
+        {
+            let payload: Value = serde_json::from_str(&body).expect("valid metrics payload");
+            let metric = &payload["resourceMetrics"][0]["scopeMetrics"][0]["metrics"][0];
+            assert_eq!(metric["name"], "atm.commands_total");
+            saw_metrics = true;
+            break;
+        }
+    }
+    assert!(
+        saw_metrics,
+        "collector should receive at least one /v1/metrics request"
+    );
 }
 
 #[test]
