@@ -2013,7 +2013,6 @@ mod tests {
     use sc_observability::TraceStatus;
     use std::collections::HashMap;
     use std::fs as stdfs;
-    use std::path::PathBuf;
     use std::time::Duration;
     use tempfile::TempDir;
     use tokio::fs;
