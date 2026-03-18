@@ -122,23 +122,28 @@ External consumers should use the neutral facade exported by
     config: &OtelConfig,
   )`
   Source: `crates/sc-observability/src/metrics.rs`
+- `pub fn current_otel_health(log_path: &Path) -> OtelHealthSnapshot`
+  Source: `crates/sc-observability/src/health.rs`
+
+These are the approved external-consumer facade entry points for best-effort
+trace/metric export plus health inspection without importing transport-specific
+code.
+
+The following public helpers are internal/in-repo only and must not be treated
+as external-consumer APIs:
+
 - `pub fn export_otel_best_effort(
     event: &LogEventV1,
     config: &OtelConfig,
     exporter: &dyn OtelExporter,
   )`
-  Source: `crates/sc-observability/src/lib.rs`
 - `pub fn export_otel_best_effort_from_path(
     log_path: &Path,
     event: &LogEventV1,
   )`
-  Source: `crates/sc-observability/src/lib.rs`
-- `pub fn current_otel_health(log_path: &Path) -> OtelHealthSnapshot`
-  Source: `crates/sc-observability/src/health.rs`
 
-These are the concrete public API entry points for best-effort trace, metric,
-and log export plus health inspection without importing transport-specific
-code.
+Those functions exist for internal sc-observability facade helpers and
+entry-point wiring. External consumers must not call them directly.
 
 ## Versioning and Compatibility
 
