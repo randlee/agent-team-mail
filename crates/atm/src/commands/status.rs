@@ -5,7 +5,7 @@ use agent_team_mail_core::daemon_client::{
     canonical_liveness_bool, query_list_agents, query_team_member_states,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
-use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
+use agent_team_mail_core::{io::inbox_read_file_tolerant, schema::TeamConfig};
 use anyhow::Result;
 use clap::Args;
 use serde_json::json;
@@ -291,23 +291,20 @@ fn count_inbox_messages(
     for member in members {
         let inbox_path = inboxes_dir.join(format!("{}.json", member.name));
         if inbox_path.exists() {
-            match fs::read_to_string(&inbox_path) {
-                Ok(content) => {
-                    if let Ok(messages) = serde_json::from_str::<Vec<InboxMessage>>(&content) {
-                        let unread_count = messages.iter().filter(|m| !m.read).count();
-                        let pending_count =
-                            messages.iter().filter(|m| m.is_pending_action()).count();
-                        counts.insert(
-                            member.name.clone(),
-                            InboxCounts {
-                                unread: unread_count,
-                                pending: pending_count,
-                            },
-                        );
-                    }
+            match inbox_read_file_tolerant(&inbox_path) {
+                Ok(messages) => {
+                    let unread_count = messages.iter().filter(|m| !m.read).count();
+                    let pending_count = messages.iter().filter(|m| m.is_pending_action()).count();
+                    counts.insert(
+                        member.name.clone(),
+                        InboxCounts {
+                            unread: unread_count,
+                            pending: pending_count,
+                        },
+                    );
                 }
                 Err(_) => {
-                    // Ignore read errors
+                    // Ignore read/parse errors.
                 }
             }
         }

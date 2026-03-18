@@ -2513,7 +2513,8 @@ mod tests {
     }
 
     #[test]
-    fn test_kill_timeout_fallback_converges_to_cleanup_dead_member_session_without_dropping_roster() {
+    fn test_kill_timeout_fallback_converges_to_cleanup_dead_member_session_without_dropping_roster()
+    {
         let (tmp, inbox_dir, team_name, sr, state_store) = setup_dead_terminal_non_lead();
         let home = tmp.path();
         let cycle_state = super::new_reconcile_cycle_state();
