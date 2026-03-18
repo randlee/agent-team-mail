@@ -7,7 +7,6 @@ use agent_team_mail_core::daemon_client::{
     DaemonTouchEntry, DaemonTouchSnapshot, RuntimeOwnerMetadata, daemon_touch_path_for,
 };
 use anyhow::{Context, Result};
-use sc_observability::OtelLastError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -74,6 +73,13 @@ pub struct OtelHealth {
     pub last_error: OtelLastError,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OtelLastError {
+    pub code: Option<String>,
+    pub message: Option<String>,
+    pub at: Option<String>,
+}
+
 impl Default for OtelHealth {
     fn default() -> Self {
         Self {
@@ -91,8 +97,8 @@ impl Default for OtelHealth {
     }
 }
 
-impl From<sc_observability::OtelHealthSnapshot> for OtelHealth {
-    fn from(value: sc_observability::OtelHealthSnapshot) -> Self {
+impl From<crate::daemon::observability::OtelHealthSnapshot> for OtelHealth {
+    fn from(value: crate::daemon::observability::OtelHealthSnapshot) -> Self {
         Self {
             schema_version: value.schema_version,
             enabled: value.enabled,
@@ -103,7 +109,11 @@ impl From<sc_observability::OtelHealthSnapshot> for OtelHealth {
             local_mirror_path: value.local_mirror_path,
             debug_local_export: value.debug_local_export,
             debug_local_state: value.debug_local_state,
-            last_error: value.last_error,
+            last_error: OtelLastError {
+                code: value.last_error.code,
+                message: value.last_error.message,
+                at: value.last_error.at,
+            },
         }
     }
 }

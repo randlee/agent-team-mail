@@ -1,5 +1,4 @@
 use chrono::{SecondsFormat, Utc};
-pub(crate) use sc_observability::{OtelHealthSnapshot, OtelLastError};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -32,8 +31,47 @@ impl Default for LoggingHealthSnapshot {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct OtelHealthSnapshot {
+    pub(crate) schema_version: String,
+    pub(crate) enabled: bool,
+    pub(crate) collector_endpoint: Option<String>,
+    pub(crate) protocol: String,
+    pub(crate) collector_state: String,
+    pub(crate) local_mirror_state: String,
+    pub(crate) local_mirror_path: String,
+    pub(crate) debug_local_export: bool,
+    pub(crate) debug_local_state: String,
+    pub(crate) last_error: OtelLastError,
+}
+
+impl Default for OtelHealthSnapshot {
+    fn default() -> Self {
+        Self {
+            schema_version: "v1".to_string(),
+            enabled: true,
+            collector_endpoint: None,
+            protocol: "otlp_http".to_string(),
+            collector_state: "not_configured".to_string(),
+            local_mirror_state: "healthy".to_string(),
+            local_mirror_path: String::new(),
+            debug_local_export: false,
+            debug_local_state: "disabled".to_string(),
+            last_error: OtelLastError::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct LastError {
+    pub(crate) code: Option<String>,
+    pub(crate) message: Option<String>,
+    pub(crate) at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct OtelLastError {
     pub(crate) code: Option<String>,
     pub(crate) message: Option<String>,
     pub(crate) at: Option<String>,
