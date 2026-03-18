@@ -1,8 +1,8 @@
+use chrono::{DateTime, Utc};
 use reqwest::blocking::{Client, ClientBuilder};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use chrono::{DateTime, Utc};
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -460,8 +460,8 @@ fn build_traces_payload(records: &[TraceTransportRecord]) -> Value {
             }
             if let Some(start_unix_nanos) = parse_timestamp_to_unix_nanos(&record.timestamp) {
                 span["startTimeUnixNano"] = json!(start_unix_nanos.to_string());
-                let end_unix_nanos = start_unix_nanos
-                    .saturating_add(record.duration_ms.saturating_mul(1_000_000));
+                let end_unix_nanos =
+                    start_unix_nanos.saturating_add(record.duration_ms.saturating_mul(1_000_000));
                 span["endTimeUnixNano"] = json!(end_unix_nanos.to_string());
             }
 
@@ -502,8 +502,8 @@ fn build_metrics_payload(records: &[MetricTransportRecord]) -> Value {
             }))
             .collect::<Vec<_>>();
 
-            let time_unix_nano = parse_timestamp_to_unix_nanos(&record.timestamp)
-                .map(|value| value.to_string());
+            let time_unix_nano =
+                parse_timestamp_to_unix_nanos(&record.timestamp).map(|value| value.to_string());
 
             let mut data_point = json!({
                 "attributes": attributes.clone(),
@@ -568,7 +568,11 @@ fn build_metrics_payload(records: &[MetricTransportRecord]) -> Value {
 
 fn parse_timestamp_to_unix_nanos(timestamp: &str) -> Option<u64> {
     let parsed = DateTime::parse_from_rfc3339(timestamp).ok()?;
-    parsed.with_timezone(&Utc).timestamp_nanos_opt()?.try_into().ok()
+    parsed
+        .with_timezone(&Utc)
+        .timestamp_nanos_opt()?
+        .try_into()
+        .ok()
 }
 
 fn correlation_attributes(
