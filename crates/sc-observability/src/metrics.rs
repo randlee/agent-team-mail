@@ -1,4 +1,4 @@
-use crate::{health, otlp_adapter, OtelConfig};
+use crate::{OtelConfig, health, otlp_adapter};
 
 /// Neutral metric signal contract for producer-side observability code.
 ///

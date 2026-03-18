@@ -1,6 +1,4 @@
-use sc_observability::{
-    OtelConfig, TraceRecord, TraceStatus, export_trace_records_best_effort,
-};
+use sc_observability::{OtelConfig, TraceRecord, TraceStatus, export_trace_records_best_effort};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
@@ -125,7 +123,11 @@ fn trace_record_exports_to_otlp_http_collector() {
     export_trace_records_best_effort(&[record], &config);
 
     let requests = collector.wait_for_request();
-    assert_eq!(requests.len(), 1, "collector should receive one trace request");
+    assert_eq!(
+        requests.len(),
+        1,
+        "collector should receive one trace request"
+    );
     assert!(
         requests[0].starts_with("POST /v1/traces HTTP/1.1"),
         "collector request should target OTLP traces endpoint: {requests:?}"
