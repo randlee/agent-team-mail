@@ -17,6 +17,37 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+fn export_otel_from_entrypoint(
+    log_path: &std::path::Path,
+    event: &agent_team_mail_core::logging_event::LogEventV1,
+) {
+    sc_observability::export_otel_best_effort_from_path(log_path, event);
+}
+
+fn current_otel_health_from_entrypoint(
+    log_path: &std::path::Path,
+) -> agent_team_mail_daemon::daemon::observability::OtelHealthSnapshot {
+    let health = sc_observability::current_otel_health(log_path);
+    // Intentional mirror of sc_observability::OtelHealthSnapshot — sc-observability
+    // imports are confined to entry-point main.rs per ARCH-BOUNDARY-002.
+    agent_team_mail_daemon::daemon::observability::OtelHealthSnapshot {
+        schema_version: health.schema_version,
+        enabled: health.enabled,
+        collector_endpoint: health.collector_endpoint,
+        protocol: health.protocol,
+        collector_state: health.collector_state,
+        local_mirror_state: health.local_mirror_state,
+        local_mirror_path: health.local_mirror_path,
+        debug_local_export: health.debug_local_export,
+        debug_local_state: health.debug_local_state,
+        last_error: agent_team_mail_daemon::daemon::observability::OtelLastError {
+            code: health.last_error.code,
+            message: health.last_error.message,
+            at: health.last_error.at,
+        },
+    }
+}
+
 /// ATM Daemon - Background service for agent team mail plugins
 #[derive(Parser, Debug)]
 #[command(name = "atm-daemon")]
@@ -380,6 +411,8 @@ async fn main() -> Result<()> {
     // Create the bounded log event queue and async writer task.
     let log_event_queue = new_log_event_queue();
     let log_cancel = cancel_token.clone();
+    daemon::observability::install_otel_export_hook(Arc::new(export_otel_from_entrypoint));
+    daemon::observability::install_otel_health_hook(Arc::new(current_otel_health_from_entrypoint));
     tokio::spawn(run_log_writer_task(
         log_event_queue.clone(),
         log_writer_config,

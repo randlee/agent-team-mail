@@ -224,14 +224,11 @@ Lifecycle and hook coverage:
 - Runtime-native identifiers (`Claude session-id`, `Codex thread-id`, `Gemini session-id`)
   must be normalized into one OTel attribute name: `session_id`.
 - OTel payloads that include `session_id` must also include `team`, `agent`, and
-  `runtime` so traces can be joined back to runtime session JSONL artifacts.
-- `trace_id` and `span_id` are required for emitted traces; `subagent_id` is
-  required for sub-agent spans/events.
-- Initial OTel baseline must include:
-  - traces: `subagent.run`, `atm.send`, `atm.read`, `daemon.request` (selected paths)
-  - metrics: `subagent_runs_total`, `subagent_run_duration_ms`,
-    `subagent_active_count`, `atm_messages_total`, `log_events_total`,
-    `warnings_total`, `errors_total`
+  `runtime` so logs can be joined back to runtime session JSONL artifacts.
+- `trace_id` and `span_id` remain valid correlation fields when present in log
+  records; native traces and metrics are Phase AW scope.
+- Phase AV is logs-only. It delivers OTLP/HTTP `/v1/logs` collector export plus
+  local `.otel.jsonl` mirroring for fail-open auditing.
 - Phase AV must add live collector export for the binaries that ship from this
   repository: `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `sc-compose`,
   and `sc-composer`.
@@ -255,12 +252,41 @@ Lifecycle and hook coverage:
 - Phase AV must define one canonical transport config surface: endpoint,
   protocol, auth/TLS material, export enablement, and debug exporter controls.
   Per-binary config drift is forbidden.
+- Retry/backoff controls are part of the Phase AV config surface. Native
+  traces, metrics, and transport batching/flush controls are Phase AW scope.
 - High-value in-repo telemetry required in Phase AV includes:
-  - CLI request/response traces for `atm read`, `atm send`, and daemon commands
-  - daemon request, plugin dispatch, and lifecycle spans
-  - GitHub firewall/ledger correlation spans and metrics
-  - worker/session lifecycle metrics already represented in local JSONL logs
-  - MCP request/session traces within `atm-agent-mcp`
+  - CLI request/response log correlation for `atm read`, `atm send`, and daemon commands
+  - daemon request, plugin dispatch, and lifecycle log coverage
+  - GitHub firewall/ledger correlation fields in log records
+  - worker/session lifecycle log coverage already represented in local JSONL logs
+  - MCP request/session log correlation within `atm-agent-mcp`
+
+### 9.1 In-Repo Scope Lock
+
+Phase AV implementation scope for this repository is limited to:
+- `atm`
+- `atm-daemon`
+- `atm-tui`
+- `atm-agent-mcp`
+- `sc-compose`
+- `sc-composer`
+- `sc-observability`
+- `sc-observability-otlp`
+
+`scmux` and `schook` are explicit follow-on work in their own repositories.
+They must not be treated as delivered by this repository's AV implementation.
+
+### 9.2 Import Boundary Enforcement
+
+- `scripts/ci/observability_boundary_check.sh` is the canonical CI/review gate
+  for `ARCH-BOUNDARY-002`.
+- The gate must fail on direct `opentelemetry*`, `opentelemetry-otlp`, or
+  `sc-observability-otlp` imports/dependencies outside the approved adapter and
+  entry-point layer.
+- The gate must also fail on direct `sc-observability` imports from modules
+  outside the approved entry-point/facade wiring set.
+- CI must run the observability boundary check before AV.2 begins, and the rule
+  remains mandatory after AV.2 lands.
 
 ## 10. Cross-Tool Integration Requirements
 

@@ -19,13 +19,33 @@
 
 - `sc-observability` (library): event model, validators, redaction, sink traits,
   health evaluator, default init path.
-- planned dedicated OTel transport adapter crate: owns OTLP/collector transport,
-  auth/TLS, batching, retry, and SDK dependency integration.
+- `sc-observability-otlp` (planned dedicated OTel transport adapter crate):
+  owns OTLP/collector transport, auth/TLS, batching, retry, and SDK dependency
+  integration.
 - Producers: `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `sc-compose`,
   `sc-composer`, `scmux` (follow-on, not in Phase AV scope), `schook`
   (follow-on, not in Phase AV scope).
 - Daemon writer path: `atm-daemon` canonical sink for ATM producer traffic.
 - Mandatory OTel exporter path for in-scope tools (non-optional AV rollout).
+
+## 2.1 In-Repo vs Follow-On Scope
+
+Phase AV implementation in this repository covers:
+- `atm`
+- `atm-daemon`
+- `atm-tui`
+- `atm-agent-mcp`
+- `sc-compose`
+- `sc-composer`
+- `sc-observability`
+- `sc-observability-otlp`
+
+Phase AV does not implement collector rollout for:
+- `scmux`
+- `schook`
+
+Those remain follow-on work in their own repositories. Their future producer
+status does not expand this repository's AV implementation scope.
 
 ## 3. Data Flow
 
@@ -77,6 +97,14 @@ Health evaluator is implemented once and reused by `atm doctor` and `atm status`
 - Logging must not fail command execution.
 - Socket send failures degrade to spool fallback.
 - Merge is append-only with source deletion only after successful merge.
+- ATM uses a deliberate two-tier spool-write model:
+  - normal producer flow goes through the async producer channel
+    (`emit_event_best_effort` -> shared producer sender) so steady-state events
+    are batched and merged through the canonical pipeline.
+  - shutdown-critical or pre-exit diagnostics may use a synchronous direct
+    spool write path to persist the event immediately before process exit.
+- That synchronous direct path intentionally bypasses `ATM_LOG` gating so
+  teardown and failure diagnostics are not lost during late shutdown.
 
 ## 8. Security and Redaction
 
@@ -118,6 +146,10 @@ logging remains continuously available.
   - auth/TLS and headers
   - batching, flush, and remote retry policy
   - stdout/debug export modes
+- Canonical transport configuration is shared and centralized. The contract
+  surface includes endpoint, protocol, auth material, TLS configuration,
+  export enablement, stdout/debug export controls, batching/flush, and
+  retry/backoff. Per-binary config drift is forbidden.
 - Application and daemon crates call the generic observability facade only.
   They must not import collector SDK crates or construct OTLP exporters
   themselves.
@@ -125,11 +157,35 @@ logging remains continuously available.
   Entry-point wiring is limited to the small set of binaries/modules that
   initialize process-wide observability. Internal feature modules, helpers, and
   libraries must depend on the generic facade instead.
+- `scripts/ci/observability_boundary_check.sh` is the dedicated enforcement
+  gate for this rule. CI must run it before AV.2 begins and keep it active
+  afterward.
 - Canonical enforcement reference: `docs/arch-boundary.md`
   ("ARCH-BOUNDARY-002 Observability Import Boundary").
 - The partition goal for Phase AV is to keep collector-facing code in one
   replaceable layer so future backend changes do not leak through the rest of
   the codebase.
+
+## 9.2 Config Contract
+
+Phase AV uses one canonical collector configuration surface for all in-repo
+producers and daemon wiring.
+
+| Field | Canonical surface | Required policy |
+|---|---|---|
+| Export enablement | `ATM_OTEL_ENABLED` | One shared on/off gate for remote export. Falsey values disable exporter construction entirely while local structured logging remains active. |
+| Collector endpoint | `ATM_OTEL_ENDPOINT` | Single OTLP collector base endpoint for the process. Empty or unset keeps remote export disabled unless a debug-only local mirror is explicitly enabled. |
+| Protocol | `ATM_OTEL_PROTOCOL` | `otlp_http` is the committed AV transport. Other values are rejected until explicitly added by requirements. |
+| Auth header injection | `ATM_OTEL_AUTH_HEADER` | Optional single header value injected only by `sc-observability-otlp`; application crates must never build transport headers themselves. |
+| TLS / CA material | `ATM_OTEL_CA_FILE`, `ATM_OTEL_INSECURE_SKIP_VERIFY` | CA bundle path is the only approved custom trust input. Skip-verify is debug-only and must be surfaced as degraded diagnostics when enabled. |
+| Request timeout | `ATM_OTEL_TIMEOUT_MS` | One transport-wide timeout budget owned by the adapter; callers may not override per callsite. |
+| Retry policy | `ATM_OTEL_RETRY_MAX_ATTEMPTS`, `ATM_OTEL_RETRY_BACKOFF_MS`, `ATM_OTEL_RETRY_MAX_BACKOFF_MS` | Retry/backoff is adapter-owned, bounded, and fail-open with local structured logging preserved. |
+| Local debug exporter | `ATM_OTEL_DEBUG_LOCAL_EXPORT` | Enables local debug mirroring only. It must not change collector routing or bypass the adapter boundary. |
+
+This table is the required config contract for AV.2 and later. New producer
+code must consume this shared contract through `sc-observability` facade
+configuration, not by inventing binary-local environment variables or transport
+options.
 
 ## 10. Diagnostics JSON Contract Lock
 
@@ -148,3 +204,6 @@ object contract:
 - `logging_health.last_error.at`
 
 No drift is allowed across these two command surfaces for shared keys.
+
+See [docs/observability/troubleshooting.md](troubleshooting.md) for the
+operator runbook that interprets this locked contract.

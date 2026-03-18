@@ -7,7 +7,8 @@ current `sc-observability` baseline present on `develop`.
 
 ## Goal
 
-Get OpenTelemetry live for the binaries that ship from this repository while
+Get OpenTelemetry live for the binaries that ship from this repository as a
+logs-only collector rollout while
 using the work as an architecture cleanup:
 
 - real collector export for in-repo ATM binaries
@@ -120,7 +121,10 @@ The collector path must be optional at runtime but mandatory in capability:
 
 ## Highest-Value Instrumentation
 
-### Traces / spans
+Phase AV is limited to OTLP `/v1/logs`. Native traces, metrics, and transport
+batching/flush controls are Phase AW scope.
+
+### Log correlation / lifecycle coverage
 
 - `atm.send`
 - `atm.read`
@@ -129,17 +133,6 @@ The collector path must be optional at runtime but mandatory in capability:
 - GitHub firewall decision path
 - GitHub execution ledger calls
 - MCP request/session lifecycle in `atm-agent-mcp`
-
-### Metrics
-
-- command/request counts and duration
-- daemon request latency
-- spool fallback count
-- OTel exporter success/failure count
-- collector retry/backoff count
-- GH firewall blocked/allowed counts
-- GH ledger call counts
-- session/worker lifecycle counts already modeled in structured events
 
 ### Health/reporting
 
@@ -176,7 +169,8 @@ Acceptance:
 Deliver:
 
 - finalize the `sc-observability-otlp` transport adapter boundary
-- define canonical config surface for endpoint/protocol/auth/TLS/debug export
+- define canonical config surface for endpoint/protocol/auth/TLS/debug export,
+  batching/flush, and retry/backoff
 - document in-repo vs out-of-repo scope explicitly
 - add `scripts/ci/observability_boundary_check.sh` as the dedicated
   observability import-boundary enforcement script
@@ -193,6 +187,9 @@ Acceptance:
 - `sc-observability-otlp` is the committed adapter crate name
 - a CI import lint rule exists before AV.2 begins and blocks
   `sc-observability-otlp` imports from non-entry-point modules
+- the same CI import lint rule blocks direct `opentelemetry*` imports outside
+  the dedicated adapter crate and blocks direct `sc-observability` imports from
+  non-entry-point modules
 
 ### AV.2 — Transport Adapter
 
@@ -216,15 +213,15 @@ paths that AT is still relocating.
 
 Deliver:
 
-- high-value traces/metrics for `atm`, `atm-daemon`, and `atm-core` emission
+- high-value log correlation for `atm`, `atm-daemon`, and `atm-core` emission
   paths
-- GitHub firewall / ledger spans and metrics
+- GitHub firewall / ledger log correlation fields
 - daemon request and lifecycle instrumentation closure
 
 Acceptance:
 
-- collector traces/metrics are useful for request/lifecycle diagnosis, not just
-  raw event mirroring
+- collector-exported logs are useful for request/lifecycle diagnosis, not just
+  raw local mirroring
 
 ### AV.4 — In-Repo Producer Rollout + Health
 
@@ -245,6 +242,11 @@ Deliver:
 - collector-backed smoke tests on real dev install
 - outage/fail-open regression tests
 - explicit handoff notes for `scmux` / `schook` follow-on (`#624`)
+
+Artifacts:
+
+- `scripts/otel-dev-install-smoke.py`
+- `docs/observability/external-handoff-scmux-schook.md`
 
 Acceptance:
 
