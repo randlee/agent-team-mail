@@ -30,15 +30,11 @@
 //!
 //! All input events are handled between ticks with a non-blocking poll.
 
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use std::{
-    collections::{BTreeMap, VecDeque},
-    process::Stdio,
-};
 
-use agent_team_mail_daemon_launch::{LaunchClass, SpawnDaemonRequest, spawn_daemon_process};
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
@@ -52,10 +48,7 @@ use tokio::time::interval;
 
 use agent_team_mail_core::{
     control::{CONTROL_SCHEMA_VERSION, ControlAck, ControlAction, ControlRequest, ControlResult},
-    daemon_client::{
-        AgentSummary, daemon_is_running, daemon_socket_path, query_agent_stream_state,
-        query_list_agents, send_control,
-    },
+    daemon_client::{AgentSummary, query_agent_stream_state, query_list_agents, send_control},
     event_log::{EventFields, emit_event_best_effort},
     home::get_home_dir,
     logging,
@@ -69,6 +62,9 @@ use agent_team_mail_tui::dashboard::{
     read_team_members, session_log_path,
 };
 use agent_team_mail_tui::{events, ui};
+
+mod daemon_launch;
+use daemon_launch::ensure_daemon_running;
 
 // ── Module-level statics ──────────────────────────────────────────────────────
 
@@ -488,46 +484,6 @@ fn build_member_rows(
             state,
         })
         .collect()
-}
-
-fn ensure_daemon_running(team: &str) -> Option<String> {
-    let socket_path =
-        daemon_socket_path().unwrap_or_else(|_| std::env::temp_dir().join("atm-daemon.sock"));
-    if daemon_is_running() && socket_path.exists() {
-        return None;
-    }
-
-    let home = get_home_dir().ok()?;
-    let launch_class =
-        match agent_team_mail_core::daemon_client::runtime_kind_for_home(&home).ok()? {
-            agent_team_mail_core::daemon_client::RuntimeKind::Release => LaunchClass::ProdShared,
-            agent_team_mail_core::daemon_client::RuntimeKind::Dev => LaunchClass::DevShared,
-            agent_team_mail_core::daemon_client::RuntimeKind::Isolated => LaunchClass::IsolatedTest,
-        };
-    if spawn_daemon_process(SpawnDaemonRequest {
-        daemon_bin: std::ffi::OsStr::new("atm-daemon"),
-        atm_home: &home,
-        launch_class,
-        issuer: "agent-team-mail-tui::ensure_daemon_running",
-        team: Some(team),
-        stdin: Stdio::null(),
-        stdout: Stdio::null(),
-        stderr: Stdio::null(),
-    })
-    .is_err()
-    {
-        return Some(format!(
-            "daemon unavailable: failed to start; run `atm-daemon --team {team}`"
-        ));
-    }
-
-    for _ in 0..20 {
-        if daemon_is_running() && socket_path.exists() {
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    Some("daemon startup incomplete: socket unavailable".to_string())
 }
 
 /// Read new bytes from a log file since `pos`, returning new lines and the
@@ -987,6 +943,37 @@ fn format_ack_result(ack: &ControlAck) -> String {
 mod tests {
     use super::*;
     use agent_team_mail_core::control::{ControlAck, ControlResult};
+    use serial_test::serial;
+    use std::{ffi::OsStr, process::Stdio};
+
+    struct TestEnvGuard {
+        key: &'static str,
+        old: Option<std::ffi::OsString>,
+    }
+
+    impl TestEnvGuard {
+        fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+            let old = std::env::var_os(key);
+            // SAFETY: test-scoped env mutation serialized by serial_test.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, old }
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: test-scoped env mutation serialized by serial_test.
+            unsafe {
+                if let Some(old) = &self.old {
+                    std::env::set_var(self.key, old);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
 
     fn make_ack(result: ControlResult, duplicate: bool, detail: Option<&str>) -> ControlAck {
         ControlAck {
@@ -1375,5 +1362,68 @@ mod tests {
                 std::env::remove_var("ATM_HOME");
             }
         }
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_daemon_binary_for_home_honors_atm_daemon_bin() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let custom = dir.path().join("custom-atm-daemon");
+        let _guard = TestEnvGuard::set("ATM_DAEMON_BIN", custom.as_os_str());
+        let resolved = daemon_launch::resolve_daemon_binary_for_home(dir.path()).unwrap();
+        assert_eq!(resolved, custom);
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_daemon_binary_for_home_derives_dev_install_from_atm_home() {
+        let root = tempfile::TempDir::new().unwrap();
+        let os_home = root.path().join("os-home");
+        std::fs::create_dir_all(&os_home).unwrap();
+        let resolved = daemon_launch::default_dev_runtime_root_for(&os_home)
+            .join("bin")
+            .join("atm-daemon");
+        let expected = if cfg!(windows) {
+            os_home
+                .join("AppData")
+                .join("Local")
+                .join("atm-dev")
+                .join("bin")
+                .join("atm-daemon")
+        } else {
+            os_home
+                .join(".local")
+                .join("atm-dev")
+                .join("bin")
+                .join("atm-daemon")
+        };
+        assert_eq!(resolved, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_spawned_daemon_guard_kills_child_on_drop() {
+        let child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        {
+            let _guard = daemon_launch::SpawnedDaemonGuard::new(child);
+        }
+
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("kill -0 {pid}"))
+            .status()
+            .unwrap();
+        assert!(
+            !status.success(),
+            "SpawnedDaemonGuard should terminate child pid {pid}"
+        );
     }
 }
