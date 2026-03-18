@@ -17,11 +17,15 @@ This plan intentionally expands beyond the AW.5 automated Loki smoke:
   - live Grafana query returned `0` streams for `service_name="atm"`
   - root cause: CLI commands are not wiring the OTel log pipeline for all
     command paths; follow-up is in `AY.2`
+  - root cause addressed in `AY.2`; live dogfood validation now returns
+    `8` Loki streams for `session_id=ay2-1773873451`
 - Tempo: `FAIL`
   - Grafana Cloud Tempo search does not accept `session_id` as a searchable
     top-level identifier
   - shared-runtime stop/start smoke still returned `0` `atm-daemon` traces
   - follow-up is in `AY.2`
+  - root cause addressed in `AY.2`; live dogfood validation now returns
+    `1` `atm-daemon` trace for `resource.session_id=ay2-1773873451`
 - Mimir: `PASS`
   - canonical series are present, including `atm_commands_count_total` and
     `atm_messages_sent_count_total`

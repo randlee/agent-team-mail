@@ -11,7 +11,6 @@ use agent_team_mail_daemon_launch::{
 };
 use anyhow::Result;
 use chrono::Utc;
-use sc_observability::{OtelConfig, TraceRecord, TraceStatus, export_trace_records_best_effort};
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -200,74 +199,57 @@ fn export_lifecycle_trace(
         });
     let trace_id = agent_team_mail_core::event_log::trace_id_for_request("atm-daemon", &request_id);
     let span_id = agent_team_mail_core::event_log::span_id_for_action(&trace_id, event_name);
-    let mut attributes = serde_json::Map::new();
-    attributes.insert(
-        "event_name".to_string(),
-        serde_json::Value::String(event_name.to_string()),
+    let mut record = crate::daemon::observability::LifecycleTraceRecord::new(
+        format!("atm-daemon.lifecycle.{event_name}"),
+        if level == "warn" {
+            crate::daemon::observability::LifecycleTraceStatus::Error
+        } else {
+            crate::daemon::observability::LifecycleTraceStatus::Ok
+        },
+        trace_id,
+        span_id,
     );
-    attributes.insert(
+    record
+        .attributes
+        .insert("event_name".to_string(), event_name.to_string());
+    record.attributes.insert(
         "lifecycle_phase".to_string(),
-        serde_json::Value::String(lifecycle_phase(event_name).to_string()),
+        lifecycle_phase(event_name).to_string(),
     );
-    attributes.insert(
+    record.attributes.insert(
         "atm_home".to_string(),
-        serde_json::Value::String(canonicalize_lossy(atm_home).display().to_string()),
+        canonicalize_lossy(atm_home).display().to_string(),
     );
     if let Some(reason) = termination_reason(event_name) {
-        attributes.insert(
-            "termination_reason".to_string(),
-            serde_json::Value::String(reason.to_string()),
-        );
+        record
+            .attributes
+            .insert("termination_reason".to_string(), reason.to_string());
     }
     if let Some(token) = token {
-        attributes.insert(
+        record.attributes.insert(
             "launch_class".to_string(),
-            serde_json::Value::String(token.launch_class.as_str().to_string()),
+            token.launch_class.as_str().to_string(),
         );
-        attributes.insert(
-            "token_id".to_string(),
-            serde_json::Value::String(token.token_id.clone()),
-        );
+        record
+            .attributes
+            .insert("token_id".to_string(), token.token_id.clone());
         if let Some(test_identifier) = &token.test_identifier {
-            attributes.insert(
-                "test_identifier".to_string(),
-                serde_json::Value::String(test_identifier.clone()),
-            );
+            record
+                .attributes
+                .insert("test_identifier".to_string(), test_identifier.clone());
         }
         if let Some(owner_pid) = token.owner_pid {
-            attributes.insert(
-                "owner_pid".to_string(),
-                serde_json::Value::Number(owner_pid.into()),
-            );
+            record
+                .attributes
+                .insert("owner_pid".to_string(), owner_pid.to_string());
         }
     }
     if let Some(detail) = detail {
-        attributes.insert(
-            "detail".to_string(),
-            serde_json::Value::String(detail.to_string()),
-        );
+        record
+            .attributes
+            .insert("detail".to_string(), detail.to_string());
     }
-
-    let record = TraceRecord {
-        timestamp: Utc::now().to_rfc3339(),
-        team: None,
-        agent: None,
-        runtime: None,
-        session_id: crate::daemon::observability::current_session_id(),
-        trace_id,
-        span_id,
-        parent_span_id: None,
-        name: format!("atm-daemon.lifecycle.{event_name}"),
-        status: if level == "warn" {
-            TraceStatus::Error
-        } else {
-            TraceStatus::Ok
-        },
-        duration_ms: 0,
-        source_binary: "atm-daemon".to_string(),
-        attributes,
-    };
-    export_trace_records_best_effort(&[record], &OtelConfig::from_env());
+    crate::daemon::observability::export_lifecycle_trace(record);
 }
 
 pub fn log_launch_accepted(home: &Path, token: &DaemonLaunchToken) {
