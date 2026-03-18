@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::event_log::{
+    EventFields, emit_event_best_effort, emit_event_to_spool_direct,
+};
 use agent_team_mail_daemon_launch::{
     ATM_LAUNCH_TOKEN_ENV, DaemonLaunchToken, LaunchClass, decode_launch_token,
 };
@@ -188,13 +190,73 @@ pub fn log_launch_accepted(home: &Path, token: &DaemonLaunchToken) {
 }
 
 pub fn log_clean_owner_shutdown(home: &Path, token: &DaemonLaunchToken) {
-    emit_lifecycle_event(
-        "info",
-        "clean_owner_shutdown",
-        Some(token),
-        home,
-        Some("daemon exited after clean owner-controlled shutdown"),
+    // Write directly to spool, bypassing the background log-forwarder thread.
+    // The forwarder is a fire-and-forget thread that the OS reclaims on process
+    // exit; events queued just before exit are silently lost on macOS.
+    // log_clean_owner_shutdown() is called after daemon::run() returns, making
+    // it the most vulnerable. Writing synchronously guarantees the event is
+    // durably persisted before main() returns.
+    let event_name = "clean_owner_shutdown";
+    let token_id = Some(token.token_id.clone());
+    let atm_home_text = canonicalize_lossy(home).display().to_string();
+    let request_id = token_id.as_ref().map(|id| format!("daemon-launch-{id}"));
+    let trace_id = request_id
+        .as_deref()
+        .map(|rid| agent_team_mail_core::event_log::trace_id_for_request("atm-daemon", rid));
+    let span_id = trace_id
+        .as_deref()
+        .map(|tid| agent_team_mail_core::event_log::span_id_for_action(tid, event_name));
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "event_name".to_string(),
+        serde_json::Value::String(event_name.to_string()),
     );
+    extra.insert(
+        "lifecycle_phase".to_string(),
+        serde_json::Value::String("shutdown".to_string()),
+    );
+    extra.insert(
+        "launch_class".to_string(),
+        serde_json::Value::String(token.launch_class.as_str().to_string()),
+    );
+    extra.insert(
+        "token_id".to_string(),
+        serde_json::Value::String(token.token_id.clone()),
+    );
+    if let Some(test_identifier) = &token.test_identifier {
+        extra.insert(
+            "test_identifier".to_string(),
+            serde_json::Value::String(test_identifier.clone()),
+        );
+    }
+    if let Some(owner_pid) = token.owner_pid {
+        extra.insert(
+            "owner_pid".to_string(),
+            serde_json::Value::Number(owner_pid.into()),
+        );
+    }
+    extra.insert(
+        "atm_home".to_string(),
+        serde_json::Value::String(atm_home_text.clone()),
+    );
+    extra.insert(
+        "termination_reason".to_string(),
+        serde_json::Value::String(event_name.to_string()),
+    );
+    let fields = EventFields {
+        level: "info",
+        source: "atm-daemon",
+        action: event_name,
+        result: Some(event_name.to_string()),
+        request_id,
+        trace_id,
+        span_id,
+        target: Some(atm_home_text),
+        error: Some("daemon exited after clean owner-controlled shutdown".to_string()),
+        extra_fields: extra,
+        ..Default::default()
+    };
+    emit_event_to_spool_direct(&fields, home);
 }
 
 fn emit_startup_rejection(
