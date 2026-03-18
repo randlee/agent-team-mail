@@ -127,15 +127,19 @@ echo "consumed by five parallel calls: $((R_before_b3 - R_after_b3))"
 ### B.4 — Monitor gate state written
 
 ```bash
-ATM_HOME="$(mktemp -d)/atm-b4-home" $AW_ATM gh pr list >/dev/null 2>&1 || true
-find "$ATM_HOME" -name '*.json' -path '*/gh-state/*' -print -exec cat {} \;
+B4_ATM_HOME="$(mktemp -d)/atm-b4-home"
+ATM_HOME="$B4_ATM_HOME" $AW_ATM gh pr list >/dev/null 2>&1 || true
+STATE_PATH="$B4_ATM_HOME/.atm/daemon/gh-monitor-repo-state.json"
+echo "state path: $STATE_PATH"
+test -f "$STATE_PATH" && cat "$STATE_PATH" || echo "FAIL: state file not found at $STATE_PATH"
 ```
 
 **PASS criteria**:
 
 - single-call consumption is bounded
 - five parallel calls do not produce unbounded amplification
-- GH state records include the budget/rate fields used by the gate
+- `$B4_ATM_HOME/.atm/daemon/gh-monitor-repo-state.json` is created after the single `atm gh pr list` call
+- repo-state JSON includes `budget_limit_per_hour` and `budget_used_in_window`
 
 ## Area C — OTel Log Field Correctness in Grafana
 
