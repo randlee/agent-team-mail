@@ -2,7 +2,9 @@ use crate::{OtelConfig, OtelError, OtelExporter, OtelRecord};
 use sc_observability_otlp::{TransportConfig, TransportError, TransportExporter, TransportRecord};
 use std::sync::Arc;
 
-pub fn build_transport_exporters(config: &OtelConfig) -> Result<Vec<Arc<dyn OtelExporter>>, OtelError> {
+pub fn build_transport_exporters(
+    config: &OtelConfig,
+) -> Result<Vec<Arc<dyn OtelExporter>>, OtelError> {
     let transport_config = TransportConfig {
         endpoint: config.endpoint.clone(),
         protocol: config.protocol.clone(),

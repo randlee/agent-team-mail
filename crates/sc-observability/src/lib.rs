@@ -203,9 +203,7 @@ impl OtelPipeline {
         let config = OtelConfig::from_env();
         let mut exporters: Vec<Arc<dyn OtelExporter>> =
             vec![Arc::new(FileOtelExporter::new(default_otel_path(log_path)))];
-        if let Ok(mut transport_exporters) =
-            otlp_adapter::build_transport_exporters(&config)
-        {
+        if let Ok(mut transport_exporters) = otlp_adapter::build_transport_exporters(&config) {
             exporters.append(&mut transport_exporters);
         }
         Self {
