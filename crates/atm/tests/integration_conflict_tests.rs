@@ -637,6 +637,49 @@ fn test_malformed_inbox_read_graceful() {
         .failure();
 }
 
+#[test]
+fn test_read_skips_malformed_records_and_legacy_content_alias() {
+    let temp_dir = TempDir::new().unwrap();
+    let _team_dir = setup_test_team(&temp_dir, "test-team");
+
+    let inbox_path = temp_dir
+        .path()
+        .join(".claude/teams/test-team/inboxes/agent-a.json");
+    fs::write(
+        &inbox_path,
+        r#"[
+            {"from":"team-lead","text":"good","timestamp":"2026-02-11T14:30:00Z","read":false,"message_id":"msg-1"},
+            {"from":"broken","timestamp":"2026-02-11T14:31:00Z"},
+            {"from":"legacy","content":"legacy content","timestamp":"2026-02-11T14:32:00Z","message_id":"msg-2"}
+        ]"#,
+    )
+    .unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .env("ATM_IDENTITY", "team-lead")
+        .arg("read")
+        .arg("--json")
+        .arg("--no-mark")
+        .arg("--no-since-last-seen")
+        .arg("agent-a");
+
+    let output = cmd.output().expect("read command should run");
+    assert!(
+        output.status.success(),
+        "read should skip malformed records: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let messages = parsed["messages"].as_array().expect("messages array");
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["text"], "good");
+    assert_eq!(messages[1]["text"], "legacy content");
+    assert_eq!(messages[1]["read"], false);
+}
+
 // ============================================================================
 // Category 5: Large Inbox Performance
 // ============================================================================
@@ -940,6 +983,7 @@ fn test_no_duplicate_message_ids_under_concurrent_sends() {
             let mut cmd = cargo::cargo_bin_cmd!("atm");
             set_home_env_path(&mut cmd, &temp_path);
             cmd.env("ATM_TEAM", "test-team");
+            cmd.env("ATM_DAEMON_AUTOSTART", "0");
             cmd.env("ATM_IDENTITY", format!("thread-{thread_id}"));
             cmd.arg("send")
                 .arg("agent-a")
@@ -957,7 +1001,7 @@ fn test_no_duplicate_message_ids_under_concurrent_sends() {
     // Drop sweep still attempts cleanup of any leaked daemon processes.
     #[cfg(unix)]
     let _adopted =
-        daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(250));
+        daemon_cleanup.adopt_running_pid(&daemon_binary_path(), Duration::from_millis(50));
 
     // Check inbox for duplicates
     let inbox_path = temp_dir

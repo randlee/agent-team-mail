@@ -269,6 +269,51 @@ pub struct CiRun {
     pub jobs: Option<Vec<CiJob>>,
 }
 
+/// Raw GitHub CLI run JSON used before conversion into canonical CI types.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GhRun {
+    pub database_id: u64,
+    pub name: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+    pub head_branch: String,
+    pub head_sha: String,
+    pub url: String,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub attempt: Option<u64>,
+    #[serde(default)]
+    pub pull_requests: Option<Vec<CiPullRequest>>,
+    pub jobs: Option<Vec<GhJob>>,
+}
+
+/// Raw GitHub CLI job JSON used before conversion into canonical CI types.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GhJob {
+    pub database_id: u64,
+    pub name: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    pub steps: Option<Vec<GhStep>>,
+}
+
+/// Raw GitHub CLI step JSON used before conversion into canonical CI types.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GhStep {
+    pub name: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+    pub number: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CiJob {
     pub id: u64,

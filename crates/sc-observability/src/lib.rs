@@ -160,6 +160,8 @@ pub enum OtelExporterKind {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct OtelRecord {
     pub name: String,
+    pub source_binary: String,
+    pub level: String,
     pub trace_id: Option<String>,
     pub span_id: Option<String>,
     pub attributes: serde_json::Map<String, serde_json::Value>,
@@ -422,6 +424,8 @@ fn build_otel_record(event: &LogEventV1) -> Result<OtelRecord, OtelError> {
 
     Ok(OtelRecord {
         name: event.action.clone(),
+        source_binary: event.source_binary.clone(),
+        level: event.level.clone(),
         trace_id: event.trace_id.clone(),
         span_id: event.span_id.clone(),
         attributes,

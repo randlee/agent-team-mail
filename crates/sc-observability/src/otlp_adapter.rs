@@ -55,6 +55,8 @@ impl OtelExporter for BridgeExporter {
 fn to_transport_record(record: &OtelRecord) -> TransportRecord {
     TransportRecord {
         name: record.name.clone(),
+        source_binary: record.source_binary.clone(),
+        level: record.level.clone(),
         trace_id: record.trace_id.clone(),
         span_id: record.span_id.clone(),
         attributes: record.attributes.clone(),
