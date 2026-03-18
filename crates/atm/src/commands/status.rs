@@ -13,7 +13,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs;
 
 use crate::commands::logging_health::{
-    build_logging_health_contract, logging_remediation, read_daemon_logging_health,
+    build_logging_health_contract, build_otel_health_contract, logging_remediation,
+    read_daemon_logging_health, read_daemon_otel_health,
 };
 use crate::util::member_labels::{GHOST_SUFFIX, UNREGISTERED_MARKER};
 use crate::util::settings::{get_home_dir, teams_root_dir_for};
@@ -82,6 +83,8 @@ pub fn execute(args: StatusArgs) -> Result<()> {
     let member_rows = build_status_member_rows(&team_config, &daemon_states);
     let logging = read_daemon_logging_health(&home_dir);
     let logging_health = build_logging_health_contract(&logging, &home_dir);
+    let otel = read_daemon_otel_health(&home_dir);
+    let otel_health = build_otel_health_contract(&otel);
 
     // Count inbox message states for each member
     let inbox_counts = count_inbox_messages(&team_dir, &member_rows)?;
@@ -124,6 +127,8 @@ pub fn execute(args: StatusArgs) -> Result<()> {
             },
             "logging_health": serde_json::to_value(&logging_health)
                 .expect("logging_health should serialize"),
+            "otel_health": serde_json::to_value(&otel_health)
+                .expect("otel_health should serialize"),
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
@@ -191,6 +196,28 @@ pub fn execute(args: StatusArgs) -> Result<()> {
         }
         if let Some(remediation) = logging_remediation(&logging.state) {
             println!("  remediation:     {remediation}");
+        }
+        println!();
+        println!("OTel:");
+        println!("  schema_version:  {}", otel_health.schema_version);
+        println!("  enabled:         {}", otel_health.enabled);
+        println!("  protocol:        {}", otel_health.protocol);
+        println!("  collector_state: {}", otel_health.collector_state);
+        println!("  local_mirror_state: {}", otel_health.local_mirror_state);
+        println!("  local_mirror_path:  {}", otel_health.local_mirror_path);
+        println!("  debug_local_export: {}", otel_health.debug_local_export);
+        println!("  debug_local_state:  {}", otel_health.debug_local_state);
+        if let Some(endpoint) = &otel_health.collector_endpoint {
+            println!("  collector_endpoint: {endpoint}");
+        }
+        if let Some(code) = &otel_health.last_error.code {
+            println!("  last_error.code: {code}");
+        }
+        if let Some(message) = &otel_health.last_error.message {
+            println!("  last_error.message: {message}");
+        }
+        if let Some(at) = &otel_health.last_error.at {
+            println!("  last_error.at:   {at}");
         }
     }
 

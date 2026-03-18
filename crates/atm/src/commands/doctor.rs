@@ -33,8 +33,8 @@ use crate::commands::init::{
     session_end_cmd, session_start_cmd, stop_cmd,
 };
 use crate::commands::logging_health::{
-    LoggingHealthContract, LoggingHealthSnapshot, build_logging_health_contract,
-    logging_remediation,
+    LoggingHealthContract, LoggingHealthSnapshot, OtelHealthContract, OtelHealthSnapshot,
+    build_logging_health_contract, build_otel_health_contract, logging_remediation,
 };
 use crate::util::caller_identity::resolve_caller_session_id_optional;
 use crate::util::member_labels::UNREGISTERED_MARKER;
@@ -141,6 +141,8 @@ struct DoctorReport {
     gh_rate_limit_audit: Option<GhRateLimitAudit>,
     #[serde(default)]
     logging_health: LoggingHealthContract,
+    #[serde(default)]
+    otel_health: OtelHealthContract,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     members: Vec<MemberSnapshot>,
     #[serde(skip_serializing, skip_deserializing, default)]
@@ -205,6 +207,8 @@ struct DaemonStatusSnapshot {
     plugins: Vec<PluginStatusSnapshot>,
     #[serde(default)]
     logging: LoggingHealthSnapshot,
+    #[serde(default)]
+    otel: OtelHealthSnapshot,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -382,6 +386,7 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
     };
     let logging = daemon_status.logging;
     let logging_health = build_logging_health_contract(&logging, home_dir);
+    let otel_health = build_otel_health_contract(&daemon_status.otel);
 
     let member_snapshot = build_member_snapshot(team_config.as_ref(), &daemon_states_by_agent);
     Ok(DoctorReport {
@@ -400,6 +405,7 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
         env_overrides: active_env_overrides(),
         gh_rate_limit_audit: None,
         logging_health,
+        otel_health,
         members: member_snapshot.clone(),
         member_snapshot,
     })
@@ -1228,12 +1234,14 @@ fn read_daemon_status(home_dir: &Path) -> DaemonStatusSnapshot {
             version: None,
             plugins: Vec::new(),
             logging: LoggingHealthSnapshot::default(),
+            otel: OtelHealthSnapshot::default(),
         };
     };
     serde_json::from_str(&raw).unwrap_or(DaemonStatusSnapshot {
         version: None,
         plugins: Vec::new(),
         logging: LoggingHealthSnapshot::default(),
+        otel: OtelHealthSnapshot::default(),
     })
 }
 
@@ -1886,6 +1894,46 @@ fn render_human(report: &DoctorReport) -> String {
     }
     if let Some(remediation) = logging_remediation(&report.logging_health.state) {
         out.push_str(&format!("  remediation: {remediation}\n"));
+    }
+    out.push('\n');
+    out.push_str("OTel health:\n");
+    out.push_str(&format!(
+        "  schema_version: {}\n",
+        report.otel_health.schema_version
+    ));
+    out.push_str(&format!("  enabled: {}\n", report.otel_health.enabled));
+    out.push_str(&format!("  protocol: {}\n", report.otel_health.protocol));
+    out.push_str(&format!(
+        "  collector_state: {}\n",
+        report.otel_health.collector_state
+    ));
+    out.push_str(&format!(
+        "  local_mirror_state: {}\n",
+        report.otel_health.local_mirror_state
+    ));
+    out.push_str(&format!(
+        "  local_mirror_path: {}\n",
+        report.otel_health.local_mirror_path
+    ));
+    out.push_str(&format!(
+        "  debug_local_export: {}\n",
+        report.otel_health.debug_local_export
+    ));
+    out.push_str(&format!(
+        "  debug_local_state: {}\n",
+        report.otel_health.debug_local_state
+    ));
+    if let Some(endpoint) = &report.otel_health.collector_endpoint {
+        out.push_str(&format!("  collector_endpoint: {endpoint}\n"));
+    }
+    if let Some(code) = &report.otel_health.last_error.code {
+        out.push_str(&format!("  last_error.code: {code}\n"));
+    }
+    if let Some(message) = &report.otel_health.last_error.message {
+        out.push_str(&format!("  last_error.message: {message}\n"));
+    }
+    if let Some(at) = &report.otel_health.last_error.at {
+        out.push_str(&format!("  last_error.at: {at}\n"));
     }
     out.push('\n');
 
@@ -3246,6 +3294,7 @@ mod tests {
             env_overrides: EnvOverrides::default(),
             gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
+            otel_health: OtelHealthContract::default(),
             members: vec![MemberSnapshot {
                 name: "team-lead".to_string(),
                 agent_type: "team-lead".to_string(),
@@ -3352,6 +3401,7 @@ mod tests {
             },
             gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
+            otel_health: OtelHealthContract::default(),
             members: vec![MemberSnapshot {
                 name: "arch-ctm".to_string(),
                 agent_type: "codex".to_string(),
@@ -3486,6 +3536,7 @@ mod tests {
             },
             gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
+            otel_health: OtelHealthContract::default(),
             members: vec![],
             member_snapshot: vec![],
         };
@@ -3525,6 +3576,7 @@ mod tests {
             env_overrides: EnvOverrides::default(),
             gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
+            otel_health: OtelHealthContract::default(),
             members: vec![MemberSnapshot {
                 name: "arch-ctm".to_string(),
                 agent_type: "codex".to_string(),
@@ -3586,6 +3638,7 @@ mod tests {
             env_overrides: EnvOverrides::default(),
             gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
+            otel_health: OtelHealthContract::default(),
             members: vec![
                 MemberSnapshot {
                     name: "arch-ctm".to_string(),

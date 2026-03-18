@@ -27,6 +27,14 @@ fn read_log_lines(path: &Path) -> Vec<String> {
         .collect()
 }
 
+fn read_otel_events(path: &Path) -> Vec<Value> {
+    fs::read_to_string(path)
+        .expect("otel sidecar should be readable")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("each otel line must be valid json"))
+        .collect()
+}
+
 #[test]
 fn render_round_trip() {
     let tmp = TempDir::new().expect("tempdir");
@@ -449,6 +457,54 @@ fn sc_compose_log_format_human_writes_human_readable_lines() {
         serde_json::from_str::<Value>(&lines[0]).is_err(),
         "human mode should not emit JSONL: {}",
         lines[0]
+    );
+}
+
+#[test]
+fn sc_compose_and_sc_composer_emit_otel_sidecar_when_enabled() {
+    let tmp = TempDir::new().expect("tempdir");
+    let log_path = tmp.path().join("sc-compose.log");
+    let otel_path = tmp.path().join("sc-compose.otel.jsonl");
+    let include = tmp.path().join("include.md.j2");
+    let template = tmp.path().join("template.md.j2");
+    fs::write(&include, "included {{ name }}").expect("write include");
+    fs::write(&template, "@<include.md.j2>\nhello {{ name }}").expect("write template");
+
+    run_sc_compose()
+        .env("SC_COMPOSE_LOG_FILE", &log_path)
+        .env("ATM_OTEL_ENABLED", "true")
+        .arg("--root")
+        .arg(tmp.path())
+        .arg("--var")
+        .arg("name=Kai")
+        .arg("render")
+        .arg(&template)
+        .assert()
+        .success();
+
+    assert!(
+        otel_path.exists(),
+        "otel sidecar should exist: {}",
+        otel_path.display()
+    );
+    let events = read_otel_events(&otel_path);
+    assert!(
+        events.iter().any(|event| event["name"] == "command_start"),
+        "command_start otel event missing: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| event["name"] == "command_end"),
+        "command_end otel event missing: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| event["name"] == "compose"),
+        "sc-composer compose otel event missing: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["attributes"]["runtime"] == "claude"),
+        "otel events should include runtime attribute from shared facade: {events:?}"
     );
 }
 

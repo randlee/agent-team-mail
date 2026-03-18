@@ -196,3 +196,6 @@ object contract:
 - `logging_health.last_error.at`
 
 No drift is allowed across these two command surfaces for shared keys.
+
+See [docs/observability/troubleshooting.md](troubleshooting.md) for the
+operator runbook that interprets this locked contract.

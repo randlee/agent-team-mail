@@ -1,4 +1,4 @@
-# Observability Troubleshooting (AK.4)
+# Observability Troubleshooting
 
 This runbook defines how to interpret mandatory OpenTelemetry behavior without
 blocking ATM workflows.
@@ -7,21 +7,30 @@ blocking ATM workflows.
 
 - Local structured logging is always considered available (`local_structured=true`).
 - OTel export is fail-open: exporter issues must not fail `atm` commands.
-- `atm doctor --json` and `atm status --json` expose:
-  - `logging_health.status` (`ok|degraded|unavailable`)
-  - `logging_health.otel_exporter`
-  - `logging_health.local_structured`
-  - `logging_health.last_export_error` (optional)
+- `atm doctor --json` and `atm status --json` expose the locked
+  `logging_health` object from
+  [section 10 of the observability architecture](architecture.md#10-diagnostics-json-contract-lock):
+  - `logging_health.schema_version`
+  - `logging_health.state`
+  - `logging_health.log_root`
+  - `logging_health.canonical_log_path`
+  - `logging_health.spool_path`
+  - `logging_health.dropped_events_total`
+  - `logging_health.spool_file_count`
+  - `logging_health.oldest_spool_age_seconds`
+  - `logging_health.last_error.code`
+  - `logging_health.last_error.message`
+  - `logging_health.last_error.at`
 
 ## Health Interpretation
 
-- `status=ok`: canonical local logging is healthy.
-- `status=degraded`: local logging remains active, but backlog/drop conditions
-  were detected.
-- `status=unavailable`: local logging health is unavailable (for example,
+- `state=healthy`: canonical local logging is healthy.
+- `state=degraded_spooling`: canonical local logging remains active, but spool
+  backlog was detected.
+- `state=degraded_dropping`: canonical local logging remains active, but queue
+  pressure caused dropped events.
+- `state=unavailable`: local logging health is unavailable (for example,
   disabled by env or daemon/path failures).
-
-`otel_exporter` follows the same state buckets and never blocks command flow.
 
 ## Fallback Paths
 
@@ -36,10 +45,10 @@ blocking ATM workflows.
   - Treat as non-fatal exporter/local-health signal.
   - Continue normal operations; investigate exporter/env/path configuration.
 - `ATM_OTEL_ENABLED=false|0|off|disabled|no`:
-  - `otel_exporter=unavailable` by design.
-  - Local structured logging remains available.
+  - remote export stays disabled by design.
+  - canonical local logging remains available.
 - Spool growth / dropped queue signals:
-  - Expect `status=degraded`; commands continue.
+  - Expect `state=degraded_spooling` or `state=degraded_dropping`; commands continue.
   - Remediate daemon availability and reduce burst log pressure.
 
 ## Operator Commands

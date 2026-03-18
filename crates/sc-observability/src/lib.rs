@@ -15,7 +15,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use thiserror::Error;
 
+mod health;
 mod otlp_adapter;
+
+pub use health::{OtelHealthSnapshot, OtelLastError, current_otel_health};
 
 pub const DEFAULT_QUEUE_CAPACITY: usize = 4096;
 pub const DEFAULT_MAX_EVENT_BYTES: usize = 64 * 1024;
@@ -139,7 +142,15 @@ pub enum OtelError {
 }
 
 pub trait OtelExporter: Send + Sync {
+    fn kind(&self) -> OtelExporterKind;
     fn export(&self, record: &OtelRecord) -> Result<(), OtelError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OtelExporterKind {
+    LocalMirror,
+    Collector,
+    DebugLocal,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -162,6 +173,10 @@ impl FileOtelExporter {
 }
 
 impl OtelExporter for FileOtelExporter {
+    fn kind(&self) -> OtelExporterKind {
+        OtelExporterKind::LocalMirror
+    }
+
     fn export(&self, record: &OtelRecord) -> Result<(), OtelError> {
         if let Some(parent) = self.path.parent()
             && let Err(err) = fs::create_dir_all(parent)
@@ -183,6 +198,7 @@ impl OtelExporter for FileOtelExporter {
 struct OtelPipeline {
     config: OtelConfig,
     exporters: Vec<Arc<dyn OtelExporter>>,
+    log_path: PathBuf,
     sleeper: fn(Duration),
 }
 
@@ -205,12 +221,19 @@ impl OtelPipeline {
         Self {
             config,
             exporters,
+            log_path: log_path.to_path_buf(),
             sleeper: std::thread::sleep,
         }
     }
 
     fn export_event(&self, event: &LogEventV1) -> Result<(), OtelError> {
-        export_otel_with_retry(event, &self.config, &self.exporters, self.sleeper)
+        export_otel_with_retry(
+            event,
+            &self.config,
+            &self.exporters,
+            &self.log_path,
+            self.sleeper,
+        )
     }
 }
 
@@ -218,6 +241,7 @@ fn export_otel_with_retry(
     event: &LogEventV1,
     config: &OtelConfig,
     exporters: &[Arc<dyn OtelExporter>],
+    _log_path: &Path,
     sleeper: fn(Duration),
 ) -> Result<(), OtelError> {
     if !config.enabled {
@@ -235,8 +259,11 @@ fn export_otel_with_retry(
         let mut any_failed = false;
         for exporter in exporters {
             if let Err(err) = exporter.export(&record) {
+                health::note_export_failure(exporter.kind(), &err);
                 any_failed = true;
                 last_err = Some(err);
+            } else {
+                health::note_export_success(exporter.kind());
             }
         }
         if !any_failed {
@@ -272,8 +299,13 @@ pub fn export_otel_best_effort(
     let mut backoff = config.initial_backoff_ms;
     loop {
         if exporter.export(&record).is_ok() {
+            health::note_export_success(exporter.kind());
             return;
         }
+        health::note_export_failure(
+            exporter.kind(),
+            &OtelError::ExportFailed("best-effort exporter failed".to_string()),
+        );
         if attempt >= config.max_retries {
             return;
         }
@@ -378,6 +410,11 @@ fn build_otel_record(event: &LogEventV1) -> Result<OtelRecord, OtelError> {
         "action".to_string(),
         serde_json::Value::String(event.action.clone()),
     );
+    for (key, value) in &event.fields {
+        attributes
+            .entry(key.clone())
+            .or_insert_with(|| value.clone());
+    }
 
     Ok(OtelRecord {
         name: event.action.clone(),
@@ -574,6 +611,7 @@ impl Logger {
             otel: OtelPipeline {
                 config: otel_config,
                 exporters: vec![exporter],
+                log_path: PathBuf::new(),
                 sleeper: std::thread::sleep,
             },
         }
@@ -858,7 +896,7 @@ fn rotate_log_files(base: &Path, max_files: u32) -> Result<(), LoggerError> {
     Ok(())
 }
 
-fn default_otel_path(log_path: &Path) -> PathBuf {
+pub(crate) fn default_otel_path(log_path: &Path) -> PathBuf {
     let mut otel_path = log_path.to_path_buf();
     let stem = log_path
         .file_stem()
@@ -913,6 +951,10 @@ mod tests {
     }
 
     impl OtelExporter for CountingExporter {
+        fn kind(&self) -> OtelExporterKind {
+            OtelExporterKind::Collector
+        }
+
         fn export(&self, record: &OtelRecord) -> Result<(), OtelError> {
             let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
             let fail_for = self.fail_for.load(Ordering::SeqCst);
@@ -1501,6 +1543,7 @@ mod tests {
                 ..OtelConfig::default()
             },
             &exporters,
+            Path::new("/tmp/atm.log.jsonl"),
             record_sleep,
         )
         .expect_err("should return final export error");
@@ -1591,6 +1634,40 @@ mod tests {
                 .get("subagent_id")
                 .and_then(|v| v.as_str()),
             Some("subagent-7")
+        );
+    }
+
+    #[test]
+    fn build_otel_record_projects_event_fields_without_overwriting_core_attributes() {
+        let mut event = new_log_event("sc-compose", "compose", "sc_compose::cli", "info");
+        event.fields.insert(
+            "runtime".to_string(),
+            serde_json::Value::String("claude".to_string()),
+        );
+        event.fields.insert(
+            "resolved_files".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(2)),
+        );
+        event.fields.insert(
+            "action".to_string(),
+            serde_json::Value::String("wrong".to_string()),
+        );
+
+        let record = build_otel_record(&event).expect("record should build");
+        assert_eq!(
+            record.attributes.get("runtime").and_then(|v| v.as_str()),
+            Some("claude")
+        );
+        assert_eq!(
+            record
+                .attributes
+                .get("resolved_files")
+                .and_then(|v| v.as_u64()),
+            Some(2)
+        );
+        assert_eq!(
+            record.attributes.get("action").and_then(|v| v.as_str()),
+            Some("compose")
         );
     }
 }

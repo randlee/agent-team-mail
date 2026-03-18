@@ -85,6 +85,16 @@ impl Default for ComposePolicy {
     }
 }
 
+fn runtime_name(runtime: RuntimeKind) -> &'static str {
+    match runtime {
+        RuntimeKind::Claude => "claude",
+        RuntimeKind::Codex => "codex",
+        RuntimeKind::Gemini => "gemini",
+        RuntimeKind::Opencode => "opencode",
+        RuntimeKind::Custom => "custom",
+    }
+}
+
 /// Input request for compose/validate operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposeRequest {
@@ -219,7 +229,7 @@ pub fn compose(request: &ComposeRequest) -> Result<ComposeResult, ComposerError>
             "ok",
             serde_json::json!({
                 "mode": format!("{:?}", request.mode),
-                "runtime": format!("{:?}", request.runtime),
+                "runtime": runtime_name(request.runtime),
                 "resolved_files": composed.resolved_files.len(),
                 "warnings": composed.warnings.len(),
             }),
@@ -229,7 +239,7 @@ pub fn compose(request: &ComposeRequest) -> Result<ComposeResult, ComposerError>
             "err",
             serde_json::json!({
                 "mode": format!("{:?}", request.mode),
-                "runtime": format!("{:?}", request.runtime),
+                "runtime": runtime_name(request.runtime),
                 "error": err.to_string(),
             }),
         ),
@@ -247,7 +257,7 @@ pub fn validate(request: &ComposeRequest) -> Result<ValidationReport, ComposerEr
             "ok",
             serde_json::json!({
                 "mode": format!("{:?}", request.mode),
-                "runtime": format!("{:?}", request.runtime),
+                "runtime": runtime_name(request.runtime),
                 "errors": report.errors.len(),
                 "warnings": report.warnings.len(),
             }),
@@ -257,7 +267,7 @@ pub fn validate(request: &ComposeRequest) -> Result<ValidationReport, ComposerEr
             "err",
             serde_json::json!({
                 "mode": format!("{:?}", request.mode),
-                "runtime": format!("{:?}", request.runtime),
+                "runtime": runtime_name(request.runtime),
                 "error": err.to_string(),
             }),
         ),
@@ -274,7 +284,7 @@ pub fn resolve(request: &ComposeRequest) -> Result<ResolveResult, ComposerError>
             "ok",
             serde_json::json!({
                 "mode": format!("{:?}", request.mode),
-                "runtime": format!("{:?}", request.runtime),
+                "runtime": runtime_name(request.runtime),
                 "attempted_paths": resolved.attempted_paths.len(),
             }),
         ),
@@ -283,7 +293,7 @@ pub fn resolve(request: &ComposeRequest) -> Result<ResolveResult, ComposerError>
             "err",
             serde_json::json!({
                 "mode": format!("{:?}", request.mode),
-                "runtime": format!("{:?}", request.runtime),
+                "runtime": runtime_name(request.runtime),
                 "error": err.to_string(),
             }),
         ),
