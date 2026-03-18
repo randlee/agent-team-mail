@@ -13,6 +13,7 @@ categories = ["development-tools", "network-programming"]
 
 [dependencies]
 reqwest.workspace = true
+sc-observability.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
