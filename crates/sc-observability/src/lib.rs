@@ -371,6 +371,47 @@ pub fn export_otel_best_effort(
     }
 }
 
+/// Export trace records without allowing exporter failures to affect callers.
+///
+/// AW.3 uses this to emit native trace spans from CLI and daemon code while
+/// keeping all failures fail-open.
+pub fn export_trace_records_best_effort(records: &[TraceRecord], config: &OtelConfig) {
+    if !config.enabled || records.is_empty() {
+        return;
+    }
+    if config
+        .endpoint
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        return;
+    }
+    if let Err(err) = otlp_adapter::export_traces(config, records) {
+        health::note_export_failure(OtelExporterKind::Collector, &err);
+    } else {
+        health::note_export_success(OtelExporterKind::Collector);
+    }
+}
+
+/// Export metric records without allowing exporter failures to affect callers.
+pub fn export_metric_records_best_effort(records: &[MetricRecord], config: &OtelConfig) {
+    if !config.enabled || records.is_empty() {
+        return;
+    }
+    if config
+        .endpoint
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        return;
+    }
+    if let Err(err) = otlp_adapter::export_metrics(config, records) {
+        health::note_export_failure(OtelExporterKind::Collector, &err);
+    } else {
+        health::note_export_success(OtelExporterKind::Collector);
+    }
+}
+
 fn build_otel_record(event: &LogEventV1) -> Result<OtelRecord, OtelError> {
     let runtime_scoped = event.team.is_some()
         || event.agent.is_some()

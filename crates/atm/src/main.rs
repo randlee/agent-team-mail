@@ -6,6 +6,8 @@
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::logging;
 use clap::Parser;
+use sc_observability::{OtelConfig, TraceRecord, TraceStatus, export_trace_records_best_effort};
+use std::time::Instant;
 use uuid::Uuid;
 
 mod commands;
@@ -13,6 +15,70 @@ mod consts;
 mod util;
 
 use commands::Cli;
+
+fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key).ok().and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn build_command_trace_record(
+    command_name: &str,
+    request_id: &str,
+    trace_id: &str,
+    span_id: &str,
+    status: TraceStatus,
+    duration_ms: u64,
+    error: Option<&str>,
+) -> TraceRecord {
+    let mut attributes = serde_json::Map::new();
+    attributes.insert(
+        "command".to_string(),
+        serde_json::Value::String(command_name.to_string()),
+    );
+    attributes.insert(
+        "request_id".to_string(),
+        serde_json::Value::String(request_id.to_string()),
+    );
+    attributes.insert(
+        "outcome".to_string(),
+        serde_json::Value::String(
+            match status {
+                TraceStatus::Ok => "ok",
+                TraceStatus::Error => "error",
+                TraceStatus::Unset => "unset",
+            }
+            .to_string(),
+        ),
+    );
+    if let Some(error) = error {
+        attributes.insert(
+            "error".to_string(),
+            serde_json::Value::String(error.to_string()),
+        );
+    }
+
+    TraceRecord {
+        timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        team: env_nonempty("ATM_TEAM"),
+        agent: env_nonempty("ATM_IDENTITY"),
+        runtime: env_nonempty("ATM_RUNTIME"),
+        session_id: env_nonempty("CLAUDE_SESSION_ID"),
+        trace_id: trace_id.to_string(),
+        span_id: span_id.to_string(),
+        parent_span_id: None,
+        name: format!("atm.command.{command_name}"),
+        status,
+        duration_ms,
+        source_binary: "atm".to_string(),
+        attributes,
+    }
+}
 
 fn main() {
     // Enable daemon auto-start for daemon-backed ATM commands.
@@ -40,6 +106,7 @@ fn main() {
     let trace_id = agent_team_mail_core::event_log::trace_id_for_request("atm", &request_id);
     let start_span_id =
         agent_team_mail_core::event_log::span_id_for_action(&trace_id, "command_start");
+    let started_at = Instant::now();
 
     emit_event_best_effort(EventFields {
         level: "info",
@@ -64,6 +131,7 @@ fn main() {
         ..Default::default()
     });
 
+    let otel_config = OtelConfig::from_env();
     let exit_code = if let Err(e) = cli.execute() {
         let rendered = e.to_string();
         emit_event_best_effort(EventFields {
@@ -90,6 +158,18 @@ fn main() {
             },
             ..Default::default()
         });
+        export_trace_records_best_effort(
+            &[build_command_trace_record(
+                &command_name,
+                &request_id,
+                &trace_id,
+                &start_span_id,
+                TraceStatus::Error,
+                started_at.elapsed().as_millis() as u64,
+                Some(&rendered),
+            )],
+            &otel_config,
+        );
         if serde_json::from_str::<serde_json::Value>(&rendered).is_ok() {
             eprintln!("{rendered}");
         } else {
@@ -122,6 +202,18 @@ fn main() {
             },
             ..Default::default()
         });
+        export_trace_records_best_effort(
+            &[build_command_trace_record(
+                &command_name,
+                &request_id,
+                &trace_id,
+                &start_span_id,
+                TraceStatus::Ok,
+                started_at.elapsed().as_millis() as u64,
+                None,
+            )],
+            &otel_config,
+        );
         0
     };
 
