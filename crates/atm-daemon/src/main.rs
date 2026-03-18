@@ -404,8 +404,12 @@ async fn main() -> Result<()> {
     let log_cancel = cancel_token.clone();
     daemon::observability::install_otel_export_hook(Arc::new(export_otel_from_entrypoint));
     daemon::observability::install_otel_health_hook(Arc::new(current_otel_health_from_entrypoint));
-    daemon::observability::install_trace_export_hook(Arc::new(export_trace_records_from_entrypoint));
-    daemon::observability::install_metric_export_hook(Arc::new(export_metric_records_from_entrypoint));
+    daemon::observability::install_trace_export_hook(Arc::new(
+        export_trace_records_from_entrypoint,
+    ));
+    daemon::observability::install_metric_export_hook(Arc::new(
+        export_metric_records_from_entrypoint,
+    ));
     tokio::spawn(run_log_writer_task(
         log_event_queue.clone(),
         log_writer_config,

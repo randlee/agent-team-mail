@@ -12,10 +12,10 @@ use thiserror::Error;
 pub use sc_observability_types::{
     DEFAULT_OTEL_INITIAL_BACKOFF_MS as DEFAULT_INITIAL_BACKOFF_MS,
     DEFAULT_OTEL_MAX_BACKOFF_MS as DEFAULT_MAX_BACKOFF_MS,
-    DEFAULT_OTEL_MAX_RETRIES as DEFAULT_MAX_RETRIES,
-    DEFAULT_OTEL_TIMEOUT_MS as DEFAULT_TIMEOUT_MS, MetricKind, MetricRecord as MetricTransportRecord,
-    MetricRecord, OTEL_PROTOCOL_HTTP, OtelConfig as TransportConfig,
-    OtelRecord as TransportRecord, TraceRecord, TraceRecord as TraceTransportRecord, TraceStatus,
+    DEFAULT_OTEL_MAX_RETRIES as DEFAULT_MAX_RETRIES, DEFAULT_OTEL_TIMEOUT_MS as DEFAULT_TIMEOUT_MS,
+    MetricKind, MetricRecord as MetricTransportRecord, MetricRecord, OTEL_PROTOCOL_HTTP,
+    OtelConfig as TransportConfig, OtelRecord as TransportRecord, TraceRecord,
+    TraceRecord as TraceTransportRecord, TraceStatus,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -603,6 +603,7 @@ fn json_value_to_otlp_any(value: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Map;
     use std::io::{Read, Result as IoResult};
     use std::net::TcpListener;
     use std::thread;

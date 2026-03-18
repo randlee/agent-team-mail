@@ -1,5 +1,8 @@
 //! Main daemon event loop
 
+use crate::daemon::observability::{
+    export_metric_records_best_effort, export_trace_records_best_effort, otel_config_from_env,
+};
 use crate::daemon::pid_backend_validation::{roster_process_id, validate_pid_backend};
 use crate::daemon::status::{
     LoggingHealth, OtelHealth, PluginStatus, PluginStatusKind, StatusWriter,
@@ -12,9 +15,6 @@ use crate::daemon::{
         SPOOL_DRAIN_INTERVAL_SECS, STATUS_WRITE_INTERVAL_SECS,
     },
     graceful_shutdown, spool_drain_loop, start_socket_server, watch_inboxes,
-};
-use crate::daemon::observability::{
-    export_metric_records_best_effort, export_trace_records_best_effort, otel_config_from_env,
 };
 use crate::plugin::{Capability, FailedPluginInit, PluginContext, PluginRegistry};
 use crate::plugins::worker_adapter::AgentState;

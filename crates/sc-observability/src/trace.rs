@@ -25,7 +25,8 @@ pub fn export_trace_records_best_effort(records: &[TraceRecord], config: &OtelCo
 
 #[cfg(test)]
 mod tests {
-    use super::{TraceRecord, TraceStatus};
+    use super::TraceRecord;
+    use crate::TraceStatus;
 
     #[test]
     fn trace_record_round_trip_allows_missing_correlation_fields() {

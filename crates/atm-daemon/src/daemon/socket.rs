@@ -22,8 +22,8 @@
 //! On non-Unix platforms the module exposes stub functions that do nothing.
 
 use crate::daemon::observability::{
-    export_metric_records_best_effort, otel_config_from_env,
     SOCKET_ERROR_INTERNAL_ERROR, SOCKET_ERROR_INVALID_PAYLOAD, SOCKET_ERROR_VERSION_MISMATCH,
+    export_metric_records_best_effort, otel_config_from_env,
 };
 use agent_team_mail_core::control::{
     CONTROL_SCHEMA_VERSION, ContentRef, ControlAck, ControlAction, ControlRequest, ControlResult,

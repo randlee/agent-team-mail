@@ -1372,14 +1372,27 @@ mod tests {
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             max_event_bytes: DEFAULT_MAX_EVENT_BYTES,
         };
-
-        unsafe {
-            std::env::set_var("ATM_OTEL_ENABLED", "true");
-            std::env::set_var("ATM_OTEL_ENDPOINT", &collector.endpoint);
-            std::env::set_var("ATM_OTEL_RETRY_MAX_ATTEMPTS", "0");
-        }
-
-        let logger = Logger::new(cfg.clone());
+        let otel_cfg = OtelConfig {
+            enabled: true,
+            endpoint: Some(collector.endpoint.clone()),
+            max_retries: 0,
+            ..OtelConfig::default()
+        };
+        let mut exporters: Vec<Arc<dyn OtelExporter>> = vec![Arc::new(FileOtelExporter::new(
+            default_otel_path(&cfg.log_path),
+        ))];
+        exporters.extend(
+            otlp_adapter::build_transport_exporters(&otel_cfg).expect("transport exporters"),
+        );
+        let logger = Logger {
+            config: cfg.clone(),
+            otel: OtelPipeline {
+                config: otel_cfg,
+                exporters,
+                log_path: cfg.log_path.clone(),
+                sleeper: std::thread::sleep,
+            },
+        };
         let start = Instant::now();
         logger
             .emit(&new_log_event(
@@ -1410,12 +1423,6 @@ mod tests {
         let sidecar_path = default_otel_path(&cfg.log_path);
         let sidecar = fs::read_to_string(sidecar_path).expect("otel sidecar should exist");
         assert!(sidecar.contains("\"command_error\""));
-
-        unsafe {
-            std::env::remove_var("ATM_OTEL_ENABLED");
-            std::env::remove_var("ATM_OTEL_ENDPOINT");
-            std::env::remove_var("ATM_OTEL_RETRY_MAX_ATTEMPTS");
-        }
     }
 
     #[test]

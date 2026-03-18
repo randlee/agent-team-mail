@@ -22,7 +22,8 @@ pub fn export_metric_records_best_effort(records: &[MetricRecord], config: &Otel
 
 #[cfg(test)]
 mod tests {
-    use super::{MetricKind, MetricRecord};
+    use super::MetricRecord;
+    use crate::MetricKind;
 
     #[test]
     fn metric_record_round_trip_with_partial_correlation() {
