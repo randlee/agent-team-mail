@@ -835,10 +835,11 @@ fn reconcile_team_member_activity_with_mode(
                 );
             }
 
-            // Terminal non-lead members must be fully removed (roster + mailbox)
-            // once daemon confirms the session is dead. A grace-skip cycle is
-            // inserted when a member just re-appeared after an absence (detected
-            // via ABSENT_REGISTRY_CYCLES), preventing premature cleanup during
+            // Terminal non-lead members still need daemon-side cleanup once the
+            // session is confirmed dead, but config.json remains authoritative
+            // for roster membership. A grace-skip cycle is inserted when a
+            // member just re-appeared after an absence (detected via
+            // ABSENT_REGISTRY_CYCLES), preventing premature cleanup during
             // config-watcher races or remove+recreate flows.
             if member.name != "team-lead"
                 && let Some(ref rec) = record
@@ -945,17 +946,12 @@ fn reconcile_team_member_activity_with_mode(
         }
 
         if changed {
-            let terminal_set: std::collections::HashSet<_> =
-                terminal_non_lead_members.iter().cloned().collect();
             let alive_members = alive_members.clone();
             let _ = store.update(|mut config| {
                 for member in &mut config.members {
                     if alive_members.contains(&member.name) {
                         member.last_active = Some(now_ms);
                     }
-                }
-                if !terminal_set.is_empty() {
-                    config.members.retain(|m| !terminal_set.contains(&m.name));
                 }
                 Ok(Some(config))
             })?;
@@ -2370,7 +2366,7 @@ mod tests {
         );
     }
 
-    fn assert_terminal_non_lead_cleanup(
+    fn assert_terminal_non_lead_session_cleanup_preserves_roster(
         home: &std::path::Path,
         team_name: &str,
         inbox_dir: &std::path::Path,
@@ -2381,12 +2377,12 @@ mod tests {
         )
         .unwrap();
         assert!(
-            cfg.members.iter().all(|m| m.name != "arch-ctm"),
-            "terminal non-lead should be removed from roster"
+            cfg.members.iter().any(|m| m.name == "arch-ctm"),
+            "dead non-lead should remain in config roster until explicit removal"
         );
         assert!(
             !inbox_dir.join("arch-ctm.json").exists(),
-            "terminal non-lead inbox should be removed"
+            "dead non-lead inbox should be removed"
         );
     }
 
@@ -2445,7 +2441,7 @@ mod tests {
     }
 
     #[test]
-    fn test_session_end_converges_to_remove_dead_member_from_roster_and_mailbox() {
+    fn test_session_end_converges_to_cleanup_dead_member_session_without_dropping_roster() {
         let (tmp, inbox_dir, team_name, sr, state_store) = setup_dead_terminal_non_lead();
         let home = tmp.path();
         let cycle_state = super::new_reconcile_cycle_state();
@@ -2470,18 +2466,18 @@ mod tests {
             &cycle_state,
         )
         .unwrap();
-        assert_terminal_non_lead_cleanup(home, &team_name, &inbox_dir);
+        assert_terminal_non_lead_session_cleanup_preserves_roster(home, &team_name, &inbox_dir);
         assert!(
             sr.lock()
                 .unwrap()
                 .query_for_team(&team_name, "arch-ctm")
                 .is_none(),
-            "terminal non-lead session record should be removed"
+            "dead non-lead session record should be removed"
         );
     }
 
     #[test]
-    fn test_sigterm_escalation_converges_to_remove_dead_member_from_roster_and_mailbox() {
+    fn test_sigterm_escalation_converges_to_cleanup_dead_member_session_without_dropping_roster() {
         let (tmp, inbox_dir, team_name, sr, state_store) = setup_dead_terminal_non_lead();
         let home = tmp.path();
         let cycle_state = super::new_reconcile_cycle_state();
@@ -2506,18 +2502,18 @@ mod tests {
             &cycle_state,
         )
         .unwrap();
-        assert_terminal_non_lead_cleanup(home, &team_name, &inbox_dir);
+        assert_terminal_non_lead_session_cleanup_preserves_roster(home, &team_name, &inbox_dir);
         assert!(
             sr.lock()
                 .unwrap()
                 .query_for_team(&team_name, "arch-ctm")
                 .is_none(),
-            "terminal non-lead session record should be removed"
+            "dead non-lead session record should be removed"
         );
     }
 
     #[test]
-    fn test_kill_timeout_fallback_converges_to_remove_dead_member_from_roster_and_mailbox() {
+    fn test_kill_timeout_fallback_converges_to_cleanup_dead_member_session_without_dropping_roster() {
         let (tmp, inbox_dir, team_name, sr, state_store) = setup_dead_terminal_non_lead();
         let home = tmp.path();
         let cycle_state = super::new_reconcile_cycle_state();
@@ -2542,13 +2538,13 @@ mod tests {
             &cycle_state,
         )
         .unwrap();
-        assert_terminal_non_lead_cleanup(home, &team_name, &inbox_dir);
+        assert_terminal_non_lead_session_cleanup_preserves_roster(home, &team_name, &inbox_dir);
         assert!(
             sr.lock()
                 .unwrap()
                 .query_for_team(&team_name, "arch-ctm")
                 .is_none(),
-            "terminal non-lead session record should be removed"
+            "dead non-lead session record should be removed"
         );
     }
 
