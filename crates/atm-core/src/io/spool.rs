@@ -105,7 +105,8 @@ fn spool_message_with_base(
 
     let now = chrono::Utc::now();
     let timestamp = now.timestamp();
-    let filename = format!("{timestamp}-{agent}@{team}.json");
+    let nonce = rand::random::<u32>();
+    let filename = format!("{timestamp}-{nonce:08x}-{agent}@{team}.json");
     let spool_path = spool_dir.join(&filename);
 
     let spooled = SpooledMessage {
@@ -184,7 +185,9 @@ pub fn spool_drain_with_base(
             match process_spooled_message(&path, inbox_base, &failed_dir) {
                 Ok(true) => {
                     // Message delivered - delete spool file
-                    let _ = fs::remove_file(&path); // Ignore cleanup errors
+                    if let Err(error) = fs::remove_file(&path) {
+                        warn!("failed to remove spool file {path:?}: {error}");
+                    }
                     delivered += 1;
                 }
                 Ok(false) => {
