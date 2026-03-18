@@ -7,7 +7,8 @@ current `sc-observability` baseline present on `develop`.
 
 ## Goal
 
-Get OpenTelemetry live for the binaries that ship from this repository while
+Get OpenTelemetry live for the binaries that ship from this repository as a
+logs-only collector rollout while
 using the work as an architecture cleanup:
 
 - real collector export for in-repo ATM binaries
@@ -120,7 +121,10 @@ The collector path must be optional at runtime but mandatory in capability:
 
 ## Highest-Value Instrumentation
 
-### Traces / spans
+Phase AV is limited to OTLP `/v1/logs`. Native traces, metrics, and transport
+batching/flush controls are Phase AW scope.
+
+### Log correlation / lifecycle coverage
 
 - `atm.send`
 - `atm.read`
@@ -129,17 +133,6 @@ The collector path must be optional at runtime but mandatory in capability:
 - GitHub firewall decision path
 - GitHub execution ledger calls
 - MCP request/session lifecycle in `atm-agent-mcp`
-
-### Metrics
-
-- command/request counts and duration
-- daemon request latency
-- spool fallback count
-- OTel exporter success/failure count
-- collector retry/backoff count
-- GH firewall blocked/allowed counts
-- GH ledger call counts
-- session/worker lifecycle counts already modeled in structured events
 
 ### Health/reporting
 
@@ -220,15 +213,15 @@ paths that AT is still relocating.
 
 Deliver:
 
-- high-value traces/metrics for `atm`, `atm-daemon`, and `atm-core` emission
+- high-value log correlation for `atm`, `atm-daemon`, and `atm-core` emission
   paths
-- GitHub firewall / ledger spans and metrics
+- GitHub firewall / ledger log correlation fields
 - daemon request and lifecycle instrumentation closure
 
 Acceptance:
 
-- collector traces/metrics are useful for request/lifecycle diagnosis, not just
-  raw event mirroring
+- collector-exported logs are useful for request/lifecycle diagnosis, not just
+  raw local mirroring
 
 ### AV.4 — In-Repo Producer Rollout + Health
 

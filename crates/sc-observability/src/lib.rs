@@ -74,7 +74,7 @@ impl OtelConfig {
 
         if let Ok(raw) = std::env::var("ATM_OTEL_ENABLED") {
             let norm = raw.trim().to_ascii_lowercase();
-            cfg.enabled = !matches!(norm.as_str(), "0" | "false" | "off" | "no");
+            cfg.enabled = !matches!(norm.as_str(), "0" | "false" | "off" | "no" | "disabled");
         }
         if let Ok(raw) = std::env::var("ATM_OTEL_ENDPOINT") {
             let raw = raw.trim();

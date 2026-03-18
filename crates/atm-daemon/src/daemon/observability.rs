@@ -7,46 +7,11 @@ pub const SOCKET_ERROR_VERSION_MISMATCH: &str = "VERSION_MISMATCH";
 pub const SOCKET_ERROR_INVALID_PAYLOAD: &str = "INVALID_PAYLOAD";
 pub const SOCKET_ERROR_INTERNAL_ERROR: &str = "INTERNAL_ERROR";
 
+pub type OtelHealthSnapshot = sc_observability::OtelHealthSnapshot;
+pub type OtelLastError = sc_observability::OtelLastError;
+
 pub type OtelExportHook = Arc<dyn Fn(&Path, &LogEventV1) + Send + Sync>;
 pub type OtelHealthHook = Arc<dyn Fn(&Path) -> OtelHealthSnapshot + Send + Sync>;
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
-pub struct OtelLastError {
-    pub code: Option<String>,
-    pub message: Option<String>,
-    pub at: Option<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct OtelHealthSnapshot {
-    pub schema_version: String,
-    pub enabled: bool,
-    pub collector_endpoint: Option<String>,
-    pub protocol: String,
-    pub collector_state: String,
-    pub local_mirror_state: String,
-    pub local_mirror_path: String,
-    pub debug_local_export: bool,
-    pub debug_local_state: String,
-    pub last_error: OtelLastError,
-}
-
-impl Default for OtelHealthSnapshot {
-    fn default() -> Self {
-        Self {
-            schema_version: "v1".to_string(),
-            enabled: true,
-            collector_endpoint: None,
-            protocol: "otlp_http".to_string(),
-            collector_state: "not_configured".to_string(),
-            local_mirror_state: "healthy".to_string(),
-            local_mirror_path: String::new(),
-            debug_local_export: false,
-            debug_local_state: "disabled".to_string(),
-            last_error: OtelLastError::default(),
-        }
-    }
-}
 
 pub fn install_otel_export_hook(hook: OtelExportHook) {
     *otel_export_hook_slot()

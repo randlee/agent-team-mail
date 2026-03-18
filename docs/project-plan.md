@@ -1597,7 +1597,7 @@ current `sc-observability` baseline present on `develop`.
 | AV.0 | Boundary remediation prerequisite: remove existing direct `sc-observability` imports that already bypass the intended facade before collector work begins | PLANNED |
 | AV.1 | Architecture boundary + config contract: define the dedicated `sc-observability-otlp` transport adapter seam, canonical collector config surface, in-repo scope, and CI enforcement gate | PLANNED |
 | AV.2 | Transport adapter implementation: add OTLP/HTTP exporter path, stdout debug exporter, and fail-open collector transport behind the dedicated adapter boundary | PLANNED |
-| AV.3 | High-value daemon/CLI instrumentation: `atm`, `atm-daemon`, `atm-core`, GitHub firewall/ledger paths, and daemon lifecycle/request spans/metrics (after Phase AT is merged to `develop`) | PLANNED |
+| AV.3 | High-value daemon/CLI log instrumentation: `atm`, `atm-daemon`, `atm-core`, GitHub firewall/ledger paths, and daemon lifecycle/request log correlation (after Phase AT is merged to `develop`) | PLANNED |
 | AV.4 | In-repo producer rollout: `atm-tui`, `atm-agent-mcp`, `sc-compose`, `sc-composer`, plus doctor/status health and troubleshooting closure | PLANNED |
 | AV.5 | Dogfood, QA, and release confidence: collector-backed smoke, fail-open outage tests, and explicit external follow-on handoff for `scmux`/`schook` | PLANNED |
 
@@ -1617,7 +1617,7 @@ current `sc-observability` baseline present on `develop`.
    losing local JSONL/`.otel.jsonl` fail-open behavior.
 2. OTel transport dependencies are isolated behind one dedicated adapter
    boundary instead of being spread through CLI/daemon/application crates.
-3. High-value traces and metrics are present for daemon requests, CLI command
+3. High-value OTLP log coverage is present for daemon requests, CLI command
    flows, GitHub governance paths, and MCP/session lifecycle paths.
 4. `atm doctor --json` and `atm status --json` expose canonical OTel health
    information for collector connectivity and local mirror state.
