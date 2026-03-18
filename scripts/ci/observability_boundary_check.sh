@@ -10,7 +10,7 @@ is_allowed_sc_observability_rust_path() {
   case "$rel" in
     crates/atm/src/main.rs) return 0 ;;
     crates/sc-compose/src/main.rs) return 0 ;;
-    crates/atm-daemon/src/main.rs) return 0 ;;
+    crates/atm-daemon/src/*) return 0 ;;
     *) return 1 ;;
   esac
 }
