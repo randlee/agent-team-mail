@@ -2983,25 +2983,32 @@ mod tests {
     fn check_daemon_ownership_mismatch_reports_home_scope_drift() {
         let tmp = tempfile::tempdir().unwrap();
         let daemon_dir = tmp.path().join(".atm/daemon");
+        let executable_path = std::env::temp_dir().join("atm-daemon");
+        let home_scope = std::env::temp_dir().join("other-home");
         fs::create_dir_all(&daemon_dir).unwrap();
         fs::write(
             daemon_dir.join("daemon.lock.meta.json"),
-            r#"{
+            format!(
+                r#"{{
   "pid": 42,
   "runtime_kind": "dev",
   "build_profile": "release",
-  "executable_path": "/tmp/atm-daemon",
-  "home_scope": "/tmp/other-home",
+  "executable_path": "{executable_path}",
+  "home_scope": "{home_scope}",
   "version": "0.44.1",
   "written_at": "2026-03-02T00:00:00Z"
-}"#,
+}}"#,
+                executable_path = executable_path.display(),
+                home_scope = home_scope.display(),
+            ),
         )
         .unwrap();
 
         let findings = check_daemon_ownership_mismatch(tmp.path());
         assert!(
             findings.iter().any(|f| {
-                f.code == "DAEMON_OWNERSHIP_MISMATCH" && f.message.contains("/tmp/other-home")
+                f.code == "DAEMON_OWNERSHIP_MISMATCH"
+                    && f.message.contains(home_scope.to_string_lossy().as_ref())
             }),
             "expected home-scope mismatch finding, got: {findings:?}"
         );
@@ -3013,6 +3020,7 @@ mod tests {
         let _guard = EnvGuard::isolate(OVERRIDE_ENV_KEYS);
         let tmp = tempfile::tempdir().unwrap();
         let daemon_dir = tmp.path().join(".atm/daemon");
+        let binary = std::env::temp_dir().join("foreign-atm-daemon");
         fs::create_dir_all(&daemon_dir).unwrap();
         fs::write(daemon_dir.join("atm-daemon.pid"), "999999\n").unwrap();
         fs::write(
@@ -3022,10 +3030,11 @@ mod tests {
   "atm-dev": {{
     "pid": {},
     "started_at": "2026-03-16T00:00:00Z",
-    "binary": "/tmp/foreign-atm-daemon"
+    "binary": "{binary}"
   }}
 }}"#,
-                std::process::id()
+                std::process::id(),
+                binary = binary.display(),
             ),
         )
         .unwrap();
