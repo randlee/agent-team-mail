@@ -1163,8 +1163,8 @@ mod tests {
   "team-b": {{"pid": 22, "started_at": "2026-03-16T00:00:02Z", "binary": "{binary_b}"}},
   "team-a": {{"pid": 11, "started_at": "2026-03-16T00:00:01Z", "binary": "{binary_a}"}}
 }}"#,
-                binary_a = binary_a.display(),
-                binary_b = binary_b.display(),
+                binary_a = binary_a.to_string_lossy().replace('\\', "/"),
+                binary_b = binary_b.to_string_lossy().replace('\\', "/"),
             ),
         )
         .expect("write daemon touch");
