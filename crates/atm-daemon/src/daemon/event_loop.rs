@@ -45,8 +45,7 @@ fn emit_plugin_lifecycle_event(
     error: Option<String>,
 ) {
     let request_id = format!("plugin-lifecycle-{plugin_name}-{action}");
-    let trace_id =
-        agent_team_mail_core::event_log::trace_id_for_request("atm-daemon", &request_id);
+    let trace_id = agent_team_mail_core::event_log::trace_id_for_request("atm-daemon", &request_id);
     emit_event_best_effort(EventFields {
         level: if error.is_some() { "error" } else { "info" },
         source: "atm-daemon",
