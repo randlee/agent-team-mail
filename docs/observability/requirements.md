@@ -1,10 +1,10 @@
 # Observability Requirements
 
-**Status**: Active (Phase AH baseline; AJ complete; AV updates in planning)
+**Status**: Active (Phase AH baseline; Phase AV logs rollout planned; Phase AW traces/metrics planned)
 **Scope**: `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `sc-compose`, `sc-composer`
 **See also**:
 - `docs/observability/architecture.md`
-- `docs/project-plan.md` (Phase AJ and Phase AV sections)
+- `docs/project-plan.md` (Phase AV and Phase AW sections)
 
 ## 1. Purpose
 
@@ -19,8 +19,8 @@ behavior across ATM tools and companion tooling.
 - Tool outputs are namespaced under per-tool log directories beneath a common root.
 - Schema and health-state semantics are shared across tools; no per-tool drift.
 - OpenTelemetry export is required for in-scope tools in this document;
-  live collector integration and non-optional enforcement are effective in
-  Phase AV rollout.
+  non-optional logs export is effective in Phase AV rollout, with traces and
+  metrics expanding in Phase AW.
 
 ## 3. Canonical Logging Architecture Contract
 
@@ -67,7 +67,7 @@ Validation requirements:
 - Reject payloads missing required fields.
 - Enforce serialized-size guard (`64 KiB` max per line, initial default).
 - Apply built-in redaction before enqueue/write.
-- `action` must be stable snake_case; baseline vocabulary lives in `docs/logging-l1a-spec.md`.
+- `action` must be stable snake_case; baseline vocabulary lives in `../logging-l1a-spec.md`.
 - For agent/runtime-scoped events (`atm.send`, `atm.read`, spawn/resume, hook lifecycle,
   daemon member/session state transitions), `team`, `agent`, `runtime`, and
   `session_id` are mandatory correlation fields.
@@ -147,7 +147,7 @@ Diagnostics surface:
   actionable remediation.
 - `atm status --json` must expose logging health state.
 - Runbook mapping of health states to remediation commands must exist in
-  `docs/logging-troubleshooting.md`.
+  `docs/observability/troubleshooting.md`.
 
 Compatibility:
 - Logging-health JSON schema is versioned and stable.
@@ -214,7 +214,8 @@ Lifecycle and hook coverage:
 
 ## 9. OpenTelemetry Requirements
 
-- OTel export is mandatory for in-scope tools (non-optional in Phase AV rollout).
+- OTel export is mandatory for in-scope tools (logs in Phase AV; traces and
+  metrics expand in Phase AW).
 - Local structured file logging remains mandatory regardless of OTel state.
 - OTel exporter startup is enabled by default.
 - Temporary disablement is allowed only for tests/controlled diagnostics paths
@@ -288,6 +289,39 @@ They must not be treated as delivered by this repository's AV implementation.
 - CI must run the observability boundary check before AV.2 begins, and the rule
   remains mandatory after AV.2 lands.
 
+## 9.1 Phase AV Grafana Rollout Requirements
+
+- Phase AV is the logs-first rollout to a Grafana-compatible OTLP HTTP logs
+  receiver.
+- AV acceptance requires the smoke protocol in
+  `docs/observability/grafana-rollout-smoke.md` to pass.
+- The rollout must prove all of the following at the same time:
+  - remote OTLP HTTP log delivery works
+  - canonical local JSONL logging still works
+  - collector outage/auth/TLS failure remains fail-open
+- Correlation fields exposed remotely must include at minimum:
+  - `team`
+  - `agent`
+  - `runtime`
+  - `session_id`
+- This AV rollout is sufficient for centralized logs in Grafana but is not yet
+  sufficient to claim full traces/metrics support.
+
+## 9.2 Phase AW Traces + Metrics Expansion Requirements
+
+- Phase AW extends AV from logs-only collector export to native traces and
+  metrics.
+- `sc-observability` may add neutral `TraceRecord` / `MetricRecord` contracts,
+  but transport-specific payload shaping remains outside it.
+- `sc-observability-otlp` must remain the only OTLP transport-owning crate for:
+  - logs
+  - traces
+  - metrics
+- Grafana acceptance in AW requires:
+  - queryable logs
+  - usable trace views for ATM flows
+  - metric panels for export health and runtime activity
+
 ## 10. Cross-Tool Integration Requirements
 
 - `sc-compose` and `sc-composer` must use `sc-observability` instead of local,
@@ -295,15 +329,21 @@ They must not be treated as delivered by this repository's AV implementation.
 - Embedded-library usage must allow host-injected sink/path configuration.
 - Standalone tool defaults remain per-tool scoped (for example `sc-compose` log root).
 
+### 10.1 External Consumer Contract (`scmux` / `schook`)
+
+- External consumers must integrate through the shared facade and adapter
+  surfaces, not by inventing their own OTLP transport wiring.
+- They must honor the same env/config surface used by ATM.
+- AV only requires logs-first carry-forward notes and smoke alignment.
+- AW is responsible for traces/metrics adoption planning across those repos.
+
 ## 11. Delivery Mapping and Testability
 
 Phase mapping:
 - AH.1: shared crate contracts (`LogEventV1`, socket contract, queue/rotation/spool baseline).
 - AJ: session identity canonicalization (`session_id` normalization and SSoT alignment).
-- AK: historical planning placeholder for mandatory OTel rollout (SUPERSEDED by
-  Phase AV).
-- AV: live collector integration, transport partitioning, in-repo producer
-  instrumentation rollout, and health/reporting hardening.
+- AV: OTLP HTTP logs rollout, dogfood, Grafana hookup smoke, and external handoff.
+- AW: native traces+metrics expansion, Grafana dashboards, and external repo rollout.
 
 Testability gate:
 - Every requirement section above is enforced by at least one unit or integration test.

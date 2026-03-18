@@ -1,11 +1,11 @@
 # Observability Architecture
 
-**Status**: Active (Phase AH baseline; AJ complete; AV updates in planning)
+**Status**: Active (Phase AH baseline; Phase AV complete; Phase AW expansion planned)
 **Primary crate**: `sc-observability`
 **See also**:
 - `docs/observability/requirements.md`
 - `docs/observability/troubleshooting.md`
-- `docs/project-plan.md` (Phase AJ and Phase AV sections)
+- `docs/project-plan.md` (Phase AV and Phase AW sections)
 
 ## 1. Architecture Goals
 
@@ -19,9 +19,11 @@
 
 - `sc-observability` (library): event model, validators, redaction, sink traits,
   health evaluator, default init path.
-- `sc-observability-otlp` (planned dedicated OTel transport adapter crate):
-  owns OTLP/collector transport, auth/TLS, batching, retry, and SDK dependency
-  integration.
+- AV-era collector export stays behind the neutral `OtelExporter` seam inside
+  `sc-observability`.
+- `sc-observability-otlp` is a planned dedicated AW-era transport adapter crate:
+  it will own OTLP/collector transport, auth/TLS, batching, retry, and SDK
+  dependency integration once traces and metrics land.
 - Producers: `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `sc-compose`,
   `sc-composer`, `scmux` (follow-on, not in Phase AV scope), `schook`
   (follow-on, not in Phase AV scope).
@@ -54,9 +56,12 @@ status does not expand this repository's AV implementation scope.
 3. ATM producers send `log-event` to daemon.
 4. Daemon validates, redacts, queues, and writes canonical JSONL.
 5. If daemon unavailable, producer writes spool event; daemon merges on startup.
-6. `sc-observability` maps structured events into neutral OTel records.
-7. The OTel transport adapter exports those records to the configured
-   collector target and optional debug mirrors.
+6. In Phase AV, `sc-observability` maps structured events into neutral
+   OTLP-ready log records.
+7. The AV-era exporter path inside `sc-observability` sends those records to
+   the configured collector target and optional debug mirrors.
+8. Phase AW introduces `sc-observability-otlp` as the dedicated transport crate
+   and extends the same boundary to traces and metrics.
 
 ## 4. Canonical State and Health Computation
 
@@ -97,6 +102,8 @@ Health evaluator is implemented once and reused by `atm doctor` and `atm status`
 - Logging must not fail command execution.
 - Socket send failures degrade to spool fallback.
 - Merge is append-only with source deletion only after successful merge.
+- Grafana/collector connectivity is fail-open in AV and must remain fail-open in
+  AW for traces and metrics too.
 - ATM uses a deliberate two-tier spool-write model:
   - normal producer flow goes through the async producer channel
     (`emit_event_best_effort` -> shared producer sender) so steady-state events
@@ -132,39 +139,37 @@ Required baseline:
 OTel export failures must never block core command execution; local structured
 logging remains continuously available.
 
-## 9.1 OTel Partition Boundary
+## 9.1 AV Rollout Boundary
 
+- AV is a logs-first rollout to a Grafana-compatible OTLP HTTP logs receiver.
+- It is sufficient for centralized logs and field-based correlation.
+- It is not yet sufficient to claim native traces or metrics support.
+- The required rollout verification is captured in
+  `docs/observability/grafana-rollout-smoke.md`.
+
+## 9.2 AW Target Architecture
+
+- AW adds real trace and metric signals while preserving the same partition:
+  - `sc-observability`: neutral contracts and fail-open semantics
+  - `sc-observability-otlp`: OTLP transport and backend concerns
+  - entry-point binaries: wiring only
+- External repos (`scmux`, `schook`) must consume the same adapter/facade
+  boundary rather than implementing ad hoc transport layers.
 - `sc-observability` remains the generic observability layer. It owns:
   - structured event schema
   - validation and redaction
   - local JSONL sink/spool behavior
   - neutral `OtelRecord` shaping
   - exporter trait definitions and fail-open semantics
-- The dedicated OTel transport adapter owns:
+- The dedicated OTel transport adapter (`sc-observability-otlp`) owns:
   - OTLP protocol/client dependencies
   - collector endpoint configuration
   - auth/TLS and headers
   - batching, flush, and remote retry policy
   - stdout/debug export modes
-- Canonical transport configuration is shared and centralized. The contract
-  surface includes endpoint, protocol, auth material, TLS configuration,
-  export enablement, stdout/debug export controls, batching/flush, and
-  retry/backoff. Per-binary config drift is forbidden.
-- Application and daemon crates call the generic observability facade only.
-  They must not import collector SDK crates or construct OTLP exporters
-  themselves.
 - `sc-observability-otlp` must not be imported by non-entry-point modules.
-  Entry-point wiring is limited to the small set of binaries/modules that
-  initialize process-wide observability. Internal feature modules, helpers, and
-  libraries must depend on the generic facade instead.
-- `scripts/ci/observability_boundary_check.sh` is the dedicated enforcement
-  gate for this rule. CI must run it before AV.2 begins and keep it active
-  afterward.
 - Canonical enforcement reference: `docs/arch-boundary.md`
   ("ARCH-BOUNDARY-002 Observability Import Boundary").
-- The partition goal for Phase AV is to keep collector-facing code in one
-  replaceable layer so future backend changes do not leak through the rest of
-  the codebase.
 
 ## 9.2 Config Contract
 
