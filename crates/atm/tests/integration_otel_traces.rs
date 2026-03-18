@@ -213,7 +213,7 @@ fn cli_status_exports_trace_record_to_collector() {
         {
             let payload: Value = serde_json::from_str(&body).expect("valid metrics payload");
             let metric = &payload["resourceMetrics"][0]["scopeMetrics"][0]["metrics"][0];
-            assert_eq!(metric["name"], "atm.commands_total");
+            assert_eq!(metric["name"], "atm.commands_count");
             saw_metrics = true;
             break;
         }
