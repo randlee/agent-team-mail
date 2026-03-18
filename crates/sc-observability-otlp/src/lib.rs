@@ -1,6 +1,5 @@
 use reqwest::blocking::{Client, ClientBuilder};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
-use sc_observability::{MetricKind, TraceStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::fs;
@@ -78,6 +77,18 @@ pub struct TraceTransportRecord {
     pub attributes: Map<String, Value>,
 }
 
+// These signal enums intentionally mirror the canonical sc-observability
+// contracts so this transport crate can shape OTLP payloads without creating a
+// Cargo cycle back into sc-observability. Replace this duplication with a
+// neutral shared types crate once GH-876 lands.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceStatus {
+    Ok,
+    Error,
+    Unset,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MetricTransportRecord {
     pub timestamp: String,
@@ -91,6 +102,16 @@ pub struct MetricTransportRecord {
     pub unit: Option<String>,
     pub source_binary: String,
     pub attributes: Map<String, Value>,
+}
+
+// Mirrored from sc-observability for the same cycle-avoidance reason as
+// TraceStatus above. GH-876 tracks the shared-types extraction.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricKind {
+    Counter,
+    Gauge,
+    Histogram,
 }
 
 #[derive(Debug, Error)]
