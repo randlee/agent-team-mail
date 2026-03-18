@@ -250,6 +250,11 @@ Deliver:
 - outage/fail-open regression tests
 - explicit handoff notes for `scmux` / `schook` follow-on (`#624`)
 
+Artifacts:
+
+- `scripts/otel-dev-install-smoke.py`
+- `docs/observability/external-handoff-scmux-schook.md`
+
 Acceptance:
 
 - ATM can dogfood collector export without breaking local logging

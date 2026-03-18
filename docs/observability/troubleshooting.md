@@ -47,3 +47,15 @@ blocking ATM workflows.
 - `atm doctor --json`
 - `atm status --json`
 - `atm logs --limit 50`
+
+## Dogfood Smoke
+
+After `scripts/dev-install`, run:
+
+- `scripts/otel-dev-install-smoke.py`
+
+This validates:
+
+- live OTLP/HTTP collector export from the installed dev binaries
+- preserved canonical local logging and `.otel.jsonl` mirror
+- fail-open behavior when the collector becomes unavailable
