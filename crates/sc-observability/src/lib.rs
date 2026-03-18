@@ -1759,6 +1759,7 @@ mod tests {
         let exporter = Arc::new(CountingExporter::with_failures(10));
         let event = new_log_event("atm", "send_message", "atm::send", "info");
         let exporters: Vec<Arc<dyn OtelExporter>> = vec![exporter.clone()];
+        let log_path = std::env::temp_dir().join("atm.log.jsonl");
         let err = export_otel_with_retry(
             &event,
             &OtelConfig {
@@ -1769,7 +1770,7 @@ mod tests {
                 ..OtelConfig::default()
             },
             &exporters,
-            Path::new("/tmp/atm.log.jsonl"),
+            &log_path,
             record_sleep,
         )
         .expect_err("should return final export error");

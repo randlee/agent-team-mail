@@ -1612,7 +1612,10 @@ poll_interval_secs = 60
             }),
             owner: Some(GhRuntimeOwner {
                 runtime: "dev".to_string(),
-                executable_path: "/tmp/fake-atm-daemon".to_string(),
+                executable_path: std::env::temp_dir()
+                    .join("fake-atm-daemon")
+                    .to_string_lossy()
+                    .into_owned(),
                 home_scope: home.display().to_string(),
                 pid: std::process::id(),
             }),

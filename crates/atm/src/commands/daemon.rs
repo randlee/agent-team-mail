@@ -1153,13 +1153,19 @@ mod tests {
     fn test_read_daemon_touch_rows_returns_sorted_rows() {
         let tmp = TempDir::new().expect("temp dir");
         let daemon_dir = tmp.path().join(".atm/daemon");
+        let binary_a = std::env::temp_dir().join("daemon-touch-team-a");
+        let binary_b = std::env::temp_dir().join("daemon-touch-team-b");
         std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
         std::fs::write(
             daemon_dir.join("daemon-touch.json"),
-            r#"{
-  "team-b": {"pid": 22, "started_at": "2026-03-16T00:00:02Z", "binary": "/tmp/b"},
-  "team-a": {"pid": 11, "started_at": "2026-03-16T00:00:01Z", "binary": "/tmp/a"}
-}"#,
+            format!(
+                r#"{{
+  "team-b": {{"pid": 22, "started_at": "2026-03-16T00:00:02Z", "binary": "{binary_b}"}},
+  "team-a": {{"pid": 11, "started_at": "2026-03-16T00:00:01Z", "binary": "{binary_a}"}}
+}}"#,
+                binary_a = binary_a.display(),
+                binary_b = binary_b.display(),
+            ),
         )
         .expect("write daemon touch");
 
