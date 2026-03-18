@@ -21,6 +21,9 @@ pub struct MetricRecord {
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+/// Mirrored as `TransportMetricKind` in `sc-observability-otlp` to avoid a
+/// Cargo dependency cycle. GH-876 tracks extraction to a shared
+/// `sc-observability-types` crate.
 pub enum MetricKind {
     Counter,
     Gauge,

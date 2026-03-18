@@ -23,6 +23,9 @@ pub struct TraceRecord {
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+/// Mirrored as `TransportTraceStatus` in `sc-observability-otlp` to avoid a
+/// Cargo dependency cycle. GH-876 tracks extraction to a shared
+/// `sc-observability-types` crate.
 pub enum TraceStatus {
     Ok,
     Error,

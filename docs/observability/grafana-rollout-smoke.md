@@ -127,17 +127,10 @@ Verify:
 
 ### 7. Dogfood Dev Install
 
-Planned — scripts not yet available in AV. This check will be delivered in AW.5.
-
-After the AW.5 dogfood scripts land, run:
-
-- `scripts/otel-dev-install-smoke.py`
-
-This confirms the installed dev binaries can:
-
-- export to a live OTLP HTTP receiver
-- preserve local canonical logging
-- remain fail-open under endpoint outage
+Deferred: A dedicated dev-install OTel smoke script
+(`scripts/otel-dev-install-smoke.py`) is planned for a future sprint. See
+GH-878 for tracking. Until then, use `scripts/grafana-verify-smoke.py` (Area C
+of the AW smoke test plan) to verify OTel log field correctness end-to-end.
 
 ## Grafana Acceptance
 
