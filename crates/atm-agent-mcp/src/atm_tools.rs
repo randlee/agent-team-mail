@@ -171,6 +171,7 @@ fn build_message(from: &str, text: String, summary: Option<String>) -> InboxMess
     let auto_sum = auto_summary(&text);
     InboxMessage {
         from: from.to_string(),
+        // local system message — source_team intentionally None
         source_team: None,
         text,
         timestamp: now_iso8601(),

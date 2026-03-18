@@ -777,6 +777,21 @@ mod tests {
         assert!(!msg.read);
     }
 
+    #[test]
+    fn test_build_inbox_message_preserves_same_team_source() {
+        let msg = build_inbox_message(
+            "team-lead".to_string(),
+            Some("atm-dev".to_string()),
+            "same-team note".to_string(),
+            Some("same-team note".to_string()),
+        );
+
+        assert_eq!(msg.from, "team-lead");
+        assert_eq!(msg.source_team.as_deref(), Some("atm-dev"));
+        assert_eq!(msg.text, "same-team note");
+        assert!(!msg.read);
+    }
+
     fn make_send_args(offline_action: Option<String>) -> SendArgs {
         SendArgs {
             agent: "test-agent".to_string(),
