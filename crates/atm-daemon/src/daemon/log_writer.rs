@@ -22,6 +22,8 @@
 //! starts a fresh base file. The oldest rotation file (`.N`) is removed.
 
 use agent_team_mail_core::logging_event::{LogEventV1, configured_log_path};
+use chrono::Utc;
+use sc_observability::{MetricKind, MetricRecord, OtelConfig, export_metric_records_best_effort};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -116,6 +118,102 @@ pub type LogEventQueue = Arc<Mutex<BoundedQueue>>;
 /// Create a new [`LogEventQueue`] with the default capacity of 4096.
 pub fn new_log_event_queue() -> LogEventQueue {
     Arc::new(Mutex::new(BoundedQueue::new(LOG_EVENT_QUEUE_CAPACITY)))
+}
+
+fn metric_record(
+    name: &str,
+    kind: MetricKind,
+    value: f64,
+    unit: Option<&str>,
+    attributes: serde_json::Map<String, serde_json::Value>,
+) -> MetricRecord {
+    MetricRecord {
+        timestamp: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        team: None,
+        agent: None,
+        runtime: std::env::var("ATM_RUNTIME")
+            .ok()
+            .filter(|v| !v.trim().is_empty()),
+        session_id: std::env::var("CLAUDE_SESSION_ID")
+            .ok()
+            .filter(|v| !v.trim().is_empty()),
+        name: name.to_string(),
+        kind,
+        value,
+        unit: unit.map(str::to_string),
+        source_binary: "atm-daemon".to_string(),
+        attributes,
+    }
+}
+
+fn metric_number(value: &serde_json::Value) -> Option<f64> {
+    match value {
+        serde_json::Value::Number(number) => number.as_f64(),
+        _ => None,
+    }
+}
+
+fn build_event_metric_records(event: &LogEventV1) -> Vec<MetricRecord> {
+    let mut records = Vec::new();
+
+    let mut event_attrs = serde_json::Map::new();
+    event_attrs.insert(
+        "action".to_string(),
+        serde_json::Value::String(event.action.clone()),
+    );
+    event_attrs.insert(
+        "source_binary".to_string(),
+        serde_json::Value::String(event.source_binary.clone()),
+    );
+    records.push(metric_record(
+        "atm_daemon.event_volume_total",
+        MetricKind::Counter,
+        1.0,
+        Some("count"),
+        event_attrs,
+    ));
+
+    let subagent_id = event.subagent_id.clone().or_else(|| {
+        event
+            .action
+            .starts_with("subagent.")
+            .then(|| "unknown".to_string())
+    });
+    if let Some(subagent_id) = subagent_id {
+        let mut subagent_attrs = serde_json::Map::new();
+        subagent_attrs.insert(
+            "subagent_id".to_string(),
+            serde_json::Value::String(subagent_id),
+        );
+        subagent_attrs.insert(
+            "action".to_string(),
+            serde_json::Value::String(event.action.clone()),
+        );
+        records.push(metric_record(
+            "atm_daemon.subagent_activity_total",
+            MetricKind::Counter,
+            1.0,
+            Some("count"),
+            subagent_attrs.clone(),
+        ));
+
+        let duration_value = event
+            .fields
+            .get("duration_ms")
+            .and_then(metric_number)
+            .or_else(|| event.fields.get("elapsed_ms").and_then(metric_number));
+        if let Some(duration_ms) = duration_value {
+            records.push(metric_record(
+                "atm_daemon.subagent_duration_ms",
+                MetricKind::Histogram,
+                duration_ms,
+                Some("ms"),
+                subagent_attrs,
+            ));
+        }
+    }
+
+    records
 }
 
 // ── Writer configuration ──────────────────────────────────────────────────────
@@ -271,6 +369,10 @@ fn write_events(config: &LogWriterConfig, events: &[LogEventV1]) {
                     continue;
                 }
                 export_otel_best_effort(&config.log_path, event);
+                export_metric_records_best_effort(
+                    &build_event_metric_records(event),
+                    &OtelConfig::from_env(),
+                );
             }
             Err(e) => {
                 warn!("log_writer: failed to serialize event: {e}");
