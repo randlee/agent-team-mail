@@ -4,6 +4,7 @@
 **See also**:
 - `docs/observability/external-consumer-contract.md`
 - `docs/observability/architecture.md`
+- `docs/observability/troubleshooting.md`
 - `scripts/validate-external-consumer.sh`
 
 1. Add `sc-observability` as the shared observability facade dependency in the
@@ -57,3 +58,7 @@ scripts/validate-external-consumer.sh --repo /path/to/consumer-repo --dry-run
 
 11. Only mark the rollout complete once both the contract validator and the
     collector-backed smoke pass cleanly.
+
+If validation fails, consult `docs/observability/troubleshooting.md` before
+declaring the rollout blocked so the operator path and expected fail-open
+behavior are reviewed first.

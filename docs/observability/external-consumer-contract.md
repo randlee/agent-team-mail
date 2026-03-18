@@ -81,19 +81,62 @@ They must not add:
 
 External consumers must honor the same configuration surface as ATM:
 
-- `ATM_OTEL_ENABLED`
-- `ATM_OTEL_ENDPOINT`
-- `ATM_OTEL_PROTOCOL`
-- `ATM_OTEL_AUTH_HEADER`
-- `ATM_OTEL_CA_FILE`
-- `ATM_OTEL_INSECURE_SKIP_VERIFY`
-- `ATM_OTEL_TIMEOUT_MS`
-- `ATM_OTEL_RETRY_MAX_ATTEMPTS`
-- `ATM_OTEL_RETRY_BACKOFF_MS`
-- `ATM_OTEL_RETRY_MAX_BACKOFF_MS`
-- `ATM_OTEL_DEBUG_LOCAL_EXPORT`
+| Variable | Description | Default | Required |
+| --- | --- | --- | --- |
+| `ATM_OTEL_ENABLED` | Master switch for OTel export behavior. Values `false`, `0`, `off`, `no`, and `disabled` disable remote export. | `true` | Optional |
+| `ATM_OTEL_ENDPOINT` | Collector OTLP HTTP endpoint base URL. | Unset | Required for collector export |
+| `ATM_OTEL_PROTOCOL` | Transport protocol selector. Current contract is OTLP HTTP. | `otlp_http` | Optional |
+| `ATM_OTEL_AUTH_HEADER` | Prebuilt authorization header sent to the collector. | Unset | Optional |
+| `ATM_OTEL_CA_FILE` | Custom CA bundle path for collector TLS verification. | Unset | Optional |
+| `ATM_OTEL_INSECURE_SKIP_VERIFY` | Disable TLS certificate verification for the collector connection. | `false` | Optional |
+| `ATM_OTEL_TIMEOUT_MS` | Per-export request timeout in milliseconds. | `1500` | Optional |
+| `ATM_OTEL_RETRY_MAX_ATTEMPTS` | Additional export retry attempts after the initial send. | `2` | Optional |
+| `ATM_OTEL_RETRY_BACKOFF_MS` | Initial retry backoff in milliseconds. | `25` | Optional |
+| `ATM_OTEL_RETRY_MAX_BACKOFF_MS` | Maximum retry backoff in milliseconds. | `250` | Optional |
+| `ATM_OTEL_DEBUG_LOCAL_EXPORT` | Emit extra local debug export records for troubleshooting. | `false` | Optional |
 
 No repo-local replacement names should be introduced for those settings.
+
+### Disabled mode
+
+When `ATM_OTEL_ENABLED` is set to `false`, `0`, `off`, `no`, or `disabled`,
+the facade performs no collector export attempt and exits successfully. This is
+distinct from collector-failure fail-open behavior:
+
+- disabled mode: no remote export is attempted and process exit remains `0`
+- collector outage mode: remote export is attempted, failures are tolerated,
+  and process exit remains `0`
+
+## Facade API Reference
+
+External consumers should use the neutral facade exported by
+`crates/sc-observability/src/lib.rs`:
+
+- `export_trace_records_best_effort`:
+  `crates/sc-observability/src/trace.rs`
+- `export_metric_records_best_effort`:
+  `crates/sc-observability/src/metrics.rs`
+
+These are the concrete API entry points for best-effort trace and metric export
+without importing transport-specific code.
+
+## Versioning and Compatibility
+
+The current contract is defined against:
+
+- `sc-observability` version `0.46.0`
+- Rust edition `2024`
+- minimum supported Rust version `1.85`
+
+Compatibility expectations:
+
+- public facade APIs follow the repository semver policy
+- additive configuration and attribute fields may be introduced in minor
+  releases
+- breaking facade or contract changes require a semver-major bump or an
+  explicitly documented migration plan
+- external consumers should pin `sc-observability` to a compatible semver range
+  rather than copying internal ATM modules directly
 
 ## External Consumer Responsibilities
 
