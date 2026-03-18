@@ -18,7 +18,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.46.0"
+version = "0.46.1"
 edition = "2024"
 authors = ["agent-team-mail contributors"]
 license = "MIT OR Apache-2.0"
@@ -41,10 +41,10 @@ thiserror = "2.0"
 anyhow = "1.0"
 
 # Internal dependencies
-agent-team-mail-ci-monitor = { path = "crates/atm-ci-monitor", version = "=0.46.0" }
-agent-team-mail-core = { path = "crates/atm-core", version = "=0.46.0" }
-agent-team-mail-daemon-launch = { path = "crates/atm-daemon-launch", version = "=0.46.0" }
-agent-team-mail-daemon = { path = "crates/atm-daemon", version = "=0.46.0" }
-sc-composer = { path = "crates/sc-composer", version = "=0.46.0" }
-sc-observability = { path = "crates/sc-observability", version = "=0.46.0" }
-sc-observability-otlp = { path = "crates/sc-observability-otlp", version = "=0.46.0" }
+agent-team-mail-ci-monitor = { path = "crates/atm-ci-monitor", version = "=0.46.1" }
+agent-team-mail-core = { path = "crates/atm-core", version = "=0.46.1" }
+agent-team-mail-daemon-launch = { path = "crates/atm-daemon-launch", version = "=0.46.1" }
+agent-team-mail-daemon = { path = "crates/atm-daemon", version = "=0.46.1" }
+sc-composer = { path = "crates/sc-composer", version = "=0.46.1" }
+sc-observability = { path = "crates/sc-observability", version = "=0.46.1" }
+sc-observability-otlp = { path = "crates/sc-observability-otlp", version = "=0.46.1" }
