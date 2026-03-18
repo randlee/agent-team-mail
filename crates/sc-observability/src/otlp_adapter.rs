@@ -15,6 +15,9 @@ pub fn build_transport_exporters(
         insecure_skip_verify: config.insecure_skip_verify,
         timeout_ms: config.timeout_ms,
         debug_local_export: config.debug_local_export,
+        max_retries: config.max_retries,
+        initial_backoff_ms: config.initial_backoff_ms,
+        max_backoff_ms: config.max_backoff_ms,
     };
 
     let exporters = sc_observability_otlp::build_exporters(&transport_config)
