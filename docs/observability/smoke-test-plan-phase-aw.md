@@ -11,6 +11,21 @@ This plan intentionally expands beyond the AW.5 automated Loki smoke:
 - This manual plan adds the missing daemon trace/metric verification and the Grafana read-path checks that AW.5 did not automate.
 - Grafana Cloud reads use backend-specific Basic auth. Use the exact per-backend instance IDs from `~/.zshrc` or `.private/grafana-otel-config.md`; do not guess or reuse one precomputed read header across Loki, Tempo, and Mimir.
 
+## AY.1 Verification Results
+
+- Loki: `FAIL`
+  - live Grafana query returned `0` streams for `service_name="atm"`
+  - root cause: CLI commands are not wiring the OTel log pipeline for all
+    command paths; follow-up is in `AY.2`
+- Tempo: `FAIL`
+  - Grafana Cloud Tempo search does not accept `session_id` as a searchable
+    top-level identifier
+  - shared-runtime stop/start smoke still returned `0` `atm-daemon` traces
+  - follow-up is in `AY.2`
+- Mimir: `PASS`
+  - canonical series are present, including `atm_commands_count_total` and
+    `atm_messages_sent_count_total`
+
 ## Preconditions
 
 - `develop` contains the merged AW work.
@@ -169,7 +184,7 @@ curl -s -G "$ATM_LOKI_URL/loki/api/v1/query_range" \
   -H "$ATM_LOKI_READ_AUTH" \
   --data-urlencode "query={service_name=\"atm\"} | logfmt | session_id=\"$SESSION_TAG\"" \
   --data-urlencode "limit=20" \
-  --data-urlencode "start=$(python3 -c 'import time; print(int((time.time()-180)*1e9))')" \
+  --data-urlencode "start=$(python3 -c 'import time; print(int((time.time()-600)*1e9))')" \
   | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
@@ -241,6 +256,13 @@ Stop any existing daemon and force a fresh daemon-owned flow before the query:
 ```bash
 DAEMON_SESSION_TAG="aw-smoke-daemon-$(date +%s)"
 $AW_ATM daemon stop >/dev/null 2>&1 || true
+
+export ATM_OTEL_ENABLED=true
+export ATM_OTEL_ENDPOINT=https://otlp-gateway-prod-us-west-0.grafana.net/otlp
+export ATM_OTEL_PROTOCOL=otlp_http
+export ATM_OTEL_AUTH_HEADER="Authorization: Basic <grafana-write-header>"
+
+$AW_ATM daemon start >/dev/null 2>&1
 
 CLAUDE_SESSION_ID="$DAEMON_SESSION_TAG" \
 ATM_TEAM=atm-dev \
@@ -371,3 +393,7 @@ print(json.dumps(d.get('otel_health',{}), indent=2))
 - Use backend-specific read credentials for Loki/Tempo/Mimir queries. Do not reuse the OTLP write header or a single shared Basic username across read APIs.
 - Grafana Cloud read APIs do not require `X-Scope-OrgID` when valid backend-specific Basic auth is used.
 - `sc-compose` remains part of the logs rollout, but the AW trace/metric smoke for this phase should focus on the signals actually emitted today by `atm` and `atm-daemon`.
+- AY.1 live verification outcome on this branch is intentionally mixed:
+  - Loki `FAIL`
+  - Tempo `FAIL`
+  - Mimir `PASS`
