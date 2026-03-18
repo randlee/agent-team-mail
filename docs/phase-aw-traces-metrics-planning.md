@@ -1,0 +1,103 @@
+# Phase AW Planning: OTel Traces + Metrics Expansion
+
+**Status**: Planned
+**Prerequisite**: Phase AV merged and dogfooded against a Grafana-compatible
+OTLP HTTP logs receiver.
+
+## Goal
+
+Expand the AV logs-only rollout into full OTel traces and metrics while keeping
+the architecture partition clean:
+
+- `sc-observability`: neutral event, span, and metric abstractions
+- `sc-observability-otlp`: OTLP transport only
+- entry-point binaries: process-level wiring only
+
+## Problem Statement
+
+Phase AV gets ATM to a useful first operational milestone:
+
+- remote OTLP HTTP logs
+- local fail-open logging preserved
+- collector endpoint, auth, TLS, timeout, and retry config centralized
+
+What AV does not yet deliver:
+
+- native OTLP traces export
+- native OTLP metrics export
+- Grafana dashboards for spans/metrics
+- external consumer rollout guidance beyond logs-first handoff
+
+## AW Scope
+
+1. Add trace export as a first-class signal, not just trace IDs embedded in logs.
+2. Add metric instruments and export.
+3. Define Grafana dashboard and query expectations for ATM observability.
+4. Keep transport/SDK dependencies isolated in `sc-observability-otlp`.
+5. Define the integration contract external repos (`scmux`, `schook`) must follow.
+
+## Architecture Guardrails
+
+- `sc-observability` may define neutral `TraceRecord` / `MetricRecord` shapes,
+  correlation rules, buffering hooks, and fail-open semantics.
+- `sc-observability-otlp` owns OTLP payload shaping, batching, retry, auth/TLS,
+  and client dependencies for logs, traces, and metrics.
+- Non-entry-point modules must not import OTLP SDK/client crates directly.
+- Grafana- or backend-specific assumptions must live in docs/contracts, not in
+  generic feature code.
+
+## Sprint Map
+
+| Sprint | Focus | Deliverables |
+|---|---|---|
+| AW.1 | Signal contracts | Neutral `TraceRecord` / `MetricRecord` types, required correlation fields, schema rules, and import-boundary updates |
+| AW.2 | OTLP transport expansion | `sc-observability-otlp` support for `/v1/traces` and `/v1/metrics`, shared batching/timeout/retry policy |
+| AW.3 | Producer trace rollout | Instrument ATM/daemon/selected producers with real spans and span lifecycle coverage |
+| AW.4 | Metrics rollout | Counters/histograms/gauges for ATM health and activity, export wiring, and diagnostics coverage |
+| AW.5 | Grafana dashboards + smoke | Dashboards/query recipes for logs/traces/metrics plus end-to-end smoke verification |
+| AW.6 | External consumer rollout | `scmux` / `schook` adoption contract, checklist, and handoff validation |
+
+## Dependencies
+
+- AV must be merged and stable as a logs rollout.
+- The AV Grafana smoke in
+  `docs/observability/grafana-rollout-smoke.md` must pass first.
+- External repos must accept the shared adapter boundary rather than reintroduce
+  transport-specific code.
+
+## External Repo Integration Contract
+
+`scmux` and `schook` need:
+
+- `sc-observability` facade usage only in feature code
+- no direct OTLP client wiring outside approved entry-point setup
+- the same env/config surface as ATM:
+  - `ATM_OTEL_ENABLED`
+  - `ATM_OTEL_ENDPOINT`
+  - `ATM_OTEL_PROTOCOL`
+  - `ATM_OTEL_AUTH_HEADER`
+  - `ATM_OTEL_CA_FILE`
+  - `ATM_OTEL_INSECURE_SKIP_VERIFY`
+  - timeout/retry controls
+- local fail-open logging preserved when collector export fails
+
+## Grafana Requirements
+
+AW should deliver:
+
+- log queries by `team`, `agent`, `runtime`, `session_id`
+- trace views for key ATM flows
+- metric panels for:
+  - event volume
+  - export failures
+  - dropped events / spool growth
+  - daemon request volume / latency
+  - subagent activity counts and duration
+
+## Exit Criteria
+
+1. ATM emits native OTLP traces and metrics in addition to logs.
+2. Logs/traces/metrics all remain fail-open with local logging preserved.
+3. `sc-observability-otlp` remains the only transport-owning crate.
+4. Grafana smoke covers logs, traces, and metrics end-to-end.
+5. External consumer repos have a concrete adoption contract and checklist.

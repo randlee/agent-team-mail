@@ -1,11 +1,11 @@
 # Observability Architecture
 
-**Status**: Active (Phase AH baseline; AJ/AK updates in planning)
+**Status**: Active (Phase AH baseline; Phase AV rollout planned; Phase AW expansion planned)
 **Primary crate**: `sc-observability`
 **See also**:
 - `docs/observability/requirements.md`
 - `docs/observability/troubleshooting.md`
-- `docs/project-plan.md` (Phase AJ and Phase AK sections)
+- `docs/project-plan.md` (Phase AV and Phase AW sections)
 
 ## 1. Architecture Goals
 
@@ -18,6 +18,8 @@
 
 - `sc-observability` (library): event model, validators, redaction, sink traits,
   health evaluator, default init path.
+- `sc-observability-otlp` (planned dedicated OTLP transport adapter crate):
+  collector transport for logs in AV; traces and metrics expand there in AW.
 - Producers: `atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `sc-compose`,
   `sc-composer`, `scmux`, `schook`.
 - Daemon writer path: `atm-daemon` canonical sink for ATM producer traffic.
@@ -30,7 +32,10 @@
 3. ATM producers send `log-event` to daemon.
 4. Daemon validates, redacts, queues, and writes canonical JSONL.
 5. If daemon unavailable, producer writes spool event; daemon merges on startup.
-6. A mirrored OTel exporter sink emits selected traces/metrics.
+6. In Phase AV, `sc-observability` shapes neutral OTLP-ready log records.
+7. `sc-observability-otlp` exports those records to a Grafana-compatible OTLP
+   HTTP logs receiver.
+8. Phase AW extends the same adapter boundary to traces and metrics.
 
 ## 4. Canonical State and Health Computation
 
@@ -71,6 +76,8 @@ Health evaluator is implemented once and reused by `atm doctor` and `atm status`
 - Logging must not fail command execution.
 - Socket send failures degrade to spool fallback.
 - Merge is append-only with source deletion only after successful merge.
+- Grafana/collector connectivity is fail-open in AV and must remain fail-open in
+  AW for traces and metrics too.
 
 ## 8. Security and Redaction
 
@@ -98,10 +105,37 @@ Required baseline:
 OTel export failures must never block core command execution; local structured
 logging remains continuously available.
 
+## 9.1 AV Rollout Boundary
+
+- AV is a logs-first rollout to a Grafana-compatible OTLP HTTP logs receiver.
+- It is sufficient for centralized logs and field-based correlation.
+- It is not yet sufficient to claim native traces or metrics support.
+- The required rollout verification is captured in
+  `docs/observability/grafana-rollout-smoke.md`.
+
+## 9.2 AW Target Architecture
+
+- AW adds real trace and metric signals while preserving the same partition:
+  - `sc-observability`: neutral contracts and fail-open semantics
+  - `sc-observability-otlp`: OTLP transport and backend concerns
+  - entry-point binaries: wiring only
+- External repos (`scmux`, `schook`) must consume the same adapter/facade
+  boundary rather than implementing ad hoc transport layers.
+
 ## 10. Diagnostics JSON Contract Lock
 
 `atm doctor --json` and `atm status --json` share one locked `logging_health`
 object contract:
-- `status`, `otel_exporter`, `local_structured`, `last_export_error`.
+- `logging_health.schema_version`
+- `logging_health.state`
+- `logging_health.log_root`
+- `logging_health.canonical_log_path`
+- `logging_health.spool_path`
+- `logging_health.dropped_events_total`
+- `logging_health.spool_file_count`
+- `logging_health.oldest_spool_age_seconds`
+- `logging_health.last_error.code`
+- `logging_health.last_error.message`
+- `logging_health.last_error.at`
 
 No drift is allowed across these two command surfaces for shared keys.
