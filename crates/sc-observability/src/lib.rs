@@ -1582,7 +1582,12 @@ mod tests {
         );
         logger.emit(&event).expect("emit should succeed");
 
-        let requests = collector.requests();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut requests = collector.requests();
+        while requests.is_empty() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(25));
+            requests = collector.requests();
+        }
         assert_eq!(requests.len(), 1, "collector should receive one request");
         assert!(
             requests[0].starts_with("POST /v1/logs HTTP/1.1"),
