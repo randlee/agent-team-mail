@@ -3005,10 +3005,11 @@ mod tests {
         .unwrap();
 
         let findings = check_daemon_ownership_mismatch(tmp.path());
+        let home_scope_str = home_scope.to_string_lossy().replace('\\', "/");
         assert!(
             findings.iter().any(|f| {
                 f.code == "DAEMON_OWNERSHIP_MISMATCH"
-                    && f.message.contains(home_scope.to_string_lossy().as_ref())
+                    && f.message.contains(home_scope_str.as_str())
             }),
             "expected home-scope mismatch finding, got: {findings:?}"
         );
