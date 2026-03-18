@@ -13,7 +13,7 @@ name = "atm-tui"
 path = "src/main.rs"
 
 [dependencies]
-agent-team-mail-core = { path = "../atm-core", version = "=0.45.2" }
+agent-team-mail-core = { path = "../atm-core", version = "=0.46.0" }
 agent-team-mail-daemon-launch.workspace = true
 sc-observability.workspace = true
 ratatui = "0.29"
