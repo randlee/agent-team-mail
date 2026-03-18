@@ -18,6 +18,37 @@ real smoke testing so ATM can:
 - install and restart the shared dev daemon in a way that preserves OTel config
 - begin live Grafana dogfooding with confidence
 
+## Current Issue Triage Snapshot
+
+### Already fixed on `develop` (not AY scope)
+
+The triage sweep closed these as already resolved on `develop` and they should
+not be re-planned inside AY:
+
+- `#883`
+- `#862`
+- `#863`
+- `#793`
+- `#835`
+- `#724`
+- `#725`
+- `#772`
+- `#783`
+- `#774`
+- `#798`
+- `#757`
+
+### Parallel work already in flight
+
+- `#888` / PR `#889` (`feature/cross-team-source-envelope`) is already being
+  fixed separately. Treat it as a parallel fix expected to land on `develop`
+  before AY.1 begins; do not duplicate that work in AY.
+
+### Still-open smoke follow-up note
+
+- `#886` (Loki `service_name`) remains pending until the live smoke re-run
+  confirms the post-AW shaping fix on current `develop`.
+
 ## Smoke Findings That Drive AY
 
 Confirmed from AW smoke and follow-up investigation:
@@ -57,8 +88,42 @@ AY turns those findings into a short execution plan.
 
 | Sprint | Focus | Deliverables |
 |---|---|---|
+| AY.0 | Flaky test hardening | Small, parallel reliability fixes for already-known flaky tests uncovered during AW smoke/CI so AY implementation work stops paying incidental test fallout |
 | AY.1 | Live signal correctness | Verify Loki `service_name="atm"` on live data, verify daemon traces after a fresh OTel-configured start, align smoke/docs/scripts to backend-specific read auth and canonical metric names, and close any remaining signal-shaping gaps discovered during that verification |
 | AY.2 | Shared dev-daemon dogfood readiness | Make canonical shared daemon/dev-install startup preserve OTel config, add an operator-safe dogfood smoke for live Grafana data, and document the exact install/start/query flow needed for ongoing dogfooding |
+| AY.3a | OTel struct and operator-smoke cleanup | Small follow-up boundary cleanup: move mirror structs into `atm-core` and add the operator `otel-dev-install-smoke.py` script |
+| AY.3b | OTel type/boundary extraction | Medium follow-up boundary work: create `sc-observability-types` and relocate `otlp_adapter` wiring to entry-point crates |
+
+## AY.0: Flaky Test Hardening
+
+### Purpose
+
+Close small, pre-existing flaky tests that surfaced during AW smoke/CI so AY
+implementation work can proceed without avoidable validation churn.
+
+### Deliverables
+
+- `#887`
+  - change `TraceCollector::Drop` to use `let _ = join.join()` in
+    `crates/sc-observability/tests/trace_export_integration.rs`
+  - verify the serial fix for
+    `log_event_exports_to_otlp_http_collector_with_service_name` in
+    `crates/sc-observability/tests/log_export_integration.rs` landed via the
+    `develop` hotfix (`#880`)
+- `#871` / `#870`
+  - fix the Tokio runtime flavor and panic isolation in
+    `crates/atm-daemon/src/plugins/registry.rs`
+- `#873`
+  - add the missing `#[serial]` to
+    `crates/atm-agent-mcp/tests/proxy_integration.rs`
+- `#860`
+  - replace the timed polling loop with a direct assertion in the janitor-reap
+    test
+
+### Notes
+
+- AY.0 is intentionally small and can run in parallel with AY.1.
+- These fixes are reliability-only and carry no architecture decision load.
 
 ## AY.1: Live Signal Correctness
 
@@ -122,6 +187,41 @@ reliably start the daemon in the desired observability mode.
 - the dogfood smoke is documented and repeatable on `develop`
 - live Grafana data is sufficient to begin routine dev-daemon dogfooding
 
+## AY.3a: OTel Struct and Operator-Smoke Cleanup
+
+### Deliverables
+
+- `#852`
+  - move `OtelHealthSnapshot` / `OtelLastError` mirror structs into
+    `atm-core`
+- `#878`
+  - add `scripts/otel-dev-install-smoke.py` as the operator-oriented dev-install
+    smoke script
+
+### Dependency
+
+- can begin after AY.2 is stable
+- must land before AY.3b
+
+## AY.3b: OTel Type and Boundary Extraction
+
+### Deliverables
+
+- `#876`
+  - create `sc-observability-types` to break the
+    `sc-observability` <-> `sc-observability-otlp` dependency cycle
+- `#867`
+  - relocate `otlp_adapter` wiring to entry-point crates after the type split
+
+### Dependency
+
+- depends on AY.3a
+
+### Purpose
+
+This is not required to begin dogfooding, but it is the right follow-on cleanup
+once the live Grafana and dev-daemon path are stable.
+
 ## Risks
 
 - Grafana ingestion lag can still cause false-negative smoke runs if the query
@@ -130,6 +230,9 @@ reliably start the daemon in the desired observability mode.
   smoke explicitly controls lifecycle
 - metric alias drift can reappear if dashboards and smoke scripts diverge from
   the canonical exported metric names
+- AY.0 flake fixes may continue landing independently on `develop`; the plan
+  must treat those as “verify landed” when applicable rather than duplicate
+  work
 
 ## Exit Criteria
 

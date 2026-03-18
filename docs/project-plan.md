@@ -186,7 +186,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AT | GitHub Boundary Elimination | Remove all remaining audited GitHub-boundary violations so only the gh plugin/provider layer owns GitHub behavior | PLANNED |
 | AV | OTel Collector Logs Rollout | Ship OTLP HTTP logs export, dogfood it against a Grafana-compatible receiver, and preserve fail-open local logging | COMPLETE |
 | AW | OTel Traces + Metrics Expansion | Add native traces and metrics, Grafana dashboards/smoke, and external repo rollout on top of AV | COMPLETE |
-| AY | OTel Grafana Dogfood Readiness | Close live-smoke gaps after AW: Loki service-name verification, daemon trace startup/config inheritance, metric query alignment, and dev-install dogfood readiness | PLANNED |
+| AY | OTel Grafana Dogfood Readiness | Close live-smoke gaps after AW with sprint map AY.0 (flake hardening), AY.1 (live signal correctness), AY.2 (shared dev-daemon dogfood readiness), AY.3a (struct/operator-smoke cleanup), and AY.3b (OTel type/boundary extraction) | PLANNED |
 
 ---
 
