@@ -97,6 +97,14 @@ Health evaluator is implemented once and reused by `atm doctor` and `atm status`
 - Logging must not fail command execution.
 - Socket send failures degrade to spool fallback.
 - Merge is append-only with source deletion only after successful merge.
+- ATM uses a deliberate two-tier spool-write model:
+  - normal producer flow goes through the async producer channel
+    (`emit_event_best_effort` -> shared producer sender) so steady-state events
+    are batched and merged through the canonical pipeline.
+  - shutdown-critical or pre-exit diagnostics may use a synchronous direct
+    spool write path to persist the event immediately before process exit.
+- That synchronous direct path intentionally bypasses `ATM_LOG` gating so
+  teardown and failure diagnostics are not lost during late shutdown.
 
 ## 8. Security and Redaction
 
