@@ -84,6 +84,26 @@ AW.5 smoke therefore covers the logs endpoint only, in both dry-run and live
 connectivity modes. Full traces-and-metrics smoke against Tempo/Mimir-class
 backends requires live endpoints and is deferred to AW.7 and later.
 
+## AW.6 Status
+
+AW.6 rollout artifacts are:
+
+- `docs/observability/external-consumer-contract.md`
+- `docs/observability/external-consumer-checklist.md`
+- `scripts/validate-external-consumer.sh`
+
+Those artifacts define and validate the external-repo contract:
+
+- feature code uses `sc-observability` only
+- collector transport stays behind approved entry-point setup
+- `sc_observability_otlp` and raw `opentelemetry*` imports are forbidden
+  outside that setup boundary
+- local fail-open logging remains mandatory
+
+The validator provides a `--dry-run` mode so a rollout owner can confirm the
+enforcement surface before running the real repo scan against `scmux`,
+`schook`, or a new consumer repo.
+
 ## Dependencies
 
 - AV must be merged and stable as a logs rollout.
