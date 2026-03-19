@@ -1,6 +1,6 @@
 # Phase AY Planning: OTel Grafana Dogfood Readiness
 
-**Status**: Planned
+**Status**: Complete
 **Prerequisites**:
 - Phase AV complete and merged
 - Phase AW complete and merged
