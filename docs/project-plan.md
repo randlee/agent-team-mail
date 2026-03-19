@@ -186,6 +186,8 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AT | GitHub Boundary Elimination | Remove all remaining audited GitHub-boundary violations so only the gh plugin/provider layer owns GitHub behavior | PLANNED |
 | AV | OTel Collector Logs Rollout | Ship OTLP HTTP logs export, dogfood it against a Grafana-compatible receiver, and preserve fail-open local logging | COMPLETE |
 | AW | OTel Traces + Metrics Expansion | Add native traces and metrics, Grafana dashboards/smoke, and external repo rollout on top of AV | PLANNED |
+| AY | Grafana Dogfood Readiness | Close live-signal and shared-daemon dogfood gaps so Grafana-backed ATM validation is repeatable on `develop` | COMPLETE |
+| AZ | AY Smoke Follow-Up | Fix missing daemon Tempo attribution and stale shared-dev smoke assumptions before broad OTel enablement | PLANNED |
 
 ---
 
@@ -1684,7 +1686,34 @@ Grafana-backed ATM dogfooding is practical and repeatable on `develop`.
 
 ---
 
-## 17.23 Phase AM: CI Monitor Subsystem Refactor
+## 17.23 Phase AZ: AY Smoke Follow-Up
+
+**Goal**: Close the remaining AY smoke failures before broad OTel enablement by
+restoring fresh `atm-daemon` traces in Tempo and updating the shared-dev smoke
+path to the real canonical logging flow.
+
+**Planning doc**: `docs/phase-az-planning.md`
+**Requirements**: `docs/observability/requirements.md`
+**Architecture**: `docs/observability/architecture.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Deliverable | Status |
+|---|---|---|---|
+| AZ.1 | Daemon trace attribution | fix startup lifecycle traces so fresh restart traces appear under `service.name="atm-daemon"` in Tempo | PLANNED |
+| AZ.2 | Shared-dev smoke + OTel coverage | fix `otel-dev-install-smoke.py` for shared-dev mode and close OTel test gaps `#904`, `#905`, `#911` | PLANNED |
+
+### Exit Criteria
+1. Shared-daemon restart smoke returns at least one Tempo trace under
+   `resource.service.name="atm-daemon"` for the smoke session.
+2. `scripts/otel-dev-install-smoke.py` passes against the real shared-dev flow
+   without relying on `ATM_LOG_FILE` temp overrides.
+3. Shared daemon-launch tests cover the missing `ATM_OTEL_*` inheritance paths.
+4. CLI error-path OTel export and health-struct serde round-trips are pinned by
+   tests.
+
+---
+
+## 17.24 Phase AM: CI Monitor Subsystem Refactor
 
 **Goal**: Refactor CI monitoring into a dedicated daemon subsystem so
 `socket.rs` remains transport glue while provider-neutral orchestration,
