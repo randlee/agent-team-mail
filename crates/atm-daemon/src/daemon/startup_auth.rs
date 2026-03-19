@@ -444,7 +444,7 @@ fn validate_token_inner(
         return Err(StartupAuthError::MissingIsolatedLeaseFields);
     }
 
-    let mut seen = seen_tokens().lock().unwrap();
+    let mut seen = seen_tokens().lock().expect("startup_auth mutex poisoned");
     if !seen.insert(token.token_id.clone()) {
         return Err(StartupAuthError::ReplayedToken);
     }
@@ -553,7 +553,9 @@ pub fn spawn_isolated_test_lease_monitor(
                             &home,
                             Some("isolated-test daemon reached lease expiry"),
                         );
-                        *lease_violation.lock().unwrap() = Some(LeaseViolation {
+                        *lease_violation
+                            .lock()
+                            .expect("startup_auth mutex poisoned") = Some(LeaseViolation {
                             event_name: "ttl_expiry_shutdown",
                             detail: "isolated-test daemon reached lease expiry".to_string(),
                         });
@@ -571,7 +573,9 @@ pub fn spawn_isolated_test_lease_monitor(
                             &home,
                             Some("isolated-test daemon owner process is no longer alive"),
                         );
-                        *lease_violation.lock().unwrap() = Some(LeaseViolation {
+                        *lease_violation
+                            .lock()
+                            .expect("startup_auth mutex poisoned") = Some(LeaseViolation {
                             event_name: "dead_owner_shutdown",
                             detail: format!("owner_pid {owner_pid} is no longer alive"),
                         });
