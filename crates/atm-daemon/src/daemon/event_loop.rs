@@ -1791,7 +1791,7 @@ fn build_otel_health(ctx: &PluginContext) -> OtelHealth {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
     let canonical_log_path = agent_team_mail_core::logging_event::configured_log_path(&home_dir);
-    crate::daemon::observability::current_otel_health(&canonical_log_path).into()
+    crate::daemon::observability::current_otel_health(&canonical_log_path)
 }
 
 fn derive_logging_state(

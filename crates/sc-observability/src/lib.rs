@@ -20,7 +20,8 @@ mod metrics;
 mod otlp_adapter;
 mod trace;
 
-pub use health::{OtelHealthSnapshot, OtelLastError, current_otel_health};
+pub use agent_team_mail_core::observability::{OtelHealthSnapshot, OtelLastError};
+pub use health::current_otel_health;
 pub use metrics::{MetricKind, MetricRecord, export_metric_records_best_effort};
 pub use trace::{TraceRecord, TraceStatus, export_trace_records_best_effort};
 

@@ -6,6 +6,7 @@
 use agent_team_mail_core::daemon_client::{
     DaemonTouchEntry, DaemonTouchSnapshot, RuntimeOwnerMetadata, daemon_touch_path_for,
 };
+pub use agent_team_mail_core::observability::{OtelHealthSnapshot as OtelHealth, OtelLastError};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -58,66 +59,6 @@ pub struct LoggingHealth {
 }
 
 /// OTel exporter health snapshot.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct OtelHealth {
-    pub schema_version: String,
-    pub enabled: bool,
-    pub collector_endpoint: Option<String>,
-    pub protocol: String,
-    pub collector_state: String,
-    pub local_mirror_state: String,
-    pub local_mirror_path: String,
-    pub debug_local_export: bool,
-    pub debug_local_state: String,
-    pub last_error: OtelLastError,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct OtelLastError {
-    pub code: Option<String>,
-    pub message: Option<String>,
-    pub at: Option<String>,
-}
-
-impl Default for OtelHealth {
-    fn default() -> Self {
-        Self {
-            schema_version: "v1".to_string(),
-            enabled: true,
-            collector_endpoint: None,
-            protocol: "otlp_http".to_string(),
-            collector_state: "not_configured".to_string(),
-            local_mirror_state: "healthy".to_string(),
-            local_mirror_path: String::new(),
-            debug_local_export: false,
-            debug_local_state: "disabled".to_string(),
-            last_error: OtelLastError::default(),
-        }
-    }
-}
-
-impl From<crate::daemon::observability::OtelHealthSnapshot> for OtelHealth {
-    fn from(value: crate::daemon::observability::OtelHealthSnapshot) -> Self {
-        Self {
-            schema_version: value.schema_version,
-            enabled: value.enabled,
-            collector_endpoint: value.collector_endpoint,
-            protocol: value.protocol,
-            collector_state: value.collector_state,
-            local_mirror_state: value.local_mirror_state,
-            local_mirror_path: value.local_mirror_path,
-            debug_local_export: value.debug_local_export,
-            debug_local_state: value.debug_local_state,
-            last_error: OtelLastError {
-                code: value.last_error.code,
-                message: value.last_error.message,
-                at: value.last_error.at,
-            },
-        }
-    }
-}
-
 impl Default for LoggingHealth {
     fn default() -> Self {
         Self {

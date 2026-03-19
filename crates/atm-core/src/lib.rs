@@ -21,6 +21,7 @@ pub mod log_reader;
 pub mod logging;
 pub mod logging_event;
 pub mod model_registry;
+pub mod observability;
 pub mod pid;
 pub mod retention;
 pub mod schema;

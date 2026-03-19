@@ -27,25 +27,7 @@ fn export_otel_from_entrypoint(
 fn current_otel_health_from_entrypoint(
     log_path: &std::path::Path,
 ) -> agent_team_mail_daemon::daemon::observability::OtelHealthSnapshot {
-    let health = sc_observability::current_otel_health(log_path);
-    // Intentional mirror of sc_observability::OtelHealthSnapshot — sc-observability
-    // imports are confined to entry-point main.rs per ARCH-BOUNDARY-002.
-    agent_team_mail_daemon::daemon::observability::OtelHealthSnapshot {
-        schema_version: health.schema_version,
-        enabled: health.enabled,
-        collector_endpoint: health.collector_endpoint,
-        protocol: health.protocol,
-        collector_state: health.collector_state,
-        local_mirror_state: health.local_mirror_state,
-        local_mirror_path: health.local_mirror_path,
-        debug_local_export: health.debug_local_export,
-        debug_local_state: health.debug_local_state,
-        last_error: agent_team_mail_daemon::daemon::observability::OtelLastError {
-            code: health.last_error.code,
-            message: health.last_error.message,
-            at: health.last_error.at,
-        },
-    }
+    sc_observability::current_otel_health(log_path)
 }
 
 fn export_lifecycle_trace_from_entrypoint(

@@ -1,4 +1,5 @@
 use agent_team_mail_core::logging_event::LogEventV1;
+pub use agent_team_mail_core::observability::{OtelHealthSnapshot, OtelLastError};
 use chrono::Utc;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -47,44 +48,6 @@ impl LifecycleTraceRecord {
             status,
             source_binary: "atm-daemon".to_string(),
             attributes: BTreeMap::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
-pub struct OtelLastError {
-    pub code: Option<String>,
-    pub message: Option<String>,
-    pub at: Option<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct OtelHealthSnapshot {
-    pub schema_version: String,
-    pub enabled: bool,
-    pub collector_endpoint: Option<String>,
-    pub protocol: String,
-    pub collector_state: String,
-    pub local_mirror_state: String,
-    pub local_mirror_path: String,
-    pub debug_local_export: bool,
-    pub debug_local_state: String,
-    pub last_error: OtelLastError,
-}
-
-impl Default for OtelHealthSnapshot {
-    fn default() -> Self {
-        Self {
-            schema_version: "v1".to_string(),
-            enabled: true,
-            collector_endpoint: None,
-            protocol: "otlp_http".to_string(),
-            collector_state: "not_configured".to_string(),
-            local_mirror_state: "healthy".to_string(),
-            local_mirror_path: String::new(),
-            debug_local_export: false,
-            debug_local_state: "disabled".to_string(),
-            last_error: OtelLastError::default(),
         }
     }
 }

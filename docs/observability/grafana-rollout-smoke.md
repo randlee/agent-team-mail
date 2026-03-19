@@ -127,10 +127,18 @@ Verify:
 
 ### 7. Dogfood Dev Install
 
-Deferred: A dedicated dev-install OTel smoke script
-(`scripts/otel-dev-install-smoke.py`) is planned for a future sprint. See
-GH-878 for tracking. Until then, use `scripts/grafana-verify-smoke.py` (Area C
-of the AW smoke test plan) to verify OTel log field correctness end-to-end.
+The installed-binary dev channel now has a dedicated operator smoke:
+`scripts/otel-dev-install-smoke.py`.
+
+Use it after `scripts/dev-install` when you need to verify that the shared dev
+channel binaries still:
+
+- export to a live OTLP collector,
+- preserve the canonical local log plus `.otel.jsonl` mirror, and
+- stay fail-open when the collector is unavailable.
+
+`scripts/grafana-verify-smoke.py` remains the broader backend verification
+smoke; `otel-dev-install-smoke.py` specifically covers the dev-install flow.
 
 ## Grafana Acceptance
 
