@@ -1,7 +1,7 @@
 use agent_team_mail_core::logging_event::LogEventV1;
 pub use agent_team_mail_core::observability::{OtelHealthSnapshot, OtelLastError};
-use sc_observability_types::{MetricRecord, OtelConfig, TraceRecord};
 use chrono::Utc;
+use sc_observability_types::{MetricRecord, OtelConfig, TraceRecord};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
