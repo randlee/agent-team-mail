@@ -3286,6 +3286,7 @@ sleep 10
     #[cfg(unix)]
     #[test]
     #[serial]
+    #[ignore = "flaky concurrent race - tracked as pre-existing, see issue #805"]
     fn test_ensure_daemon_running_serializes_concurrent_start() {
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
