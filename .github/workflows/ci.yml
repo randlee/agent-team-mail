@@ -130,6 +130,9 @@ jobs:
             --manifest release/publish-artifacts.toml \
             --workspace-toml Cargo.toml
 
+      - name: Validate publish_order dependency graph
+        run: scripts/ci/validate_publish_order.sh
+
   parity-contract:
     name: parity-contract (${{ matrix.os }})
     needs: [clippy]
