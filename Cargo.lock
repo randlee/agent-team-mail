@@ -63,6 +63,7 @@ dependencies = [
  "fs2",
  "hostname",
  "libc",
+ "rand 0.8.5",
  "serde",
  "serde_json",
  "serial_test",
