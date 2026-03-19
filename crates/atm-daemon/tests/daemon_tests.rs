@@ -1408,12 +1408,17 @@ fn test_daemon_exits_when_isolated_test_ttl_expires() {
     let temp_dir = TempDir::new().unwrap();
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"));
     cmd.env("ATM_HOME", temp_dir.path());
+    let ttl = if cfg!(debug_assertions) {
+        Duration::from_secs(5)
+    } else {
+        Duration::from_secs(1)
+    };
     let token = issue_isolated_test_launch_token_with_lease(
         temp_dir.path(),
         "daemon_tests::ttl_expiry",
         "daemon_tests::ttl_expiry",
         std::process::id(),
-        Duration::from_secs(1),
+        ttl,
     );
     attach_launch_token(&mut cmd, &token).expect("encode ttl-expiry token");
     let output = cmd.output().expect("spawn daemon with short TTL");
