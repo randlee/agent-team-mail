@@ -1,45 +1,8 @@
 use crate::{OTEL_PROTOCOL_HTTP, OtelConfig, OtelError, OtelExporterKind, default_otel_path};
+use agent_team_mail_core::observability::{OtelHealthSnapshot, OtelLastError};
 use chrono::{SecondsFormat, Utc};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
-pub struct OtelLastError {
-    pub code: Option<String>,
-    pub message: Option<String>,
-    pub at: Option<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct OtelHealthSnapshot {
-    pub schema_version: String,
-    pub enabled: bool,
-    pub collector_endpoint: Option<String>,
-    pub protocol: String,
-    pub collector_state: String,
-    pub local_mirror_state: String,
-    pub local_mirror_path: String,
-    pub debug_local_export: bool,
-    pub debug_local_state: String,
-    pub last_error: OtelLastError,
-}
-
-impl Default for OtelHealthSnapshot {
-    fn default() -> Self {
-        Self {
-            schema_version: "v1".to_string(),
-            enabled: true,
-            collector_endpoint: None,
-            protocol: OTEL_PROTOCOL_HTTP.to_string(),
-            collector_state: "not_configured".to_string(),
-            local_mirror_state: "healthy".to_string(),
-            local_mirror_path: String::new(),
-            debug_local_export: false,
-            debug_local_state: "disabled".to_string(),
-            last_error: OtelLastError::default(),
-        }
-    }
-}
 
 #[derive(Debug, Default)]
 struct OtelRuntimeHealth {
@@ -183,7 +146,11 @@ pub fn current_otel_health(log_path: &Path) -> OtelHealthSnapshot {
         schema_version: "v1".to_string(),
         enabled: config.enabled,
         collector_endpoint: config.endpoint.clone(),
-        protocol: config.protocol.clone(),
+        protocol: if config.protocol.trim().is_empty() {
+            OTEL_PROTOCOL_HTTP.to_string()
+        } else {
+            config.protocol.clone()
+        },
         collector_state,
         local_mirror_state: health_state(
             local_mirror_configured,

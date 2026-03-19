@@ -1648,7 +1648,43 @@ keeping transport concerns isolated in `sc-observability-otlp`.
 
 ---
 
-## 17.21 Phase AM: CI Monitor Subsystem Refactor
+## 17.22 Phase AY: Grafana Dogfood Readiness
+
+**Goal**: Close the live-signal and shared-daemon gaps uncovered by AW smoke so
+Grafana-backed ATM dogfooding is practical and repeatable on `develop`.
+
+**Planning doc**: `docs/phase-ay-grafana-dogfood-readiness.md`
+**Requirements**: `docs/observability/requirements.md`
+**Architecture**: `docs/observability/architecture.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Deliverable | Status |
+|---|---|---|---|
+| AY.0 | Flaky test hardening | small reliability fixes for known flaky tests surfaced by AW smoke/CI | COMPLETE |
+| AY.1 | Live signal correctness | verify Loki/Tempo/Mimir live results and align smoke/docs/scripts to real signal ownership | COMPLETE |
+| AY.2 | Shared dev-daemon dogfood readiness | preserve OTel config through canonical shared daemon/dev-install startup and add live dogfood smoke | COMPLETE |
+| AY.3a | Struct and operator-smoke cleanup | move OTel mirror structs into `atm-core` and add operator smoke script | COMPLETE |
+| AY.3b | Boundary extraction | create `sc-observability-types` and relocate `otlp_adapter` wiring to entry-point crates | COMPLETE |
+| AY.4 | Spool/inbox reliability | fix spool filename collision risk, merged-write durability, and spool cleanup diagnostics | COMPLETE |
+| AY.5 | Observability test hardening | harden OTel collector/env-var tests and bounded shutdown behavior | COMPLETE |
+
+### Exit Criteria
+1. Loki returns recent ATM CLI logs under `service_name="atm"` in live Grafana.
+2. Tempo returns fresh `atm-daemon` traces after a smoke-controlled daemon
+   stop/start sequence.
+3. Mimir queries use and document the canonical exported ATM metric names.
+4. The shared dev-daemon/dev-install flow preserves OTel config well enough for
+   repeatable Grafana dogfooding.
+5. `sc-observability-types` is the canonical shared OTel type surface, with
+   daemon/library modules consuming shared types instead of duplicating signal
+   enums across producer and transport crates.
+6. Observability collector/env-var tests are hardened with RAII env guards,
+   required `#[serial]` coverage, and bounded collector teardown so AY merge
+   validation is stable across platforms.
+
+---
+
+## 17.23 Phase AM: CI Monitor Subsystem Refactor
 
 **Goal**: Refactor CI monitoring into a dedicated daemon subsystem so
 `socket.rs` remains transport glue while provider-neutral orchestration,

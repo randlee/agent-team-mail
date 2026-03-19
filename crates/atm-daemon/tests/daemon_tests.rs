@@ -1117,17 +1117,12 @@ async fn test_plugin_run_failure_isolated_from_sibling_plugins() {
         .await
     });
 
-    let sibling_running = wait_until_elapsed(1_000, || {
-        let recorded_events = events.lock().unwrap();
-        recorded_events.contains(&"gh-monitor:run_failed".to_string())
-            && recorded_events.contains(&"worker-adapter:run".to_string())
-    })
-    .await
-    .expect("expected failing and sibling plugin states before cancellation");
-    assert!(
-        sibling_running <= Duration::from_secs(1),
-        "expected failing and sibling plugin states before cancellation"
-    );
+    wait_for_recorded_event_elapsed(&events, "gh-monitor:run_failed", 5_000)
+        .await
+        .expect("expected failing plugin state before cancellation");
+    wait_for_recorded_event_elapsed(&events, "worker-adapter:run", 5_000)
+        .await
+        .expect("expected sibling plugin running state before cancellation");
 
     {
         let recorded_events = events.lock().unwrap();

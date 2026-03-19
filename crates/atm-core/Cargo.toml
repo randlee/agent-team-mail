@@ -30,6 +30,7 @@ toml = { version = "0.8", features = ["parse"] }
 
 # For hostname detection
 hostname = "0.4"
+rand = "0.8"
 
 # For URL parsing (git remote URL parsing)
 url = "2.5"
