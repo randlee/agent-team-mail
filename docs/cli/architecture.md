@@ -151,8 +151,12 @@ The current codebase does not yet meet the target architecture:
 
 - `crates/atm/src/commands/gh.rs` imports daemon plugin implementation helpers
   directly from `agent_team_mail_daemon::plugins::ci_monitor`
+- `crates/atm/src/commands/doctor.rs` imports a direct
+  `agent_team_mail_ci_monitor` helper block for GH observer/ledger state
 - `crates/atm/src/commands/doctor.rs` imports a daemon-plugin-owned helper for
   GitHub execution
+- `crates/atm/src/main.rs` directly calls
+  `agent_team_mail_ci_monitor::flush_gh_observability_records()` on shutdown
 
 ### 6.2 Crate Dependency Coupling
 
@@ -160,6 +164,7 @@ The current codebase does not yet meet the target architecture:
 
 - `agent-team-mail-ci-monitor`
 - `agent-team-mail-daemon`
+- `agent-team-mail-daemon-launch`
 
 That means the CLI crate is compiled against plugin-host and plugin-specific
 implementation crates rather than purely neutral contracts.
@@ -170,15 +175,29 @@ Phase BA should repair the CLI boundary in two sprints:
 
 ### BA.3 — Command Boundary Extraction
 
-- extract neutral plugin capability and command contracts
+- extract neutral plugin capability and command contracts into `atm-core`
+  (recommended module family: `atm_core::plugin_contract` or
+  `atm_core::gh_command`)
 - remove direct daemon-plugin imports from the CLI
 - move CLI-needed plugin data shaping behind neutral shared contracts
+- move the current `doctor.rs` GH observer/ledger imports behind the same
+  neutral contract surface
+- resolve the `main.rs` shutdown flush path either by moving it behind an
+  `atm-core` lifecycle hook or explicitly documenting a narrow permitted
+  teardown exception
 - stop treating `atm gh` as a CLI-owned implementation surface
 
 ### BA.4 — Boundary Enforcement and UX
 
+- demote `agent-team-mail-daemon` and `agent-team-mail-ci-monitor` from
+  non-dev `crates/atm/Cargo.toml` dependencies after BA.3 so the compiler
+  enforces the boundary
 - wire plugin namespace availability from capability descriptors
 - add CI checks that forbid new CLI imports from daemon plugin modules
+- keep a secondary grep/lint gate as belt-and-suspenders after dep demotion
+- explicitly classify `agent-team-mail-daemon-launch` as either:
+  - a permitted CLI dependency for canonical launcher lifecycle wiring
+  - or a follow-on boundary violation to remove
 - document the absent/present/enabled plugin command states
 
 ## 8. Architectural Direction for Cross-Team Commands

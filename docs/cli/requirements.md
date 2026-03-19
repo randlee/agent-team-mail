@@ -140,11 +140,26 @@ The current codebase still contains CLI/plugin coupling that Phase BA must
 remove:
 
 - `crates/atm/Cargo.toml` has non-dev dependencies on
-  `agent-team-mail-ci-monitor` and `agent-team-mail-daemon`
+  `agent-team-mail-ci-monitor`, `agent-team-mail-daemon`, and
+  `agent-team-mail-daemon-launch`
 - `crates/atm/src/commands/gh.rs` imports
   `agent_team_mail_daemon::plugins::ci_monitor::*`
+- `crates/atm/src/commands/doctor.rs` imports a direct
+  `agent_team_mail_ci_monitor` helper block for GH observer/ledger functions:
+  `GhCliObserverContext`, `RateLimitUpdate`, `emit_gh_info_denied`,
+  `emit_gh_info_live_refresh`, `emit_gh_info_requested`,
+  `emit_gh_info_served_from_cache`, `gh_repo_state_cache_age_secs`,
+  `new_gh_execution_call_id`, `new_gh_info_request_id`, `read_gh_repo_state`,
+  `update_gh_repo_state_rate_limit`
 - `crates/atm/src/commands/doctor.rs` imports the daemon-plugin-owned helper
   `run_attributed_gh_command_with_ids`
+- `crates/atm/src/main.rs` directly calls
+  `agent_team_mail_ci_monitor::flush_gh_observability_records()` during CLI
+  teardown
+- Phase AT closed the GitHub-behavior boundary (raw `gh` execution ownership)
+  but did not remove these CLI-to-plugin implementation couplings. BA therefore
+  addresses a post-AT boundary gap, not a reopening of AT’s completed raw-`gh`
+  elimination scope.
 
 These are boundary violations against the target command-ownership model above.
 
@@ -152,5 +167,18 @@ These are boundary violations against the target command-ownership model above.
 
 - BA.1: idle dedupe/suppression + explicit inbox-clear behavior
 - BA.2: queue-style `atm read` + atomic acknowledgement workflow
-- BA.3: CLI/plugin command-boundary extraction
-- BA.4: CLI boundary enforcement + plugin availability UX
+- BA.3: CLI/plugin command-boundary extraction via a neutral `atm-core`
+  contract module (for example `atm_core::plugin_contract` or
+  `atm_core::gh_command`) that owns:
+  - plugin capability descriptors
+  - `gh` namespace command request/response contracts
+  - any permitted CLI teardown lifecycle hook such as ledger flush
+- BA.4: CLI boundary enforcement + plugin availability UX, with:
+  - primary enforcement by demoting `agent-team-mail-daemon` and
+    `agent-team-mail-ci-monitor` from non-dev `crates/atm/Cargo.toml`
+    dependencies once BA.3 lands
+  - secondary CI grep/lint forbidding new CLI imports from daemon plugin
+    implementation modules
+  - explicit treatment of `agent-team-mail-daemon-launch` as either a permitted
+    CLI lifecycle dependency or a follow-on removal target; BA may not leave its
+    status implicit

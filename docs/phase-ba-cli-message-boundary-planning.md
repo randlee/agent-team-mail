@@ -35,9 +35,29 @@ Current dogfood issues fall into two linked groups:
 - `crates/atm/Cargo.toml` depends directly on `agent-team-mail-daemon` and
   `agent-team-mail-ci-monitor`
 - `crates/atm/src/commands/gh.rs` imports daemon plugin implementation helpers
-- `crates/atm/src/commands/doctor.rs` imports a plugin-owned GitHub helper
+- `crates/atm/src/commands/doctor.rs` imports both:
+  - a direct `agent_team_mail_ci_monitor` helper block for GH observer/ledger
+    state
+  - a plugin-owned GitHub execution helper from
+    `agent_team_mail_daemon::plugins::ci_monitor`
+- `crates/atm/src/main.rs` directly calls
+  `agent_team_mail_ci_monitor::flush_gh_observability_records()`
 - plugin command ownership is blurred: the CLI effectively implements plugin
   behavior instead of routing through plugin capability contracts
+- `agent-team-mail-daemon-launch` is also a current CLI dependency and must be
+  classified explicitly during BA.3/BA.4 rather than left as an implicit
+  exception
+
+### Scope clarification vs Phase AT
+
+Phase AT closed the GitHub-behavior boundary: raw `gh` execution and provider
+ownership now live only in the owning gh plugin/provider layer. BA does not
+reopen that completed scope. Instead, BA addresses the remaining CLI-level
+coupling that AT did not eliminate:
+
+- CLI imports of plugin implementation helpers
+- CLI crate dependencies on plugin implementation crates
+- plugin namespace ownership/advertisement semantics at the CLI boundary
 
 ## Sprint Map
 
@@ -105,20 +125,44 @@ BA.4.
   and `agent-team-mail-ci-monitor`
 - `crates/atm/src/commands/gh.rs` imports
   `agent_team_mail_daemon::plugins::ci_monitor::*`
+- `crates/atm/src/commands/doctor.rs:3-8` imports the direct
+  `agent_team_mail_ci_monitor` helper block:
+  `GhCliObserverContext`, `RateLimitUpdate`, `emit_gh_info_denied`,
+  `emit_gh_info_live_refresh`, `emit_gh_info_requested`,
+  `emit_gh_info_served_from_cache`, `gh_repo_state_cache_age_secs`,
+  `new_gh_execution_call_id`, `new_gh_info_request_id`, `read_gh_repo_state`,
+  `update_gh_repo_state_rate_limit`
 - `crates/atm/src/commands/doctor.rs` imports
   `run_attributed_gh_command_with_ids` from the daemon plugin layer
+- `crates/atm/src/main.rs:352` directly calls
+  `flush_gh_observability_records()`
 
 **Deliverables**:
 
-- define or extract neutral plugin capability / command contracts for CLI use
+- define or extract neutral plugin capability / command contracts in `atm-core`
+  (recommended module: `atm_core::plugin_contract` or
+  `atm_core::gh_command`)
+- minimum new neutral surface:
+  - capability descriptor type
+  - `gh` namespace command request/response contracts
+  - any permitted CLI teardown lifecycle hook such as GH ledger flush
 - remove direct daemon plugin imports from `atm`
 - move CLI-facing GH command data shaping behind neutral contracts
+- move the direct `doctor.rs` ci-monitor helper block behind the same neutral
+  `atm-core` contract surface
+- resolve the `main.rs` ledger flush call either by moving it into the same
+  `atm-core` lifecycle contract or by documenting a narrow permitted teardown
+  exception with rationale
 - document the command ownership rule:
   - plugin owns semantics
   - CLI owns routing/help/rendering
 
 **Acceptance**:
 
+- BA.3 remediation explicitly covers all three known sites:
+  - `doctor.rs` ci-monitor helper block
+  - `doctor.rs` daemon plugin helper import
+  - `main.rs` teardown flush path
 - `atm` no longer imports daemon plugin implementation modules for GH command
   behavior
 - direct CLI dependency on plugin implementation crates is removed or reduced to
@@ -131,14 +175,22 @@ BA.4.
 
 - capability-advertised plugin namespace model
 - absent / present-disabled / present-enabled UX rules for plugin commands
-- CI/lint gate that forbids new CLI imports from daemon plugin modules
+- primary boundary gate: demote `agent-team-mail-daemon` and
+  `agent-team-mail-ci-monitor` from non-dev dependencies in `crates/atm/Cargo.toml`
+  after BA.3 lands
+- secondary CI/lint gate that forbids new CLI imports from daemon plugin modules
 - docs/tests for plugin command availability and boundary enforcement
+- explicit classification of `agent-team-mail-daemon-launch` as either:
+  - permitted CLI dependency for canonical launcher lifecycle ownership
+  - or follow-on removal target
 
 **Acceptance**:
 
 - plugin namespaces are shown according to capability state, not hard-coded
   implementation ownership
 - CI fails if the CLI reintroduces daemon-plugin implementation imports
+- the dependency gate is explicit rather than implied
+- `agent-team-mail-daemon-launch` is addressed explicitly
 - the CLI availability model is documented and tested
 
 ## Exit Criteria
