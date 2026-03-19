@@ -12,6 +12,7 @@ shared dev channel. It verifies two AV.5 requirements:
 
 from __future__ import annotations
 
+import argparse
 import http.server
 import json
 import os
@@ -27,6 +28,18 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_DEV_BIN = pathlib.Path.home() / ".local" / "atm-dev" / "bin"
 DEFAULT_SHARED_HOME = pathlib.Path.home() / ".local" / "share" / "atm-dev" / "home"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Collector-backed OTel smoke for installed dev binaries"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print resolved shared-dev inputs without running the smoke",
+    )
+    return parser.parse_args()
 
 
 def resolve_dev_bin() -> pathlib.Path:
@@ -184,9 +197,27 @@ def run_sc_compose(sc_compose_bin: pathlib.Path, env: dict[str, str], workspace:
 
 
 def main() -> int:
+    args = parse_args()
     dev_bin = resolve_dev_bin()
     atm_bin = require_binary(dev_bin / "atm")
     sc_compose_bin = require_binary(dev_bin / "sc-compose")
+
+    if args.dry_run:
+        env = build_base_env(dev_bin)
+        resolved_home = resolve_atm_home(dev_bin, env)
+        print(
+            json.dumps(
+                {
+                    "dev_bin": str(dev_bin),
+                    "atm_bin": str(atm_bin),
+                    "sc_compose_bin": str(sc_compose_bin),
+                    "shared_dev_mode": shared_dev_mode(dev_bin, env),
+                    "resolved_atm_home": str(resolved_home) if resolved_home else None,
+                },
+                indent=2,
+            )
+        )
+        return 0
 
     with tempfile.TemporaryDirectory(prefix="av5-otel-smoke-") as tmpdir:
         root = pathlib.Path(tmpdir)
@@ -228,11 +259,11 @@ def main() -> int:
         ensure_contains(payloads, "command_start", "live collector smoke")
         ensure_contains(payloads, "compose", "live collector smoke")
 
-        if not live_shared_dev and not atm_log.exists():
+        if not atm_log.exists():
             raise SystemExit("live collector smoke: ATM local log missing")
         if not sc_log.exists():
             raise SystemExit("live collector smoke: sc-compose local log missing")
-        if not live_shared_dev and not atm_log.with_suffix(".otel.jsonl").exists():
+        if not atm_log.with_suffix(".otel.jsonl").exists():
             raise SystemExit("live collector smoke: atm .otel.jsonl mirror missing")
         if not sc_log.with_suffix(".otel.jsonl").exists():
             raise SystemExit("live collector smoke: sc-compose .otel.jsonl mirror missing")
@@ -244,9 +275,9 @@ def main() -> int:
             live_atm_otel_before,
             "live collector smoke: atm .otel.jsonl mirror",
         )
-        if not live_shared_dev and not live_atm_log_advanced:
+        if not live_atm_log_advanced:
             raise SystemExit("live collector smoke: atm local log did not receive a new event")
-        if not live_shared_dev and not live_atm_otel_advanced:
+        if not live_atm_otel_advanced:
             raise SystemExit("live collector smoke: atm .otel.jsonl mirror did not advance")
         if not wait_for_count_increase(
             sc_log, live_sc_before, "live collector smoke: sc-compose local log"
@@ -288,11 +319,11 @@ def main() -> int:
         if outage_sc.returncode != 0:
             raise SystemExit(f"outage smoke sc-compose failed: {outage_sc.stderr.strip()}")
 
-        if not outage_shared_dev and not outage_atm_log.exists():
+        if not outage_atm_log.exists():
             raise SystemExit("outage smoke: ATM local log missing")
         if not outage_sc_log.exists():
             raise SystemExit("outage smoke: sc-compose local log missing")
-        if not outage_shared_dev and not wait_for_count_increase(
+        if not wait_for_count_increase(
             outage_atm_log, outage_atm_before, "outage smoke: ATM local log"
         ):
             raise SystemExit("outage smoke: ATM local log did not receive a new event")
