@@ -18,6 +18,7 @@ use tokio::sync::Mutex as TokioMutex;
 fn create_test_message(from: &str, text: &str) -> InboxMessage {
     InboxMessage {
         from: from.to_string(),
+        source_team: None,
         text: text.to_string(),
         timestamp: chrono::Utc::now().to_rfc3339(),
         read: false,
