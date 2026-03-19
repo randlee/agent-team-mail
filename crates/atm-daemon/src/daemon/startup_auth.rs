@@ -803,16 +803,19 @@ mod tests {
     #[serial]
     fn non_isolated_tokens_may_omit_lease_fields() {
         clear_seen_tokens_for_tests();
-        let temp = agent_team_mail_core::home::get_os_home_dir().unwrap();
+        // ProdShared tokens require the real OS home dir. On Windows,
+        // dirs::home_dir() bypasses USERPROFILE env overrides, so TempDir
+        // cannot classify as shared runtime.
+        let os_home = agent_team_mail_core::home::get_os_home_dir().unwrap();
         let token = issue_launch_token(
             LaunchClass::ProdShared,
-            &temp,
+            &os_home,
             "test-binary",
             "startup-auth-test",
             Duration::from_secs(30),
         );
         let raw = encode_launch_token(&token).unwrap();
-        let accepted = validate_token_inner(&temp, Some(&raw)).unwrap();
+        let accepted = validate_token_inner(&os_home, Some(&raw)).unwrap();
         assert_eq!(accepted.launch_class, LaunchClass::ProdShared);
     }
 

@@ -18,6 +18,9 @@ struct OtelRuntimeHealth {
 }
 
 fn otel_runtime_health_slot() -> &'static Mutex<OtelRuntimeHealth> {
+    // This process-global OnceLock intentionally shares runtime health across
+    // tests. Callers that mutate OTel env/config around export assertions must
+    // run serially to avoid cross-test bleed from the shared slot.
     static OTEL_RUNTIME_HEALTH: OnceLock<Mutex<OtelRuntimeHealth>> = OnceLock::new();
     OTEL_RUNTIME_HEALTH.get_or_init(|| Mutex::new(OtelRuntimeHealth::default()))
 }

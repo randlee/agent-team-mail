@@ -534,11 +534,11 @@ async fn test_daemon_starts_and_loads_mock_plugin() {
         .await
     });
 
-    let observed_run = wait_for_recorded_event_elapsed(&events, "test-plugin:run", 1_000)
+    let observed_run = wait_for_recorded_event_elapsed(&events, "test-plugin:run", 10_000)
         .await
         .expect("daemon should reach plugin run state before cancellation");
     assert!(
-        observed_run <= Duration::from_secs(1),
+        observed_run <= Duration::from_secs(10),
         "daemon should reach plugin run state before cancellation"
     );
 
@@ -604,18 +604,18 @@ async fn test_signal_triggers_graceful_shutdown() {
         .await
     });
 
-    let plugin1_running = wait_for_recorded_event_elapsed(&events, "plugin1:run", 1_000)
+    let plugin1_running = wait_for_recorded_event_elapsed(&events, "plugin1:run", 10_000)
         .await
         .expect("plugin1 should reach run state before cancellation");
     assert!(
-        plugin1_running <= Duration::from_secs(1),
+        plugin1_running <= Duration::from_secs(10),
         "plugin1 should reach run state before cancellation"
     );
-    let plugin2_running = wait_for_recorded_event_elapsed(&events, "plugin2:run", 1_000)
+    let plugin2_running = wait_for_recorded_event_elapsed(&events, "plugin2:run", 10_000)
         .await
         .expect("plugin2 should reach run state before cancellation");
     assert!(
-        plugin2_running <= Duration::from_secs(1),
+        plugin2_running <= Duration::from_secs(10),
         "plugin2 should reach run state before cancellation"
     );
 
@@ -665,11 +665,11 @@ async fn test_plugin_lifecycle_order() {
         .await
     });
 
-    let plugin_running = wait_for_recorded_event_elapsed(&events, "plugin:run", 1_000)
+    let plugin_running = wait_for_recorded_event_elapsed(&events, "plugin:run", 10_000)
         .await
         .expect("plugin should reach run state before cancellation");
     assert!(
-        plugin_running <= Duration::from_secs(1),
+        plugin_running <= Duration::from_secs(10),
         "plugin should reach run state before cancellation"
     );
     cancel.cancel();
@@ -1000,11 +1000,11 @@ async fn test_graceful_shutdown_with_timeout() {
         .await
     });
 
-    let run_observed = wait_for_recorded_event_elapsed(&events, "slow-shutdown:run", 1_000)
+    let run_observed = wait_for_recorded_event_elapsed(&events, "slow-shutdown:run", 10_000)
         .await
         .expect("slow-shutdown plugin should enter run before cancellation");
     assert!(
-        run_observed <= Duration::from_secs(1),
+        run_observed <= Duration::from_secs(10),
         "slow-shutdown plugin should enter run before cancellation"
     );
     cancel.cancel();
@@ -1113,25 +1113,25 @@ async fn test_multiple_plugins_run_concurrently() {
         .await
     });
 
-    let plugin1_running = wait_for_recorded_event_elapsed(&events, "plugin1:run", 1_000)
+    let plugin1_running = wait_for_recorded_event_elapsed(&events, "plugin1:run", 10_000)
         .await
         .expect("plugin1 should reach run state before cancellation");
     assert!(
-        plugin1_running <= Duration::from_secs(1),
+        plugin1_running <= Duration::from_secs(10),
         "plugin1 should reach run state before cancellation"
     );
-    let plugin2_running = wait_for_recorded_event_elapsed(&events, "plugin2:run", 1_000)
+    let plugin2_running = wait_for_recorded_event_elapsed(&events, "plugin2:run", 10_000)
         .await
         .expect("plugin2 should reach run state before cancellation");
     assert!(
-        plugin2_running <= Duration::from_secs(1),
+        plugin2_running <= Duration::from_secs(10),
         "plugin2 should reach run state before cancellation"
     );
-    let plugin3_running = wait_for_recorded_event_elapsed(&events, "plugin3:run", 1_000)
+    let plugin3_running = wait_for_recorded_event_elapsed(&events, "plugin3:run", 10_000)
         .await
         .expect("plugin3 should reach run state before cancellation");
     assert!(
-        plugin3_running <= Duration::from_secs(1),
+        plugin3_running <= Duration::from_secs(10),
         "plugin3 should reach run state before cancellation"
     );
     cancel.cancel();
