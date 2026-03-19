@@ -218,15 +218,12 @@ pub fn execute(args: SendArgs) -> Result<()> {
         .unwrap_or_else(|| generate_summary(&final_message_text));
 
     // Create inbox message
-    let inbox_message = InboxMessage {
-        from: config.core.identity.clone(),
-        text: final_message_text.clone(),
-        timestamp: Utc::now().to_rfc3339(),
-        read: false,
-        summary: Some(summary.clone()),
-        message_id: Some(Uuid::new_v4().to_string()),
-        unknown_fields: HashMap::new(),
-    };
+    let inbox_message = build_inbox_message(
+        config.core.identity.clone(),
+        Some(sender_team.clone()),
+        final_message_text.clone(),
+        Some(summary.clone()),
+    );
 
     // Dry run output
     if args.dry_run {
@@ -561,6 +558,24 @@ fn generate_summary(text: &str) -> String {
     }
 }
 
+fn build_inbox_message(
+    from: String,
+    source_team: Option<String>,
+    text: String,
+    summary: Option<String>,
+) -> InboxMessage {
+    InboxMessage {
+        from,
+        source_team,
+        text,
+        timestamp: Utc::now().to_rfc3339(),
+        read: false,
+        summary,
+        message_id: Some(Uuid::new_v4().to_string()),
+        unknown_fields: HashMap::new(),
+    }
+}
+
 fn resolve_sender_session_id_with_context(
     team: Option<&str>,
     identity: Option<&str>,
@@ -745,6 +760,36 @@ mod tests {
     fn test_generate_summary_whitespace() {
         let text = "   Message with whitespace   ";
         assert_eq!(generate_summary(text), "Message with whitespace");
+    }
+
+    #[test]
+    fn test_build_inbox_message_preserves_cross_team_source() {
+        let msg = build_inbox_message(
+            "team-lead".to_string(),
+            Some("src-gen".to_string()),
+            "cross-team note".to_string(),
+            Some("cross-team note".to_string()),
+        );
+
+        assert_eq!(msg.from, "team-lead");
+        assert_eq!(msg.source_team.as_deref(), Some("src-gen"));
+        assert_eq!(msg.text, "cross-team note");
+        assert!(!msg.read);
+    }
+
+    #[test]
+    fn test_build_inbox_message_preserves_same_team_source() {
+        let msg = build_inbox_message(
+            "team-lead".to_string(),
+            Some("atm-dev".to_string()),
+            "same-team note".to_string(),
+            Some("same-team note".to_string()),
+        );
+
+        assert_eq!(msg.from, "team-lead");
+        assert_eq!(msg.source_team.as_deref(), Some("atm-dev"));
+        assert_eq!(msg.text, "same-team note");
+        assert!(!msg.read);
     }
 
     fn make_send_args(offline_action: Option<String>) -> SendArgs {

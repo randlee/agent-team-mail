@@ -315,6 +315,7 @@ mod tests {
         let mut messages = vec![
             InboxMessage {
                 from: "user-a".to_string(),
+                source_team: None,
                 text: "Message 1".to_string(),
                 timestamp: "2026-02-16T10:00:00Z".to_string(),
                 read: false,
@@ -324,6 +325,7 @@ mod tests {
             },
             InboxMessage {
                 from: "user-b".to_string(),
+                source_team: None,
                 text: "Message 2".to_string(),
                 timestamp: "2026-02-16T10:05:00Z".to_string(),
                 read: false,
@@ -333,6 +335,7 @@ mod tests {
             },
             InboxMessage {
                 from: "user-c".to_string(),
+                source_team: None,
                 text: "Message 3".to_string(),
                 timestamp: "2026-02-16T10:10:00Z".to_string(),
                 read: false,

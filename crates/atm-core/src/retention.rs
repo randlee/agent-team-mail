@@ -402,6 +402,7 @@ mod tests {
         // Message from 10 days ago (expired)
         let old_message = InboxMessage {
             from: "test".to_string(),
+            source_team: None,
             text: "old message".to_string(),
             timestamp: (now - Duration::days(10)).to_rfc3339(),
             read: false,
@@ -414,6 +415,7 @@ mod tests {
         // Message from 3 days ago (not expired)
         let recent_message = InboxMessage {
             from: "test".to_string(),
+            source_team: None,
             text: "recent message".to_string(),
             timestamp: (now - Duration::days(3)).to_rfc3339(),
             read: false,

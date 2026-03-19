@@ -20,6 +20,7 @@
 //! let inbox_path = Path::new("/home/user/.claude/teams/my-team/inboxes/agent.json");
 //! let message = InboxMessage {
 //!     from: "team-lead".to_string(),
+//!     source_team: None,
 //!     text: "CI failure detected".to_string(),
 //!     timestamp: "2026-02-11T14:30:00Z".to_string(),
 //!     read: false,
