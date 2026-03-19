@@ -56,7 +56,10 @@ mod tests {
             protocol: "otlp_http".to_string(),
             collector_state: "healthy".to_string(),
             local_mirror_state: "healthy".to_string(),
-            local_mirror_path: "/tmp/atm.log.otel.jsonl".to_string(),
+            local_mirror_path: std::env::temp_dir()
+                .join("atm.log.otel.jsonl")
+                .to_string_lossy()
+                .into_owned(),
             debug_local_export: true,
             debug_local_state: "healthy".to_string(),
             last_error: OtelLastError {
