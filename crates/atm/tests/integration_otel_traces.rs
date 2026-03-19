@@ -285,3 +285,75 @@ fn cli_status_trace_export_is_fail_open_when_collector_unreachable() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+#[serial]
+fn cli_error_exports_log_and_error_trace_to_collector() {
+    let temp = TempDir::new().expect("temp dir");
+    let (endpoint, rx) = start_collector();
+
+    let mut cmd = Command::new(cargo_bin("atm"));
+    cmd.env("ATM_HOME", temp.path())
+        .env("ATM_TEAM", "atm-dev")
+        .env("ATM_IDENTITY", "arch-ctm")
+        .env("ATM_RUNTIME", "codex")
+        .env("CLAUDE_SESSION_ID", "sess-error-123")
+        .env("ATM_DAEMON_AUTOSTART", "0")
+        .env("ATM_OTEL_ENABLED", "true")
+        .env("ATM_OTEL_ENDPOINT", endpoint)
+        .args(["status", "--team", "atm-dev", "--json"]);
+
+    let output = cmd.output().expect("run failing atm status");
+    assert!(
+        !output.status.success(),
+        "status command should fail when team config is missing"
+    );
+
+    let mut saw_logs = false;
+    let mut saw_traces = false;
+    for _ in 0..8 {
+        if let Ok((path, body)) = rx.recv_timeout(Duration::from_secs(5)) {
+            let payload: Value = serde_json::from_str(&body).expect("valid collector payload");
+            match path.as_str() {
+                "/v1/logs" => {
+                    let log_record = &payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0];
+                    let attrs = log_record["attributes"].as_array().expect("log attributes");
+                    assert!(attrs.iter().any(|item| {
+                        item["key"] == "session_id"
+                            && item["value"]["stringValue"] == "sess-error-123"
+                    }));
+                    saw_logs = true;
+                }
+                "/v1/traces" => {
+                    let span = &payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0];
+                    assert_eq!(span["status"]["code"], "STATUS_CODE_ERROR");
+                    let span_attrs = span["attributes"].as_array().expect("span attributes");
+                    for (key, value) in [
+                        ("team", "atm-dev"),
+                        ("agent", "arch-ctm"),
+                        ("runtime", "codex"),
+                        ("session_id", "sess-error-123"),
+                    ] {
+                        assert!(
+                            span_attrs.iter().any(|item| {
+                                item["key"] == key && item["value"]["stringValue"] == value
+                            }),
+                            "trace span should include {key}={value}: {payload}"
+                        );
+                    }
+                    saw_traces = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    assert!(
+        saw_logs,
+        "collector should receive at least one /v1/logs request for the error path"
+    );
+    assert!(
+        saw_traces,
+        "collector should receive at least one /v1/traces request for the error path"
+    );
+}
