@@ -331,7 +331,12 @@ mod tests {
         command
             .env("CLAUDE_SESSION_ID", "session-123")
             .env("ATM_OTEL_ENABLED", "true")
-            .env("ATM_OTEL_ENDPOINT", "http://collector:4318");
+            .env("ATM_OTEL_ENDPOINT", "http://collector:4318")
+            .env("ATM_OTEL_PROTOCOL", "otlp_http")
+            .env("ATM_OTEL_AUTH_HEADER", "Authorization: Bearer test-token")
+            .env("ATM_OTEL_CA_FILE", "/path/to/ca.pem")
+            .env("ATM_OTEL_INSECURE_SKIP_VERIFY", "true")
+            .env("ATM_OTEL_DEBUG_LOCAL_EXPORT", "1");
         let old_claude = std::env::var("CLAUDE_SESSION_ID").ok();
         // SAFETY: test-scoped env mutation for launch inheritance check.
         unsafe { std::env::set_var("CLAUDE_SESSION_ID", "session-123") };
@@ -364,6 +369,26 @@ mod tests {
         assert_eq!(
             envs.get(OsStr::new("ATM_OTEL_ENDPOINT")),
             Some(&Some(OsStr::new("http://collector:4318")))
+        );
+        assert_eq!(
+            envs.get(OsStr::new("ATM_OTEL_PROTOCOL")),
+            Some(&Some(OsStr::new("otlp_http")))
+        );
+        assert_eq!(
+            envs.get(OsStr::new("ATM_OTEL_AUTH_HEADER")),
+            Some(&Some(OsStr::new("Authorization: Bearer test-token")))
+        );
+        assert_eq!(
+            envs.get(OsStr::new("ATM_OTEL_CA_FILE")),
+            Some(&Some(OsStr::new("/path/to/ca.pem")))
+        );
+        assert_eq!(
+            envs.get(OsStr::new("ATM_OTEL_INSECURE_SKIP_VERIFY")),
+            Some(&Some(OsStr::new("true")))
+        );
+        assert_eq!(
+            envs.get(OsStr::new("ATM_OTEL_DEBUG_LOCAL_EXPORT")),
+            Some(&Some(OsStr::new("1")))
         );
 
         match old_claude {

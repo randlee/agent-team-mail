@@ -1456,6 +1456,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn emit_is_fail_open_when_otel_exporter_fails() {
         let tmp = TempDir::new().expect("temp dir");
         let cfg = LogConfig {
@@ -1502,6 +1503,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn export_otel_best_effort_from_path_is_fail_open_when_export_fails() {
         let tmp = TempDir::new().expect("temp dir");
         let parent_file = tmp.path().join("not-a-directory");
@@ -1514,6 +1516,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn otel_exporter_retries_then_succeeds() {
         let tmp = TempDir::new().expect("temp dir");
         let cfg = LogConfig {
@@ -1563,6 +1566,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn producer_events_export_through_pipeline_with_counting_exporter() {
         let tmp = TempDir::new().expect("temp dir");
         let cfg = LogConfig {
@@ -1617,6 +1621,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn export_otel_best_effort_is_public_and_fail_open() {
         let exporter = CountingExporter::with_failures(10);
         let event = new_log_event("atm", "send_message", "atm::send", "info");
