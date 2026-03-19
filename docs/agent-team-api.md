@@ -13,9 +13,10 @@
 > `API Version` tracks the observed upstream Claude Code/Anthropic schema generation.
 > `Document Version` tracks ATM-local documentation revisions in this reference.
 
-> **Schema Baseline: Claude Code 2.1.39**
+> **Schema Baseline: Claude Code 2.1.74–2.1.79**
 >
-> All JSON schemas in this document were captured from Claude Code **v2.1.39**.
+> All JSON schemas in this document were captured from Claude Code **v2.1.39** (initial baseline)
+> and updated with dogfood testing on **v2.1.74–2.1.79** (2026-03-19).
 > The Agent Teams feature is **experimental and pre-release** — schemas may change
 > without notice in future Claude Code versions. Any tool consuming these schemas
 > should version-check against `claude --version` and handle unknown fields gracefully.
@@ -454,9 +455,11 @@ The `agentId` is an internal bookkeeping field. It does not appear in inbox file
 ### Message Delivery to Offline Agents
 
 `SendMessage` to a shut-down agent **succeeds silently**:
-- The message is written to the agent's inbox file (`{name}.json`) with `read: false`
+- The message is written to the agent's inbox file (`{name}.json`)
+- The `read` flag is set to `true` immediately when the recipient agent process is **running** (regardless of busy/idle state); `false` when the recipient process is **offline** (not running)
 - No error or warning is returned to the sender
 - Messages accumulate in the inbox file indefinitely
+- `pendingAckAt` is NOT set retroactively — it is only set when a message is injected into a running session
 
 ### Queued Message Processing on Respawn
 
@@ -1071,19 +1074,70 @@ Approve or reject agent's implementation plan.
 
 **File**: `~/.claude/teams/{team_name}/inboxes/{agent_name}.json`
 
-**Message Object**:
+**Message Object** (all known fields as of v2.1.79):
 
 ```json
 {
   "from": "string (sender agent name or 'team-lead')",
-  "text": "string (message content, markdown supported)",
+  "text": "string (message content, markdown supported; JSON string for system messages)",
   "timestamp": "string (ISO 8601 UTC)",
   "read": "boolean",
-  "summary": "string (optional, brief summary)"
+  "summary": "string | null (brief preview; null for system messages)",
+  "message_id": "string (UUID) | null",
+  "pendingAckAt": "string (ISO 8601) | null",
+  "acknowledgedAt": "string (ISO 8601) | null",
+  "source_team": "string | null"
 }
 ```
 
-**Field Notes**:
+> **Note**: Not all fields are present on every message. Fields absent from a message JSON object
+> should be treated as null. Unknown fields must be tolerated gracefully (schema is additive).
+
+**Field Semantics** (from dogfood testing, v2.1.74–2.1.79, 2026-03-19):
+
+| Field | When Set | Transport |
+|-------|----------|-----------|
+| `read` | Set to `true` immediately when the receiving agent process is **running** at delivery time (regardless of busy/idle state). Set to `false` when the recipient is **offline** (process not running). NOT a reliable indicator the agent has processed or acted on the message. | Both |
+| `message_id` | UUID for ATM CLI messages (`atm send`). `null` for Claude Code `SendMessage` tool messages. | ATM CLI only |
+| `pendingAckAt` | Set by `atm read` when the ATM CLI agent reads a message. Not set by Claude Code's file watcher or `SendMessage` tool. Messages delivered while the agent is offline remain `null`. | ATM CLI only |
+| `acknowledgedAt` | Set when the agent explicitly acknowledges the message (`atm ack <message_id>` for CLI agents). Claude Code `SendMessage` agents currently do not appear to set this field via any observed mechanism. | ATM CLI only |
+| `summary` | Optional 5–10 word preview. `null` for system/idle messages. | Both |
+| `source_team` | Team name from which the message was routed. `null` on many messages. | ATM CLI |
+
+**Message state machine** (ATM CLI agents only):
+
+```
+Delivery   → read: true (running) or false (offline), pendingAckAt: null, acknowledgedAt: null
+              ↓ (agent runs atm read)
+Pending    → read: true, pendingAckAt: <timestamp>, acknowledgedAt: null
+              ↓ (agent runs atm ack <message_id>)
+Acked      → read: true, pendingAckAt: null, acknowledgedAt: <timestamp>
+```
+
+> **Practical note**: The `pendingAckAt`/`acknowledgedAt` state machine is only reliably
+> functional for ATM CLI agents (arch-ctm, Codex workers). Claude Code `SendMessage` agents
+> (quality-mgr, team-lead) typically have `pendingAckAt: null` and `acknowledgedAt: null`
+> on all messages, even after processing. Inbox filtering by `acknowledgedAt` is only
+> useful for agents using the ATM CLI read/ack protocol.
+
+**System message format** (`idle_notification`):
+
+Claude Code teammates automatically send periodic idle notifications with this format in the `text` field:
+
+```json
+{
+  "type": "idle_notification",
+  "from": "agent-name",
+  "timestamp": "ISO 8601",
+  "idleReason": "available"
+}
+```
+
+These messages have `summary: null` and `message_id: null`. They accumulate continuously and
+can represent the majority of inbox messages (e.g., 1,259/3,118 messages in a mature inbox).
+ATM tools should filter these by type when counting actionable messages.
+
+**Field Notes** (member object, unrelated to message schema):
 
 - **Team Lead Member**: First member has empty/null `prompt`, `color`, `tmuxPaneId`, and no `backendType`
 - **Spawned Agents**: Have `prompt`, `color`, `tmuxPaneId`, and `backendType` populated
@@ -1106,15 +1160,21 @@ Approve or reject agent's implementation plan.
     "from": "team-lead",
     "text": "CI failure detected in backend tests",
     "timestamp": "2026-02-11T14:30:00.000Z",
-    "read": false,
-    "summary": "CI failure detected"
+    "read": true,
+    "summary": "CI failure detected",
+    "message_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "pendingAckAt": "2026-02-11T14:30:00.142Z",
+    "acknowledgedAt": null
   },
   {
     "from": "ci-fix-agent",
     "text": "Acknowledged. Beginning investigation.",
     "timestamp": "2026-02-11T14:30:15.000Z",
     "read": true,
-    "summary": "Investigation started"
+    "summary": "Investigation started",
+    "message_id": null,
+    "pendingAckAt": null,
+    "acknowledgedAt": null
   }
 ]
 ```

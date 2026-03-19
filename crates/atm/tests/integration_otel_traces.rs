@@ -91,7 +91,7 @@ fn start_collector() -> (String, mpsc::Receiver<(String, String)>) {
     let (tx, rx) = mpsc::channel();
 
     thread::spawn(move || {
-        for _ in 0..4 {
+        for _ in 0..8 {
             let Ok((mut stream, _)) = listener.accept() else {
                 break;
             };
@@ -161,7 +161,6 @@ fn cli_status_exports_trace_record_to_collector() {
         .env("ATM_IDENTITY", "arch-ctm")
         .env("ATM_RUNTIME", "codex")
         .env("CLAUDE_SESSION_ID", "sess-123")
-        .env("ATM_LOG", "0")
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_OTEL_ENABLED", "true")
         .env("ATM_OTEL_ENDPOINT", endpoint)
@@ -175,49 +174,84 @@ fn cli_status_exports_trace_record_to_collector() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let (path, body) = rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("collector request");
-    assert_eq!(path, "/v1/traces");
-
-    let payload: Value = serde_json::from_str(&body).expect("valid traces payload");
-    let span = &payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0];
-    assert_eq!(span["name"], "atm.command.status");
-    assert!(span["traceId"].as_str().is_some());
-    assert!(span["spanId"].as_str().is_some());
-
-    let resource_attrs = payload["resourceSpans"][0]["resource"]["attributes"]
-        .as_array()
-        .expect("resource attributes");
-    assert!(
-        resource_attrs
-            .iter()
-            .any(|item| { item["key"] == "service.name" && item["value"]["stringValue"] == "atm" })
-    );
-    let span_attrs = span["attributes"].as_array().expect("span attributes");
-    assert!(
-        span_attrs
-            .iter()
-            .any(|item| { item["key"] == "team" && item["value"]["stringValue"] == "atm-dev" })
-    );
-    assert!(
-        span_attrs
-            .iter()
-            .any(|item| { item["key"] == "agent" && item["value"]["stringValue"] == "arch-ctm" })
-    );
-
+    let mut saw_logs = false;
+    let mut saw_traces = false;
     let mut saw_metrics = false;
-    for _ in 0..3 {
-        if let Ok((path, body)) = rx.recv_timeout(Duration::from_secs(5))
-            && path == "/v1/metrics"
-        {
-            let payload: Value = serde_json::from_str(&body).expect("valid metrics payload");
-            let metric = &payload["resourceMetrics"][0]["scopeMetrics"][0]["metrics"][0];
-            assert_eq!(metric["name"], "atm.commands_count");
-            saw_metrics = true;
-            break;
+    for _ in 0..8 {
+        if let Ok((path, body)) = rx.recv_timeout(Duration::from_secs(5)) {
+            let payload: Value = serde_json::from_str(&body).expect("valid collector payload");
+            match path.as_str() {
+                "/v1/logs" => {
+                    let resource_attrs = payload["resourceLogs"][0]["resource"]["attributes"]
+                        .as_array()
+                        .expect("log resource attributes");
+                    assert!(
+                        resource_attrs.iter().any(|item| {
+                            item["key"] == "service.name" && item["value"]["stringValue"] == "atm"
+                        }),
+                        "log payload should set service.name=atm: {payload}"
+                    );
+                    let log_attrs =
+                        payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"]
+                            .as_array()
+                            .expect("log attributes");
+                    assert!(
+                        log_attrs.iter().any(|item| {
+                            item["key"] == "session_id"
+                                && item["value"]["stringValue"] == "sess-123"
+                        }),
+                        "log payload should include session_id: {payload}"
+                    );
+                    saw_logs = true;
+                }
+                "/v1/traces" => {
+                    let span = &payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0];
+                    assert_eq!(span["name"], "atm.command.status");
+                    assert!(span["traceId"].as_str().is_some());
+                    assert!(span["spanId"].as_str().is_some());
+
+                    let resource_attrs = payload["resourceSpans"][0]["resource"]["attributes"]
+                        .as_array()
+                        .expect("trace resource attributes");
+                    assert!(
+                        resource_attrs.iter().any(|item| {
+                            item["key"] == "service.name" && item["value"]["stringValue"] == "atm"
+                        }),
+                        "trace payload should set service.name=atm: {payload}"
+                    );
+                    assert!(
+                        resource_attrs.iter().any(|item| {
+                            item["key"] == "session_id"
+                                && item["value"]["stringValue"] == "sess-123"
+                        }),
+                        "trace resource should include session_id for Tempo queries: {payload}"
+                    );
+                    let span_attrs = span["attributes"].as_array().expect("span attributes");
+                    assert!(span_attrs.iter().any(|item| {
+                        item["key"] == "team" && item["value"]["stringValue"] == "atm-dev"
+                    }));
+                    assert!(span_attrs.iter().any(|item| {
+                        item["key"] == "agent" && item["value"]["stringValue"] == "arch-ctm"
+                    }));
+                    saw_traces = true;
+                }
+                "/v1/metrics" => {
+                    let metric = &payload["resourceMetrics"][0]["scopeMetrics"][0]["metrics"][0];
+                    assert_eq!(metric["name"], "atm.commands_count");
+                    saw_metrics = true;
+                }
+                _ => {}
+            }
         }
     }
+    assert!(
+        saw_logs,
+        "collector should receive at least one /v1/logs request"
+    );
+    assert!(
+        saw_traces,
+        "collector should receive at least one /v1/traces request"
+    );
     assert!(
         saw_metrics,
         "collector should receive at least one /v1/metrics request"
@@ -249,5 +283,77 @@ fn cli_status_trace_export_is_fail_open_when_collector_unreachable() {
         "trace export failure must not fail the command: stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[serial]
+fn cli_error_exports_log_and_error_trace_to_collector() {
+    let temp = TempDir::new().expect("temp dir");
+    let (endpoint, rx) = start_collector();
+
+    let mut cmd = Command::new(cargo_bin("atm"));
+    cmd.env("ATM_HOME", temp.path())
+        .env("ATM_TEAM", "atm-dev")
+        .env("ATM_IDENTITY", "arch-ctm")
+        .env("ATM_RUNTIME", "codex")
+        .env("CLAUDE_SESSION_ID", "sess-error-123")
+        .env("ATM_DAEMON_AUTOSTART", "0")
+        .env("ATM_OTEL_ENABLED", "true")
+        .env("ATM_OTEL_ENDPOINT", endpoint)
+        .args(["status", "--team", "atm-dev", "--json"]);
+
+    let output = cmd.output().expect("run failing atm status");
+    assert!(
+        !output.status.success(),
+        "status command should fail when team config is missing"
+    );
+
+    let mut saw_logs = false;
+    let mut saw_traces = false;
+    for _ in 0..8 {
+        if let Ok((path, body)) = rx.recv_timeout(Duration::from_secs(5)) {
+            let payload: Value = serde_json::from_str(&body).expect("valid collector payload");
+            match path.as_str() {
+                "/v1/logs" => {
+                    let log_record = &payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0];
+                    let attrs = log_record["attributes"].as_array().expect("log attributes");
+                    assert!(attrs.iter().any(|item| {
+                        item["key"] == "session_id"
+                            && item["value"]["stringValue"] == "sess-error-123"
+                    }));
+                    saw_logs = true;
+                }
+                "/v1/traces" => {
+                    let span = &payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0];
+                    assert_eq!(span["status"]["code"], "STATUS_CODE_ERROR");
+                    let span_attrs = span["attributes"].as_array().expect("span attributes");
+                    for (key, value) in [
+                        ("team", "atm-dev"),
+                        ("agent", "arch-ctm"),
+                        ("runtime", "codex"),
+                        ("session_id", "sess-error-123"),
+                    ] {
+                        assert!(
+                            span_attrs.iter().any(|item| {
+                                item["key"] == key && item["value"]["stringValue"] == value
+                            }),
+                            "trace span should include {key}={value}: {payload}"
+                        );
+                    }
+                    saw_traces = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    assert!(
+        saw_logs,
+        "collector should receive at least one /v1/logs request for the error path"
+    );
+    assert!(
+        saw_traces,
+        "collector should receive at least one /v1/traces request for the error path"
     );
 }

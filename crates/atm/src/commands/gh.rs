@@ -1732,6 +1732,7 @@ fn notify_team_lead_of_monitor_control(
     let now = chrono::Utc::now().to_rfc3339();
     let message = InboxMessage {
         from: actor.to_string(),
+        source_team: None,
         text: format!(
             "your gh monitor was {} by {}@{} for {}",
             action_word,

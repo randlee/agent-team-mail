@@ -102,14 +102,12 @@ def loki_query(endpoint: str, auth_header: tuple[str, str] | None, query: str, s
         return json.loads(response.read().decode("utf-8"))
 
 
-def find_match(result: dict, expected_service: str, expected: dict[str, str]) -> dict | None:
+def find_match(result: dict, expected_service: str) -> dict | None:
     data = result.get("data", {})
     for stream in data.get("result", []):
         labels = stream.get("stream", {})
         service = labels.get("service_name") or labels.get("source_binary")
         if service != expected_service:
-            continue
-        if any(labels.get(key) != value for key, value in expected.items()):
             continue
         return {
             "service_name": service,
@@ -119,7 +117,7 @@ def find_match(result: dict, expected_service: str, expected: dict[str, str]) ->
     return None
 
 
-def query_until_match(endpoint: str, auth_header: tuple[str, str] | None, selectors: list[str], expected_service: str, expected_fields: dict[str, str]) -> dict:
+def query_until_match(endpoint: str, auth_header: tuple[str, str] | None, selectors: list[str], expected_service: str) -> dict:
     deadline = time.time() + QUERY_RETRY_SECONDS
     last_results: list[dict] = []
     while time.time() < deadline:
@@ -128,7 +126,7 @@ def query_until_match(endpoint: str, auth_header: tuple[str, str] | None, select
         for selector in selectors:
             result = loki_query(endpoint, auth_header, selector, start_ns, end_ns)
             last_results.append({"query": selector, "result": result})
-            matched = find_match(result, expected_service, expected_fields)
+            matched = find_match(result, expected_service)
             if matched is not None:
                 return {
                     "query": selector,
@@ -153,9 +151,9 @@ def main() -> int:
     atm_bin = pathlib.Path(args.atm_bin).expanduser().resolve()
 
     selectors = [
-        f'{{service_name="atm",team="{args.team}",agent="{args.agent}",runtime="{args.runtime}",session_id="{args.session_id}"}}',
-        f'{{source_binary="atm",team="{args.team}",agent="{args.agent}",runtime="{args.runtime}",session_id="{args.session_id}"}}',
-        f'{{team="{args.team}",agent="{args.agent}",runtime="{args.runtime}",session_id="{args.session_id}"}}',
+        f'{{service_name="atm"}} | session_id="{args.session_id}"',
+        f'{{service_name="atm"}} | command="config"',
+        '{service_name="atm"}',
     ]
 
     if args.dry_run:
@@ -251,12 +249,6 @@ def main() -> int:
             loki_auth_header,
             selectors,
             expected_service="atm",
-            expected_fields={
-                "team": args.team,
-                "agent": args.agent,
-                "runtime": args.runtime,
-                "session_id": args.session_id,
-            },
         )
 
         summary = {

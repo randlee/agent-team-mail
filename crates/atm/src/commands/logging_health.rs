@@ -4,6 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use agent_team_mail_core::daemon_client::daemon_status_path_for;
+pub(crate) use agent_team_mail_core::observability::{
+    OtelHealthSnapshot, OtelHealthSnapshot as OtelHealthContract,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -31,47 +34,8 @@ impl Default for LoggingHealthSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub(crate) struct OtelHealthSnapshot {
-    pub(crate) schema_version: String,
-    pub(crate) enabled: bool,
-    pub(crate) collector_endpoint: Option<String>,
-    pub(crate) protocol: String,
-    pub(crate) collector_state: String,
-    pub(crate) local_mirror_state: String,
-    pub(crate) local_mirror_path: String,
-    pub(crate) debug_local_export: bool,
-    pub(crate) debug_local_state: String,
-    pub(crate) last_error: OtelLastError,
-}
-
-impl Default for OtelHealthSnapshot {
-    fn default() -> Self {
-        Self {
-            schema_version: "v1".to_string(),
-            enabled: true,
-            collector_endpoint: None,
-            protocol: "otlp_http".to_string(),
-            collector_state: "not_configured".to_string(),
-            local_mirror_state: "healthy".to_string(),
-            local_mirror_path: String::new(),
-            debug_local_export: false,
-            debug_local_state: "disabled".to_string(),
-            last_error: OtelLastError::default(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct LastError {
-    pub(crate) code: Option<String>,
-    pub(crate) message: Option<String>,
-    pub(crate) at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub(crate) struct OtelLastError {
     pub(crate) code: Option<String>,
     pub(crate) message: Option<String>,
     pub(crate) at: Option<String>,
@@ -88,37 +52,6 @@ pub(crate) struct LoggingHealthContract {
     pub(crate) spool_file_count: u64,
     pub(crate) oldest_spool_age_seconds: Option<u64>,
     pub(crate) last_error: LastError,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct OtelHealthContract {
-    pub(crate) schema_version: String,
-    pub(crate) enabled: bool,
-    pub(crate) collector_endpoint: Option<String>,
-    pub(crate) protocol: String,
-    pub(crate) collector_state: String,
-    pub(crate) local_mirror_state: String,
-    pub(crate) local_mirror_path: String,
-    pub(crate) debug_local_export: bool,
-    pub(crate) debug_local_state: String,
-    pub(crate) last_error: OtelLastError,
-}
-
-impl Default for OtelHealthContract {
-    fn default() -> Self {
-        Self {
-            schema_version: "v1".to_string(),
-            enabled: true,
-            collector_endpoint: None,
-            protocol: "otlp_http".to_string(),
-            collector_state: "not_configured".to_string(),
-            local_mirror_state: "healthy".to_string(),
-            local_mirror_path: String::new(),
-            debug_local_export: false,
-            debug_local_state: "disabled".to_string(),
-            last_error: OtelLastError::default(),
-        }
-    }
 }
 
 impl Default for LoggingHealthContract {
@@ -185,18 +118,7 @@ pub(crate) fn build_logging_health_contract(
 }
 
 pub(crate) fn build_otel_health_contract(otel: &OtelHealthSnapshot) -> OtelHealthContract {
-    OtelHealthContract {
-        schema_version: otel.schema_version.clone(),
-        enabled: otel.enabled,
-        collector_endpoint: otel.collector_endpoint.clone(),
-        protocol: otel.protocol.clone(),
-        collector_state: otel.collector_state.clone(),
-        local_mirror_state: otel.local_mirror_state.clone(),
-        local_mirror_path: otel.local_mirror_path.clone(),
-        debug_local_export: otel.debug_local_export,
-        debug_local_state: otel.debug_local_state.clone(),
-        last_error: otel.last_error.clone(),
-    }
+    otel.clone()
 }
 
 pub(crate) fn logging_remediation(state: &str) -> Option<&'static str> {

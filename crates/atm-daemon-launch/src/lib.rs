@@ -142,6 +142,19 @@ fn scrub_shared_runtime_owner_env(command: &mut Command) {
     }
 }
 
+fn inherited_shared_runtime_session_id() -> Option<String> {
+    for key in ["CLAUDE_SESSION_ID", "ATM_SESSION_ID", "CODEX_THREAD_ID"] {
+        if let Some(value) = std::env::var(key)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            return Some(value);
+        }
+    }
+    None
+}
+
 fn configure_spawn_command(
     command: &mut Command,
     request: SpawnDaemonRequest<'_>,
@@ -156,6 +169,9 @@ fn configure_spawn_command(
         .stdout(request.stdout)
         .stderr(request.stderr);
     if request.launch_class != LaunchClass::IsolatedTest {
+        if let Some(session_id) = inherited_shared_runtime_session_id() {
+            command.env("ATM_SESSION_ID", session_id);
+        }
         scrub_shared_runtime_owner_env(command);
         #[cfg(unix)]
         {
@@ -197,6 +213,7 @@ pub fn spawn_daemon_process(request: SpawnDaemonRequest<'_>) -> io::Result<Child
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn issue_launch_token_populates_required_fields() {
@@ -297,6 +314,93 @@ mod tests {
         assert_eq!(envs.get(OsStr::new("CLAUDE_SESSION_ID")), Some(&None));
         assert_eq!(envs.get(OsStr::new("ATM_IDENTITY")), Some(&None));
         assert_eq!(envs.get(OsStr::new("ATM_TEAM")), Some(&None));
+    }
+
+    #[test]
+    #[serial]
+    fn shared_runtime_spawn_preserves_runtime_session_and_otel_env() {
+        let atm_home = std::env::temp_dir().join("shared-home");
+        let token = issue_launch_token(
+            LaunchClass::DevShared,
+            &atm_home,
+            "target/debug/atm-daemon",
+            "launcher-test",
+            Duration::from_secs(15),
+        );
+        let mut command = Command::new("sh");
+        command
+            .env("CLAUDE_SESSION_ID", "session-123")
+            .env("ATM_OTEL_ENABLED", "true")
+            .env("ATM_OTEL_ENDPOINT", "http://collector:4318")
+            .env("ATM_OTEL_PROTOCOL", "otlp_http")
+            .env("ATM_OTEL_AUTH_HEADER", "Authorization: Bearer test-token")
+            .env("ATM_OTEL_CA_FILE", "/path/to/ca.pem")
+            .env("ATM_OTEL_INSECURE_SKIP_VERIFY", "true")
+            .env("ATM_OTEL_DEBUG_LOCAL_EXPORT", "1");
+        let old_claude = std::env::var("CLAUDE_SESSION_ID").ok();
+        // SAFETY: test-scoped env mutation for launch inheritance check.
+        unsafe { std::env::set_var("CLAUDE_SESSION_ID", "session-123") };
+
+        configure_spawn_command(
+            &mut command,
+            SpawnDaemonRequest {
+                daemon_bin: OsStr::new("atm-daemon"),
+                atm_home: &atm_home,
+                launch_class: LaunchClass::DevShared,
+                issuer: "launcher-test",
+                team: Some("atm-dev"),
+                stdin: Stdio::null(),
+                stdout: Stdio::null(),
+                stderr: Stdio::null(),
+            },
+            &token,
+        )
+        .unwrap();
+
+        let envs: std::collections::HashMap<_, _> = command.get_envs().collect();
+        assert_eq!(
+            envs.get(OsStr::new("ATM_SESSION_ID")),
+            Some(&Some(OsStr::new("session-123")))
+        );
+        assert_eq!(
+            envs.get(OsStr::new("ATM_OTEL_ENABLED")),
+            Some(&Some(OsStr::new("true")))
+        );
+        assert_eq!(
+            envs.get(OsStr::new("ATM_OTEL_ENDPOINT")),
+            Some(&Some(OsStr::new("http://collector:4318")))
+        );
+        assert_eq!(
+            envs.get(OsStr::new("ATM_OTEL_PROTOCOL")),
+            Some(&Some(OsStr::new("otlp_http")))
+        );
+        assert_eq!(
+            envs.get(OsStr::new("ATM_OTEL_AUTH_HEADER")),
+            Some(&Some(OsStr::new("Authorization: Bearer test-token")))
+        );
+        assert_eq!(
+            envs.get(OsStr::new("ATM_OTEL_CA_FILE")),
+            Some(&Some(OsStr::new("/path/to/ca.pem")))
+        );
+        assert_eq!(
+            envs.get(OsStr::new("ATM_OTEL_INSECURE_SKIP_VERIFY")),
+            Some(&Some(OsStr::new("true")))
+        );
+        assert_eq!(
+            envs.get(OsStr::new("ATM_OTEL_DEBUG_LOCAL_EXPORT")),
+            Some(&Some(OsStr::new("1")))
+        );
+
+        match old_claude {
+            Some(value) => {
+                // SAFETY: restore prior test-scoped env value.
+                unsafe { std::env::set_var("CLAUDE_SESSION_ID", value) };
+            }
+            None => {
+                // SAFETY: restore prior absence.
+                unsafe { std::env::remove_var("CLAUDE_SESSION_ID") };
+            }
+        }
     }
 
     #[test]

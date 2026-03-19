@@ -1,4 +1,5 @@
 use sc_observability::{OtelConfig, TraceRecord, TraceStatus, export_trace_records_best_effort};
+use serial_test::serial;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,6 +34,9 @@ impl TraceCollector {
                         if shutdown_flag.load(Ordering::SeqCst) {
                             break;
                         }
+                        stream
+                            .set_nonblocking(false)
+                            .expect("accepted stream should block for request body");
                         let mut request = Vec::new();
                         let mut header_buf = [0_u8; 4096];
                         let header_len = stream.read(&mut header_buf).expect("read request");
@@ -99,12 +103,13 @@ impl Drop for TraceCollector {
         self.shutdown.store(true, Ordering::SeqCst);
         let _ = TcpStream::connect(&self.wake_addr);
         if let Some(join) = self.join.take() {
-            join.join().expect("collector thread should join");
+            let _ = join.join();
         }
     }
 }
 
 #[test]
+#[serial]
 fn trace_record_exports_to_otlp_http_collector() {
     let collector = TraceCollector::start();
     let record = TraceRecord {

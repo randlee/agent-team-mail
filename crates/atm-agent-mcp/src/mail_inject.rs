@@ -112,6 +112,7 @@ pub fn format_mail_turn_content(messages: &[MailEnvelope]) -> String {
 ///
 /// let msg = InboxMessage {
 ///     from: "bob".into(),
+///     source_team: None,
 ///     text: "hi".into(),
 ///     timestamp: "2026-02-19T00:00:00Z".into(),
 ///     read: false,
@@ -440,6 +441,7 @@ mod tests {
     fn make_msg(from: &str, text: &str, read: bool, id: Option<&str>) -> InboxMessage {
         InboxMessage {
             from: from.to_string(),
+            source_team: None,
             text: text.to_string(),
             timestamp: "2026-02-19T10:00:00Z".to_string(),
             read,

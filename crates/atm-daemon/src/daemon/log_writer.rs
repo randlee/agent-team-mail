@@ -23,7 +23,7 @@
 
 use agent_team_mail_core::logging_event::{LogEventV1, configured_log_path};
 use chrono::Utc;
-use sc_observability::{MetricKind, MetricRecord, OtelConfig, export_metric_records_best_effort};
+use sc_observability_types::{MetricKind, MetricRecord};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,7 +33,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::daemon::consts::LOG_WARNING_RATE_LIMIT_SECS;
-use crate::daemon::observability::{LOG_EVENT_QUEUE_CAPACITY, export_otel_best_effort};
+use crate::daemon::observability::{
+    LOG_EVENT_QUEUE_CAPACITY, export_metric_records_best_effort, export_otel_best_effort,
+    otel_config_from_env,
+};
 
 // ── Queue ─────────────────────────────────────────────────────────────────────
 
@@ -371,7 +374,7 @@ fn write_events(config: &LogWriterConfig, events: &[LogEventV1]) {
                 export_otel_best_effort(&config.log_path, event);
                 export_metric_records_best_effort(
                     &build_event_metric_records(event),
-                    &OtelConfig::from_env(),
+                    &otel_config_from_env(),
                 );
             }
             Err(e) => {

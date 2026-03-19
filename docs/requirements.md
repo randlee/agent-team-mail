@@ -139,6 +139,8 @@ All JSON types use **permissive deserialization with round-trip preservation**:
 #[derive(Serialize, Deserialize)]
 pub struct InboxMessage {
     pub from: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_team: Option<String>,
     pub text: String,
     pub timestamp: String,
     pub read: bool,
@@ -421,6 +423,17 @@ atm send <agent> --stdin             # message from stdin
   accepted and routed when configured by transport plugins. ATM core must treat
   namespace suffixes as routable address components, not invalid identifiers.
 - Agent name must exist in team's `config.json` members array
+- Cross-team delivery must preserve the sender team in the stored envelope via
+  `InboxMessage.source_team`
+- Same-team sends may also populate `source_team`; consumers must treat the
+  field as optional envelope metadata rather than as proof of cross-team routing
+
+**Cross-team behavior**:
+- Claude Code `SendMessage` remains local-team-only and does not perform
+  cross-team routing on its own
+- Cross-team replies and follow-up messages must use `atm send <agent>@<team>`
+- When a message is delivered across teams, the receiving inbox must preserve
+  the sender team in `source_team`
 
 **Options**:
 

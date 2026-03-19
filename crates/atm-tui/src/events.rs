@@ -392,6 +392,7 @@ mod tests {
         app.inbox_messages = vec![
             agent_team_mail_core::schema::InboxMessage {
                 from: "team-lead".to_string(),
+                source_team: None,
                 text: "review this change".to_string(),
                 timestamp: "2026-03-01T00:00:00Z".to_string(),
                 read: false,
@@ -401,6 +402,7 @@ mod tests {
             },
             agent_team_mail_core::schema::InboxMessage {
                 from: "arch-atm".to_string(),
+                source_team: None,
                 text: "follow-up".to_string(),
                 timestamp: "2026-03-01T00:01:00Z".to_string(),
                 read: true,

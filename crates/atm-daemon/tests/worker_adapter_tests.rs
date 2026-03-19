@@ -730,6 +730,7 @@ async fn test_handle_message_routes_to_agent() {
 
     let message = InboxMessage {
         from: "sender".to_string(),
+        source_team: None,
         text: "Hello, test agent!".to_string(),
         timestamp: "2026-02-14T00:00:00Z".to_string(),
         read: false,

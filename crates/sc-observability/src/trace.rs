@@ -1,36 +1,5 @@
 use crate::{OtelConfig, health, otlp_adapter};
-
-/// Neutral trace signal contract for producer-side observability code.
-///
-/// Correlation fields are intentionally optional and fail-open in AW.1 so
-/// producers can adopt trace emission incrementally without blocking callers.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-pub struct TraceRecord {
-    pub timestamp: String,
-    pub team: Option<String>,
-    pub agent: Option<String>,
-    pub runtime: Option<String>,
-    pub session_id: Option<String>,
-    pub trace_id: String,
-    pub span_id: String,
-    pub parent_span_id: Option<String>,
-    pub name: String,
-    pub status: TraceStatus,
-    pub duration_ms: u64,
-    pub source_binary: String,
-    pub attributes: serde_json::Map<String, serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-/// Mirrored as `TransportTraceStatus` in `sc-observability-otlp` to avoid a
-/// Cargo dependency cycle. GH-876 tracks extraction to a shared
-/// `sc-observability-types` crate.
-pub enum TraceStatus {
-    Ok,
-    Error,
-    Unset,
-}
+use sc_observability_types::TraceRecord;
 
 /// Export trace records without allowing exporter failures to affect callers.
 ///
@@ -56,7 +25,8 @@ pub fn export_trace_records_best_effort(records: &[TraceRecord], config: &OtelCo
 
 #[cfg(test)]
 mod tests {
-    use super::{TraceRecord, TraceStatus};
+    use super::TraceRecord;
+    use crate::TraceStatus;
 
     #[test]
     fn trace_record_round_trip_allows_missing_correlation_fields() {
