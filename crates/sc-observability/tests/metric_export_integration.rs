@@ -1,4 +1,5 @@
 use sc_observability::{MetricKind, MetricRecord, OtelConfig, export_metric_records_best_effort};
+use serial_test::serial;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -105,6 +106,7 @@ impl Drop for MetricCollector {
 }
 
 #[test]
+#[serial]
 fn metric_record_exports_to_otlp_http_collector() {
     let collector = MetricCollector::start();
     let record = MetricRecord {

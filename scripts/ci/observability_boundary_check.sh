@@ -38,6 +38,9 @@ while IFS= read -r match; do
   [[ -z "$match" ]] && continue
   file="${match%%:*}"
   case "$file" in
+    crates/atm/src/main.rs) continue ;;
+    # Daemon-local OTLP calls are approved entry-point wiring points.
+    crates/atm-daemon/src/*) continue ;;
     crates/sc-observability/src/otlp_adapter.rs) continue ;;
     crates/sc-observability-otlp/*) continue ;;
   esac
