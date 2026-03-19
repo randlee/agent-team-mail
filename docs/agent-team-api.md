@@ -960,6 +960,7 @@ Approve or reject agent's implementation plan.
 - Message content max 10,000 characters
 - Summary max 100 characters
 - Recipient must be valid agent in team
+- `SendMessage` is local-team-only; for cross-team delivery, use `atm send <agent>@<team>`
 
 ---
 
@@ -1076,6 +1077,7 @@ Approve or reject agent's implementation plan.
 ```json
 {
   "from": "string (sender agent name or 'team-lead')",
+  "source_team": "string (optional sender team for cross-team or explicitly tagged envelopes)",
   "text": "string (message content, markdown supported)",
   "timestamp": "string (ISO 8601 UTC)",
   "read": "boolean",
@@ -1091,6 +1093,7 @@ Approve or reject agent's implementation plan.
 - **`isActive`**: activity signal only (true=busy/sending, false=idle); NOT a liveness indicator — use daemon session state for liveness
 - **`prompt`**: Where specialized instructions are stored (can be long multi-line text)
 - **`color`**: UI color for team dashboard (optional but recommended)
+- **`source_team`**: Preserved envelope metadata for cross-team sends. Use this when a reply must go back to a sender on another team; the local `from` field is still only the sender name.
 
 ---
 
@@ -1104,6 +1107,7 @@ Approve or reject agent's implementation plan.
 [
   {
     "from": "team-lead",
+    "source_team": "src-gen",
     "text": "CI failure detected in backend tests",
     "timestamp": "2026-02-11T14:30:00.000Z",
     "read": false,
@@ -1118,6 +1122,11 @@ Approve or reject agent's implementation plan.
   }
 ]
 ```
+
+Cross-team reply guidance:
+- Claude Code `SendMessage` does not route across teams
+- For a reply to a message with `source_team`, use `atm send <from>@<source_team> ...`
+- GH #888 is fixed by the envelope change that preserves `source_team` for these flows
 
 ### Task Schema
 

@@ -34,6 +34,9 @@ impl TraceCollector {
                         if shutdown_flag.load(Ordering::SeqCst) {
                             break;
                         }
+                        stream
+                            .set_nonblocking(false)
+                            .expect("accepted stream should block for request body");
                         let mut request = Vec::new();
                         let mut header_buf = [0_u8; 4096];
                         let header_len = stream.read(&mut header_buf).expect("read request");

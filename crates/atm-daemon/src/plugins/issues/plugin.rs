@@ -242,6 +242,8 @@ impl IssuesPlugin {
 
         InboxMessage {
             from: self.config.agent.clone(),
+            // local system message — source_team intentionally None
+            source_team: None,
             text: content,
             timestamp: chrono::Utc::now().to_rfc3339(),
             read: false,
@@ -732,6 +734,7 @@ mod tests {
 
         let msg = InboxMessage {
             from: "issues-bot".to_string(),
+            source_team: None,
             text: "[issue:42]\nThis should be ignored".to_string(),
             timestamp: chrono::Utc::now().to_rfc3339(),
             read: false,

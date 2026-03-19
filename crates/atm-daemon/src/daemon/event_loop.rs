@@ -2176,6 +2176,7 @@ mod tests {
 
         let msg1 = InboxMessage {
             from: "a".to_string(),
+            source_team: None,
             text: "first".to_string(),
             timestamp: "2026-02-11T10:00:00Z".to_string(),
             read: false,
@@ -2186,6 +2187,7 @@ mod tests {
 
         let msg2 = InboxMessage {
             from: "b".to_string(),
+            source_team: None,
             text: "second".to_string(),
             timestamp: "2026-02-11T10:05:00Z".to_string(),
             read: false,
@@ -2204,6 +2206,7 @@ mod tests {
 
         let msg3 = InboxMessage {
             from: "c".to_string(),
+            source_team: None,
             text: "third".to_string(),
             timestamp: "2026-02-11T10:10:00Z".to_string(),
             read: false,
@@ -2238,6 +2241,7 @@ mod tests {
 
         let msg1 = InboxMessage {
             from: "a".to_string(),
+            source_team: None,
             text: "first".to_string(),
             timestamp: "2026-02-11T10:00:00Z".to_string(),
             read: false,
@@ -2248,6 +2252,7 @@ mod tests {
 
         let msg2 = InboxMessage {
             from: "b".to_string(),
+            source_team: None,
             text: "second".to_string(),
             timestamp: "2026-02-11T10:05:00Z".to_string(),
             read: false,

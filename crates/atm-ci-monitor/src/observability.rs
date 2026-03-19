@@ -918,6 +918,7 @@ fn emit_budget_warning_message(
     let inbox_path = team_dir.join("inboxes").join(format!("{lead_agent}.json"));
     let message = InboxMessage {
         from: "gh_monitor".to_string(),
+        source_team: None,
         text: format!(
             "GitHub monitor budget warning for {} on {}: {}/{} calls used in current window while running `{}`.",
             ctx.team,

@@ -32,6 +32,7 @@ fn sample_app() -> App {
     app.inbox_messages = vec![
         InboxMessage {
             from: "team-lead".to_string(),
+            source_team: None,
             text: "Please investigate CI failure and report findings.".to_string(),
             timestamp: "2026-03-02T00:00:00Z".to_string(),
             read: false,
@@ -41,6 +42,7 @@ fn sample_app() -> App {
         },
         InboxMessage {
             from: "quality-mgr".to_string(),
+            source_team: None,
             text: "Smoke tests passed.".to_string(),
             timestamp: "2026-03-02T00:01:00Z".to_string(),
             read: true,
