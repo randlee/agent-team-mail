@@ -1,4 +1,5 @@
 use sc_observability::{OtelConfig, TraceRecord, TraceStatus, export_trace_records_best_effort};
+use serial_test::serial;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -108,6 +109,7 @@ impl Drop for TraceCollector {
 }
 
 #[test]
+#[serial]
 fn trace_record_exports_to_otlp_http_collector() {
     let collector = TraceCollector::start();
     let record = TraceRecord {

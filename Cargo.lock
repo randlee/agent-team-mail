@@ -23,6 +23,8 @@ dependencies = [
  "regex",
  "sc-composer",
  "sc-observability",
+ "sc-observability-otlp",
+ "sc-observability-types",
  "serde",
  "serde_json",
  "serial_test",
@@ -96,6 +98,8 @@ dependencies = [
  "notify",
  "rand 0.8.5",
  "sc-observability",
+ "sc-observability-otlp",
+ "sc-observability-types",
  "serde",
  "serde_json",
  "serial_test",
@@ -1998,6 +2002,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "sc-observability-otlp",
+ "sc-observability-types",
  "serde",
  "serde_json",
  "serial_test",
@@ -2011,9 +2016,19 @@ version = "0.46.1"
 dependencies = [
  "chrono",
  "reqwest",
+ "sc-observability-types",
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "sc-observability-types"
+version = "0.46.1"
+dependencies = [
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 

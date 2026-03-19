@@ -1,6 +1,7 @@
 use agent_team_mail_core::logging_event::LogEventV1;
 pub use agent_team_mail_core::observability::{OtelHealthSnapshot, OtelLastError};
 use chrono::Utc;
+use sc_observability_types::{MetricRecord, OtelConfig, TraceRecord};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -12,6 +13,8 @@ pub const SOCKET_ERROR_INTERNAL_ERROR: &str = "INTERNAL_ERROR";
 
 pub type OtelExportHook = Arc<dyn Fn(&Path, &LogEventV1) + Send + Sync>;
 pub type OtelHealthHook = Arc<dyn Fn(&Path) -> OtelHealthSnapshot + Send + Sync>;
+pub type TraceExportHook = Arc<dyn Fn(&[TraceRecord], &OtelConfig) + Send + Sync>;
+pub type MetricExportHook = Arc<dyn Fn(&[MetricRecord], &OtelConfig) + Send + Sync>;
 pub type LifecycleTraceHook = Arc<dyn Fn(LifecycleTraceRecord) + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +79,30 @@ pub fn clear_otel_health_hook() {
         .expect("atm-daemon otel health hook lock poisoned") = None;
 }
 
+pub fn install_trace_export_hook(hook: TraceExportHook) {
+    *trace_export_hook_slot()
+        .lock()
+        .expect("atm-daemon trace export hook lock poisoned") = Some(hook);
+}
+
+pub fn clear_trace_export_hook() {
+    *trace_export_hook_slot()
+        .lock()
+        .expect("atm-daemon trace export hook lock poisoned") = None;
+}
+
+pub fn install_metric_export_hook(hook: MetricExportHook) {
+    *metric_export_hook_slot()
+        .lock()
+        .expect("atm-daemon metric export hook lock poisoned") = Some(hook);
+}
+
+pub fn clear_metric_export_hook() {
+    *metric_export_hook_slot()
+        .lock()
+        .expect("atm-daemon metric export hook lock poisoned") = None;
+}
+
 pub fn install_lifecycle_trace_hook(hook: LifecycleTraceHook) {
     *lifecycle_trace_hook_slot()
         .lock()
@@ -96,6 +123,16 @@ fn otel_export_hook_slot() -> &'static Mutex<Option<OtelExportHook>> {
 fn otel_health_hook_slot() -> &'static Mutex<Option<OtelHealthHook>> {
     static OTEL_HEALTH_HOOK: OnceLock<Mutex<Option<OtelHealthHook>>> = OnceLock::new();
     OTEL_HEALTH_HOOK.get_or_init(|| Mutex::new(None))
+}
+
+fn trace_export_hook_slot() -> &'static Mutex<Option<TraceExportHook>> {
+    static TRACE_EXPORT_HOOK: OnceLock<Mutex<Option<TraceExportHook>>> = OnceLock::new();
+    TRACE_EXPORT_HOOK.get_or_init(|| Mutex::new(None))
+}
+
+fn metric_export_hook_slot() -> &'static Mutex<Option<MetricExportHook>> {
+    static METRIC_EXPORT_HOOK: OnceLock<Mutex<Option<MetricExportHook>>> = OnceLock::new();
+    METRIC_EXPORT_HOOK.get_or_init(|| Mutex::new(None))
 }
 
 fn lifecycle_trace_hook_slot() -> &'static Mutex<Option<LifecycleTraceHook>> {
@@ -129,6 +166,30 @@ pub fn current_otel_health(log_path: &Path) -> OtelHealthSnapshot {
         .expect("atm-daemon otel health hook lock poisoned")
         .clone();
     hook.map(|hook| hook(log_path)).unwrap_or_default()
+}
+
+pub fn export_trace_records_best_effort(records: &[TraceRecord], config: &OtelConfig) {
+    let hook = trace_export_hook_slot()
+        .lock()
+        .expect("atm-daemon trace export hook lock poisoned")
+        .clone();
+    if let Some(hook) = hook {
+        hook(records, config);
+    }
+}
+
+pub fn export_metric_records_best_effort(records: &[MetricRecord], config: &OtelConfig) {
+    let hook = metric_export_hook_slot()
+        .lock()
+        .expect("atm-daemon metric export hook lock poisoned")
+        .clone();
+    if let Some(hook) = hook {
+        hook(records, config);
+    }
+}
+
+pub fn otel_config_from_env() -> OtelConfig {
+    OtelConfig::from_env()
 }
 
 pub fn current_session_id() -> Option<String> {

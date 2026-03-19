@@ -12,6 +12,7 @@ use agent_team_mail_daemon::plugin::{MailService, PluginContext, PluginRegistry}
 use agent_team_mail_daemon::roster::RosterService;
 use anyhow::{Context, Result};
 use clap::Parser;
+use sc_observability_types::{MetricRecord, OtelConfig, TraceRecord};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -28,6 +29,14 @@ fn current_otel_health_from_entrypoint(
     log_path: &std::path::Path,
 ) -> agent_team_mail_daemon::daemon::observability::OtelHealthSnapshot {
     sc_observability::current_otel_health(log_path)
+}
+
+fn export_trace_records_from_entrypoint(records: &[TraceRecord], config: &OtelConfig) {
+    let _ = sc_observability_otlp::export_traces(config, records);
+}
+
+fn export_metric_records_from_entrypoint(records: &[MetricRecord], config: &OtelConfig) {
+    let _ = sc_observability_otlp::export_metrics(config, records);
 }
 
 fn export_lifecycle_trace_from_entrypoint(
@@ -431,6 +440,12 @@ async fn main() -> Result<()> {
     let log_cancel = cancel_token.clone();
     daemon::observability::install_otel_export_hook(Arc::new(export_otel_from_entrypoint));
     daemon::observability::install_otel_health_hook(Arc::new(current_otel_health_from_entrypoint));
+    daemon::observability::install_trace_export_hook(Arc::new(
+        export_trace_records_from_entrypoint,
+    ));
+    daemon::observability::install_metric_export_hook(Arc::new(
+        export_metric_records_from_entrypoint,
+    ));
     daemon::observability::install_lifecycle_trace_hook(Arc::new(
         export_lifecycle_trace_from_entrypoint,
     ));

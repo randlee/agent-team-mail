@@ -1152,8 +1152,14 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_configured_log_path_defaults_to_tool_scoped_formula() {
         let home = TempDir::new().expect("temp dir");
+        // SAFETY: test-scoped cleanup.
+        unsafe {
+            std::env::remove_var("ATM_LOG_FILE");
+            std::env::remove_var("ATM_LOG_PATH");
+        }
         let path = configured_log_path_for_tool(home.path(), "atm-daemon");
         assert_eq!(
             path,

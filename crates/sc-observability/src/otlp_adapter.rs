@@ -12,18 +12,7 @@ use std::sync::Arc;
 pub fn build_transport_exporters(
     config: &OtelConfig,
 ) -> Result<Vec<Arc<dyn OtelExporter>>, OtelError> {
-    let transport_config = TransportConfig {
-        endpoint: config.endpoint.clone(),
-        protocol: config.protocol.clone(),
-        auth_header: config.auth_header.clone(),
-        ca_file: config.ca_file.clone(),
-        insecure_skip_verify: config.insecure_skip_verify,
-        timeout_ms: config.timeout_ms,
-        debug_local_export: config.debug_local_export,
-        max_retries: config.max_retries,
-        initial_backoff_ms: config.initial_backoff_ms,
-        max_backoff_ms: config.max_backoff_ms,
-    };
+    let transport_config = config.clone();
 
     let exporters = sc_observability_otlp::build_exporters(&transport_config)
         .map_err(|err| OtelError::ExportFailed(err.to_string()))?;
@@ -84,18 +73,7 @@ pub fn export_metrics(config: &OtelConfig, records: &[MetricRecord]) -> Result<(
 }
 
 fn build_transport_config(config: &OtelConfig) -> TransportConfig {
-    TransportConfig {
-        endpoint: config.endpoint.clone(),
-        protocol: config.protocol.clone(),
-        auth_header: config.auth_header.clone(),
-        ca_file: config.ca_file.clone(),
-        insecure_skip_verify: config.insecure_skip_verify,
-        timeout_ms: config.timeout_ms,
-        debug_local_export: config.debug_local_export,
-        max_retries: config.max_retries,
-        initial_backoff_ms: config.initial_backoff_ms,
-        max_backoff_ms: config.max_backoff_ms,
-    }
+    config.clone()
 }
 
 fn to_trace_transport_record(record: TraceRecord) -> TraceTransportRecord {
