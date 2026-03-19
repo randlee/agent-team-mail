@@ -1654,6 +1654,8 @@ keeping transport concerns isolated in `sc-observability-otlp`.
 
 **Goal**: Close the live-signal and shared-daemon gaps uncovered by AW smoke so
 Grafana-backed ATM dogfooding is practical and repeatable on `develop`.
+**Merged baseline**: all AY sprints (`AY.0`-`AY.5`) are merged to `develop` at
+`384bfd8c`.
 
 **Planning doc**: `docs/phase-ay-grafana-dogfood-readiness.md`
 **Requirements**: `docs/observability/requirements.md`
@@ -1689,8 +1691,9 @@ Grafana-backed ATM dogfooding is practical and repeatable on `develop`.
 ## 17.23 Phase AZ: AY Smoke Follow-Up
 
 **Goal**: Close the remaining AY smoke failures before broad OTel enablement by
-restoring fresh `atm-daemon` traces in Tempo and updating the shared-dev smoke
-path to the real canonical logging flow.
+restoring fresh `atm-daemon` traces in Tempo, updating the shared-dev smoke
+path to the real canonical logging flow, closing the flaky-test backlog, and
+adding the CI publish-order gate.
 
 **Planning doc**: `docs/phase-az-planning.md`
 **Requirements**: `docs/observability/requirements.md`
@@ -1701,15 +1704,23 @@ path to the real canonical logging flow.
 |---|---|---|---|
 | AZ.1 | Daemon trace attribution | fix startup lifecycle traces so fresh restart traces appear under `service.name="atm-daemon"` in Tempo | PLANNED |
 | AZ.2 | Shared-dev smoke + OTel coverage | fix `otel-dev-install-smoke.py` for shared-dev mode and close OTel test gaps `#904`, `#905`, `#911` | PLANNED |
+| AZ.3 | Flaky test hardening | close `#899`, `#900`, `#901`, `#902`, and `#914` so validation stops paying recurring CI flake tax | PLANNED |
+| AZ.4 | Easy prod fix + CI publish gate | land `#917` and `#838` so production code and publish-order validation are release-safe | PLANNED |
 
 ### Exit Criteria
 1. Shared-daemon restart smoke returns at least one Tempo trace under
    `resource.service.name="atm-daemon"` for the smoke session.
 2. `scripts/otel-dev-install-smoke.py` passes against the real shared-dev flow
    without relying on `ATM_LOG_FILE` temp overrides.
-3. Shared daemon-launch tests cover the missing `ATM_OTEL_*` inheritance paths.
-4. CLI error-path OTel export and health-struct serde round-trips are pinned by
-   tests.
+3. Shared daemon-launch tests explicitly cover `ATM_OTEL_PROTOCOL`,
+   `ATM_OTEL_AUTH_HEADER`, `ATM_OTEL_CA_FILE`,
+   `ATM_OTEL_INSECURE_SKIP_VERIFY`, and `ATM_OTEL_DEBUG_LOCAL_EXPORT`.
+4. CLI error-path OTel export and health-struct serde round-trips are pinned by tests.
+5. AZ.3 flaky-test fixes are merged and the affected suites are stable across
+   repeated workspace validation.
+6. AZ.1 local regression test passes: daemon integration test with mock OTLP
+   collector asserts `/v1/traces` contains a span with
+   `service.name="atm-daemon"` and inherited `session_id` after daemon startup.
 
 ---
 
