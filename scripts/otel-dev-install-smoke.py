@@ -26,6 +26,7 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_DEV_BIN = pathlib.Path.home() / ".local" / "atm-dev" / "bin"
+DEFAULT_SHARED_HOME = pathlib.Path.home() / ".local" / "share" / "atm-dev" / "home"
 
 
 def resolve_dev_bin() -> pathlib.Path:
@@ -118,6 +119,34 @@ def ensure_contains(payloads: list[str], needle: str, label: str) -> None:
         raise SystemExit(f"{label}: missing `{needle}` in collector payloads")
 
 
+def resolve_atm_home(dev_bin: pathlib.Path, env: dict[str, str]) -> pathlib.Path | None:
+    atm_home = env.get("ATM_HOME", "").strip()
+    if atm_home:
+        return pathlib.Path(atm_home).expanduser().resolve()
+    if dev_bin.resolve() == DEFAULT_DEV_BIN.resolve():
+        return DEFAULT_SHARED_HOME
+    return None
+
+
+def shared_dev_mode(dev_bin: pathlib.Path, env: dict[str, str]) -> bool:
+    resolved_home = resolve_atm_home(dev_bin, env)
+    if "ATM_HOME" in env and env["ATM_HOME"].strip():
+        return resolved_home == DEFAULT_SHARED_HOME.resolve()
+    return dev_bin.resolve() == DEFAULT_DEV_BIN.resolve()
+
+
+def canonical_log_paths(home_dir: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    atm_log = home_dir / ".config" / "atm" / "logs" / "atm" / "atm.log.jsonl"
+    sc_compose_log = (
+        home_dir / ".config" / "sc-compose" / "logs" / "sc-compose.log"
+    )
+    return atm_log, sc_compose_log
+
+
+def count_events(path: pathlib.Path) -> int:
+    return len(read_json_lines(path))
+
+
 def build_base_env(dev_bin: pathlib.Path) -> dict[str, str]:
     env = os.environ.copy()
     env["PATH"] = f"{dev_bin}{os.pathsep}{env.get('PATH', '')}"
@@ -157,8 +186,21 @@ def main() -> int:
 
         live_env = build_base_env(dev_bin)
         live_env["ATM_OTEL_ENDPOINT"] = collector.endpoint
-        live_env["ATM_LOG_FILE"] = str(root / "atm.log.jsonl")
-        live_env["SC_COMPOSE_LOG_FILE"] = str(root / "sc-compose.log")
+        live_shared_dev = shared_dev_mode(dev_bin, live_env)
+        if live_shared_dev:
+            resolved_home = resolve_atm_home(dev_bin, live_env)
+            if resolved_home is None:
+                raise SystemExit("shared-dev smoke: failed to resolve ATM_HOME")
+            atm_log, sc_log = canonical_log_paths(resolved_home)
+        else:
+            atm_log = root / "atm.log.jsonl"
+            sc_log = root / "sc-compose.log"
+            live_env["ATM_LOG_FILE"] = str(atm_log)
+            live_env["SC_COMPOSE_LOG_FILE"] = str(sc_log)
+        live_atm_before = count_events(atm_log)
+        live_atm_otel_before = count_events(atm_log.with_suffix(".otel.jsonl"))
+        live_sc_before = count_events(sc_log)
+        live_sc_otel_before = count_events(sc_log.with_suffix(".otel.jsonl"))
 
         atm_result = run([str(atm_bin), "config", "--json"], live_env)
         sc_compose_result = run_sc_compose(sc_compose_bin, live_env, root)
@@ -176,19 +218,40 @@ def main() -> int:
         ensure_contains(payloads, "command_start", "live collector smoke")
         ensure_contains(payloads, "compose", "live collector smoke")
 
-        atm_log = root / "atm.log.jsonl"
-        sc_log = root / "sc-compose.log"
         if not atm_log.exists() or not sc_log.exists():
             raise SystemExit("live collector smoke: canonical local logs were not written")
         if not atm_log.with_suffix(".otel.jsonl").exists():
             raise SystemExit("live collector smoke: atm .otel.jsonl mirror missing")
         if not sc_log.with_suffix(".otel.jsonl").exists():
             raise SystemExit("live collector smoke: sc-compose .otel.jsonl mirror missing")
+        if count_events(atm_log) <= live_atm_before:
+            raise SystemExit("live collector smoke: atm local log did not receive a new event")
+        if count_events(atm_log.with_suffix(".otel.jsonl")) <= live_atm_otel_before:
+            raise SystemExit("live collector smoke: atm .otel.jsonl mirror did not advance")
+        if count_events(sc_log) <= live_sc_before:
+            raise SystemExit(
+                "live collector smoke: sc-compose local log did not receive a new event"
+            )
+        if count_events(sc_log.with_suffix(".otel.jsonl")) <= live_sc_otel_before:
+            raise SystemExit(
+                "live collector smoke: sc-compose .otel.jsonl mirror did not advance"
+            )
 
         outage_env = build_base_env(dev_bin)
         outage_env["ATM_OTEL_ENDPOINT"] = closed_local_endpoint()
-        outage_env["ATM_LOG_FILE"] = str(root / "atm-outage.log.jsonl")
-        outage_env["SC_COMPOSE_LOG_FILE"] = str(root / "sc-compose-outage.log")
+        outage_shared_dev = shared_dev_mode(dev_bin, outage_env)
+        if outage_shared_dev:
+            resolved_home = resolve_atm_home(dev_bin, outage_env)
+            if resolved_home is None:
+                raise SystemExit("outage smoke: failed to resolve ATM_HOME")
+            outage_atm_log, outage_sc_log = canonical_log_paths(resolved_home)
+        else:
+            outage_atm_log = root / "atm-outage.log.jsonl"
+            outage_sc_log = root / "sc-compose-outage.log"
+            outage_env["ATM_LOG_FILE"] = str(outage_atm_log)
+            outage_env["SC_COMPOSE_LOG_FILE"] = str(outage_sc_log)
+        outage_atm_before = count_events(outage_atm_log)
+        outage_sc_before = count_events(outage_sc_log)
 
         outage_atm = run([str(atm_bin), "config", "--json"], outage_env)
         outage_sc = run_sc_compose(sc_compose_bin, outage_env, root)
@@ -198,10 +261,14 @@ def main() -> int:
         if outage_sc.returncode != 0:
             raise SystemExit(f"outage smoke sc-compose failed: {outage_sc.stderr.strip()}")
 
-        if not pathlib.Path(outage_env["ATM_LOG_FILE"]).exists():
+        if not outage_atm_log.exists():
             raise SystemExit("outage smoke: ATM local log missing")
-        if not pathlib.Path(outage_env["SC_COMPOSE_LOG_FILE"]).exists():
+        if not outage_sc_log.exists():
             raise SystemExit("outage smoke: sc-compose local log missing")
+        if count_events(outage_atm_log) <= outage_atm_before:
+            raise SystemExit("outage smoke: ATM local log did not receive a new event")
+        if count_events(outage_sc_log) <= outage_sc_before:
+            raise SystemExit("outage smoke: sc-compose local log did not receive a new event")
 
         summary = {
             "collector_endpoint": collector.endpoint,
