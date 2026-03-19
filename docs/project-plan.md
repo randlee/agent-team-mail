@@ -186,6 +186,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AT | GitHub Boundary Elimination | Remove all remaining audited GitHub-boundary violations so only the gh plugin/provider layer owns GitHub behavior | PLANNED |
 | AV | OTel Collector Logs Rollout | Ship OTLP HTTP logs export, dogfood it against a Grafana-compatible receiver, and preserve fail-open local logging | COMPLETE |
 | AW | OTel Traces + Metrics Expansion | Add native traces and metrics, Grafana dashboards/smoke, and external repo rollout on top of AV | PLANNED |
+| BA | CLI Message Management + Plugin Boundary | Fix inbox lifecycle noise, add atomic queue/ack semantics, and remove current `atm -> daemon plugin` command coupling | PLANNED |
 
 ---
 
