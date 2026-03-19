@@ -23,6 +23,8 @@ agent-team-mail-daemon.workspace = true
 agent-team-mail-daemon-launch.workspace = true
 sc-composer.workspace = true
 sc-observability.workspace = true
+sc-observability-otlp.workspace = true
+sc-observability-types.workspace = true
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 serde_json.workspace = true

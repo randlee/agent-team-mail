@@ -1,5 +1,8 @@
 //! Main daemon event loop
 
+use crate::daemon::observability::{
+    export_metric_records_best_effort, export_trace_records_best_effort, otel_config_from_env,
+};
 use crate::daemon::pid_backend_validation::{roster_process_id, validate_pid_backend};
 use crate::daemon::status::{
     LoggingHealth, OtelHealth, PluginStatus, PluginStatusKind, StatusWriter,
@@ -20,10 +23,7 @@ use agent_team_mail_core::schema::TeamConfig;
 use agent_team_mail_core::team_config_store::TeamConfigStore;
 use anyhow::{Context, Result};
 use chrono::Utc;
-use sc_observability::{
-    MetricKind, MetricRecord, OtelConfig, TraceRecord, TraceStatus,
-    export_metric_records_best_effort, export_trace_records_best_effort,
-};
+use sc_observability_types::{MetricKind, MetricRecord, TraceRecord, TraceStatus};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -104,7 +104,7 @@ fn build_daemon_metric_record(
         team: env_nonempty("ATM_TEAM"),
         agent: env_nonempty("ATM_IDENTITY"),
         runtime: env_nonempty("ATM_RUNTIME"),
-        session_id: env_nonempty("CLAUDE_SESSION_ID"),
+        session_id: crate::daemon::observability::current_session_id(),
         name: name.to_string(),
         kind,
         value,
@@ -196,7 +196,7 @@ fn build_dispatch_root_trace_record(
         team: Some(event.team.clone()),
         agent: Some(event.agent.clone()),
         runtime: env_nonempty("ATM_RUNTIME"),
-        session_id: env_nonempty("CLAUDE_SESSION_ID"),
+        session_id: crate::daemon::observability::current_session_id(),
         trace_id: trace_id.to_string(),
         span_id: root_span_id.to_string(),
         parent_span_id: None,
@@ -259,7 +259,7 @@ fn build_plugin_dispatch_trace_record(
         team: Some(event.team.clone()),
         agent: Some(event.agent.clone()),
         runtime: env_nonempty("ATM_RUNTIME"),
-        session_id: env_nonempty("CLAUDE_SESSION_ID"),
+        session_id: crate::daemon::observability::current_session_id(),
         trace_id: trace_id.to_string(),
         span_id,
         parent_span_id: Some(parent_span_id.to_string()),
@@ -629,7 +629,7 @@ pub async fn run(
                                 &dispatch_trace_id,
                                 "dispatch_message",
                             );
-                        let otel_config = OtelConfig::from_env();
+                        let otel_config = otel_config_from_env();
                         let mut dispatch_failed = false;
 
                         emit_event_best_effort(EventFields {
@@ -1684,7 +1684,7 @@ async fn status_writer_loop(
     let otel = build_otel_health(&ctx);
     export_metric_records_best_effort(
         &build_daemon_health_metric_records(&logging, &otel),
-        &OtelConfig::from_env(),
+        &otel_config_from_env(),
     );
     if let Err(e) = status_writer.write_daemon_touch(&teams) {
         error!("Failed to write daemon touch sidecar: {}", e);
@@ -1714,7 +1714,7 @@ async fn status_writer_loop(
                 let otel = build_otel_health(&ctx);
                 export_metric_records_best_effort(
                     &build_daemon_health_metric_records(&logging, &otel),
-                    &OtelConfig::from_env(),
+                    &otel_config_from_env(),
                 );
 
                 if let Err(e) = status_writer.write_status(plugin_statuses, teams, logging, otel) {
@@ -1791,7 +1791,7 @@ fn build_otel_health(ctx: &PluginContext) -> OtelHealth {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
     let canonical_log_path = agent_team_mail_core::logging_event::configured_log_path(&home_dir);
-    crate::daemon::observability::current_otel_health(&canonical_log_path).into()
+    crate::daemon::observability::current_otel_health(&canonical_log_path)
 }
 
 fn derive_logging_state(
@@ -2010,7 +2010,7 @@ mod tests {
     use crate::plugins::worker_adapter::AgentState;
     use agent_team_mail_core::event_log::span_id_for_action;
     use agent_team_mail_core::schema::InboxMessage;
-    use sc_observability::TraceStatus;
+    use sc_observability_types::TraceStatus;
     use std::collections::HashMap;
     use std::fs as stdfs;
     use std::time::Duration;
@@ -2176,6 +2176,7 @@ mod tests {
 
         let msg1 = InboxMessage {
             from: "a".to_string(),
+            source_team: None,
             text: "first".to_string(),
             timestamp: "2026-02-11T10:00:00Z".to_string(),
             read: false,
@@ -2186,6 +2187,7 @@ mod tests {
 
         let msg2 = InboxMessage {
             from: "b".to_string(),
+            source_team: None,
             text: "second".to_string(),
             timestamp: "2026-02-11T10:05:00Z".to_string(),
             read: false,
@@ -2204,6 +2206,7 @@ mod tests {
 
         let msg3 = InboxMessage {
             from: "c".to_string(),
+            source_team: None,
             text: "third".to_string(),
             timestamp: "2026-02-11T10:10:00Z".to_string(),
             read: false,
@@ -2238,6 +2241,7 @@ mod tests {
 
         let msg1 = InboxMessage {
             from: "a".to_string(),
+            source_team: None,
             text: "first".to_string(),
             timestamp: "2026-02-11T10:00:00Z".to_string(),
             read: false,
@@ -2248,6 +2252,7 @@ mod tests {
 
         let msg2 = InboxMessage {
             from: "b".to_string(),
+            source_team: None,
             text: "second".to_string(),
             timestamp: "2026-02-11T10:05:00Z".to_string(),
             read: false,

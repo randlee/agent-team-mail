@@ -8,6 +8,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 #[path = "support/daemon_process_guard.rs"]
 mod daemon_process_guard;
@@ -255,7 +256,7 @@ fn test_status_and_members_preserve_registered_member_state_after_daemon_restart
     let mut daemon_restarted = DaemonProcessGuard::spawn(&temp_dir, team);
     daemon_restarted.wait_ready(&temp_dir);
 
-    let liveness_after = read_member_liveness(&temp_dir, team, member);
+    let liveness_after = wait_for_member_liveness(&temp_dir, team, member, Duration::from_secs(2));
     assert_eq!(
         liveness_after.get("members"),
         Some(&Some(true)),
@@ -266,6 +267,24 @@ fn test_status_and_members_preserve_registered_member_state_after_daemon_restart
         Some(&Some(true)),
         "status should preserve Online state after daemon restart"
     );
+}
+
+fn wait_for_member_liveness(
+    temp_dir: &TempDir,
+    team: &str,
+    member: &str,
+    timeout: Duration,
+) -> HashMap<&'static str, Option<bool>> {
+    let deadline = Instant::now() + timeout;
+    let mut latest = read_member_liveness(temp_dir, team, member);
+    while Instant::now() < deadline {
+        if latest.get("members") == Some(&Some(true)) && latest.get("status") == Some(&Some(true)) {
+            return latest;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+        latest = read_member_liveness(temp_dir, team, member);
+    }
+    latest
 }
 
 fn read_member_liveness(

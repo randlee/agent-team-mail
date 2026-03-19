@@ -12,6 +12,7 @@ use agent_team_mail_daemon::plugin::{MailService, PluginContext, PluginRegistry}
 use agent_team_mail_daemon::roster::RosterService;
 use anyhow::{Context, Result};
 use clap::Parser;
+use sc_observability_types::{MetricRecord, OtelConfig, TraceRecord};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -27,25 +28,62 @@ fn export_otel_from_entrypoint(
 fn current_otel_health_from_entrypoint(
     log_path: &std::path::Path,
 ) -> agent_team_mail_daemon::daemon::observability::OtelHealthSnapshot {
-    let health = sc_observability::current_otel_health(log_path);
-    // Intentional mirror of sc_observability::OtelHealthSnapshot — sc-observability
-    // imports are confined to entry-point main.rs per ARCH-BOUNDARY-002.
-    agent_team_mail_daemon::daemon::observability::OtelHealthSnapshot {
-        schema_version: health.schema_version,
-        enabled: health.enabled,
-        collector_endpoint: health.collector_endpoint,
-        protocol: health.protocol,
-        collector_state: health.collector_state,
-        local_mirror_state: health.local_mirror_state,
-        local_mirror_path: health.local_mirror_path,
-        debug_local_export: health.debug_local_export,
-        debug_local_state: health.debug_local_state,
-        last_error: agent_team_mail_daemon::daemon::observability::OtelLastError {
-            code: health.last_error.code,
-            message: health.last_error.message,
-            at: health.last_error.at,
+    sc_observability::current_otel_health(log_path)
+}
+
+fn export_trace_records_from_entrypoint(records: &[TraceRecord], config: &OtelConfig) {
+    let _ = sc_observability_otlp::export_traces(config, records);
+}
+
+fn export_metric_records_from_entrypoint(records: &[MetricRecord], config: &OtelConfig) {
+    let _ = sc_observability_otlp::export_metrics(config, records);
+}
+
+fn export_lifecycle_trace_from_entrypoint(
+    record: agent_team_mail_daemon::daemon::observability::LifecycleTraceRecord,
+) {
+    let attributes = record
+        .attributes
+        .into_iter()
+        .map(|(key, value)| (key, serde_json::Value::String(value)))
+        .collect();
+    let trace_record = sc_observability::TraceRecord {
+        timestamp: record.timestamp,
+        team: None,
+        agent: None,
+        runtime: None,
+        session_id: record.session_id,
+        trace_id: record.trace_id,
+        span_id: record.span_id,
+        parent_span_id: None,
+        name: record.name,
+        status: match record.status {
+            agent_team_mail_daemon::daemon::observability::LifecycleTraceStatus::Ok => {
+                sc_observability::TraceStatus::Ok
+            }
+            agent_team_mail_daemon::daemon::observability::LifecycleTraceStatus::Error => {
+                sc_observability::TraceStatus::Error
+            }
         },
-    }
+        duration_ms: 0,
+        source_binary: record.source_binary,
+        attributes,
+    };
+    // Lifecycle startup traces are emitted from the async daemon entrypoint
+    // before the normal writer task is running. Export on a dedicated OS thread
+    // so reqwest's blocking OTLP client never constructs/drops its private
+    // runtime inside the active tokio context.
+    let config = sc_observability::OtelConfig::from_env();
+    let _ = std::thread::Builder::new()
+        .name("atm-daemon-lifecycle-trace-export".to_string())
+        .spawn(move || {
+            sc_observability::export_trace_records_best_effort(&[trace_record], &config);
+        })
+        .and_then(|handle| {
+            handle
+                .join()
+                .map_err(|_| std::io::Error::other("lifecycle trace exporter thread panicked"))
+        });
 }
 
 /// ATM Daemon - Background service for agent team mail plugins
@@ -84,6 +122,9 @@ async fn main() -> Result<()> {
     // Determine home directory early for lock/log path resolution.
     let home_dir =
         agent_team_mail_core::home::get_home_dir().context("Failed to determine home directory")?;
+    daemon::observability::install_lifecycle_trace_hook(Arc::new(
+        export_lifecycle_trace_from_entrypoint,
+    ));
     let _ = daemon::startup_auth::sweep_stale_isolated_runtimes()
         .context("Failed to sweep stale isolated runtimes")?;
     let launch_token = daemon::startup_auth::validate_startup_token(&home_dir)
@@ -413,6 +454,12 @@ async fn main() -> Result<()> {
     let log_cancel = cancel_token.clone();
     daemon::observability::install_otel_export_hook(Arc::new(export_otel_from_entrypoint));
     daemon::observability::install_otel_health_hook(Arc::new(current_otel_health_from_entrypoint));
+    daemon::observability::install_trace_export_hook(Arc::new(
+        export_trace_records_from_entrypoint,
+    ));
+    daemon::observability::install_metric_export_hook(Arc::new(
+        export_metric_records_from_entrypoint,
+    ));
     tokio::spawn(run_log_writer_task(
         log_event_queue.clone(),
         log_writer_config,

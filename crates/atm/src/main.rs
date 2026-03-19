@@ -3,13 +3,14 @@
 //! A thin CLI over the `~/.claude/teams/` file-based API, providing
 //! send, read, broadcast, and inbox commands with atomic file I/O.
 
-use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::event_log::{
+    EventFields, clear_event_observer_hook, emit_event_best_effort, install_event_observer_hook,
+};
 use agent_team_mail_core::logging;
 use clap::Parser;
-use sc_observability::{
-    MetricKind, MetricRecord, OtelConfig, TraceRecord, TraceStatus,
-    export_metric_records_best_effort, export_trace_records_best_effort,
-};
+use sc_observability::LogConfig;
+use sc_observability_types::{MetricKind, MetricRecord, OtelConfig, TraceRecord, TraceStatus};
+use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -198,6 +199,23 @@ fn build_command_metric_records(
     records
 }
 
+fn install_cli_otel_event_hook() {
+    let home_dir =
+        agent_team_mail_core::home::get_home_dir().unwrap_or_else(|_| std::env::temp_dir());
+    let log_path = LogConfig::from_home_for_tool(&home_dir, "atm").log_path;
+    install_event_observer_hook(Arc::new(move |event| {
+        sc_observability::export_otel_best_effort_from_path(&log_path, event);
+    }));
+}
+
+fn export_trace_records_from_entrypoint(records: &[TraceRecord], config: &OtelConfig) {
+    let _ = sc_observability_otlp::export_traces(config, records);
+}
+
+fn export_metric_records_from_entrypoint(records: &[MetricRecord], config: &OtelConfig) {
+    let _ = sc_observability_otlp::export_metrics(config, records);
+}
+
 fn main() {
     // Enable daemon auto-start for daemon-backed ATM commands.
     // Respect explicit caller override (e.g., tests setting "0").
@@ -217,6 +235,7 @@ fn main() {
         },
     )
     .unwrap_or_else(|_| logging::init_stderr_only());
+    install_cli_otel_event_hook();
 
     let cli = Cli::parse();
     let command_name = cli.command_name().to_string();
@@ -277,7 +296,7 @@ fn main() {
             },
             ..Default::default()
         });
-        export_trace_records_best_effort(
+        export_trace_records_from_entrypoint(
             &[build_command_trace_record(
                 &command_name,
                 &request_id,
@@ -289,7 +308,7 @@ fn main() {
             )],
             &otel_config,
         );
-        export_metric_records_best_effort(
+        export_metric_records_from_entrypoint(
             &build_command_metric_records(&command_name, "error", duration_ms),
             &otel_config,
         );
@@ -326,7 +345,7 @@ fn main() {
             },
             ..Default::default()
         });
-        export_trace_records_best_effort(
+        export_trace_records_from_entrypoint(
             &[build_command_trace_record(
                 &command_name,
                 &request_id,
@@ -338,7 +357,7 @@ fn main() {
             )],
             &otel_config,
         );
-        export_metric_records_best_effort(
+        export_metric_records_from_entrypoint(
             &build_command_metric_records(&command_name, "ok", duration_ms),
             &otel_config,
         );
@@ -350,6 +369,7 @@ fn main() {
     // may kill it before it has written all pending records.  This flush is
     // synchronous and completes quickly (microseconds in practice).
     let _ = agent_team_mail_ci_monitor::flush_gh_observability_records();
+    clear_event_observer_hook();
 
     if exit_code != 0 {
         std::process::exit(exit_code);

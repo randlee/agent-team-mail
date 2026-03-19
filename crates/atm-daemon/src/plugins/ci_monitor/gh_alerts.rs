@@ -24,6 +24,7 @@ pub(crate) fn emit_ci_monitor_message(
             .join(format!("{agent}.json"));
         let message = InboxMessage {
             from: from_agent.to_string(),
+            source_team: None,
             text: text.to_string(),
             timestamp: chrono::Utc::now().to_rfc3339(),
             read: false,
@@ -72,6 +73,7 @@ pub(crate) fn emit_ci_not_started_alert(
             .join(format!("{agent}.json"));
         let message = InboxMessage {
             from: from_agent.clone(),
+            source_team: None,
             text: text.clone(),
             timestamp: chrono::Utc::now().to_rfc3339(),
             read: false,
@@ -180,6 +182,7 @@ pub(crate) fn emit_merge_conflict_alert(
             .join(format!("{agent}.json"));
         let message = InboxMessage {
             from: from_agent.clone(),
+            source_team: None,
             text: text.clone(),
             timestamp: chrono::Utc::now().to_rfc3339(),
             read: false,

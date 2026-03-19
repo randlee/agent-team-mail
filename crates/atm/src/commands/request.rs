@@ -111,6 +111,7 @@ pub fn execute(args: RequestArgs) -> Result<()> {
 
     let inbox_message = InboxMessage {
         from: from_agent.clone(),
+        source_team: None,
         text: request_text.clone(),
         timestamp: Utc::now().to_rfc3339(),
         read: false,
@@ -372,6 +373,7 @@ mod tests {
 
         let msg = InboxMessage {
             from: "responder".to_string(),
+            source_team: None,
             text: "response body".to_string(),
             timestamp: "2026-02-14T00:00:00Z".to_string(),
             read: false,
@@ -396,6 +398,7 @@ mod tests {
 
         let msg = InboxMessage {
             from: "responder".to_string(),
+            source_team: None,
             text: "response body".to_string(),
             timestamp: "2026-02-14T00:00:00Z".to_string(),
             read: false,

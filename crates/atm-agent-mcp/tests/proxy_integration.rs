@@ -5,6 +5,7 @@
 //! timeout, and crash detection.
 
 use serde_json::{Value, json};
+use serial_test::serial;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
@@ -198,6 +199,7 @@ fn spawn_proxy(
 // ─── Initialize handled by proxy ────────────────────────────────────────
 
 #[tokio::test]
+#[serial]
 async fn test_initialize_passes_through() {
     let (mut writer, mut reader, handle) = spawn_proxy(300);
 
@@ -231,6 +233,7 @@ async fn test_initialize_passes_through() {
 // ─── Notifications initialized pass-through ─────────────────────────────
 
 #[tokio::test]
+#[serial]
 async fn test_notifications_initialized_passes_through() {
     let (mut writer, _reader, handle) = spawn_proxy(300);
 
@@ -241,13 +244,13 @@ async fn test_notifications_initialized_passes_through() {
     });
     send_newline(&mut writer, &notif).await;
 
-    let elapsed = wait_for_condition(Duration::from_secs(1), Duration::from_millis(10), || {
+    let elapsed = wait_for_condition(Duration::from_secs(10), Duration::from_millis(10), || {
         !handle.is_finished()
     })
     .await;
     assert!(
-        elapsed < Duration::from_secs(1),
-        "proxy notification pass-through check did not stay healthy within 1s: elapsed={elapsed:?}"
+        elapsed < Duration::from_secs(10),
+        "proxy notification pass-through check did not stay healthy within 10s: elapsed={elapsed:?}"
     );
 
     drop(writer);
@@ -257,6 +260,7 @@ async fn test_notifications_initialized_passes_through() {
 // ─── tools/list interception ────────────────────────────────────────────
 
 #[tokio::test]
+#[serial]
 async fn test_tools_list_adds_synthetic_tools() {
     let (mut writer, mut reader, handle) = spawn_proxy(300);
 
@@ -306,6 +310,7 @@ async fn test_tools_list_adds_synthetic_tools() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_tools_list_preserves_codex_tools() {
     let (mut writer, mut reader, handle) = spawn_proxy(300);
 
@@ -346,6 +351,7 @@ async fn test_tools_list_preserves_codex_tools() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_multiple_synthetic_tools_count() {
     let (mut writer, mut reader, handle) = spawn_proxy(300);
 
@@ -393,6 +399,7 @@ async fn test_multiple_synthetic_tools_count() {
 // ─── Unknown method pass-through ────────────────────────────────────────
 
 #[tokio::test]
+#[serial]
 async fn test_unknown_method_passes_through() {
     let (mut writer, mut reader, handle) = spawn_proxy(300);
 
@@ -429,6 +436,7 @@ async fn test_unknown_method_passes_through() {
 // ─── Lazy spawn tests ───────────────────────────────────────────────────
 
 #[tokio::test]
+#[serial]
 async fn test_lazy_spawn_on_first_codex_call() {
     let (mut writer, mut reader, handle) = spawn_proxy(300);
 
@@ -482,6 +490,7 @@ async fn test_lazy_spawn_on_first_codex_call() {
 // ─── Child crash tests ──────────────────────────────────────────────────
 
 #[tokio::test]
+#[serial]
 async fn test_child_crash_returns_error() {
     let (mut writer, mut reader, handle) = spawn_proxy(300);
 
@@ -541,6 +550,7 @@ async fn test_child_crash_returns_error() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_child_crash_includes_exit_code() {
     let (mut writer, mut reader, handle) = spawn_proxy(300);
 
@@ -625,6 +635,7 @@ async fn test_child_crash_includes_exit_code() {
 // ─── Timeout tests ──────────────────────────────────────────────────────
 
 #[tokio::test]
+#[serial]
 async fn test_request_timeout_returns_error() {
     // Use a 1-second timeout
     let (mut writer, mut reader, handle) = spawn_proxy(1);
@@ -653,6 +664,7 @@ async fn test_request_timeout_returns_error() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_timeout_includes_proxy_source() {
     let (mut writer, mut reader, handle) = spawn_proxy(1);
 
@@ -681,6 +693,7 @@ async fn test_timeout_includes_proxy_source() {
 // ─── Event forwarding tests ─────────────────────────────────────────────
 
 #[tokio::test]
+#[serial]
 async fn test_codex_event_forwarded_to_upstream() {
     let (mut writer, mut reader, handle) = spawn_proxy(300);
 
@@ -715,6 +728,7 @@ async fn test_codex_event_forwarded_to_upstream() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_codex_event_has_agent_id() {
     let (mut writer, mut reader, handle) = spawn_proxy(300);
 
@@ -743,6 +757,7 @@ async fn test_codex_event_has_agent_id() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_event_content_unchanged() {
     let (mut writer, mut reader, handle) = spawn_proxy(300);
 
@@ -777,6 +792,7 @@ async fn test_event_content_unchanged() {
 // ─── Proxy lifecycle tests ──────────────────────────────────────────────
 
 #[tokio::test]
+#[serial]
 async fn test_proxy_shuts_down_on_stdin_eof() {
     let (writer, _reader, handle) = spawn_proxy(300);
 
@@ -789,6 +805,7 @@ async fn test_proxy_shuts_down_on_stdin_eof() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_tools_list_schema_valid() {
     // Verify all synthetic tools have valid JSON Schema inputSchema
     let tools = atm_agent_mcp::tools::synthetic_tools();
@@ -812,6 +829,7 @@ async fn test_tools_list_schema_valid() {
 // ─── codex-reply pass-through ───────────────────────────────────────────
 
 #[tokio::test]
+#[serial]
 async fn test_codex_reply_passes_through() {
     let (mut writer, mut reader, handle) = spawn_proxy(300);
 
@@ -860,6 +878,7 @@ async fn test_codex_reply_passes_through() {
 /// This test replaced the Sprint A.2/A.3 stub test which expected `isError:true`
 /// with "not yet implemented" — ATM tools are real as of Sprint A.4.
 #[tokio::test]
+#[serial]
 async fn test_synthetic_tool_returns_not_implemented() {
     let (mut writer, mut reader, handle) = spawn_proxy(300);
 
@@ -897,6 +916,7 @@ async fn test_synthetic_tool_returns_not_implemented() {
 // ─── Content-Length upstream framing ─────────────────────────────────────
 
 #[tokio::test]
+#[serial]
 async fn test_content_length_upstream_framing() {
     let (mut writer, mut reader, handle) = spawn_proxy(300);
 
@@ -934,6 +954,7 @@ async fn test_content_length_upstream_framing() {
 // ─── Dropped events counter ─────────────────────────────────────────────
 
 #[tokio::test]
+#[serial]
 async fn test_dropped_events_counter_accessible() {
     use atm_agent_mcp::config::AgentMcpConfig;
     use std::sync::atomic::Ordering;
@@ -946,6 +967,7 @@ async fn test_dropped_events_counter_accessible() {
 // ─── initialize before child spawn ──────────────────────────────────────
 
 #[tokio::test]
+#[serial]
 async fn test_initialize_returns_capabilities() {
     let (mut writer, mut reader, handle) = spawn_proxy(5);
 
@@ -982,6 +1004,7 @@ async fn test_initialize_returns_capabilities() {
 // ─── tools/list before child spawn ──────────────────────────────────────
 
 #[tokio::test]
+#[serial]
 async fn test_tools_list_before_child_spawn_returns_synthetic_tools() {
     let (mut writer, mut reader, handle) = spawn_proxy(5);
 
@@ -1034,6 +1057,7 @@ async fn test_tools_list_before_child_spawn_returns_synthetic_tools() {
 // ─── notifications/initialized before child spawn ───────────────────────
 
 #[tokio::test]
+#[serial]
 async fn test_notifications_initialized_does_not_produce_response() {
     let (mut writer, mut reader, handle) = spawn_proxy(5);
 

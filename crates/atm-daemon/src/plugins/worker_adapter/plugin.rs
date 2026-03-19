@@ -355,6 +355,7 @@ impl WorkerAdapterPlugin {
 
         let warn_msg = InboxMessage {
             from: "worker-adapter".to_string(),
+            source_team: None,
             text: warning_text,
             timestamp: Utc::now().to_rfc3339(),
             read: false,
@@ -578,6 +579,7 @@ impl WorkerAdapterPlugin {
         // Build response message (use member_name as sender)
         let response = InboxMessage {
             from: member_name.clone(),
+            source_team: None,
             text: captured.response_text,
             timestamp: Utc::now().to_rfc3339(),
             read: false,
@@ -786,6 +788,7 @@ impl WorkerAdapterPlugin {
             let notification_text = format!("[AGENT STATE] {} is now {}", agent, new_state);
             let msg = InboxMessage {
                 from: "daemon".to_string(),
+                source_team: None,
                 text: notification_text,
                 timestamp: Utc::now().to_rfc3339(),
                 read: false,
@@ -1524,6 +1527,7 @@ mod tests {
         let plugin = WorkerAdapterPlugin::new();
         let msg = InboxMessage {
             from: "sender".to_string(),
+            source_team: None,
             text: "Hello, agent!".to_string(),
             timestamp: "2026-02-14T00:00:00Z".to_string(),
             read: false,

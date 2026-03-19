@@ -2147,12 +2147,65 @@ fn resolve_daemon_binary() -> anyhow::Result<std::ffi::OsString> {
 }
 
 #[cfg(unix)]
+struct DaemonStartupGuards {
+    _startup_process_guard: std::sync::MutexGuard<'static, ()>,
+    _startup_lock: Option<crate::io::lock::FileLock>,
+}
+
+#[cfg(unix)]
+fn acquire_daemon_startup_guards(home: &std::path::Path) -> anyhow::Result<DaemonStartupGuards> {
+    use crate::io::InboxError;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
+
+    let startup_lock_path = daemon_start_lock_path()?;
+    if let Some(parent) = startup_lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    static STARTUP_PROCESS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let startup_process_lock = STARTUP_PROCESS_LOCK.get_or_init(|| Mutex::new(()));
+    let startup_process_guard = startup_process_lock
+        .lock()
+        .expect("daemon startup process lock poisoned");
+
+    let startup_lock = match crate::io::lock::acquire_lock(&startup_lock_path, 3) {
+        Ok(lock) => Some(lock),
+        Err(InboxError::LockTimeout { .. }) => {
+            for _ in 0..10 {
+                if daemon_socket_connectable(home) {
+                    return Ok(DaemonStartupGuards {
+                        _startup_process_guard: startup_process_guard,
+                        _startup_lock: None,
+                    });
+                }
+                std::thread::sleep(Duration::from_millis(RETRY_SLEEP_MS));
+            }
+            match crate::io::lock::acquire_lock(&startup_lock_path, 10) {
+                Ok(lock) => Some(lock),
+                Err(e) => anyhow::bail!(
+                    "timed out waiting for daemon startup lock holder to bring daemon online: {} ({e})",
+                    startup_lock_path.display()
+                ),
+            }
+        }
+        Err(e) => anyhow::bail!(
+            "failed to acquire daemon startup lock {}: {e}",
+            startup_lock_path.display()
+        ),
+    };
+
+    Ok(DaemonStartupGuards {
+        _startup_process_guard: startup_process_guard,
+        _startup_lock: startup_lock,
+    })
+}
+
+#[cfg(unix)]
 fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     use crate::event_log::emit_event_best_effort;
-    use crate::io::InboxError;
     use std::io::ErrorKind;
     use std::process::Stdio;
-    use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
     // When autostart is disabled, the daemon lifecycle is managed externally.
@@ -2177,44 +2230,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
 
     cleanup_stale_daemon_runtime_files(&home);
 
-    let startup_lock_path = daemon_start_lock_path()?;
-    if let Some(parent) = startup_lock_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    static STARTUP_PROCESS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    let startup_process_lock = STARTUP_PROCESS_LOCK.get_or_init(|| Mutex::new(()));
-    let _startup_process_guard = startup_process_lock
-        .lock()
-        .expect("daemon startup process lock poisoned");
-
-    // Serialize daemon startup across concurrent CLI processes.
-    let _startup_lock = match crate::io::lock::acquire_lock(&startup_lock_path, 3) {
-        Ok(lock) => Some(lock),
-        Err(InboxError::LockTimeout { .. }) => {
-            // Another process likely holds the startup lock and is spawning the daemon.
-            // Wait briefly for that startup attempt to converge.
-            for _ in 0..10 {
-                if daemon_socket_connectable(&home) {
-                    return Ok(());
-                }
-                std::thread::sleep(Duration::from_millis(RETRY_SLEEP_MS));
-            }
-            // Startup did not converge yet. Re-attempt lock acquisition so any
-            // fallback spawn still occurs under lock (single-daemon invariant).
-            match crate::io::lock::acquire_lock(&startup_lock_path, 10) {
-                Ok(lock) => Some(lock),
-                Err(e) => anyhow::bail!(
-                    "timed out waiting for daemon startup lock holder to bring daemon online: {} ({e})",
-                    startup_lock_path.display()
-                ),
-            }
-        }
-        Err(e) => anyhow::bail!(
-            "failed to acquire daemon startup lock {}: {e}",
-            startup_lock_path.display()
-        ),
-    };
+    let _startup_guards = acquire_daemon_startup_guards(&home)?;
 
     let socket_connectable = daemon_socket_connectable(&home);
     if daemon_is_running() || socket_connectable {
@@ -3287,122 +3303,50 @@ sleep 10
     #[test]
     #[serial]
     fn test_ensure_daemon_running_serializes_concurrent_start() {
-        use std::fs;
-        use std::os::unix::fs::PermissionsExt;
-        use std::sync::Arc;
+        use std::sync::mpsc;
         use std::thread;
 
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().to_path_buf();
-        let script_path = home.join("fake-daemon.sh");
-
-        let script = format!(
-            r#"#!/bin/sh
-set -eu
-home="${{ATM_HOME:?}}"
-mkdir -p "$home/.atm/daemon"
-mkdir -p "$home/spawn-markers"
-touch "$home/spawn-markers/spawn.$$"
-echo $$ > "$home/.atm/daemon/atm-daemon.pid"
-cat > "$home/.atm/daemon/status.json" <<'EOF'
-{{"pid":$$,"version":"{}"}}
-EOF
-cat > "$home/.atm/daemon/daemon.lock.meta.json" <<'EOF'
-{{
-  "pid": $$,
-  "owner": {{
-    "runtime_kind": "isolated",
-    "build_profile": "release",
-    "executable_path": "{}",
-    "home_scope": "{}"
-  }},
-  "version": "{}",
-  "written_at": "2026-03-16T00:00:00Z"
-}}
-EOF
-python3 - "$home/.atm/daemon/atm-daemon.sock" "$home/stop-daemon" <<'PY' &
-import os, socket, sys, time
-sock_path=sys.argv[1]
-stop_path=sys.argv[2]
-try:
-    os.unlink(sock_path)
-except FileNotFoundError:
-    pass
-srv=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-srv.bind(sock_path)
-srv.listen(1)
-srv.settimeout(0.1)
-try:
-    while not os.path.exists(stop_path):
-        try:
-            conn, _ = srv.accept()
-        except socket.timeout:
-            continue
-        else:
-            conn.close()
-finally:
-    srv.close()
-    try:
-        os.unlink(sock_path)
-    except FileNotFoundError:
-        pass
-PY
-server_pid=$!
-cleanup() {{
-  kill "$server_pid" 2>/dev/null || true
-  wait "$server_pid" 2>/dev/null || true
-}}
-term_cleanup() {{
-  cleanup
-  exit 0
-}}
-trap cleanup EXIT
-trap term_cleanup INT TERM
-while [ ! -f "$home/stop-daemon" ]; do
-  sleep 0.1
-done
-"#,
-            env!("CARGO_PKG_VERSION"),
-            script_path.display(),
-            home.display(),
-            env!("CARGO_PKG_VERSION"),
-        );
-        fs::write(&script_path, script).unwrap();
-        let mut perms = fs::metadata(&script_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&script_path, perms).unwrap();
-
         let _home_guard = EnvGuard::set("ATM_HOME", home.to_str().unwrap());
-        let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", script_path.to_str().unwrap());
-        let _auto_guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "1");
+        let (first_acquired_tx, first_acquired_rx) = mpsc::channel();
+        let (release_first_tx, release_first_rx) = mpsc::channel();
+        let (second_acquired_tx, second_acquired_rx) = mpsc::channel();
 
-        let mut handles = Vec::new();
-        let barrier = Arc::new(std::sync::Barrier::new(2));
-        for _ in 0..2 {
-            let b = Arc::clone(&barrier);
-            handles.push(thread::spawn(move || {
-                b.wait();
-                ensure_daemon_running_unix().unwrap();
-            }));
-        }
-        for h in handles {
-            h.join().unwrap();
-        }
+        let first_home = home.clone();
+        let first = thread::spawn(move || {
+            let guards = acquire_daemon_startup_guards(&first_home).expect("first startup guards");
+            first_acquired_tx.send(()).unwrap();
+            release_first_rx.recv().unwrap();
+            drop(guards);
+        });
 
-        let current_pid = fs::read_to_string(home.join(".atm/daemon/atm-daemon.pid"))
-            .ok()
-            .and_then(|raw| raw.trim().parse::<i32>().ok());
-        let socket_ready = super::daemon_socket_connectable(&home);
-        fs::write(home.join("stop-daemon"), "stop").unwrap();
-        assert_eq!(
-            current_pid.map(pid_alive),
-            Some(true),
-            "concurrent startup attempts must converge to a live daemon pid"
-        );
+        first_acquired_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first thread should acquire startup guards");
+
+        let second_home = home.clone();
+        let second = thread::spawn(move || {
+            let guards =
+                acquire_daemon_startup_guards(&second_home).expect("second startup guards");
+            second_acquired_tx.send(()).unwrap();
+            drop(guards);
+        });
+
         assert!(
-            socket_ready,
-            "concurrent startup attempts must converge to a connectable daemon socket"
+            second_acquired_rx
+                .recv_timeout(Duration::from_millis(250))
+                .is_err(),
+            "second startup attempt must stay blocked while first holds startup guards"
         );
+
+        release_first_tx.send(()).unwrap();
+
+        second_acquired_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("second thread should acquire startup guards after release");
+        first.join().unwrap();
+        second.join().unwrap();
     }
 
     #[cfg(unix)]

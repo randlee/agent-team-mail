@@ -312,6 +312,7 @@ fn send_shutdown_request(
     });
     let msg = InboxMessage {
         from: "atm".to_string(),
+        source_team: None,
         text: payload.to_string(),
         timestamp: Utc::now().to_rfc3339(),
         read: false,
