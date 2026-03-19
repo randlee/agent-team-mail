@@ -803,16 +803,19 @@ mod tests {
     #[serial]
     fn non_isolated_tokens_may_omit_lease_fields() {
         clear_seen_tokens_for_tests();
-        let temp = agent_team_mail_core::home::get_os_home_dir().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _home_guard = EnvGuard::set_path("HOME", temp.path());
+        #[cfg(windows)]
+        let _userprofile_guard = EnvGuard::set_path("USERPROFILE", temp.path());
         let token = issue_launch_token(
             LaunchClass::ProdShared,
-            &temp,
+            temp.path(),
             "test-binary",
             "startup-auth-test",
             Duration::from_secs(30),
         );
         let raw = encode_launch_token(&token).unwrap();
-        let accepted = validate_token_inner(&temp, Some(&raw)).unwrap();
+        let accepted = validate_token_inner(temp.path(), Some(&raw)).unwrap();
         assert_eq!(accepted.launch_class, LaunchClass::ProdShared);
     }
 
