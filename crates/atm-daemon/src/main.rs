@@ -69,10 +69,21 @@ fn export_lifecycle_trace_from_entrypoint(
         source_binary: record.source_binary,
         attributes,
     };
-    sc_observability::export_trace_records_best_effort(
-        &[trace_record],
-        &sc_observability::OtelConfig::from_env(),
-    );
+    // Lifecycle startup traces are emitted from the async daemon entrypoint
+    // before the normal writer task is running. Export on a dedicated OS thread
+    // so reqwest's blocking OTLP client never constructs/drops its private
+    // runtime inside the active tokio context.
+    let config = sc_observability::OtelConfig::from_env();
+    let _ = std::thread::Builder::new()
+        .name("atm-daemon-lifecycle-trace-export".to_string())
+        .spawn(move || {
+            sc_observability::export_trace_records_best_effort(&[trace_record], &config);
+        })
+        .and_then(|handle| {
+            handle
+                .join()
+                .map_err(|_| std::io::Error::other("lifecycle trace exporter thread panicked"))
+        });
 }
 
 /// ATM Daemon - Background service for agent team mail plugins
@@ -111,6 +122,9 @@ async fn main() -> Result<()> {
     // Determine home directory early for lock/log path resolution.
     let home_dir =
         agent_team_mail_core::home::get_home_dir().context("Failed to determine home directory")?;
+    daemon::observability::install_lifecycle_trace_hook(Arc::new(
+        export_lifecycle_trace_from_entrypoint,
+    ));
     let _ = daemon::startup_auth::sweep_stale_isolated_runtimes()
         .context("Failed to sweep stale isolated runtimes")?;
     let launch_token = daemon::startup_auth::validate_startup_token(&home_dir)
@@ -445,9 +459,6 @@ async fn main() -> Result<()> {
     ));
     daemon::observability::install_metric_export_hook(Arc::new(
         export_metric_records_from_entrypoint,
-    ));
-    daemon::observability::install_lifecycle_trace_hook(Arc::new(
-        export_lifecycle_trace_from_entrypoint,
     ));
     tokio::spawn(run_log_writer_task(
         log_event_queue.clone(),
