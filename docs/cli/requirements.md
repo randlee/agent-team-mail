@@ -40,12 +40,17 @@ daemon-spawn, and plugin-specific subsystem contracts.
 - If the plugin is present but not enabled, only bootstrap/management commands
   may appear.
 - If the plugin is present and enabled, the full namespace may appear.
+- Plugin root/status UX must surface the effective namespace state explicitly.
 
 For the GitHub monitor stack specifically:
 
 - the gh plugin/provider layer owns GitHub command semantics
 - the CLI may route `atm gh ...` but must not directly depend on daemon plugin
   implementation modules to do so
+- the CLI-advertised namespace states are:
+  - `absent`
+  - `present_disabled`
+  - `present_enabled`
 
 ### 2.3 CLI Boundary Rules
 
@@ -136,32 +141,21 @@ For the GitHub monitor stack specifically:
 
 ## 5. Current Boundary Findings Driving Phase BA
 
-The current codebase still contains CLI/plugin coupling that Phase BA must
-remove:
+Phase AT closed the GitHub-behavior boundary (raw `gh` execution ownership).
+Phase BA addresses the remaining CLI boundary gap.
 
-- `crates/atm/Cargo.toml` has non-dev dependencies on
-  `agent-team-mail-ci-monitor`, `agent-team-mail-daemon`, and
-  `agent-team-mail-daemon-launch`
-- `crates/atm/src/commands/gh.rs` imports
-  `agent_team_mail_daemon::plugins::ci_monitor::*`
-- `crates/atm/src/commands/doctor.rs` imports a direct
-  `agent_team_mail_ci_monitor` helper block for GH observer/ledger functions:
-  `GhCliObserverContext`, `RateLimitUpdate`, `emit_gh_info_denied`,
-  `emit_gh_info_live_refresh`, `emit_gh_info_requested`,
-  `emit_gh_info_served_from_cache`, `gh_repo_state_cache_age_secs`,
-  `new_gh_execution_call_id`, `new_gh_info_request_id`, `read_gh_repo_state`,
-  `update_gh_repo_state_rate_limit`
-- `crates/atm/src/commands/doctor.rs` imports the daemon-plugin-owned helper
-  `run_attributed_gh_command_with_ids`
-- `crates/atm/src/main.rs` directly calls
-  `agent_team_mail_ci_monitor::flush_gh_observability_records()` during CLI
-  teardown
-- Phase AT closed the GitHub-behavior boundary (raw `gh` execution ownership)
-  but did not remove these CLI-to-plugin implementation couplings. BA therefore
-  addresses a post-AT boundary gap, not a reopening of AT’s completed raw-`gh`
-  elimination scope.
+- BA.3 removed direct non-dev CLI dependencies on
+  `agent-team-mail-daemon` and `agent-team-mail-ci-monitor`.
+- BA.3 removed direct CLI imports of daemon plugin implementation helpers and
+  moved the GH contract plus teardown hook behind `atm-core::gh_command`.
+- BA.4 must keep that cleanup enforced so the CLI cannot regress back to daemon
+  plugin implementation imports or forbidden manifest dependencies.
+- `agent-team-mail-daemon-launch` remains a permitted CLI dependency for
+  canonical launcher lifecycle ownership. Its allowed status must stay explicit
+  in docs and manifest comments rather than becoming an implicit exception.
 
-These are boundary violations against the target command-ownership model above.
+These are enforcement requirements against the target command-ownership model
+above.
 
 ## 6. Phase BA Implementation Targets
 
@@ -174,11 +168,10 @@ These are boundary violations against the target command-ownership model above.
   - `gh` namespace command request/response contracts
   - any permitted CLI teardown lifecycle hook such as ledger flush
 - BA.4: CLI boundary enforcement + plugin availability UX, with:
-  - primary enforcement by demoting `agent-team-mail-daemon` and
-    `agent-team-mail-ci-monitor` from non-dev `crates/atm/Cargo.toml`
-    dependencies once BA.3 lands
+  - primary enforcement by keeping `agent-team-mail-daemon` and
+    `agent-team-mail-ci-monitor` absent from non-dev `crates/atm/Cargo.toml`
   - secondary CI grep/lint forbidding new CLI imports from daemon plugin
     implementation modules
-  - explicit treatment of `agent-team-mail-daemon-launch` as either a permitted
-    CLI lifecycle dependency or a follow-on removal target; BA may not leave its
+  - explicit treatment of `agent-team-mail-daemon-launch` as a permitted CLI
+    lifecycle dependency for canonical launcher ownership; BA may not leave its
     status implicit

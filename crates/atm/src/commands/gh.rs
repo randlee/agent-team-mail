@@ -267,6 +267,7 @@ struct GhNamespaceStatus {
     config_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     config_path: Option<String>,
+    namespace_state: &'static str,
     lifecycle_state: String,
     availability_state: String,
     in_flight: u64,
@@ -298,6 +299,23 @@ struct GhNamespaceStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     owner_poll_interval_secs: Option<u64>,
     actions: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GhNamespaceState {
+    Absent,
+    PresentDisabled,
+    PresentEnabled,
+}
+
+impl GhNamespaceState {
+    fn as_str(self) -> &'static str {
+        match self {
+            GhNamespaceState::Absent => "absent",
+            GhNamespaceState::PresentDisabled => "present_disabled",
+            GhNamespaceState::PresentEnabled => "present_enabled",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1277,6 +1295,7 @@ fn print_namespace_status(health: &GhMonitorHealth, json: bool) -> Result<()> {
     println!("Team:              {}", status.team);
     println!("Configured:        {}", yes_no(status.configured));
     println!("Enabled:           {}", yes_no(status.enabled));
+    println!("Namespace State:   {}", status.namespace_state);
     if let Some(source) = status.config_source.as_deref() {
         println!("Config Source:     {source}");
     }
@@ -1331,12 +1350,14 @@ fn print_namespace_status(health: &GhMonitorHealth, json: bool) -> Result<()> {
 }
 
 fn namespace_status_view(health: &GhMonitorHealth) -> GhNamespaceStatus {
+    let namespace_state = namespace_state_for_health(health);
     GhNamespaceStatus {
         team: health.team.clone(),
         configured: health.configured,
         enabled: health.enabled,
         config_source: health.config_source.clone(),
         config_path: health.config_path.clone(),
+        namespace_state: namespace_state.as_str(),
         lifecycle_state: health.lifecycle_state.clone(),
         availability_state: health.availability_state.clone(),
         in_flight: health.in_flight,
@@ -1354,13 +1375,30 @@ fn namespace_status_view(health: &GhMonitorHealth) -> GhNamespaceStatus {
         owner_atm_home: health.owner_atm_home.clone(),
         owner_repo: health.owner_repo.clone(),
         owner_poll_interval_secs: health.owner_poll_interval_secs,
-        actions: namespace_actions(health.enabled && health.configured),
+        actions: namespace_actions(namespace_state),
     }
 }
 
-fn namespace_actions(enabled: bool) -> Vec<&'static str> {
-    if enabled {
-        vec![
+fn namespace_state_for_health(health: &GhMonitorHealth) -> GhNamespaceState {
+    if !health.configured {
+        GhNamespaceState::Absent
+    } else if health.enabled && health.availability_state != "disabled_config_error" {
+        GhNamespaceState::PresentEnabled
+    } else {
+        GhNamespaceState::PresentDisabled
+    }
+}
+
+fn namespace_actions(state: GhNamespaceState) -> Vec<&'static str> {
+    match state {
+        GhNamespaceState::Absent => vec!["atm gh init"],
+        GhNamespaceState::PresentDisabled => vec![
+            "atm gh",
+            "atm gh init",
+            "atm gh status",
+            "atm gh monitor status",
+        ],
+        GhNamespaceState::PresentEnabled => vec![
             "atm gh",
             "atm gh status",
             "atm gh status <pr|workflow|run> <target>",
@@ -1372,9 +1410,7 @@ fn namespace_actions(enabled: bool) -> Vec<&'static str> {
             "atm gh pr init-report [--output <path>]",
             "atm gh monitor start|stop|restart|status",
             "atm gh init",
-        ]
-    } else {
-        vec!["atm gh", "atm gh init"]
+        ],
     }
 }
 

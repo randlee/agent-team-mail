@@ -18,6 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 agent-team-mail-core.workspace = true
+# BA.4 classification: permitted CLI dependency for canonical launcher lifecycle ownership.
 agent-team-mail-daemon-launch.workspace = true
 sc-composer.workspace = true
 sc-observability.workspace = true

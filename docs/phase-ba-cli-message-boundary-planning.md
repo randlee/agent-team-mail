@@ -32,21 +32,21 @@ Current dogfood issues fall into two linked groups:
 
 ### CLI boundary problems
 
-- `crates/atm/Cargo.toml` depends directly on `agent-team-mail-daemon` and
-  `agent-team-mail-ci-monitor`
-- `crates/atm/src/commands/gh.rs` imports daemon plugin implementation helpers
-- `crates/atm/src/commands/doctor.rs` imports both:
+- before BA.3, `crates/atm/Cargo.toml` depended directly on
+  `agent-team-mail-daemon` and `agent-team-mail-ci-monitor`
+- before BA.3, `crates/atm/src/commands/gh.rs` imported daemon plugin
+  implementation helpers
+- before BA.3, `crates/atm/src/commands/doctor.rs` imported both:
   - a direct `agent_team_mail_ci_monitor` helper block for GH observer/ledger
     state
   - a plugin-owned GitHub execution helper from
     `agent_team_mail_daemon::plugins::ci_monitor`
-- `crates/atm/src/main.rs` directly calls
+- before BA.3, `crates/atm/src/main.rs` directly called
   `agent_team_mail_ci_monitor::flush_gh_observability_records()`
 - plugin command ownership is blurred: the CLI effectively implements plugin
   behavior instead of routing through plugin capability contracts
-- `agent-team-mail-daemon-launch` is also a current CLI dependency and must be
-  classified explicitly during BA.3/BA.4 rather than left as an implicit
-  exception
+- `agent-team-mail-daemon-launch` remains a current CLI dependency and must be
+  classified explicitly during BA.4 rather than left as an implicit exception
 
 ### Scope clarification vs Phase AT
 
@@ -168,6 +168,8 @@ BA.4.
 - direct CLI dependency on plugin implementation crates is removed or reduced to
   neutral contract crates only
 - `atm gh` no longer depends on daemon plugin implementation helpers
+- `crates/atm/Cargo.toml` no longer depends on `agent-team-mail-daemon` or
+  `agent-team-mail-ci-monitor`
 
 ## BA.4 — Boundary Enforcement + Plugin Availability UX
 
@@ -177,12 +179,11 @@ BA.4.
 - absent / present-disabled / present-enabled UX rules for plugin commands
 - primary boundary gate: demote `agent-team-mail-daemon` and
   `agent-team-mail-ci-monitor` from non-dev dependencies in `crates/atm/Cargo.toml`
-  after BA.3 lands
+  must remain in force after BA.3 lands
 - secondary CI/lint gate that forbids new CLI imports from daemon plugin modules
 - docs/tests for plugin command availability and boundary enforcement
-- explicit classification of `agent-team-mail-daemon-launch` as either:
-  - permitted CLI dependency for canonical launcher lifecycle ownership
-  - or follow-on removal target
+- explicit classification of `agent-team-mail-daemon-launch` as a permitted CLI
+  dependency for canonical launcher lifecycle ownership
 
 **Acceptance**:
 
