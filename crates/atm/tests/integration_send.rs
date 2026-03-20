@@ -281,6 +281,116 @@ fn start_fake_unknown_register_hint_daemon(home: &Path) -> Child {
 }
 
 #[cfg(unix)]
+fn write_fake_request_logging_daemon_script(home: &Path) -> PathBuf {
+    let script = home.join("fake-request-logging-daemon.py");
+    let body = r#"#!/usr/bin/env python3
+import json
+import os
+import signal
+import socket
+from pathlib import Path
+
+home = Path(os.environ["ATM_HOME"])
+daemon_dir = home / ".atm" / "daemon"
+daemon_dir.mkdir(parents=True, exist_ok=True)
+
+sock_path = daemon_dir / "atm-daemon.sock"
+pid_path = daemon_dir / "atm-daemon.pid"
+log_path = daemon_dir / "requests.jsonl"
+if sock_path.exists():
+    sock_path.unlink()
+pid_path.write_text(str(os.getpid()))
+
+running = True
+def _stop(_signum, _frame):
+    global running
+    running = False
+
+signal.signal(signal.SIGTERM, _stop)
+signal.signal(signal.SIGINT, _stop)
+
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(str(sock_path))
+srv.listen(16)
+srv.settimeout(0.2)
+
+while running:
+    try:
+        conn, _ = srv.accept()
+    except TimeoutError:
+        continue
+    except OSError:
+        break
+    with conn:
+        data = b""
+        while b"\n" not in data:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        try:
+            req = json.loads(data.decode().strip() or "{}")
+        except Exception:
+            req = {}
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(req) + "\n")
+
+        request_id = req.get("request_id", "req")
+        command = req.get("command", "")
+        payload = req.get("payload", {}) or {}
+        if command in ("session-query-team", "session-for-team"):
+            response_payload = {
+                "session_id": "live-session",
+                "process_id": os.getpid(),
+                "alive": True,
+                "runtime": "codex",
+                "agent": payload.get("name", "unknown"),
+                "team": payload.get("team", "unknown"),
+            }
+        elif command == "agent-state":
+            response_payload = {
+                "state": "idle",
+                "last_transition": "2026-02-11T10:00:00Z",
+            }
+        else:
+            response_payload = {}
+
+        resp = {
+            "version": 1,
+            "request_id": request_id,
+            "status": "ok",
+            "payload": response_payload,
+        }
+        conn.sendall((json.dumps(resp) + "\n").encode())
+
+try:
+    srv.close()
+finally:
+    try:
+        sock_path.unlink()
+    except FileNotFoundError:
+        pass
+    try:
+        pid_path.unlink()
+    except FileNotFoundError:
+        pass
+"#;
+    fs::write(&script, body).unwrap();
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).unwrap();
+    script
+}
+
+#[cfg(unix)]
+fn start_fake_request_logging_daemon(home: &Path) -> (Child, PathBuf) {
+    let script = write_fake_request_logging_daemon_script(home);
+    let child = spawn_python_script(&script, home);
+    wait_for_daemon_socket(home);
+    (child, home.join(".atm/daemon/requests.jsonl"))
+}
+
+#[cfg(unix)]
 fn start_fake_claude_process(home: &Path) -> Child {
     let sleep_bin = Path::new("/bin/sleep");
     assert!(
@@ -1066,4 +1176,50 @@ fn test_send_warns_and_continues_when_register_hint_is_unsupported() {
     let _ = daemon.wait();
     let _ = fake_claude.kill();
     let _ = fake_claude.wait();
+}
+
+#[cfg(unix)]
+#[test]
+fn test_send_emits_post_send_idle_without_subscribe_side_effect() {
+    let temp_dir = TempDir::new().unwrap();
+    let _team_dir = setup_test_team(&temp_dir, "test-team");
+    let (mut daemon, request_log) = start_fake_request_logging_daemon(temp_dir.path());
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .env("ATM_RUNTIME", "codex")
+        .env("ATM_SESSION_ID", "codex-session-123")
+        .arg("send")
+        .arg("test-agent")
+        .arg("codex should return to idle")
+        .assert()
+        .success();
+
+    let requests: Vec<serde_json::Value> = fs::read_to_string(&request_log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+
+    let commands: Vec<&str> = requests
+        .iter()
+        .filter_map(|request| request["command"].as_str())
+        .collect();
+    assert!(
+        !commands.contains(&"subscribe"),
+        "send must not auto-subscribe sender to idle events; commands={commands:?}"
+    );
+    let hook_event = requests
+        .iter()
+        .find(|request| request["command"] == "hook-event")
+        .expect("post-send idle hook-event should be emitted");
+    assert_eq!(hook_event["payload"]["event"], "teammate_idle");
+    assert_eq!(hook_event["payload"]["agent"], "team-lead");
+    assert_eq!(hook_event["payload"]["team"], "test-team");
+    assert_eq!(hook_event["payload"]["session_id"], "codex-session-123");
+    assert_eq!(hook_event["payload"]["source"]["kind"], "agent_hook");
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
 }

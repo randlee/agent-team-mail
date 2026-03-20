@@ -1067,3 +1067,118 @@ fn test_read_does_not_mark_other_agents_messages() {
         "arch-ctm message must NOT be marked as read when team-lead runs `atm read arch-ctm`"
     );
 }
+
+#[test]
+fn test_inbox_clear_dry_run_defaults_to_idle_notifications_only() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = setup_test_team(&temp_dir, "test-team");
+
+    let messages = vec![
+        serde_json::json!({
+            "from": "daemon",
+            "text": "[AGENT STATE] arch-ctm is now idle",
+            "timestamp": "2026-02-11T10:00:00Z",
+            "read": false,
+            "summary": "Agent arch-ctm → idle",
+            "message_id": "idle-001",
+            "type": "idle_notification",
+            "idleSender": "arch-ctm"
+        }),
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "regular task",
+            "timestamp": "2026-02-11T11:00:00Z",
+            "read": true,
+            "message_id": "msg-002",
+            "acknowledgedAt": "2026-02-11T11:05:00Z"
+        }),
+    ];
+    create_test_inbox(&team_dir, "test-agent", messages);
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    let assert = cmd
+        .env("ATM_TEAM", "test-team")
+        .arg("inbox")
+        .arg("clear")
+        .arg("test-agent")
+        .arg("--dry-run")
+        .arg("--json")
+        .assert()
+        .success();
+
+    let output: serde_json::Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("json output");
+    assert_eq!(output["removed_total"], 1);
+    assert_eq!(output["removed_idle_notifications"], 1);
+    assert_eq!(output["removed_acked_messages"], 0);
+    assert_eq!(output["remaining_total"], 1);
+
+    let inbox_path = team_dir.join("inboxes/test-agent.json");
+    let content = fs::read_to_string(&inbox_path).unwrap();
+    let persisted: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
+    assert_eq!(persisted.len(), 2, "dry-run must not mutate the inbox");
+}
+
+#[test]
+fn test_inbox_clear_removes_idle_acked_and_old_messages() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = setup_test_team(&temp_dir, "test-team");
+
+    let messages = vec![
+        serde_json::json!({
+            "from": "daemon",
+            "text": "[AGENT STATE] arch-ctm is now idle",
+            "timestamp": "2026-02-11T10:00:00Z",
+            "read": false,
+            "summary": "Agent arch-ctm → idle",
+            "message_id": "idle-001",
+            "type": "idle_notification",
+            "idleSender": "arch-ctm"
+        }),
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "old acknowledged task",
+            "timestamp": "2025-01-01T10:00:00Z",
+            "read": true,
+            "message_id": "msg-acked-old",
+            "acknowledgedAt": "2025-01-01T10:05:00Z"
+        }),
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "still relevant",
+            "timestamp": "2026-03-15T12:00:00Z",
+            "read": false,
+            "message_id": "msg-keep"
+        }),
+    ];
+    create_test_inbox(&team_dir, "test-agent", messages);
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    let assert = cmd
+        .env("ATM_TEAM", "test-team")
+        .arg("inbox")
+        .arg("clear")
+        .arg("test-agent")
+        .arg("--acked")
+        .arg("--older-than")
+        .arg("30d")
+        .arg("--json")
+        .assert()
+        .success();
+
+    let output: serde_json::Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("json output");
+    assert_eq!(output["removed_total"], 2);
+    assert_eq!(output["removed_idle_notifications"], 1);
+    assert_eq!(output["removed_acked_messages"], 1);
+    assert_eq!(output["removed_older_than"], 2);
+    assert_eq!(output["remaining_total"], 1);
+
+    let inbox_path = team_dir.join("inboxes/test-agent.json");
+    let persisted: Vec<serde_json::Value> =
+        serde_json::from_str(&fs::read_to_string(&inbox_path).unwrap()).unwrap();
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0]["message_id"], "msg-keep");
+}

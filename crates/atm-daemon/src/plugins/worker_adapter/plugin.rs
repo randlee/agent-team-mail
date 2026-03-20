@@ -19,7 +19,7 @@ use crate::plugins::consts::{
 };
 use agent_team_mail_core::daemon_client::{LaunchConfig, LaunchResult};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
-use agent_team_mail_core::io::inbox::inbox_append;
+use agent_team_mail_core::io::inbox::{inbox_append, inbox_update};
 use agent_team_mail_core::schema::InboxMessage;
 use chrono::Utc;
 use std::collections::HashMap;
@@ -786,7 +786,7 @@ impl WorkerAdapterPlugin {
 
         for subscriber in &subscribers {
             let notification_text = format!("[AGENT STATE] {} is now {}", agent, new_state);
-            let msg = InboxMessage {
+            let mut msg = InboxMessage {
                 from: "daemon".to_string(),
                 source_team: None,
                 text: notification_text,
@@ -796,8 +796,22 @@ impl WorkerAdapterPlugin {
                 message_id: Some(Uuid::new_v4().to_string()),
                 unknown_fields: HashMap::new(),
             };
+            if new_state == "idle" {
+                msg.mark_idle_notification(agent.to_string());
+            }
             let inbox_path = self.agent_inbox_path(ctx, team_name, subscriber);
-            if let Err(e) = inbox_append(&inbox_path, &msg, team_name, subscriber) {
+            let write_result = if msg.is_idle_notification() {
+                inbox_update(&inbox_path, team_name, subscriber, |messages| {
+                    messages.retain(|existing| {
+                        !(existing.is_idle_notification()
+                            && existing.idle_notification_sender() == Some(agent))
+                    });
+                    messages.push(msg.clone());
+                })
+            } else {
+                inbox_append(&inbox_path, &msg, team_name, subscriber).map(|_| ())
+            };
+            if let Err(e) = write_result {
                 warn!("Failed to deliver pubsub notification to {subscriber}: {e}");
             } else {
                 debug!("Delivered pubsub notification to {subscriber}: {agent} → {new_state}");
@@ -1420,11 +1434,36 @@ mod tests {
     use super::super::mock_backend::{MockCall, MockTmuxBackend};
     use super::*;
     use crate::daemon::session_registry::new_session_registry;
+    use crate::plugin::{MailService, PluginContext};
+    use crate::roster::RosterService;
+    use agent_team_mail_core::config::Config;
+    use agent_team_mail_core::context::{Platform, SystemContext};
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     /// Helper to create a plugin that has a backend but no launch receiver.
     fn make_plugin_without_backend() -> WorkerAdapterPlugin {
         WorkerAdapterPlugin::new()
+    }
+
+    fn make_test_context(root: &std::path::Path) -> PluginContext {
+        let claude_root = root.join(".claude");
+        std::fs::create_dir_all(claude_root.join("teams/atm-dev/inboxes")).unwrap();
+        let system = SystemContext::new(
+            "test-host".to_string(),
+            Platform::Linux,
+            claude_root,
+            "0.1.0".to_string(),
+            "atm-dev".to_string(),
+        );
+        let mut config = Config::default();
+        config.core.default_team = "atm-dev".to_string();
+        PluginContext::new(
+            Arc::new(system),
+            Arc::new(MailService::new(root.to_path_buf())),
+            Arc::new(config),
+            Arc::new(RosterService::new(root.to_path_buf())),
+        )
     }
 
     #[tokio::test]
@@ -1447,6 +1486,36 @@ mod tests {
             msg.contains("backend"),
             "Expected error about backend: {msg}"
         );
+    }
+
+    #[test]
+    fn test_idle_pubsub_notifications_replace_prior_idle_for_same_sender() {
+        let temp = TempDir::new().unwrap();
+        let mut plugin = WorkerAdapterPlugin::new();
+        plugin.ctx = Some(make_test_context(temp.path()));
+        plugin
+            .pubsub
+            .lock()
+            .unwrap()
+            .subscribe("team-lead", "arch-ctm", vec!["idle".to_string()])
+            .unwrap();
+
+        plugin.deliver_pubsub_notifications("arch-ctm", "idle");
+        plugin.deliver_pubsub_notifications("arch-ctm", "idle");
+
+        let inbox_path = temp
+            .path()
+            .join(".claude/teams/atm-dev/inboxes/team-lead.json");
+        let messages: Vec<InboxMessage> =
+            serde_json::from_str(&std::fs::read_to_string(&inbox_path).unwrap()).unwrap();
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "duplicate idle notifications must collapse"
+        );
+        assert!(messages[0].is_idle_notification());
+        assert_eq!(messages[0].idle_notification_sender(), Some("arch-ctm"));
     }
 
     #[tokio::test]
