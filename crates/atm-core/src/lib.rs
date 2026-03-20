@@ -15,6 +15,7 @@ pub mod control;
 pub mod daemon_client;
 pub mod daemon_stream;
 pub mod event_log;
+pub mod gh_command;
 pub mod home;
 pub mod io;
 pub mod log_reader;

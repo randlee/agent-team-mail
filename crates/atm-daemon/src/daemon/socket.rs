@@ -2790,10 +2790,17 @@ fn parse_and_dispatch(
             SOCKET_ERROR_INTERNAL_ERROR,
             "stream-event command should have been handled by the async path",
         ),
-        // gh-monitor family commands are handled asynchronously before
+        // gh namespace commands are handled asynchronously before
         // parse_and_dispatch is called. If one reaches this sync path, return a
         // clear internal error from the router boundary.
-        "gh-monitor" | "gh-status" | "gh-monitor-control" | "gh-monitor-health" => {
+        "gh-monitor"
+        | "gh-status"
+        | "gh-monitor-control"
+        | "gh-monitor-health"
+        | "gh-pr-list"
+        | "gh-pr-report"
+        | "gh-cli-prereqs"
+        | "gh-rate-limit-audit" => {
             gh_monitor_router::async_dispatch_error(&request.request_id, request.command.as_str())
                 .expect("gh-monitor async-dispatch error should exist for known commands")
         }
@@ -4114,8 +4121,10 @@ mod tests {
     use agent_team_mail_core::control::{CONTROL_SCHEMA_VERSION, ControlAction, ControlRequest};
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
     use serial_test::serial;
+    use std::process::{Child, Command};
     use std::time::Duration;
     use tempfile::TempDir;
+    use tracing_test::traced_test;
 
     fn make_store() -> SharedStateStore {
         std::sync::Arc::new(std::sync::Mutex::new(AgentStateTracker::new()))
@@ -4151,33 +4160,26 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Default)]
-    struct SharedLogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    struct LiveMismatchProcess(Child);
 
-    impl SharedLogCapture {
-        fn contents(&self) -> String {
-            String::from_utf8(self.0.lock().unwrap().clone()).unwrap_or_default()
+    impl LiveMismatchProcess {
+        fn spawn() -> Self {
+            let child = Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn live mismatch helper process");
+            Self(child)
+        }
+
+        fn pid(&self) -> u32 {
+            self.0.id()
         }
     }
 
-    struct SharedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for SharedLogWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for SharedLogCapture {
-        type Writer = SharedLogWriter;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            SharedLogWriter(self.0.clone())
+    impl Drop for LiveMismatchProcess {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
         }
     }
 
@@ -5253,6 +5255,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[traced_test]
     #[test]
     #[serial]
     fn test_handle_register_hint_rejects_codex_backend_pid_mismatch_with_warn_log() {
@@ -5260,15 +5263,7 @@ mod tests {
         set_member_backend(fixture._temp.path(), "atm-dev", "arch-ctm", "codex");
         let store = make_store();
         let sr = make_sr();
-
-        let capture = SharedLogCapture::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .without_time()
-            .with_target(false)
-            .with_writer(capture.clone())
-            .finish();
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let mismatch_process = LiveMismatchProcess::spawn();
 
         let req = make_request(
             "register-hint",
@@ -5276,7 +5271,7 @@ mod tests {
                 "team": "atm-dev",
                 "agent": "arch-ctm",
                 "session_id": "codex:sess-mismatch",
-                "process_id": std::process::id(),
+                "process_id": mismatch_process.pid(),
                 "runtime": "codex",
             }),
         );
@@ -5285,9 +5280,8 @@ mod tests {
         let payload = resp.payload.expect("payload required");
         assert_eq!(payload["processed"].as_bool(), Some(true));
 
-        let logs = capture.contents();
-        assert!(logs.contains("pid/backend mismatch at register_hint"));
-        assert!(logs.contains("backend='codex'"));
+        assert!(logs_contain("pid/backend mismatch at register_hint"));
+        assert!(logs_contain("backend='codex'"));
         assert!(
             sr.lock()
                 .unwrap()
@@ -5298,6 +5292,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[traced_test]
     #[test]
     #[serial]
     fn test_handle_register_hint_rejects_claude_backend_pid_mismatch_with_warn_log() {
@@ -5311,15 +5306,7 @@ mod tests {
         );
         let store = make_store();
         let sr = make_sr();
-
-        let capture = SharedLogCapture::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .without_time()
-            .with_target(false)
-            .with_writer(capture.clone())
-            .finish();
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let mismatch_process = LiveMismatchProcess::spawn();
 
         let req = make_request(
             "register-hint",
@@ -5327,7 +5314,7 @@ mod tests {
                 "team": "atm-dev",
                 "agent": "team-lead-2",
                 "session_id": "claude:sess-mismatch",
-                "process_id": std::process::id(),
+                "process_id": mismatch_process.pid(),
                 "runtime": "claude",
             }),
         );
@@ -5336,9 +5323,8 @@ mod tests {
         let payload = resp.payload.expect("payload required");
         assert_eq!(payload["processed"].as_bool(), Some(true));
 
-        let logs = capture.contents();
-        assert!(logs.contains("pid/backend mismatch at register_hint"));
-        assert!(logs.contains("backend='claude-code'"));
+        assert!(logs_contain("pid/backend mismatch at register_hint"));
+        assert!(logs_contain("backend='claude-code'"));
         assert!(
             sr.lock()
                 .unwrap()
