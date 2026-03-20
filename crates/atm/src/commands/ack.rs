@@ -335,7 +335,7 @@ fn persist_inbox_atomic(
     _original_bytes: &[u8],
     messages: &[InboxMessage],
 ) -> Result<()> {
-    let tmp_path = path.with_extension("acktmp");
+    let tmp_path = path.with_extension("json.tmp");
     let content = serde_json::to_vec_pretty(messages)?;
     write_synced_file(&tmp_path, &content)?;
 
@@ -354,7 +354,7 @@ fn persist_inbox_atomic(
 
 fn restore_inbox(path: &Path, path_exists: bool, original_bytes: &[u8]) -> Result<()> {
     if path_exists {
-        let rollback_path = path.with_extension("rollback");
+        let rollback_path = path.with_extension("json.rollback");
         write_synced_file(&rollback_path, original_bytes)?;
         atomic_swap(path, &rollback_path)?;
         let _ = fs::remove_file(&rollback_path);

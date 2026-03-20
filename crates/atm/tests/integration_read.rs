@@ -208,7 +208,7 @@ fn test_read_default_buckets_hide_history() {
 }
 
 #[test]
-fn test_read_history_filter_shows_history_only() {
+fn test_read_history_expands_active_view_with_full_history() {
     let temp_dir = TempDir::new().unwrap();
     let team_dir = setup_test_team(&temp_dir, "test-team");
 
@@ -248,8 +248,98 @@ fn test_read_history_filter_shows_history_only() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Historical note"))
+        .stdout(predicate::str::contains("Unread task"))
+        .stdout(predicate::str::contains("Pending task"));
+}
+
+#[test]
+fn test_read_unread_only_filter_shows_only_unread_bucket() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = setup_test_team(&temp_dir, "test-team");
+
+    let messages = vec![
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Unread task",
+            "timestamp": "2026-02-11T12:00:00Z",
+            "read": false,
+            "message_id": "msg-u1"
+        }),
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Pending task",
+            "timestamp": "2026-02-11T11:00:00Z",
+            "read": true,
+            "pendingAckAt": "2026-02-11T11:05:00Z",
+            "message_id": "msg-p1"
+        }),
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Historical note",
+            "timestamp": "2026-02-11T10:00:00Z",
+            "read": true,
+            "message_id": "msg-h1"
+        }),
+    ];
+    create_test_inbox(&team_dir, "test-agent", messages);
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("read")
+        .arg("--no-since-last-seen")
+        .arg("--unread-only")
+        .arg("test-agent")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Unread task"))
+        .stdout(predicate::str::contains("Pending task").not())
+        .stdout(predicate::str::contains("Historical note").not());
+}
+
+#[test]
+fn test_read_pending_ack_only_filter_shows_only_pending_ack_bucket() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = setup_test_team(&temp_dir, "test-team");
+
+    let messages = vec![
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Unread task",
+            "timestamp": "2026-02-11T12:00:00Z",
+            "read": false,
+            "message_id": "msg-u1"
+        }),
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Pending task",
+            "timestamp": "2026-02-11T11:00:00Z",
+            "read": true,
+            "pendingAckAt": "2026-02-11T11:05:00Z",
+            "message_id": "msg-p1"
+        }),
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Historical note",
+            "timestamp": "2026-02-11T10:00:00Z",
+            "read": true,
+            "message_id": "msg-h1"
+        }),
+    ];
+    create_test_inbox(&team_dir, "test-agent", messages);
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("read")
+        .arg("--no-since-last-seen")
+        .arg("--pending-ack-only")
+        .arg("test-agent")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Pending task"))
         .stdout(predicate::str::contains("Unread task").not())
-        .stdout(predicate::str::contains("Pending task").not());
+        .stdout(predicate::str::contains("Historical note").not());
 }
 
 #[test]
