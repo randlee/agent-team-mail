@@ -676,8 +676,9 @@ fn test_read_skips_malformed_records_and_legacy_content_alias() {
     let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let messages = parsed["messages"].as_array().expect("messages array");
     assert_eq!(messages.len(), 2);
-    assert_eq!(messages[0]["text"], "good");
-    assert_eq!(messages[1]["text"], "legacy content");
+    assert_eq!(messages[0]["text"], "legacy content");
+    assert_eq!(messages[1]["text"], "good");
+    assert_eq!(parsed["bucket_counts"]["unread"], 2);
     assert_eq!(messages[1]["read"], false);
 }
 

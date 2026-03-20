@@ -1100,7 +1100,7 @@ Approve or reject agent's implementation plan.
 | `read` | Set to `true` immediately when the receiving agent process is **running** at delivery time (regardless of busy/idle state). Set to `false` when the recipient is **offline** (process not running). NOT a reliable indicator the agent has processed or acted on the message. | Both |
 | `message_id` | UUID for ATM CLI messages (`atm send`). `null` for Claude Code `SendMessage` tool messages. | ATM CLI only |
 | `pendingAckAt` | Set by `atm read` when the ATM CLI agent reads a message. Not set by Claude Code's file watcher or `SendMessage` tool. Messages delivered while the agent is offline remain `null`. | ATM CLI only |
-| `acknowledgedAt` | Set when the agent explicitly acknowledges the message (`atm ack <message_id>` for CLI agents). Claude Code `SendMessage` agents currently do not appear to set this field via any observed mechanism. | ATM CLI only |
+| `acknowledgedAt` | Set when the agent explicitly acknowledges the message (`atm ack <message_id> "<reply>"` for CLI agents). Claude Code `SendMessage` agents currently do not appear to set this field via any observed mechanism. | ATM CLI only |
 | `summary` | Optional 5–10 word preview. `null` for system/idle messages. | Both |
 | `source_team` | Team name from which the message was routed. `null` on many messages. | ATM CLI |
 
@@ -1110,7 +1110,7 @@ Approve or reject agent's implementation plan.
 Delivery   → read: true (running) or false (offline), pendingAckAt: null, acknowledgedAt: null
               ↓ (agent runs atm read)
 Pending    → read: true, pendingAckAt: <timestamp>, acknowledgedAt: null
-              ↓ (agent runs atm ack <message_id>)
+              ↓ (agent runs atm ack <message_id> "<reply>")
 Acked      → read: true, pendingAckAt: null, acknowledgedAt: <timestamp>
 ```
 

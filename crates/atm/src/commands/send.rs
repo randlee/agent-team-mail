@@ -543,7 +543,7 @@ where
 }
 
 /// Generate summary from message text (first ~100 chars)
-fn generate_summary(text: &str) -> String {
+pub(crate) fn generate_summary(text: &str) -> String {
     let trimmed = text.trim();
     if trimmed.chars().count() <= MESSAGE_MAX_LEN {
         trimmed.to_string()
