@@ -18,6 +18,8 @@ path = "src/main.rs"
 
 [dependencies]
 agent-team-mail-core.workspace = true
+# BA.4 classification: permitted CLI dependency for canonical launcher lifecycle ownership.
+agent-team-mail-daemon-launch.workspace = true
 sc-composer.workspace = true
 sc-observability.workspace = true
 sc-observability-otlp.workspace = true
@@ -46,10 +48,6 @@ libc = "0.2"
 sysinfo = { version = "0.31", default-features = false, features = ["system"] }
 
 [dev-dependencies]
-# BA.3-FIX-R2 ruling: daemon-launch stays test-only here because src/ no longer
-# consumes it directly. BA.4 can revisit whether the CLI ever needs a
-# non-dev launcher dependency again.
-agent-team-mail-daemon-launch.workspace = true
 assert_cmd = "2"
 predicates = "3"
 serial_test = "3"

@@ -1507,9 +1507,21 @@ fn test_gh_namespace_status_missing_repo_is_actionable() {
         status["availability_state"].as_str(),
         Some("disabled_config_error")
     );
+    assert_eq!(status["namespace_state"].as_str(), Some("present_disabled"));
     let message = status["message"].as_str().unwrap_or_default();
     assert!(message.contains("missing required field: repo"));
     assert!(message.contains("atm gh init"));
+    let actions = status["actions"].as_array().unwrap();
+    assert!(
+        actions
+            .iter()
+            .any(|value| value.as_str() == Some("atm gh init"))
+    );
+    assert!(
+        actions
+            .iter()
+            .all(|value| value.as_str() != Some("atm gh monitor pr <number>"))
+    );
 
     let _ = daemon.kill();
     let _ = daemon.wait();
@@ -1612,6 +1624,7 @@ fn test_gh_monitor_status_json_has_stable_schema() {
         "team",
         "configured",
         "enabled",
+        "namespace_state",
         "lifecycle_state",
         "availability_state",
         "in_flight",
@@ -1621,6 +1634,69 @@ fn test_gh_monitor_status_json_has_stable_schema() {
         assert!(json.get(key).is_some(), "missing key: {key}");
     }
     assert!(json["actions"].is_array());
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_namespace_absent_only_advertises_init() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["namespace_state"].as_str(), Some("absent"));
+    assert_eq!(json["actions"], serde_json::json!(["atm gh init"]));
+}
+
+#[test]
+#[cfg(unix)]
+#[serial]
+fn test_gh_namespace_enabled_advertises_full_command_surface() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let mut daemon = start_fake_gh_daemon(temp_dir.path());
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", true);
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["namespace_state"].as_str(), Some("present_enabled"));
+    let actions = json["actions"].as_array().unwrap();
+    assert!(
+        actions
+            .iter()
+            .any(|value| value.as_str() == Some("atm gh pr list"))
+    );
+    assert!(
+        actions
+            .iter()
+            .any(|value| value.as_str() == Some("atm gh monitor pr <number>"))
+    );
 
     let _ = daemon.kill();
     let _ = daemon.wait();
