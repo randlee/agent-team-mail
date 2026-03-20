@@ -426,11 +426,7 @@ struct MessageBuckets {
     history: Vec<InboxMessage>,
 }
 
-struct DisplayBuckets {
-    unread: Vec<InboxMessage>,
-    pending_ack: Vec<InboxMessage>,
-    history: Vec<InboxMessage>,
-}
+type DisplayBuckets = MessageBuckets;
 
 fn bucket_messages(messages: Vec<InboxMessage>) -> MessageBuckets {
     let mut buckets = MessageBuckets {
@@ -469,18 +465,20 @@ fn sort_bucket_newest_first(messages: &mut [InboxMessage]) {
 fn select_display_messages(buckets: &MessageBuckets, args: &ReadArgs) -> Vec<InboxMessage> {
     let mut displayed = Vec::new();
 
-    if args.all || args.unread_only {
+    if args.unread_only {
         displayed.extend(buckets.unread.clone());
+        return displayed;
     }
-    if args.all || args.pending_ack_only {
+
+    if args.pending_ack_only {
         displayed.extend(buckets.pending_ack.clone());
+        return displayed;
     }
+
+    displayed.extend(buckets.unread.clone());
+    displayed.extend(buckets.pending_ack.clone());
     if args.history || args.all {
         displayed.extend(buckets.history.clone());
-    }
-    if !args.all && !args.unread_only && !args.pending_ack_only && !args.history {
-        displayed.extend(buckets.unread.clone());
-        displayed.extend(buckets.pending_ack.clone());
     }
 
     displayed
@@ -493,23 +491,7 @@ fn apply_limit(displayed_messages: &mut Vec<InboxMessage>, limit: Option<usize>)
 }
 
 fn display_bucket_views(displayed_messages: &[InboxMessage]) -> DisplayBuckets {
-    let mut buckets = DisplayBuckets {
-        unread: Vec::new(),
-        pending_ack: Vec::new(),
-        history: Vec::new(),
-    };
-
-    for message in displayed_messages {
-        if !message.read {
-            buckets.unread.push(message.clone());
-        } else if message.pending_ack_at().is_some() && !message.is_acknowledged() {
-            buckets.pending_ack.push(message.clone());
-        } else {
-            buckets.history.push(message.clone());
-        }
-    }
-
-    buckets
+    bucket_messages(displayed_messages.to_vec())
 }
 
 fn print_bucket(name: &str, messages: &[InboxMessage]) {
@@ -570,6 +552,32 @@ fn extract_hostname_registry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    fn inbox_message(
+        message_id: &str,
+        timestamp: &str,
+        read: bool,
+        pending_ack: bool,
+    ) -> InboxMessage {
+        let mut unknown_fields = HashMap::new();
+        if pending_ack {
+            unknown_fields.insert(
+                "pendingAckAt".to_string(),
+                serde_json::Value::String("2026-02-11T11:05:00Z".to_string()),
+            );
+        }
+        InboxMessage {
+            from: "team-lead".to_string(),
+            source_team: None,
+            text: format!("message {message_id}"),
+            timestamp: timestamp.to_string(),
+            read,
+            summary: None,
+            message_id: Some(message_id.to_string()),
+            unknown_fields,
+        }
+    }
 
     #[test]
     fn test_format_relative_time_seconds() {
@@ -607,5 +615,62 @@ mod tests {
     fn test_format_relative_time_invalid() {
         let formatted = format_relative_time("invalid-timestamp");
         assert_eq!(formatted, "unknown");
+    }
+
+    #[test]
+    fn sort_bucket_newest_first_orders_by_timestamp_then_message_id_desc() {
+        let mut messages = vec![
+            inbox_message("msg-001", "2026-02-11T10:00:00Z", false, false),
+            inbox_message("msg-003", "2026-02-11T11:00:00Z", false, false),
+            inbox_message("msg-002", "2026-02-11T11:00:00Z", false, false),
+        ];
+
+        sort_bucket_newest_first(&mut messages);
+
+        let ids: Vec<&str> = messages
+            .iter()
+            .map(|message| message.message_id.as_deref().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["msg-003", "msg-002", "msg-001"]);
+    }
+
+    #[test]
+    fn history_flag_expands_active_view_instead_of_filtering() {
+        let buckets = MessageBuckets {
+            unread: vec![inbox_message(
+                "msg-u1",
+                "2026-02-11T12:00:00Z",
+                false,
+                false,
+            )],
+            pending_ack: vec![inbox_message("msg-p1", "2026-02-11T11:00:00Z", true, true)],
+            history: vec![inbox_message("msg-h1", "2026-02-11T10:00:00Z", true, false)],
+        };
+
+        let args = ReadArgs {
+            agent: None,
+            team: None,
+            all: false,
+            unread_only: false,
+            pending_ack_only: false,
+            history: true,
+            since_last_seen: false,
+            no_since_last_seen: true,
+            no_mark: true,
+            no_update_seen: true,
+            limit: None,
+            since: None,
+            from: None,
+            json: false,
+            timeout: None,
+            reader_as: None,
+        };
+
+        let displayed = select_display_messages(&buckets, &args);
+        let ids: Vec<&str> = displayed
+            .iter()
+            .map(|message| message.message_id.as_deref().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["msg-u1", "msg-p1", "msg-h1"]);
     }
 }

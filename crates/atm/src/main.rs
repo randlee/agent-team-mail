@@ -6,7 +6,9 @@
 use agent_team_mail_core::event_log::{
     EventFields, clear_event_observer_hook, emit_event_best_effort, install_event_observer_hook,
 };
-use agent_team_mail_core::gh_command::run_cli_teardown_hook;
+use agent_team_mail_core::gh_command::{
+    flush_local_gh_observability_records, install_cli_teardown_hook, run_cli_teardown_hook,
+};
 use agent_team_mail_core::logging;
 use clap::Parser;
 use sc_observability::LogConfig;
@@ -237,6 +239,11 @@ fn main() {
     )
     .unwrap_or_else(|_| logging::init_stderr_only());
     install_cli_otel_event_hook();
+    if let Ok(home_dir) = agent_team_mail_core::home::get_home_dir() {
+        install_cli_teardown_hook(Arc::new(move || {
+            let _ = flush_local_gh_observability_records(&home_dir);
+        }));
+    }
 
     let cli = Cli::parse();
     let command_name = cli.command_name().to_string();

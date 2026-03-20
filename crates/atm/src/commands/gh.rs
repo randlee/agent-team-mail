@@ -7,13 +7,13 @@ use agent_team_mail_core::consts::GH_MONITOR_DEFAULT_DRAIN_TIMEOUT_SECS;
 use agent_team_mail_core::context::GitProvider;
 use agent_team_mail_core::daemon_client::{
     GhMonitorControlRequest, GhMonitorHealth, GhMonitorLifecycleAction, GhMonitorRequest,
-    GhMonitorStatus, GhMonitorTargetKind, GhStatusRequest, gh_monitor, gh_monitor_control,
-    gh_monitor_health_with_context, gh_status,
+    GhMonitorStatus, GhMonitorTargetKind, GhStatusRequest, gh_cli_prerequisites, gh_monitor,
+    gh_monitor_control, gh_monitor_health_with_context, gh_pr_list, gh_pr_report, gh_status,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::gh_command::{
-    GH_MONITOR_REPORT_SCHEMA_VERSION, GhCiRollup, GhPrListSummary, GhPrReportSummary,
-    build_pr_list_summary, build_pr_report_summary, validate_gh_cli_prerequisites,
+    GH_MONITOR_REPORT_SCHEMA_VERSION, GhCiRollup, GhCliPrereqRequest, GhCliPrereqStatus,
+    GhPrListRequest, GhPrListSummary, GhPrReportRequest, GhPrReportSummary,
 };
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
@@ -638,7 +638,14 @@ fn execute_pr_list(
     json: bool,
 ) -> Result<()> {
     let repo = resolve_monitor_repo_scope(config, current_dir, home_dir, team)?;
-    let summary = build_pr_list_summary(team, home_dir, &repo, limit)?;
+    agent_team_mail_core::daemon_client::ensure_daemon_running()
+        .context("failed to auto-start daemon for atm gh pr list command")?;
+    let summary = gh_pr_list(&GhPrListRequest {
+        team: team.to_string(),
+        repo,
+        limit,
+    })?
+    .ok_or_else(|| anyhow::anyhow!("daemon is not reachable for atm gh pr list command"))?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -663,7 +670,14 @@ fn execute_pr_report(
     }
 
     let repo = resolve_monitor_repo_scope(config, current_dir, home_dir, team)?;
-    let report = build_pr_report_summary(team, home_dir, &repo, pr_number)?;
+    agent_team_mail_core::daemon_client::ensure_daemon_running()
+        .context("failed to auto-start daemon for atm gh pr report command")?;
+    let report = gh_pr_report(&GhPrReportRequest {
+        team: team.to_string(),
+        repo,
+        pr_number,
+    })?
+    .ok_or_else(|| anyhow::anyhow!("daemon is not reachable for atm gh pr report command"))?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1426,7 +1440,7 @@ fn execute_init(
     repo_override: Option<&str>,
     json: bool,
 ) -> Result<()> {
-    validate_gh_cli_prerequisites()?;
+    let prereqs = fetch_gh_cli_prereqs(team)?;
 
     let detected = detect_github_remote(current_dir);
     let (owner, repo) = resolve_repo_coordinates(repo_override, detected.as_ref())?;
@@ -1486,8 +1500,8 @@ fn execute_init(
         config_path: config_path.display().to_string(),
         dry_run: args.dry_run,
         created: !config_path.exists(),
-        gh_installed: true,
-        gh_authenticated: true,
+        gh_installed: prereqs.gh_installed,
+        gh_authenticated: prereqs.gh_authenticated,
         owner,
         repo,
         notify_target,
@@ -1540,6 +1554,27 @@ fn execute_init(
     }
 
     Ok(())
+}
+
+fn fetch_gh_cli_prereqs(team: &str) -> Result<GhCliPrereqStatus> {
+    agent_team_mail_core::daemon_client::ensure_daemon_running()
+        .context("failed to auto-start daemon for atm gh init command")?;
+    let status = gh_cli_prerequisites(&GhCliPrereqRequest {
+        team: team.to_string(),
+    })?
+    .ok_or_else(|| anyhow::anyhow!("daemon is not reachable for atm gh init command"))?;
+    if let Some(error) = status.error.as_deref() {
+        bail!("{error}");
+    }
+    if !status.gh_installed {
+        bail!(
+            "GitHub CLI (`gh`) not found or not executable. Install from https://cli.github.com/"
+        );
+    }
+    if !status.gh_authenticated {
+        bail!("GitHub CLI is not authenticated. Run `gh auth login` first.");
+    }
+    Ok(status)
 }
 
 fn detect_github_remote(current_dir: &Path) -> Option<(String, String)> {
