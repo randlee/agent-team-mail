@@ -33,6 +33,7 @@ struct MemberRow {
     model: String,
     session_id: Option<String>,
     process_id: Option<u32>,
+    last_alive_at: Option<String>,
     status: String,
     activity: String,
     liveness: Option<bool>,
@@ -56,10 +57,10 @@ fn render_members_human(team_name: &str, member_rows: &[MemberRow]) -> String {
     }
 
     out.push_str(&format!(
-        "  {:<20} {:<20} {:<25} {:<10} {:<8} {:<7} Activity\n",
-        "Name", "Type", "Model", "Status", "PID", "Session"
+        "  {:<20} {:<20} {:<25} {:<10} {:<8} {:<8} {:<20} Activity\n",
+        "Name", "Type", "Model", "Status", "PID", "Session", "Last Alive"
     ));
-    out.push_str(&format!("  {}\n", "─".repeat(110)));
+    out.push_str(&format!("  {}\n", "─".repeat(132)));
 
     for member in member_rows {
         let name = if member.in_config {
@@ -72,8 +73,12 @@ fn render_members_human(team_name: &str, member_rows: &[MemberRow]) -> String {
             .process_id
             .map(|pid| pid.to_string())
             .unwrap_or_else(|| "-".to_string());
+        let last_alive = member
+            .last_alive_at
+            .clone()
+            .unwrap_or_else(|| "-".to_string());
         out.push_str(&format!(
-            "  {name:<20} {:<20} {:<25} {:<10} {pid:<8} {session:<7} {}\n",
+            "  {name:<20} {:<20} {:<25} {:<10} {pid:<8} {session:<8} {last_alive:<20} {}\n",
             member.agent_type, member.model, member.status, member.activity
         ));
     }
@@ -90,6 +95,7 @@ fn render_members_json(team_name: &str, member_rows: &[MemberRow]) -> serde_json
             "model": m.model,
             "sessionId": m.session_id,
             "processId": m.process_id,
+            "lastAliveAt": m.last_alive_at,
             "status": m.status,
             "activity": m.activity,
             "liveness": m.liveness,
@@ -176,6 +182,7 @@ fn build_member_rows(
                     model: member.model.clone(),
                     session_id: daemon_state.and_then(|s| s.session_id.clone()),
                     process_id: daemon_state.and_then(|s| s.process_id),
+                    last_alive_at: daemon_state.and_then(|s| s.last_alive_at.clone()),
                     status: canonical_status_label(daemon_state).to_string(),
                     activity: canonical_activity_label(daemon_state).to_string(),
                     liveness: canonical_liveness_bool(daemon_state),
@@ -188,6 +195,7 @@ fn build_member_rows(
                     model: UNREGISTERED_MARKER.to_string(),
                     session_id: daemon_state.and_then(|s| s.session_id.clone()),
                     process_id: daemon_state.and_then(|s| s.process_id),
+                    last_alive_at: daemon_state.and_then(|s| s.last_alive_at.clone()),
                     status: canonical_status_label(daemon_state).to_string(),
                     activity: canonical_activity_label(daemon_state).to_string(),
                     liveness: canonical_liveness_bool(daemon_state),
@@ -246,7 +254,7 @@ mod tests {
                 activity: "busy".to_string(),
                 session_id: Some("sess-1".to_string()),
                 process_id: Some(1234),
-                last_alive_at: None,
+                last_alive_at: Some("2026-03-20T22:00:00Z".to_string()),
                 reason: "session active".to_string(),
                 source: "session_registry".to_string(),
                 in_config: false,
@@ -272,6 +280,7 @@ mod tests {
             model: "custom:codex".to_string(),
             session_id: Some("123e4567-e89b-12d3-a456-426614174000".to_string()),
             process_id: Some(4242),
+            last_alive_at: Some("2026-03-20T22:00:00Z".to_string()),
             status: "Active".to_string(),
             activity: "Busy".to_string(),
             liveness: Some(true),
@@ -283,6 +292,7 @@ mod tests {
         assert!(rendered.contains("4242"));
         assert!(rendered.contains("Active"));
         assert!(rendered.contains("Busy"));
+        assert!(rendered.contains("2026-03-20T22:00:00Z"));
         assert!(!rendered.contains("123e4567-e89b-12d3-a456-426614174000"));
     }
 
@@ -294,6 +304,7 @@ mod tests {
             model: "custom:codex".to_string(),
             session_id: Some("123e4567-e89b-12d3-a456-426614174000".to_string()),
             process_id: Some(4242),
+            last_alive_at: Some("2026-03-20T22:00:00Z".to_string()),
             status: "Active".to_string(),
             activity: "Busy".to_string(),
             liveness: Some(true),
@@ -306,6 +317,10 @@ mod tests {
             Some("123e4567-e89b-12d3-a456-426614174000")
         );
         assert_eq!(rendered["members"][0]["processId"].as_u64(), Some(4242));
+        assert_eq!(
+            rendered["members"][0]["lastAliveAt"].as_str(),
+            Some("2026-03-20T22:00:00Z")
+        );
         assert_eq!(rendered["members"][0]["status"].as_str(), Some("Active"));
         assert_eq!(rendered["members"][0]["activity"].as_str(), Some("Busy"));
     }

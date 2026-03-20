@@ -535,6 +535,27 @@ fn test_doctor_distinguishes_absent_daemon_from_pid_verification_failure() {
             .contains("Daemon is not running: no live daemon PID file or socket was found"),
         "unexpected absent-daemon output: {absent_stdout}"
     );
+    let mut absent_json_cmd = cargo::cargo_bin_cmd!("atm");
+    let absent_json_output = absent_json_cmd
+        .env("ATM_HOME", absent_home.path())
+        .env("ATM_TEAM", "team-absent")
+        .env("ATM_DAEMON_AUTOSTART", "0")
+        .arg("doctor")
+        .arg("--team")
+        .arg("team-absent")
+        .arg("--json")
+        .output()
+        .unwrap();
+    let absent_value: serde_json::Value =
+        serde_json::from_slice(&absent_json_output.stdout).unwrap();
+    let absent_codes: Vec<_> = absent_value["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|finding| finding["code"].as_str())
+        .collect();
+    assert!(absent_codes.contains(&"DAEMON_NOT_RUNNING"));
+    assert!(!absent_codes.contains(&"DAEMON_PID_UNVERIFIABLE"));
 
     let stale_home = TempDir::new().unwrap();
     write_team_config(stale_home.path(), "team-stale");
@@ -566,6 +587,26 @@ fn test_doctor_distinguishes_absent_daemon_from_pid_verification_failure() {
         stale_stdout.contains("PID cannot be verified"),
         "unexpected stale-daemon output: {stale_stdout}"
     );
+    let mut stale_json_cmd = cargo::cargo_bin_cmd!("atm");
+    let stale_json_output = stale_json_cmd
+        .env("ATM_HOME", stale_home.path())
+        .env("ATM_TEAM", "team-stale")
+        .env("ATM_DAEMON_AUTOSTART", "0")
+        .arg("doctor")
+        .arg("--team")
+        .arg("team-stale")
+        .arg("--json")
+        .output()
+        .unwrap();
+    let stale_value: serde_json::Value = serde_json::from_slice(&stale_json_output.stdout).unwrap();
+    let stale_codes: Vec<_> = stale_value["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|finding| finding["code"].as_str())
+        .collect();
+    assert!(stale_codes.contains(&"DAEMON_PID_UNVERIFIABLE"));
+    assert!(!stale_codes.contains(&"DAEMON_NOT_RUNNING"));
 }
 
 #[test]
@@ -613,6 +654,7 @@ fn test_members_reports_status_session_and_pid_after_daemon_autostart() {
     assert_eq!(member["activity"].as_str(), Some("Busy"));
     assert_eq!(member["sessionId"].as_str(), Some("fake-session"));
     assert_eq!(member["processId"].as_u64(), Some(4242));
+    assert_eq!(member["lastAliveAt"].as_str(), Some("2026-03-20T22:00:00Z"));
 }
 
 #[test]

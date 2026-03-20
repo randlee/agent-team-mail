@@ -2452,13 +2452,15 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         Err(e) => {
             let error = if e.kind() == ErrorKind::NotFound {
                 format!(
-                    "failed to auto-start daemon: binary '{}' is missing or not executable",
-                    daemon_bin_path.display()
+                    "failed to auto-start daemon: binary '{}' is missing or not executable (stderr_capture={})",
+                    daemon_bin_path.display(),
+                    stderr_capture.display()
                 )
             } else {
                 format!(
-                    "failed to auto-start daemon via '{}': {e}",
-                    daemon_bin_path.display()
+                    "failed to auto-start daemon via '{}': {e} (stderr_capture={})",
+                    daemon_bin_path.display(),
+                    stderr_capture.display()
                 )
             };
             emit_event_best_effort(daemon_autostart_event(
@@ -2506,10 +2508,14 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
             let error = match stderr_tail {
                 Some(tail) => {
                     format!(
-                        "daemon process exited during startup with status {status}; stderr_tail={tail}"
+                        "daemon process exited during startup with status {status}; stderr_capture={}; stderr_tail={tail}",
+                        stderr_capture.display()
                     )
                 }
-                None => format!("daemon process exited during startup with status {status}"),
+                None => format!(
+                    "daemon process exited during startup with status {status}; stderr_capture={}",
+                    stderr_capture.display()
+                ),
             };
             emit_event_best_effort(daemon_autostart_event(
                 &autostart_request_id,
@@ -2519,7 +2525,6 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
                 Some(daemon_bin_path.display().to_string()),
                 Some(error.clone()),
             ));
-            let _ = std::fs::remove_file(&stderr_capture);
             anyhow::bail!("{error}");
         }
         std::thread::sleep(Duration::from_millis(RETRY_SLEEP_MS));
@@ -2529,12 +2534,13 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     let socket_path = daemon_socket_path()?;
     let pid_path = daemon_pid_path()?;
     let timeout_error = format!(
-        "daemon startup timed out after {}s; pid_file_exists={}, socket_exists={}, pid_path={}, socket_path={}",
+        "daemon startup timed out after {}s; pid_file_exists={}, socket_exists={}, pid_path={}, socket_path={}, stderr_capture={}",
         STARTUP_DEADLINE_SECS,
         pid_path.exists(),
         socket_path.exists(),
         pid_path.display(),
-        socket_path.display()
+        socket_path.display(),
+        stderr_capture.display()
     );
     let mut timeout_event = daemon_autostart_event(
         &autostart_request_id,
@@ -3399,6 +3405,10 @@ exit 42
         assert!(
             msg.contains("daemon process exited during startup with status"),
             "startup exit must still be reported clearly: {msg}"
+        );
+        assert!(
+            msg.contains("stderr_capture="),
+            "startup exit should report the stderr capture path: {msg}"
         );
     }
 
