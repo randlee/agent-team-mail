@@ -37,6 +37,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::event_log::EventFields;
+use crate::gh_command::{
+    GhCliPrereqRequest, GhCliPrereqStatus, GhPrListRequest, GhPrListSummary, GhPrReportRequest,
+    GhPrReportSummary, GhRateLimitAudit, GhRateLimitAuditRequest,
+};
 use agent_team_mail_daemon_launch::{LaunchClass, SpawnDaemonRequest, spawn_daemon_process};
 
 use crate::consts::{
@@ -1931,6 +1935,66 @@ pub fn gh_monitor_health_with_context(
     decode_gh_monitor_health_response(response).map(Some)
 }
 
+pub fn gh_pr_list(request: &GhPrListRequest) -> anyhow::Result<Option<GhPrListSummary>> {
+    let socket_request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "gh-pr-list".to_string(),
+        payload: serde_json::to_value(request)?,
+    };
+    let response = match query_daemon_with_timeout(&socket_request, Duration::from_secs(120))? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    decode_gh_command_response(response, "gh-pr-list").map(Some)
+}
+
+pub fn gh_pr_report(request: &GhPrReportRequest) -> anyhow::Result<Option<GhPrReportSummary>> {
+    let socket_request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "gh-pr-report".to_string(),
+        payload: serde_json::to_value(request)?,
+    };
+    let response = match query_daemon_with_timeout(&socket_request, Duration::from_secs(120))? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    decode_gh_command_response(response, "gh-pr-report").map(Some)
+}
+
+pub fn gh_cli_prerequisites(
+    request: &GhCliPrereqRequest,
+) -> anyhow::Result<Option<GhCliPrereqStatus>> {
+    let socket_request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "gh-cli-prereqs".to_string(),
+        payload: serde_json::to_value(request)?,
+    };
+    let response = match query_daemon(&socket_request)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    decode_gh_command_response(response, "gh-cli-prereqs").map(Some)
+}
+
+pub fn gh_rate_limit_audit(
+    request: &GhRateLimitAuditRequest,
+) -> anyhow::Result<Option<Option<GhRateLimitAudit>>> {
+    let socket_request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "gh-rate-limit-audit".to_string(),
+        payload: serde_json::to_value(request)?,
+    };
+    let response = match query_daemon(&socket_request)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    decode_gh_command_response(response, "gh-rate-limit-audit").map(Some)
+}
+
 fn decode_gh_monitor_response(response: SocketResponse) -> anyhow::Result<GhMonitorStatus> {
     if !response.is_ok() {
         let Some(err) = response.error else {
@@ -1971,6 +2035,31 @@ fn decode_gh_monitor_health_response(response: SocketResponse) -> anyhow::Result
 
     serde_json::from_value::<GhMonitorHealth>(payload)
         .map_err(|e| anyhow::anyhow!("Failed to parse GhMonitorHealth from daemon response: {e}"))
+}
+
+fn decode_gh_command_response<T: serde::de::DeserializeOwned>(
+    response: SocketResponse,
+    command_name: &str,
+) -> anyhow::Result<T> {
+    if !response.is_ok() {
+        let Some(err) = response.error else {
+            anyhow::bail!("Daemon returned {command_name} error status without error payload");
+        };
+        anyhow::bail!(
+            "Daemon returned error for {} command: {}: {}",
+            response.request_id,
+            err.code,
+            err.message
+        );
+    }
+
+    let payload = response
+        .payload
+        .ok_or_else(|| anyhow::anyhow!("Daemon returned ok status but no payload"))?;
+
+    serde_json::from_value::<T>(payload).map_err(|e| {
+        anyhow::anyhow!("Failed to parse {command_name} payload from daemon response: {e}")
+    })
 }
 
 fn decode_register_hint_response(response: SocketResponse) -> anyhow::Result<RegisterHintOutcome> {

@@ -11,19 +11,13 @@ use agent_team_mail_core::daemon_client::{
     gh_monitor_health_with_context, gh_status,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
-use agent_team_mail_core::io::inbox::inbox_append;
-use agent_team_mail_core::schema::InboxMessage;
-use agent_team_mail_core::team_config_store::TeamConfigStore;
-use agent_team_mail_daemon::plugins::ci_monitor::{
+use agent_team_mail_core::gh_command::{
     GH_MONITOR_REPORT_SCHEMA_VERSION, GhCiRollup, GhPrListSummary, GhPrReportSummary,
     build_pr_list_summary, build_pr_report_summary, validate_gh_cli_prerequisites,
 };
-#[cfg(test)]
-use agent_team_mail_daemon::plugins::ci_monitor::{
-    GhMergeReport, GhMonitorReportPr, GhMonitorReviewReport, build_merge_report,
-    extract_check_reports, extract_review_reports, normalize_merge_status,
-    normalize_report_review_decision, summarize_ci_rollup,
-};
+use agent_team_mail_core::io::inbox::inbox_append;
+use agent_team_mail_core::schema::InboxMessage;
+use agent_team_mail_core::team_config_store::TeamConfigStore;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use minijinja::Environment;
@@ -1820,6 +1814,11 @@ fn write_text_atomic(path: &Path, content: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_team_mail_core::gh_command::{
+        GhMergeReport, GhMonitorReportPr, GhMonitorReviewReport, build_merge_report,
+        extract_check_reports, extract_review_reports, normalize_merge_status,
+        normalize_report_review_decision, summarize_ci_rollup,
+    };
     use tempfile::TempDir;
 
     #[test]

@@ -17,9 +17,7 @@ name = "atm"
 path = "src/main.rs"
 
 [dependencies]
-agent-team-mail-ci-monitor.workspace = true
 agent-team-mail-core.workspace = true
-agent-team-mail-daemon.workspace = true
 agent-team-mail-daemon-launch.workspace = true
 sc-composer.workspace = true
 sc-observability.workspace = true

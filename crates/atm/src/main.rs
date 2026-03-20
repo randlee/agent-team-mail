@@ -6,6 +6,7 @@
 use agent_team_mail_core::event_log::{
     EventFields, clear_event_observer_hook, emit_event_best_effort, install_event_observer_hook,
 };
+use agent_team_mail_core::gh_command::run_cli_teardown_hook;
 use agent_team_mail_core::logging;
 use clap::Parser;
 use sc_observability::LogConfig;
@@ -364,11 +365,8 @@ fn main() {
         0
     };
 
-    // Flush the gh observability ledger writer thread before process exit.
-    // The writer thread is fire-and-forget; without an explicit flush the OS
-    // may kill it before it has written all pending records.  This flush is
-    // synchronous and completes quickly (microseconds in practice).
-    let _ = agent_team_mail_ci_monitor::flush_gh_observability_records();
+    // Neutral CLI teardown hook for plugin-owned lifecycle cleanup.
+    run_cli_teardown_hook();
     clear_event_observer_hook();
 
     if exit_code != 0 {

@@ -6,9 +6,7 @@ version = 4
 name = "agent-team-mail"
 version = "0.46.1"
 dependencies = [
- "agent-team-mail-ci-monitor",
  "agent-team-mail-core",
- "agent-team-mail-daemon",
  "agent-team-mail-daemon-launch",
  "anyhow",
  "assert_cmd",

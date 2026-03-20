@@ -13,9 +13,17 @@ use crate::plugins::ci_monitor::types::{
     CiMonitorControlRequest, CiMonitorHealth, CiMonitorLifecycleAction, CiMonitorRequest,
     CiMonitorStatus, CiMonitorStatusRequest, CiMonitorTargetKind,
 };
+#[cfg(unix)]
+use crate::plugins::ci_monitor::{
+    build_gh_rate_limit_audit, build_pr_list_summary, build_pr_report_summary,
+    validate_gh_cli_prerequisites_status,
+};
 use agent_team_mail_core::daemon_client::{
     GhMonitorControlRequest, GhMonitorRequest, GhStatusRequest, PROTOCOL_VERSION, SocketError,
     SocketRequest, SocketResponse,
+};
+use agent_team_mail_core::gh_command::{
+    GhCliPrereqRequest, GhPrListRequest, GhPrReportRequest, GhRateLimitAuditRequest,
 };
 
 const SOCKET_ERROR_INTERNAL_ERROR: &str = "INTERNAL_ERROR";
@@ -296,19 +304,37 @@ pub(crate) fn is_gh_monitor_command(request_str: &str) -> bool {
         || request_str.contains(r#""command": "gh-monitor""#)
 }
 
+fn is_command(request_str: &str, command: &str) -> bool {
+    request_str.contains(&format!(r#""command":"{command}""#))
+        || request_str.contains(&format!(r#""command": "{command}""#))
+}
+
 pub(crate) fn is_gh_status_command(request_str: &str) -> bool {
-    request_str.contains(r#""command":"gh-status""#)
-        || request_str.contains(r#""command": "gh-status""#)
+    is_command(request_str, "gh-status")
 }
 
 pub(crate) fn is_gh_monitor_control_command(request_str: &str) -> bool {
-    request_str.contains(r#""command":"gh-monitor-control""#)
-        || request_str.contains(r#""command": "gh-monitor-control""#)
+    is_command(request_str, "gh-monitor-control")
 }
 
 pub(crate) fn is_gh_monitor_health_command(request_str: &str) -> bool {
-    request_str.contains(r#""command":"gh-monitor-health""#)
-        || request_str.contains(r#""command": "gh-monitor-health""#)
+    is_command(request_str, "gh-monitor-health")
+}
+
+pub(crate) fn is_gh_pr_list_command(request_str: &str) -> bool {
+    is_command(request_str, "gh-pr-list")
+}
+
+pub(crate) fn is_gh_pr_report_command(request_str: &str) -> bool {
+    is_command(request_str, "gh-pr-report")
+}
+
+pub(crate) fn is_gh_cli_prereqs_command(request_str: &str) -> bool {
+    is_command(request_str, "gh-cli-prereqs")
+}
+
+pub(crate) fn is_gh_rate_limit_audit_command(request_str: &str) -> bool {
+    is_command(request_str, "gh-rate-limit-audit")
 }
 
 #[cfg(unix)]
@@ -324,6 +350,14 @@ pub(crate) async fn maybe_route_async_command(
         Some(handle_gh_monitor_health_command(request_str, home).await)
     } else if is_gh_status_command(request_str) {
         Some(handle_gh_status_command(request_str, home).await)
+    } else if is_gh_pr_list_command(request_str) {
+        Some(handle_gh_pr_list_command(request_str, home).await)
+    } else if is_gh_pr_report_command(request_str) {
+        Some(handle_gh_pr_report_command(request_str, home).await)
+    } else if is_gh_cli_prereqs_command(request_str) {
+        Some(handle_gh_cli_prereqs_command(request_str, home).await)
+    } else if is_gh_rate_limit_audit_command(request_str) {
+        Some(handle_gh_rate_limit_audit_command(request_str, home).await)
     } else {
         None
     }
@@ -346,6 +380,12 @@ pub(crate) fn async_dispatch_error(request_id: &str, command: &str) -> Option<So
         }
         "gh-monitor-health" => {
             "gh-monitor-health command should have been handled by the async path"
+        }
+        "gh-pr-list" => "gh-pr-list command should have been handled by the async path",
+        "gh-pr-report" => "gh-pr-report command should have been handled by the async path",
+        "gh-cli-prereqs" => "gh-cli-prereqs command should have been handled by the async path",
+        "gh-rate-limit-audit" => {
+            "gh-rate-limit-audit command should have been handled by the async path"
         }
         _ => return None,
     };
@@ -458,6 +498,90 @@ pub(crate) async fn handle_gh_status_command(
     }
 }
 
+#[cfg(unix)]
+pub(crate) async fn handle_gh_pr_list_command(
+    request_str: &str,
+    home: &std::path::Path,
+) -> SocketResponse {
+    let ParsedWireRequest {
+        request_id,
+        payload: request,
+    } = match parse_wire_request::<GhPrListRequest>(request_str, "gh-pr-list") {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
+    };
+
+    match build_pr_list_summary(&request.team, home, &request.repo, request.limit) {
+        Ok(summary) => make_ok_response(
+            &request_id,
+            serde_json::to_value(summary).unwrap_or_default(),
+        ),
+        Err(err) => make_error_response(&request_id, "GH_PR_LIST_FAILED", &err.to_string()),
+    }
+}
+
+#[cfg(unix)]
+pub(crate) async fn handle_gh_pr_report_command(
+    request_str: &str,
+    home: &std::path::Path,
+) -> SocketResponse {
+    let ParsedWireRequest {
+        request_id,
+        payload: request,
+    } = match parse_wire_request::<GhPrReportRequest>(request_str, "gh-pr-report") {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
+    };
+
+    match build_pr_report_summary(&request.team, home, &request.repo, request.pr_number) {
+        Ok(report) => make_ok_response(
+            &request_id,
+            serde_json::to_value(report).unwrap_or_default(),
+        ),
+        Err(err) => make_error_response(&request_id, "GH_PR_REPORT_FAILED", &err.to_string()),
+    }
+}
+
+#[cfg(unix)]
+pub(crate) async fn handle_gh_cli_prereqs_command(
+    request_str: &str,
+    _home: &std::path::Path,
+) -> SocketResponse {
+    let ParsedWireRequest {
+        request_id,
+        payload: _request,
+    } = match parse_wire_request::<GhCliPrereqRequest>(request_str, "gh-cli-prereqs") {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
+    };
+
+    make_ok_response(
+        &request_id,
+        serde_json::to_value(validate_gh_cli_prerequisites_status()).unwrap_or_default(),
+    )
+}
+
+#[cfg(unix)]
+pub(crate) async fn handle_gh_rate_limit_audit_command(
+    request_str: &str,
+    home: &std::path::Path,
+) -> SocketResponse {
+    let ParsedWireRequest {
+        request_id,
+        payload: request,
+    } = match parse_wire_request::<GhRateLimitAuditRequest>(request_str, "gh-rate-limit-audit") {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
+    };
+
+    match build_gh_rate_limit_audit(home, &request.team) {
+        Ok(audit) => make_ok_response(&request_id, serde_json::to_value(audit).unwrap_or_default()),
+        Err(err) => {
+            make_error_response(&request_id, "GH_RATE_LIMIT_AUDIT_FAILED", &err.to_string())
+        }
+    }
+}
+
 #[cfg(not(unix))]
 pub(crate) async fn handle_gh_monitor_command(
     request_str: &str,
@@ -540,6 +664,64 @@ pub(crate) async fn handle_gh_status_command(
         "UNSUPPORTED_PLATFORM",
         "gh-status commands require Unix daemon transport",
     )
+}
+
+#[cfg(not(unix))]
+pub(crate) async fn handle_gh_pr_list_command(
+    request_str: &str,
+    _home: &std::path::Path,
+) -> SocketResponse {
+    unsupported_platform_response(
+        request_str,
+        "gh-pr-list commands require Unix daemon transport",
+    )
+}
+
+#[cfg(not(unix))]
+pub(crate) async fn handle_gh_pr_report_command(
+    request_str: &str,
+    _home: &std::path::Path,
+) -> SocketResponse {
+    unsupported_platform_response(
+        request_str,
+        "gh-pr-report commands require Unix daemon transport",
+    )
+}
+
+#[cfg(not(unix))]
+pub(crate) async fn handle_gh_cli_prereqs_command(
+    request_str: &str,
+    _home: &std::path::Path,
+) -> SocketResponse {
+    unsupported_platform_response(
+        request_str,
+        "gh-cli-prereqs commands require Unix daemon transport",
+    )
+}
+
+#[cfg(not(unix))]
+pub(crate) async fn handle_gh_rate_limit_audit_command(
+    request_str: &str,
+    _home: &std::path::Path,
+) -> SocketResponse {
+    unsupported_platform_response(
+        request_str,
+        "gh-rate-limit-audit commands require Unix daemon transport",
+    )
+}
+
+#[cfg(not(unix))]
+fn unsupported_platform_response(request_str: &str, message: &str) -> SocketResponse {
+    let request_id = serde_json::from_str::<serde_json::Value>(request_str)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("request_id")
+                .and_then(|request_id| request_id.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    make_error_response(&request_id, "UNSUPPORTED_PLATFORM", message)
 }
 
 fn make_ok_response(request_id: &str, payload: serde_json::Value) -> SocketResponse {

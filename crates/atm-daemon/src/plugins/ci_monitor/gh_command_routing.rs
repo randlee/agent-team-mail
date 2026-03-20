@@ -2,11 +2,18 @@
 
 use super::run_attributed_gh_command_with_ids;
 use agent_team_mail_ci_monitor::{
-    GhCliObserverContext, emit_gh_info_denied, emit_gh_info_live_refresh, emit_gh_info_requested,
-    new_gh_execution_call_id, new_gh_info_request_id,
+    GhCliObserverContext, RateLimitUpdate, emit_gh_info_denied, emit_gh_info_live_refresh,
+    emit_gh_info_requested, emit_gh_info_served_from_cache, gh_repo_state_cache_age_secs,
+    new_gh_execution_call_id, new_gh_info_request_id, read_gh_repo_state,
+    update_gh_repo_state_rate_limit,
+};
+use agent_team_mail_core::gh_command::{
+    GH_MONITOR_REPORT_SCHEMA_VERSION, GhCiRollup, GhCliPrereqStatus, GhMergeReport,
+    GhMonitorCheckReport, GhMonitorListItem, GhMonitorReportPr, GhMonitorReviewReport,
+    GhPrListSummary, GhPrReportSummary, GhRateLimitAudit,
 };
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::path::Path;
 use std::process::Command;
 use std::thread;
@@ -46,68 +53,6 @@ struct GhPrReportRow {
     reviews: Vec<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct GhPrListSummary {
-    pub team: String,
-    pub repo: String,
-    pub generated_at: String,
-    pub total_open_prs: usize,
-    pub items: Vec<GhMonitorListItem>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct GhMonitorListItem {
-    pub number: u64,
-    pub title: String,
-    pub url: String,
-    pub draft: bool,
-    pub ci: GhCiRollup,
-    pub merge: String,
-    pub review: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct GhCiRollup {
-    pub state: String,
-    pub total: u64,
-    pub pass: u64,
-    pub fail: u64,
-    pub pending: u64,
-    pub skip: u64,
-    pub neutral: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct GhPrReportSummary {
-    pub schema_version: String,
-    pub team: String,
-    pub repo: String,
-    pub generated_at: String,
-    pub pr: GhMonitorReportPr,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct GhMonitorReportPr {
-    pub number: u64,
-    pub title: String,
-    pub url: String,
-    pub draft: bool,
-    pub ci: GhCiRollup,
-    pub review_decision: String,
-    pub merge: GhMergeReport,
-    pub checks: Vec<GhMonitorCheckReport>,
-    pub reviews: Vec<GhMonitorReviewReport>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct GhMergeReport {
-    pub mergeable: String,
-    pub merge_state_status: String,
-    pub status: String,
-    pub blocking_reasons: Vec<String>,
-    pub advisory_reasons: Vec<String>,
-}
-
 #[derive(Debug, Deserialize)]
 struct GhPrMergeProbe {
     #[serde(default)]
@@ -116,29 +61,6 @@ struct GhPrMergeProbe {
     merge_state_status: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct GhMonitorCheckReport {
-    pub name: String,
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub conclusion: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub started_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub completed_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub run_url: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct GhMonitorReviewReport {
-    pub reviewer: String,
-    pub state: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub submitted_at: Option<String>,
-}
-
-pub const GH_MONITOR_REPORT_SCHEMA_VERSION: &str = "1.0.0";
 const GH_MONITOR_MERGE_RETRY_ATTEMPTS: u8 = 3;
 const GH_MONITOR_MERGE_RETRY_DELAY_MS: u64 = 250;
 
@@ -409,6 +331,163 @@ pub fn validate_gh_cli_prerequisites() -> Result<()> {
     }
 
     Ok(())
+}
+
+pub fn validate_gh_cli_prerequisites_status() -> GhCliPrereqStatus {
+    match validate_gh_cli_prerequisites() {
+        Ok(()) => GhCliPrereqStatus {
+            gh_installed: true,
+            gh_authenticated: true,
+            error: None,
+        },
+        Err(err) => {
+            let message = err.to_string();
+            let lower = message.to_ascii_lowercase();
+            GhCliPrereqStatus {
+                gh_installed: !lower.contains("gh --version")
+                    && !lower.contains("not found")
+                    && !lower.contains("not executable"),
+                gh_authenticated: !lower.contains("not authenticated")
+                    && !lower.contains("gh auth login"),
+                error: Some(message),
+            }
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct GhRateLimitResponse {
+    resources: GhRateLimitResources,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhRateLimitResources {
+    core: GhCoreRateLimit,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhCoreRateLimit {
+    limit: u64,
+    remaining: u64,
+    #[serde(default)]
+    reset: Option<i64>,
+}
+
+pub fn build_gh_rate_limit_audit(home_dir: &Path, team: &str) -> Result<Option<GhRateLimitAudit>> {
+    let state = read_gh_repo_state(home_dir)?;
+    let team_records: Vec<_> = state
+        .records
+        .into_iter()
+        .filter(|record| record.team == team)
+        .collect();
+    if team_records.is_empty() {
+        return Ok(None);
+    }
+
+    let repo_scope = &team_records[0].repo;
+    if !repo_scope.contains('/') {
+        anyhow::bail!("invalid owner/repo scope in gh repo-state: {repo_scope}");
+    }
+    let observer_ctx = GhCliObserverContext::new(
+        home_dir.to_path_buf(),
+        team.to_string(),
+        repo_scope.to_string(),
+        "atm-daemon".to_string(),
+    );
+    let request_id = new_gh_info_request_id();
+    let call_id = new_gh_execution_call_id();
+    emit_gh_info_requested(&observer_ctx, &request_id, "gh_api_rate_limit", None, None);
+    if let Some(cached_rate_limit) = team_records
+        .iter()
+        .filter_map(|record| record.rate_limit.as_ref().map(|_| record))
+        .max_by_key(|record| record.updated_at.clone())
+    {
+        emit_gh_info_served_from_cache(
+            &observer_ctx,
+            &request_id,
+            "gh_api_rate_limit",
+            gh_repo_state_cache_age_secs(cached_rate_limit),
+            None,
+            None,
+        );
+    }
+    let output = match run_attributed_gh_command_with_ids(
+        &observer_ctx,
+        "gh_api_rate_limit",
+        &["api", "rate_limit"],
+        None,
+        None,
+        request_id.clone(),
+        call_id.clone(),
+    ) {
+        Ok(output) => {
+            emit_gh_info_live_refresh(
+                &observer_ctx,
+                &request_id,
+                "gh_api_rate_limit",
+                &call_id,
+                None,
+                None,
+            );
+            output
+        }
+        Err(err) => {
+            emit_gh_info_denied(
+                &observer_ctx,
+                &request_id,
+                "gh_api_rate_limit",
+                &err.to_string(),
+                None,
+                None,
+            );
+            return Err(err).context("gh api rate_limit failed via attributed provider path");
+        }
+    };
+
+    let live: GhRateLimitResponse =
+        serde_json::from_str(&output).context("failed to parse gh api rate_limit response")?;
+    let live_reset_at = live
+        .resources
+        .core
+        .reset
+        .and_then(|epoch| chrono::DateTime::<chrono::Utc>::from_timestamp(epoch, 0))
+        .map(|ts| ts.to_rfc3339());
+    let _ = update_gh_repo_state_rate_limit(
+        home_dir,
+        team,
+        repo_scope,
+        RateLimitUpdate {
+            runtime: "atm-daemon".to_string(),
+            remaining: live.resources.core.remaining,
+            limit: live.resources.core.limit,
+            reset_at: live_reset_at.clone(),
+            source: "atm_daemon_rate_limit_audit",
+        },
+    );
+    let cached_used_in_window: u64 = team_records
+        .iter()
+        .map(|record| record.budget_used_in_window)
+        .sum();
+    let cached_rate_limit = team_records
+        .iter()
+        .filter_map(|record| record.rate_limit.as_ref())
+        .max_by_key(|rate| rate.updated_at.clone());
+    let consumed_live = live
+        .resources
+        .core
+        .limit
+        .saturating_sub(live.resources.core.remaining);
+
+    Ok(Some(GhRateLimitAudit {
+        live_remaining: live.resources.core.remaining,
+        live_limit: live.resources.core.limit,
+        live_reset_at,
+        cached_used_in_window,
+        repos_observed: team_records.len(),
+        cached_rate_limit_remaining: cached_rate_limit.map(|rate| rate.remaining),
+        cached_rate_limit_limit: cached_rate_limit.map(|rate| rate.limit),
+        delta_consumed_vs_cached: consumed_live as i64 - cached_used_in_window as i64,
+    }))
 }
 
 pub fn extract_check_reports(entries: &[serde_json::Value]) -> Vec<GhMonitorCheckReport> {
