@@ -109,7 +109,14 @@ while running:
         command = req.get("command", "")
         payload = req.get("payload", {}) or {}
         if command == "list-agents":
-            response_payload = []
+            custom_payload = os.environ.get("ATM_FAKE_LIST_AGENTS")
+            if custom_payload:
+                try:
+                    response_payload = json.loads(custom_payload)
+                except Exception:
+                    response_payload = []
+            else:
+                response_payload = []
         elif command == "session-query-team" or command == "session-for-team":
             alive = os.environ.get("ATM_FAKE_SESSION_ALIVE", "false").lower() == "true"
             runtime = os.environ.get("ATM_FAKE_SESSION_RUNTIME", "codex")
@@ -191,6 +198,24 @@ fn spawn_count(home: &Path) -> usize {
         .flatten()
         .filter_map(Result::ok)
         .count()
+}
+
+#[cfg(unix)]
+fn fake_member_states_json(agent: &str, process_id: u32) -> String {
+    serde_json::json!([
+        {
+            "agent": agent,
+            "state": "active",
+            "activity": "busy",
+            "session_id": "fake-session",
+            "process_id": process_id,
+            "last_alive_at": "2026-03-20T22:00:00Z",
+            "reason": "session active",
+            "source": "session_registry",
+            "in_config": true
+        }
+    ])
+    .to_string()
 }
 
 #[test]
@@ -485,6 +510,158 @@ fn test_doctor_no_daemon_not_running_after_status_autostart() {
         !has_daemon_not_running,
         "doctor must not report DAEMON_NOT_RUNNING after status autostart"
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_doctor_distinguishes_absent_daemon_from_pid_verification_failure() {
+    let absent_home = TempDir::new().unwrap();
+    write_team_config(absent_home.path(), "team-absent");
+
+    let mut absent_cmd = cargo::cargo_bin_cmd!("atm");
+    let absent_output = absent_cmd
+        .env("ATM_HOME", absent_home.path())
+        .env("ATM_TEAM", "team-absent")
+        .env("ATM_DAEMON_AUTOSTART", "0")
+        .arg("doctor")
+        .arg("--team")
+        .arg("team-absent")
+        .output()
+        .unwrap();
+    assert_eq!(absent_output.status.code(), Some(2));
+    let absent_stdout = String::from_utf8_lossy(&absent_output.stdout);
+    assert!(
+        absent_stdout
+            .contains("Daemon is not running: no live daemon PID file or socket was found"),
+        "unexpected absent-daemon output: {absent_stdout}"
+    );
+
+    let stale_home = TempDir::new().unwrap();
+    write_team_config(stale_home.path(), "team-stale");
+    let daemon_dir = stale_home.path().join(".atm/daemon");
+    fs::create_dir_all(&daemon_dir).unwrap();
+    fs::write(
+        daemon_dir.join("status.json"),
+        serde_json::json!({
+            "pid": 999_991_u32,
+            "version": env!("CARGO_PKG_VERSION"),
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let mut stale_cmd = cargo::cargo_bin_cmd!("atm");
+    let stale_output = stale_cmd
+        .env("ATM_HOME", stale_home.path())
+        .env("ATM_TEAM", "team-stale")
+        .env("ATM_DAEMON_AUTOSTART", "0")
+        .arg("doctor")
+        .arg("--team")
+        .arg("team-stale")
+        .output()
+        .unwrap();
+    assert_eq!(stale_output.status.code(), Some(2));
+    let stale_stdout = String::from_utf8_lossy(&stale_output.stdout);
+    assert!(
+        stale_stdout.contains("PID cannot be verified"),
+        "unexpected stale-daemon output: {stale_stdout}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_members_reports_status_session_and_pid_after_daemon_autostart() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path();
+    let team = "team-members";
+    write_team_config(home, team);
+    let script = write_fake_daemon_script(home);
+
+    let mut members_cmd = cargo::cargo_bin_cmd!("atm");
+    let output = members_cmd
+        .env("ATM_HOME", home)
+        .env("ATM_TEAM", team)
+        .env("ATM_DAEMON_BIN", &script)
+        .env(
+            "ATM_FAKE_LIST_AGENTS",
+            fake_member_states_json("alice", 4242),
+        )
+        .arg("members")
+        .arg("--team")
+        .arg(team)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "members should succeed after daemon autostart: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    wait_for_daemon_socket(home);
+    let daemon_pid = read_daemon_pid(&temp).expect("members autostart should write daemon pid");
+    let _daemon_guard =
+        daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(daemon_pid, &script, home);
+
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let member = value["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"].as_str() == Some("alice"))
+        .expect("alice row");
+    assert_eq!(member["status"].as_str(), Some("Active"));
+    assert_eq!(member["activity"].as_str(), Some("Busy"));
+    assert_eq!(member["sessionId"].as_str(), Some("fake-session"));
+    assert_eq!(member["processId"].as_u64(), Some(4242));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_status_autostart_recovers_after_stale_restart_cycle() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path();
+    let team = "team-restart";
+    write_team_config(home, team);
+    let script = write_fake_daemon_script(home);
+
+    let mut first_status = cargo::cargo_bin_cmd!("atm");
+    first_status
+        .env("ATM_HOME", home)
+        .env("ATM_TEAM", team)
+        .env("ATM_DAEMON_BIN", &script)
+        .arg("status")
+        .arg("--team")
+        .arg(team)
+        .arg("--json")
+        .assert()
+        .success();
+    wait_for_daemon_socket(home);
+    let first_pid = read_daemon_pid(&temp).expect("initial daemon pid");
+    Command::new("kill")
+        .args(["-9", &first_pid.to_string()])
+        .status()
+        .expect("kill stale daemon");
+    daemon_process_guard::wait_for_pid_exit(first_pid as i32, Duration::from_secs(5));
+
+    let mut second_status = cargo::cargo_bin_cmd!("atm");
+    second_status
+        .env("ATM_HOME", home)
+        .env("ATM_TEAM", team)
+        .env("ATM_DAEMON_BIN", &script)
+        .arg("status")
+        .arg("--team")
+        .arg(team)
+        .arg("--json")
+        .assert()
+        .success();
+    wait_for_daemon_socket(home);
+    let second_pid = read_daemon_pid(&temp).expect("restarted daemon pid");
+    assert_ne!(
+        second_pid, first_pid,
+        "autostart should replace the stale daemon pid"
+    );
+    let _daemon_guard =
+        daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(second_pid, &script, home);
 }
 
 #[test]

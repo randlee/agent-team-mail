@@ -2233,31 +2233,69 @@ fn daemon_autostart_enabled() -> bool {
 }
 
 #[cfg(unix)]
-fn resolve_daemon_binary() -> anyhow::Result<std::ffi::OsString> {
+fn resolve_daemon_binary_candidates() -> anyhow::Result<Vec<PathBuf>> {
+    let mut candidates = Vec::new();
+
     if let Some(override_bin) = std::env::var_os("ATM_DAEMON_BIN")
         && !override_bin.is_empty()
     {
-        return Ok(override_bin);
+        candidates.push(PathBuf::from(override_bin));
     }
 
     let name = std::ffi::OsString::from("atm-daemon");
-
     if let Ok(current_exe) = std::env::current_exe()
         && let Some(dir) = current_exe.parent()
     {
         let sibling = dir.join(std::path::Path::new(&name));
-        if sibling.exists() {
-            return Ok(sibling.into_os_string());
+        if sibling.exists() && !candidates.iter().any(|candidate| candidate == &sibling) {
+            candidates.push(sibling);
         }
-        anyhow::bail!(
-            "failed to resolve atm-daemon binary: ATM_DAEMON_BIN is unset and sibling binary '{}' is missing",
-            sibling.display()
-        );
+    }
+
+    if !candidates.is_empty() {
+        return Ok(candidates);
     }
 
     anyhow::bail!(
-        "failed to resolve atm-daemon binary: ATM_DAEMON_BIN is unset and current executable path is unavailable"
+        "failed to resolve atm-daemon binary: ATM_DAEMON_BIN is unset and no sibling atm-daemon binary was found next to the current executable"
     )
+}
+
+#[cfg(unix)]
+fn resolve_daemon_binary_for_home(home: &Path) -> anyhow::Result<(PathBuf, RuntimeOwnerMetadata)> {
+    // Shells may export a dev-channel ATM_DAEMON_BIN globally while commands
+    // target the default shared ATM_HOME. Prefer a compatible sibling daemon
+    // binary for the resolved runtime instead of letting a cross-channel
+    // override strand release-runtime diagnostics at autostart time.
+    let mut candidates = resolve_daemon_binary_candidates()?;
+    let override_was_explicit =
+        std::env::var_os("ATM_DAEMON_BIN").is_some_and(|value| !value.is_empty());
+    let mut first_error = None;
+
+    while let Some(candidate) = candidates.first().cloned() {
+        candidates.remove(0);
+        match validate_runtime_admission(home, &candidate) {
+            Ok(owner) => return Ok((candidate, owner)),
+            Err(err) => {
+                let can_fallback = override_was_explicit
+                    && candidate.exists()
+                    && !candidates.is_empty()
+                    && err.to_string().contains("approved installed daemon binary");
+                if can_fallback {
+                    first_error.get_or_insert(err);
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    }
+
+    Err(first_error.unwrap_or_else(|| {
+        anyhow::anyhow!(
+            "failed to resolve a daemon binary candidate for {}",
+            home.display()
+        )
+    }))
 }
 
 #[cfg(unix)]
@@ -2369,7 +2407,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         }
     }
 
-    let daemon_bin = resolve_daemon_binary().map_err(|e| {
+    let (daemon_bin_path, runtime_owner) = resolve_daemon_binary_for_home(&home).map_err(|e| {
         let error = e.to_string();
         emit_event_best_effort(daemon_autostart_event(
             &autostart_request_id,
@@ -2377,19 +2415,6 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
             "daemon_autostart_failure",
             "binary_resolution_error",
             None,
-            Some(error.clone()),
-        ));
-        anyhow::anyhow!("{error}")
-    })?;
-    let daemon_bin_path = PathBuf::from(&daemon_bin);
-    let runtime_owner = validate_runtime_admission(&home, &daemon_bin_path).map_err(|e| {
-        let error = e.to_string();
-        emit_event_best_effort(daemon_autostart_event(
-            &autostart_request_id,
-            &autostart_trace_id,
-            "daemon_autostart_failure",
-            "runtime_admission_denied",
-            Some(daemon_bin_path.display().to_string()),
             Some(error.clone()),
         ));
         anyhow::anyhow!("{error}")
@@ -2414,7 +2439,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to prepare daemon stderr capture: {e}"))?;
 
     let mut child = match spawn_daemon_process(SpawnDaemonRequest {
-        daemon_bin: daemon_bin.as_os_str(),
+        daemon_bin: daemon_bin_path.as_os_str(),
         atm_home: &home,
         launch_class: launch_class_for_runtime_kind(&runtime_owner.runtime_kind),
         issuer: "agent-team-mail-core::daemon_client::ensure_daemon_running_unix",
@@ -2428,12 +2453,12 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
             let error = if e.kind() == ErrorKind::NotFound {
                 format!(
                     "failed to auto-start daemon: binary '{}' is missing or not executable",
-                    std::path::PathBuf::from(&daemon_bin).display()
+                    daemon_bin_path.display()
                 )
             } else {
                 format!(
                     "failed to auto-start daemon via '{}': {e}",
-                    std::path::PathBuf::from(&daemon_bin).display()
+                    daemon_bin_path.display()
                 )
             };
             emit_event_best_effort(daemon_autostart_event(
@@ -2730,7 +2755,10 @@ fn detect_daemon_identity_mismatch(
         .unwrap_or_else(|_| home.to_path_buf())
         .to_string_lossy()
         .to_string();
-    let expected_bin = resolve_daemon_binary().ok();
+    let expected_bin = resolve_daemon_binary_candidates()
+        .ok()
+        .and_then(|candidates| candidates.into_iter().next())
+        .map(|path| path.into_os_string());
     let snapshot = DaemonIdentitySnapshot {
         pid_from_file,
         pid_from_status,
@@ -3256,8 +3284,8 @@ mod tests {
         let custom = tmp.path().join("custom-atm-daemon");
         std::fs::write(&custom, "#!/bin/sh\nexit 0\n").unwrap();
         let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", custom.to_str().unwrap());
-        let resolved = resolve_daemon_binary().expect("override should resolve");
-        assert_eq!(std::path::PathBuf::from(resolved), custom);
+        let candidates = resolve_daemon_binary_candidates().expect("override should resolve");
+        assert_eq!(candidates.first(), Some(&custom));
     }
 
     #[cfg(unix)]

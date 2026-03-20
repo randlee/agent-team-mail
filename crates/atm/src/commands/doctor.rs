@@ -907,6 +907,50 @@ fn codex_notify_matches_expected(array: &[toml::Value], expected_script: &str) -
     python_name_matches && script.replace('\\', "/") == expected_script
 }
 
+fn daemon_not_running_message(home_dir: &Path, pid_path: &Path, socket_path: &Path) -> String {
+    let status_path = daemon_status_path_for(home_dir);
+    let has_runtime_artifacts = pid_path.exists()
+        || socket_path.exists()
+        || status_path.exists()
+        || read_daemon_lock_metadata(home_dir).is_some();
+
+    if !pid_path.exists() {
+        if has_runtime_artifacts {
+            return format!(
+                "Daemon state exists but PID cannot be verified: PID file missing at {}",
+                pid_path.display()
+            );
+        }
+        return format!(
+            "Daemon is not running: no live daemon PID file or socket was found under {}",
+            home_dir.join(".atm/daemon").display()
+        );
+    }
+
+    match fs::read_to_string(pid_path) {
+        Ok(raw) => match raw.trim().parse::<u32>() {
+            Ok(pid) if is_pid_alive(pid) => format!(
+                "Daemon PID file is present but the daemon socket is not reachable: pid={} path={}",
+                pid,
+                pid_path.display()
+            ),
+            Ok(pid) => format!(
+                "Daemon state exists but PID cannot be verified: pid {} from {} is not alive",
+                pid,
+                pid_path.display()
+            ),
+            Err(_) => format!(
+                "Daemon state exists but PID cannot be verified: invalid pid file contents at {}",
+                pid_path.display()
+            ),
+        },
+        Err(err) => format!(
+            "Daemon state exists but PID cannot be verified: failed to read {} ({err})",
+            pid_path.display()
+        ),
+    }
+}
+
 fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
     let mut findings = Vec::new();
 
@@ -923,7 +967,7 @@ fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
             Severity::Critical,
             "daemon_health",
             "DAEMON_NOT_RUNNING",
-            "Daemon is not running or PID cannot be verified".to_string(),
+            daemon_not_running_message(home_dir, &pid_path, &socket_path),
         ));
     }
 
@@ -2898,6 +2942,62 @@ mod tests {
             findings
                 .iter()
                 .any(|finding| finding.code == "COMPETING_DAEMON_DETECTED")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn check_daemon_health_distinguishes_absent_daemon() {
+        let _guard = EnvGuard::isolate(OVERRIDE_ENV_KEYS);
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+
+        let findings = check_daemon_health(tmp.path());
+        let daemon = findings
+            .iter()
+            .find(|finding| finding.code == "DAEMON_NOT_RUNNING")
+            .expect("daemon finding");
+        assert!(
+            daemon
+                .message
+                .contains("Daemon is not running: no live daemon PID file or socket was found"),
+            "unexpected absent-daemon message: {}",
+            daemon.message
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn check_daemon_health_distinguishes_pid_verification_failure() {
+        let _guard = EnvGuard::isolate(OVERRIDE_ENV_KEYS);
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon_dir = tmp.path().join(".atm/daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+        fs::write(
+            daemon_dir.join("status.json"),
+            serde_json::json!({
+                "pid": 999_991_u32,
+                "version": "0.46.1",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+
+        let findings = check_daemon_health(tmp.path());
+        let daemon = findings
+            .iter()
+            .find(|finding| finding.code == "DAEMON_NOT_RUNNING")
+            .expect("daemon finding");
+        assert!(
+            daemon.message.contains("PID cannot be verified"),
+            "unexpected pid-verification message: {}",
+            daemon.message
+        );
+        assert!(
+            daemon.message.contains("PID file missing"),
+            "pid-verification message should explain the missing pid file: {}",
+            daemon.message
         );
     }
 

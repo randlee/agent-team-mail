@@ -2,7 +2,8 @@
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    canonical_liveness_bool, query_list_agents, query_team_member_states,
+    canonical_activity_label, canonical_liveness_bool, canonical_status_label, query_list_agents,
+    query_team_member_states,
 };
 use agent_team_mail_core::schema::TeamConfig;
 use anyhow::Result;
@@ -31,6 +32,9 @@ struct MemberRow {
     agent_type: String,
     model: String,
     session_id: Option<String>,
+    process_id: Option<u32>,
+    status: String,
+    activity: String,
     liveness: Option<bool>,
     in_config: bool,
 }
@@ -52,26 +56,25 @@ fn render_members_human(team_name: &str, member_rows: &[MemberRow]) -> String {
     }
 
     out.push_str(&format!(
-        "  {:<20} {:<20} {:<25} {:<8} Status\n",
-        "Name", "Type", "Model", "Session"
+        "  {:<20} {:<20} {:<25} {:<10} {:<8} {:<7} Activity\n",
+        "Name", "Type", "Model", "Status", "PID", "Session"
     ));
-    out.push_str(&format!("  {}\n", "─".repeat(84)));
+    out.push_str(&format!("  {}\n", "─".repeat(110)));
 
     for member in member_rows {
-        let active = match member.liveness {
-            Some(true) => "Online",
-            Some(false) => "Offline",
-            None => "Unknown",
-        };
         let name = if member.in_config {
             member.name.clone()
         } else {
             format!("{}{}", member.name, GHOST_SUFFIX)
         };
         let session = format_session_short(member.session_id.as_deref());
+        let pid = member
+            .process_id
+            .map(|pid| pid.to_string())
+            .unwrap_or_else(|| "-".to_string());
         out.push_str(&format!(
-            "  {name:<20} {:<20} {:<25} {session:<8} {active}\n",
-            member.agent_type, member.model
+            "  {name:<20} {:<20} {:<25} {:<10} {pid:<8} {session:<7} {}\n",
+            member.agent_type, member.model, member.status, member.activity
         ));
     }
 
@@ -86,6 +89,9 @@ fn render_members_json(team_name: &str, member_rows: &[MemberRow]) -> serde_json
             "type": m.agent_type,
             "model": m.model,
             "sessionId": m.session_id,
+            "processId": m.process_id,
+            "status": m.status,
+            "activity": m.activity,
             "liveness": m.liveness,
             "inConfig": m.in_config,
             "ghost": !m.in_config,
@@ -162,15 +168,17 @@ fn build_member_rows(
     names
         .into_iter()
         .map(|name| {
+            let daemon_state = daemon_states.get(name.as_str());
             if let Some(member) = by_name.get(name.as_str()) {
                 MemberRow {
                     name,
                     agent_type: member.agent_type.clone(),
                     model: member.model.clone(),
-                    session_id: daemon_states
-                        .get(member.name.as_str())
-                        .and_then(|s| s.session_id.clone()),
-                    liveness: canonical_liveness_bool(daemon_states.get(member.name.as_str())),
+                    session_id: daemon_state.and_then(|s| s.session_id.clone()),
+                    process_id: daemon_state.and_then(|s| s.process_id),
+                    status: canonical_status_label(daemon_state).to_string(),
+                    activity: canonical_activity_label(daemon_state).to_string(),
+                    liveness: canonical_liveness_bool(daemon_state),
                     in_config: true,
                 }
             } else {
@@ -178,10 +186,11 @@ fn build_member_rows(
                     name: name.clone(),
                     agent_type: UNREGISTERED_MARKER.to_string(),
                     model: UNREGISTERED_MARKER.to_string(),
-                    session_id: daemon_states
-                        .get(name.as_str())
-                        .and_then(|s| s.session_id.clone()),
-                    liveness: canonical_liveness_bool(daemon_states.get(name.as_str())),
+                    session_id: daemon_state.and_then(|s| s.session_id.clone()),
+                    process_id: daemon_state.and_then(|s| s.process_id),
+                    status: canonical_status_label(daemon_state).to_string(),
+                    activity: canonical_activity_label(daemon_state).to_string(),
+                    liveness: canonical_liveness_bool(daemon_state),
                     in_config: false,
                 }
             }
@@ -262,12 +271,18 @@ mod tests {
             agent_type: "codex".to_string(),
             model: "custom:codex".to_string(),
             session_id: Some("123e4567-e89b-12d3-a456-426614174000".to_string()),
+            process_id: Some(4242),
+            status: "Active".to_string(),
+            activity: "Busy".to_string(),
             liveness: Some(true),
             in_config: true,
         }];
 
         let rendered = render_members_human("atm-dev", &rows);
         assert!(rendered.contains("123e4567"));
+        assert!(rendered.contains("4242"));
+        assert!(rendered.contains("Active"));
+        assert!(rendered.contains("Busy"));
         assert!(!rendered.contains("123e4567-e89b-12d3-a456-426614174000"));
     }
 
@@ -278,6 +293,9 @@ mod tests {
             agent_type: "codex".to_string(),
             model: "custom:codex".to_string(),
             session_id: Some("123e4567-e89b-12d3-a456-426614174000".to_string()),
+            process_id: Some(4242),
+            status: "Active".to_string(),
+            activity: "Busy".to_string(),
             liveness: Some(true),
             in_config: true,
         }];
@@ -287,5 +305,8 @@ mod tests {
             rendered["members"][0]["sessionId"].as_str(),
             Some("123e4567-e89b-12d3-a456-426614174000")
         );
+        assert_eq!(rendered["members"][0]["processId"].as_u64(), Some(4242));
+        assert_eq!(rendered["members"][0]["status"].as_str(), Some("Active"));
+        assert_eq!(rendered["members"][0]["activity"].as_str(), Some("Busy"));
     }
 }
