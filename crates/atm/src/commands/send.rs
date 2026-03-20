@@ -318,17 +318,16 @@ pub fn execute(args: SendArgs) -> Result<()> {
         WriteOutcome::Success | WriteOutcome::ConflictResolved { .. }
     ) {
         let _ = touch_sender_session_heartbeat(&team_name, &config.core.identity);
+        if should_emit_post_send_idle_transition() {
+            if let Some(ref session_id) = sender_session_id {
+                let _ = agent_team_mail_core::daemon_client::emit_teammate_idle_best_effort(
+                    &team_name,
+                    &config.core.identity,
+                    session_id,
+                );
+            }
+        }
     }
-
-    // Auto-subscribe the sender to the target agent's idle event (upsert — refreshes TTL
-    // if a subscription already exists). This is best-effort: errors are silently ignored
-    // because the daemon may not be running.
-    let _ = agent_team_mail_core::daemon_client::subscribe_to_agent(
-        &config.core.identity,
-        &agent_name,
-        &team_name,
-        &["idle".to_string()],
-    );
 
     // Query the daemon for agent state to enrich the output (best-effort, silent fallback).
     let agent_state_info =
@@ -595,6 +594,16 @@ where
 {
     let _ = query(team, sender)?;
     Ok(())
+}
+
+fn should_emit_post_send_idle_transition() -> bool {
+    matches!(
+        std::env::var("ATM_RUNTIME")
+            .ok()
+            .map(|runtime| runtime.trim().to_ascii_lowercase()),
+        Some(runtime)
+            if matches!(runtime.as_str(), "codex" | "codex-cli" | "gemini" | "gemini-cli" | "opencode")
+    )
 }
 
 fn should_warn_self_send(

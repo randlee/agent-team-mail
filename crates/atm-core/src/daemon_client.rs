@@ -1177,6 +1177,31 @@ pub fn subscribe_to_agent(
     query_daemon(&request)
 }
 
+/// Emit a best-effort non-Claude teammate idle lifecycle event to the daemon.
+///
+/// This is used by CLI sender paths that already know the caller runtime session
+/// and need to restore the sender to `idle` after a successful command. The
+/// call is silent when the daemon is unavailable.
+pub fn emit_teammate_idle_best_effort(
+    team: &str,
+    agent: &str,
+    session_id: &str,
+) -> anyhow::Result<Option<SocketResponse>> {
+    let request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "hook-event".to_string(),
+        payload: serde_json::json!({
+            "event": "teammate_idle",
+            "agent": agent,
+            "team": team,
+            "session_id": session_id,
+            "source": LifecycleSource::new(LifecycleSourceKind::AgentHook),
+        }),
+    };
+    query_daemon(&request)
+}
+
 /// Send an unsubscribe request to the daemon.
 ///
 /// Removes the subscription for `(subscriber, agent)`. This is a best-effort

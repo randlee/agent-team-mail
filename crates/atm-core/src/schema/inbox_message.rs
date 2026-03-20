@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub const IDLE_NOTIFICATION_TYPE: &str = "idle_notification";
+
 /// Message in an agent's inbox
 ///
 /// Messages are stored in `~/.claude/teams/{team_name}/inboxes/{agent_name}.json`
@@ -60,6 +62,33 @@ impl InboxMessage {
 
     pub fn is_pending_action(&self) -> bool {
         !self.read || (self.pending_ack_at().is_some() && !self.is_acknowledged())
+    }
+
+    pub fn notification_type(&self) -> Option<&str> {
+        self.unknown_fields
+            .get("type")
+            .and_then(|value| value.as_str())
+    }
+
+    pub fn is_idle_notification(&self) -> bool {
+        self.notification_type() == Some(IDLE_NOTIFICATION_TYPE)
+    }
+
+    pub fn idle_notification_sender(&self) -> Option<&str> {
+        self.unknown_fields
+            .get("idleSender")
+            .and_then(|value| value.as_str())
+    }
+
+    pub fn mark_idle_notification(&mut self, sender: impl Into<String>) {
+        self.unknown_fields.insert(
+            "type".to_string(),
+            serde_json::Value::String(IDLE_NOTIFICATION_TYPE.to_string()),
+        );
+        self.unknown_fields.insert(
+            "idleSender".to_string(),
+            serde_json::Value::String(sender.into()),
+        );
     }
 
     pub fn mark_pending_ack(&mut self, timestamp: impl Into<String>) {
@@ -254,6 +283,30 @@ mod tests {
         msg.mark_acknowledged("2026-02-11T14:31:00.000Z");
         assert_eq!(msg.pending_ack_at(), None);
         assert_eq!(msg.acknowledged_at(), Some("2026-02-11T14:31:00.000Z"));
+    }
+
+    #[test]
+    fn test_idle_notification_helpers_roundtrip() {
+        let mut msg = InboxMessage {
+            from: "daemon".to_string(),
+            source_team: None,
+            text: "[AGENT STATE] arch-ctm is now idle".to_string(),
+            timestamp: "2026-02-11T14:30:00.000Z".to_string(),
+            read: false,
+            summary: Some("Agent arch-ctm → idle".to_string()),
+            message_id: Some("msg-1".to_string()),
+            unknown_fields: HashMap::new(),
+        };
+
+        msg.mark_idle_notification("arch-ctm");
+
+        assert!(msg.is_idle_notification());
+        assert_eq!(msg.idle_notification_sender(), Some("arch-ctm"));
+
+        let serialized = serde_json::to_string(&msg).unwrap();
+        let reparsed: InboxMessage = serde_json::from_str(&serialized).unwrap();
+        assert!(reparsed.is_idle_notification());
+        assert_eq!(reparsed.idle_notification_sender(), Some("arch-ctm"));
     }
 
     #[test]

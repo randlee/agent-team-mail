@@ -1,10 +1,13 @@
-//! Inbox command implementation - show inbox summaries
+//! Inbox command implementation - show inbox summaries and targeted cleanup
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
+use agent_team_mail_core::retention::parse_duration;
+use agent_team_mail_core::schema::InboxMessage;
 use agent_team_mail_core::schema::TeamConfig;
 use anyhow::Result;
-use chrono::DateTime;
-use clap::{ArgAction, Args};
+use chrono::{DateTime, Utc};
+use clap::{ArgAction, Args, Subcommand};
+use serde::Serialize;
 use std::path::Path;
 
 use crate::util::settings::{get_home_dir, teams_root_dir_for};
@@ -36,10 +39,69 @@ pub struct InboxArgs {
     /// Poll interval for --watch (milliseconds)
     #[arg(long, default_value_t = 200)]
     interval_ms: u64,
+
+    #[command(subcommand)]
+    command: Option<InboxCommand>,
+}
+
+#[derive(Subcommand, Debug)]
+enum InboxCommand {
+    /// Clear selected messages from an inbox
+    Clear(ClearArgs),
+}
+
+#[derive(Args, Debug)]
+struct ClearArgs {
+    /// Target agent inbox (defaults to current ATM identity)
+    agent: Option<String>,
+
+    /// Override default team
+    #[arg(long)]
+    team: Option<String>,
+
+    /// Remove acknowledged messages
+    #[arg(long)]
+    acked: bool,
+
+    /// Remove messages older than the given duration (e.g. 7d, 24h)
+    #[arg(long, value_name = "DURATION")]
+    older_than: Option<String>,
+
+    /// Only remove idle notifications
+    #[arg(long, conflicts_with = "acked", conflicts_with = "older_than")]
+    idle_only: bool,
+
+    /// Show what would be removed without mutating the inbox
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Output cleanup results as JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Default, Clone, Serialize, PartialEq, Eq)]
+struct InboxClearResult {
+    team: String,
+    agent: String,
+    dry_run: bool,
+    inbox_path: String,
+    removed_total: usize,
+    remaining_total: usize,
+    removed_idle_notifications: usize,
+    removed_acked_messages: usize,
+    removed_older_than: usize,
 }
 
 /// Execute the inbox command
 pub fn execute(args: InboxArgs) -> Result<()> {
+    if let Some(InboxCommand::Clear(mut clear_args)) = args.command {
+        if clear_args.team.is_none() {
+            clear_args.team = args.team.clone();
+        }
+        return execute_clear(clear_args);
+    }
+
     let home_dir = get_home_dir()?;
     let current_dir = std::env::current_dir()?;
 
@@ -95,6 +157,57 @@ pub fn execute(args: InboxArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn execute_clear(args: ClearArgs) -> Result<()> {
+    let home_dir = get_home_dir()?;
+    let current_dir = std::env::current_dir()?;
+    let overrides = ConfigOverrides {
+        team: args.team.clone(),
+        ..Default::default()
+    };
+    let config = resolve_config(&overrides, &current_dir, &home_dir)?;
+    let team_name = args
+        .team
+        .clone()
+        .unwrap_or_else(|| config.core.default_team.clone());
+    let agent_name = args
+        .agent
+        .clone()
+        .unwrap_or_else(|| config.core.identity.clone());
+    let inbox_path = teams_root_dir_for(&home_dir)
+        .join(&team_name)
+        .join("inboxes")
+        .join(format!("{agent_name}.json"));
+
+    let result = clear_inbox_messages(&inbox_path, &team_name, &agent_name, &args)?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else if args.dry_run {
+        println!(
+            "Dry run - would remove {} message(s) from {}@{}",
+            result.removed_total, agent_name, team_name
+        );
+        print_clear_counts(&result);
+    } else {
+        println!(
+            "Cleared {} message(s) from {}@{}",
+            result.removed_total, agent_name, team_name
+        );
+        print_clear_counts(&result);
+    }
+
+    Ok(())
+}
+
+fn print_clear_counts(result: &InboxClearResult) {
+    println!(
+        "  idle_notifications: {}",
+        result.removed_idle_notifications
+    );
+    println!("  acked_messages: {}", result.removed_acked_messages);
+    println!("  older_than: {}", result.removed_older_than);
+    println!("  remaining_total: {}", result.remaining_total);
 }
 
 /// Show inbox summary for a single team
@@ -187,6 +300,86 @@ fn show_team_summary(home_dir: &Path, team_name: &str, use_since_last_seen: bool
     }
 
     Ok(())
+}
+
+fn clear_inbox_messages(
+    inbox_path: &Path,
+    team_name: &str,
+    agent_name: &str,
+    args: &ClearArgs,
+) -> Result<InboxClearResult> {
+    let messages: Vec<InboxMessage> = if inbox_path.exists() {
+        serde_json::from_str(&std::fs::read_to_string(inbox_path)?)?
+    } else {
+        Vec::new()
+    };
+    let older_than = match args.older_than.as_deref() {
+        Some(raw) => Some(parse_duration(raw)?),
+        None => None,
+    };
+    let now = Utc::now();
+    let mut result = InboxClearResult {
+        team: team_name.to_string(),
+        agent: agent_name.to_string(),
+        dry_run: args.dry_run,
+        inbox_path: inbox_path.display().to_string(),
+        ..Default::default()
+    };
+
+    let mut kept = Vec::with_capacity(messages.len());
+    for message in messages {
+        let idle_match = message.is_idle_notification();
+        let acked_match = args.acked && message.is_acknowledged();
+        let older_match = older_than
+            .as_ref()
+            .is_some_and(|duration| message_is_older_than(&message, *duration, now));
+        let should_remove = if args.idle_only {
+            idle_match
+        } else {
+            idle_match || acked_match || older_match
+        };
+
+        if should_remove {
+            result.removed_total += 1;
+            if idle_match {
+                result.removed_idle_notifications += 1;
+            }
+            if acked_match {
+                result.removed_acked_messages += 1;
+            }
+            if older_match {
+                result.removed_older_than += 1;
+            }
+        } else {
+            kept.push(message);
+        }
+    }
+
+    result.remaining_total = kept.len();
+
+    if !args.dry_run && result.removed_total > 0 {
+        agent_team_mail_core::io::inbox::inbox_update(
+            inbox_path,
+            team_name,
+            agent_name,
+            |stored| {
+                stored.clear();
+                stored.extend(kept.clone());
+            },
+        )?;
+    }
+
+    Ok(result)
+}
+
+fn message_is_older_than(
+    message: &InboxMessage,
+    max_age: chrono::Duration,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    DateTime::parse_from_rfc3339(&message.timestamp)
+        .map(|timestamp| now.signed_duration_since(timestamp.with_timezone(&Utc)) > max_age)
+        .unwrap_or(true)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
