@@ -176,37 +176,37 @@ pub fn run_cli_teardown_hook() {
 }
 
 #[derive(Debug, Deserialize)]
-struct GhPrListRow {
-    number: u64,
-    title: String,
-    url: String,
+pub struct GhPrListRow {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
     #[serde(rename = "isDraft", default)]
-    is_draft: bool,
+    pub is_draft: bool,
     #[serde(rename = "reviewDecision", default)]
-    review_decision: Option<String>,
+    pub review_decision: Option<String>,
     #[serde(rename = "mergeStateStatus", default)]
-    merge_state_status: Option<String>,
+    pub merge_state_status: Option<String>,
     #[serde(rename = "statusCheckRollup", default)]
-    status_check_rollup: Vec<serde_json::Value>,
+    pub status_check_rollup: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
-struct GhPrReportRow {
-    number: u64,
-    title: String,
-    url: String,
+pub struct GhPrReportRow {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
     #[serde(rename = "isDraft", default)]
-    is_draft: bool,
+    pub is_draft: bool,
     #[serde(rename = "reviewDecision", default)]
-    review_decision: Option<String>,
+    pub review_decision: Option<String>,
     #[serde(rename = "mergeStateStatus", default)]
-    merge_state_status: Option<String>,
+    pub merge_state_status: Option<String>,
     #[serde(default)]
-    mergeable: Option<String>,
+    pub mergeable: Option<String>,
     #[serde(rename = "statusCheckRollup", default)]
-    status_check_rollup: Vec<serde_json::Value>,
+    pub status_check_rollup: Vec<serde_json::Value>,
     #[serde(default)]
-    reviews: Vec<serde_json::Value>,
+    pub reviews: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -620,6 +620,27 @@ fn emit_local_gh_ledger_record(
 
 fn new_local_gh_id(prefix: &str) -> String {
     format!("{prefix}-{}", rand::random::<u64>())
+}
+
+pub fn flush_local_gh_observability_records(home_dir: &std::path::Path) -> anyhow::Result<()> {
+    let paths = [
+        home_dir.join(GH_OBSERVABILITY_LEDGER_FILE),
+        home_dir.join(".atm/daemon/gh-monitor-repo-state.json"),
+    ];
+
+    for path in paths {
+        if !path.exists() {
+            continue;
+        }
+        let file = OpenOptions::new().append(true).open(&path).map_err(|err| {
+            anyhow::anyhow!("open gh observability file {}: {err}", path.display())
+        })?;
+        file.sync_all().map_err(|err| {
+            anyhow::anyhow!("flush gh observability file {}: {err}", path.display())
+        })?;
+    }
+
+    Ok(())
 }
 
 fn record_local_repo_state(

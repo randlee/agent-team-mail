@@ -18,6 +18,8 @@ path = "src/main.rs"
 
 [dependencies]
 agent-team-mail-core.workspace = true
+# BA.4 will explicitly classify whether daemon-launch remains a permitted
+# launcher-lifecycle CLI dependency or becomes a follow-on removal target.
 agent-team-mail-daemon-launch.workspace = true
 sc-composer.workspace = true
 sc-observability.workspace = true
