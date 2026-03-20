@@ -7,23 +7,18 @@ use agent_team_mail_core::consts::GH_MONITOR_DEFAULT_DRAIN_TIMEOUT_SECS;
 use agent_team_mail_core::context::GitProvider;
 use agent_team_mail_core::daemon_client::{
     GhMonitorControlRequest, GhMonitorHealth, GhMonitorLifecycleAction, GhMonitorRequest,
-    GhMonitorStatus, GhMonitorTargetKind, GhStatusRequest, gh_monitor, gh_monitor_control,
-    gh_monitor_health_with_context, gh_status,
+    GhMonitorStatus, GhMonitorTargetKind, GhStatusRequest, gh_cli_prerequisites, gh_monitor,
+    gh_monitor_control, gh_monitor_health_with_context, gh_pr_list, gh_pr_report, gh_status,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::gh_command::{
+    GH_MONITOR_REPORT_SCHEMA_VERSION, GhCiRollup, GhCliPrereqRequest, GhCliPrereqStatus,
+    GhPrListRequest, GhPrListSummary, GhPrReportRequest, GhPrReportSummary,
+    PluginCapabilityDescriptor,
+};
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
 use agent_team_mail_core::team_config_store::TeamConfigStore;
-use agent_team_mail_daemon::plugins::ci_monitor::{
-    GH_MONITOR_REPORT_SCHEMA_VERSION, GhCiRollup, GhPrListSummary, GhPrReportSummary,
-    build_pr_list_summary, build_pr_report_summary, validate_gh_cli_prerequisites,
-};
-#[cfg(test)]
-use agent_team_mail_daemon::plugins::ci_monitor::{
-    GhMergeReport, GhMonitorReportPr, GhMonitorReviewReport, build_merge_report,
-    extract_check_reports, extract_review_reports, normalize_merge_status,
-    normalize_report_review_decision, summarize_ci_rollup,
-};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use minijinja::Environment;
@@ -273,6 +268,7 @@ struct GhNamespaceStatus {
     config_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     config_path: Option<String>,
+    namespace_state: &'static str,
     lifecycle_state: String,
     availability_state: String,
     in_flight: u64,
@@ -303,7 +299,26 @@ struct GhNamespaceStatus {
     owner_repo: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     owner_poll_interval_secs: Option<u64>,
-    actions: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capability_descriptor: Option<PluginCapabilityDescriptor>,
+    actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GhNamespaceState {
+    Absent,
+    PresentDisabled,
+    PresentEnabled,
+}
+
+impl GhNamespaceState {
+    fn as_str(self) -> &'static str {
+        match self {
+            GhNamespaceState::Absent => "absent",
+            GhNamespaceState::PresentDisabled => "present_disabled",
+            GhNamespaceState::PresentEnabled => "present_enabled",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -626,7 +641,14 @@ fn execute_pr_list(
     json: bool,
 ) -> Result<()> {
     let repo = resolve_monitor_repo_scope(config, current_dir, home_dir, team)?;
-    let summary = build_pr_list_summary(team, home_dir, &repo, limit)?;
+    agent_team_mail_core::daemon_client::ensure_daemon_running()
+        .context("failed to auto-start daemon for atm gh pr list command")?;
+    let summary = gh_pr_list(&GhPrListRequest {
+        team: team.to_string(),
+        repo,
+        limit,
+    })?
+    .ok_or_else(|| anyhow::anyhow!("daemon is not reachable for atm gh pr list command"))?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -651,7 +673,14 @@ fn execute_pr_report(
     }
 
     let repo = resolve_monitor_repo_scope(config, current_dir, home_dir, team)?;
-    let report = build_pr_report_summary(team, home_dir, &repo, pr_number)?;
+    agent_team_mail_core::daemon_client::ensure_daemon_running()
+        .context("failed to auto-start daemon for atm gh pr report command")?;
+    let report = gh_pr_report(&GhPrReportRequest {
+        team: team.to_string(),
+        repo,
+        pr_number,
+    })?
+    .ok_or_else(|| anyhow::anyhow!("daemon is not reachable for atm gh pr report command"))?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1283,6 +1312,7 @@ fn print_namespace_status(health: &GhMonitorHealth, json: bool) -> Result<()> {
     println!("Team:              {}", status.team);
     println!("Configured:        {}", yes_no(status.configured));
     println!("Enabled:           {}", yes_no(status.enabled));
+    println!("Namespace State:   {}", status.namespace_state);
     if let Some(source) = status.config_source.as_deref() {
         println!("Config Source:     {source}");
     }
@@ -1337,12 +1367,15 @@ fn print_namespace_status(health: &GhMonitorHealth, json: bool) -> Result<()> {
 }
 
 fn namespace_status_view(health: &GhMonitorHealth) -> GhNamespaceStatus {
+    let capability_descriptor = capability_descriptor_for_health(health);
+    let namespace_state = namespace_state_from_descriptor(capability_descriptor.as_ref());
     GhNamespaceStatus {
         team: health.team.clone(),
         configured: health.configured,
         enabled: health.enabled,
         config_source: health.config_source.clone(),
         config_path: health.config_path.clone(),
+        namespace_state: namespace_state.as_str(),
         lifecycle_state: health.lifecycle_state.clone(),
         availability_state: health.availability_state.clone(),
         in_flight: health.in_flight,
@@ -1360,27 +1393,72 @@ fn namespace_status_view(health: &GhMonitorHealth) -> GhNamespaceStatus {
         owner_atm_home: health.owner_atm_home.clone(),
         owner_repo: health.owner_repo.clone(),
         owner_poll_interval_secs: health.owner_poll_interval_secs,
-        actions: namespace_actions(health.enabled && health.configured),
+        capability_descriptor: capability_descriptor.clone(),
+        actions: namespace_actions(capability_descriptor.as_ref(), namespace_state),
     }
 }
 
-fn namespace_actions(enabled: bool) -> Vec<&'static str> {
-    if enabled {
+fn capability_descriptor_for_health(
+    health: &GhMonitorHealth,
+) -> Option<PluginCapabilityDescriptor> {
+    let commands = if !health.configured {
+        return None;
+    } else if health.enabled && health.availability_state != "disabled_config_error" {
         vec![
-            "atm gh",
-            "atm gh status",
-            "atm gh status <pr|workflow|run> <target>",
-            "atm gh monitor pr <number>",
-            "atm gh monitor workflow <name> --ref <ref>",
-            "atm gh monitor run <run-id>",
-            "atm gh pr list",
-            "atm gh pr report <pr-number>",
-            "atm gh pr init-report [--output <path>]",
-            "atm gh monitor start|stop|restart|status",
-            "atm gh init",
+            "atm gh".to_string(),
+            "atm gh status".to_string(),
+            "atm gh status <pr|workflow|run> <target>".to_string(),
+            "atm gh monitor pr <number>".to_string(),
+            "atm gh monitor workflow <name> --ref <ref>".to_string(),
+            "atm gh monitor run <run-id>".to_string(),
+            "atm gh pr list".to_string(),
+            "atm gh pr report <pr-number>".to_string(),
+            "atm gh pr init-report [--output <path>]".to_string(),
+            "atm gh monitor start|stop|restart|status".to_string(),
+            "atm gh init".to_string(),
         ]
     } else {
-        vec!["atm gh", "atm gh init"]
+        vec![
+            "atm gh".to_string(),
+            "atm gh init".to_string(),
+            "atm gh status".to_string(),
+            "atm gh monitor status".to_string(),
+        ]
+    };
+
+    Some(PluginCapabilityDescriptor {
+        namespace: "gh".to_string(),
+        plugin_name: "gh_monitor".to_string(),
+        commands,
+    })
+}
+
+fn namespace_state_from_descriptor(
+    descriptor: Option<&PluginCapabilityDescriptor>,
+) -> GhNamespaceState {
+    match descriptor {
+        None => GhNamespaceState::Absent,
+        Some(descriptor)
+            if descriptor.commands.iter().any(|command| {
+                command.starts_with("atm gh pr ")
+                    || command.starts_with("atm gh monitor pr ")
+                    || command.starts_with("atm gh monitor workflow ")
+                    || command.starts_with("atm gh monitor run ")
+            }) =>
+        {
+            GhNamespaceState::PresentEnabled
+        }
+        Some(_) => GhNamespaceState::PresentDisabled,
+    }
+}
+
+fn namespace_actions(
+    descriptor: Option<&PluginCapabilityDescriptor>,
+    state: GhNamespaceState,
+) -> Vec<String> {
+    match (descriptor, state) {
+        (Some(descriptor), _) if !descriptor.commands.is_empty() => descriptor.commands.clone(),
+        _ => vec!["atm gh init".to_string()],
     }
 }
 
@@ -1396,7 +1474,7 @@ fn execute_init(
     repo_override: Option<&str>,
     json: bool,
 ) -> Result<()> {
-    validate_gh_cli_prerequisites()?;
+    let prereqs = fetch_gh_cli_prereqs(team)?;
 
     let detected = detect_github_remote(current_dir);
     let (owner, repo) = resolve_repo_coordinates(repo_override, detected.as_ref())?;
@@ -1456,8 +1534,8 @@ fn execute_init(
         config_path: config_path.display().to_string(),
         dry_run: args.dry_run,
         created: !config_path.exists(),
-        gh_installed: true,
-        gh_authenticated: true,
+        gh_installed: prereqs.gh_installed,
+        gh_authenticated: prereqs.gh_authenticated,
         owner,
         repo,
         notify_target,
@@ -1510,6 +1588,27 @@ fn execute_init(
     }
 
     Ok(())
+}
+
+fn fetch_gh_cli_prereqs(team: &str) -> Result<GhCliPrereqStatus> {
+    agent_team_mail_core::daemon_client::ensure_daemon_running()
+        .context("failed to auto-start daemon for atm gh init command")?;
+    let status = gh_cli_prerequisites(&GhCliPrereqRequest {
+        team: team.to_string(),
+    })?
+    .ok_or_else(|| anyhow::anyhow!("daemon is not reachable for atm gh init command"))?;
+    if let Some(error) = status.error.as_deref() {
+        bail!("{error}");
+    }
+    if !status.gh_installed {
+        bail!(
+            "GitHub CLI (`gh`) not found or not executable. Install from https://cli.github.com/"
+        );
+    }
+    if !status.gh_authenticated {
+        bail!("GitHub CLI is not authenticated. Run `gh auth login` first.");
+    }
+    Ok(status)
 }
 
 fn detect_github_remote(current_dir: &Path) -> Option<(String, String)> {
@@ -1820,6 +1919,11 @@ fn write_text_atomic(path: &Path, content: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_team_mail_core::gh_command::{
+        GhMergeReport, GhMonitorReportPr, GhMonitorReviewReport, build_merge_report,
+        extract_check_reports, extract_review_reports, normalize_merge_status,
+        normalize_report_review_decision, summarize_ci_rollup,
+    };
     use tempfile::TempDir;
 
     #[test]
@@ -1878,6 +1982,87 @@ mod tests {
         assert_eq!(rollup.pass, 1);
         assert_eq!(rollup.fail, 1);
         assert_eq!(rollup.pending, 1);
+    }
+
+    #[test]
+    fn capability_descriptor_for_disabled_namespace_is_management_only() {
+        let health = GhMonitorHealth {
+            team: "atm-dev".to_string(),
+            configured: true,
+            enabled: false,
+            config_source: None,
+            config_path: None,
+            lifecycle_state: "stopped".to_string(),
+            availability_state: "disabled_config_error".to_string(),
+            in_flight: 0,
+            updated_at: "2026-03-20T00:00:00Z".to_string(),
+            message: None,
+            repo_state_updated_at: None,
+            budget_limit_per_hour: None,
+            budget_used_in_window: None,
+            rate_limit_remaining: None,
+            rate_limit_limit: None,
+            poll_owner: None,
+            owner_runtime_kind: None,
+            owner_pid: None,
+            owner_binary_path: None,
+            owner_atm_home: None,
+            owner_repo: None,
+            owner_poll_interval_secs: None,
+        };
+
+        let descriptor = capability_descriptor_for_health(&health).expect("descriptor");
+        assert_eq!(descriptor.namespace, "gh");
+        assert_eq!(
+            namespace_state_from_descriptor(Some(&descriptor)),
+            GhNamespaceState::PresentDisabled
+        );
+        assert!(descriptor.commands.iter().all(|command| {
+            !command.starts_with("atm gh pr ")
+                && !command.starts_with("atm gh monitor pr ")
+                && !command.starts_with("atm gh monitor workflow ")
+                && !command.starts_with("atm gh monitor run ")
+        }));
+    }
+
+    #[test]
+    fn capability_descriptor_for_enabled_namespace_exposes_full_actions() {
+        let health = GhMonitorHealth {
+            team: "atm-dev".to_string(),
+            configured: true,
+            enabled: true,
+            config_source: None,
+            config_path: None,
+            lifecycle_state: "running".to_string(),
+            availability_state: "ready".to_string(),
+            in_flight: 0,
+            updated_at: "2026-03-20T00:00:00Z".to_string(),
+            message: None,
+            repo_state_updated_at: None,
+            budget_limit_per_hour: None,
+            budget_used_in_window: None,
+            rate_limit_remaining: None,
+            rate_limit_limit: None,
+            poll_owner: None,
+            owner_runtime_kind: None,
+            owner_pid: None,
+            owner_binary_path: None,
+            owner_atm_home: None,
+            owner_repo: None,
+            owner_poll_interval_secs: None,
+        };
+
+        let descriptor = capability_descriptor_for_health(&health).expect("descriptor");
+        assert_eq!(
+            namespace_state_from_descriptor(Some(&descriptor)),
+            GhNamespaceState::PresentEnabled
+        );
+        assert!(
+            descriptor
+                .commands
+                .iter()
+                .any(|command| command == "atm gh pr list")
+        );
     }
 
     #[test]

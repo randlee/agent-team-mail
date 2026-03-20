@@ -71,6 +71,16 @@ jobs:
       - name: Enforce ARCH-BOUNDARY-002
         run: bash scripts/ci/observability_boundary_check.sh
 
+  cli-boundary:
+    name: cli-boundary (ubuntu)
+    needs: [fmt]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enforce CLI boundary
+        run: bash scripts/ci/cli_boundary_check.sh
+
   core-isolation:
     name: core-isolation (${{ matrix.os }})
     needs: [clippy]
