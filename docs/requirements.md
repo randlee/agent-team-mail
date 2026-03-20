@@ -12,6 +12,8 @@ This primary requirements document registers secondary source-of-truth documents
 
 - Observability requirements: `docs/observability/requirements.md`
 - Observability architecture: `docs/observability/architecture.md`
+- CLI requirements: `docs/cli/requirements.md`
+- CLI architecture: `docs/cli/architecture.md`
 - sc-composer requirements: `docs/sc-composer/requirements.md`
 - sc-composer architecture: `docs/sc-composer/architecture.md`
 - CI monitoring requirements: `docs/ci-monitoring/requirements.md`
