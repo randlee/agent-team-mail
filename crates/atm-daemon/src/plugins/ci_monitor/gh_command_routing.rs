@@ -10,7 +10,7 @@ use agent_team_mail_ci_monitor::{
 use agent_team_mail_core::gh_command::{
     GH_MONITOR_REPORT_SCHEMA_VERSION, GhCiRollup, GhCliPrereqStatus, GhMergeReport,
     GhMonitorCheckReport, GhMonitorListItem, GhMonitorReportPr, GhMonitorReviewReport, GhPrListRow,
-    GhPrListSummary, GhPrReportRow, GhPrReportSummary, GhRateLimitAudit,
+    GhPrListSummary, GhPrMergeProbe, GhPrReportRow, GhPrReportSummary, GhRateLimitAudit,
 };
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -18,14 +18,6 @@ use std::path::Path;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
-
-#[derive(Debug, Deserialize)]
-struct GhPrMergeProbe {
-    #[serde(default)]
-    mergeable: Option<String>,
-    #[serde(rename = "mergeStateStatus", default)]
-    merge_state_status: Option<String>,
-}
 
 const GH_MONITOR_MERGE_RETRY_ATTEMPTS: u8 = 3;
 const GH_MONITOR_MERGE_RETRY_DELAY_MS: u64 = 250;
