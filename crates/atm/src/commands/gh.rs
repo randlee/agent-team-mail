@@ -14,6 +14,7 @@ use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::gh_command::{
     GH_MONITOR_REPORT_SCHEMA_VERSION, GhCiRollup, GhCliPrereqRequest, GhCliPrereqStatus,
     GhPrListRequest, GhPrListSummary, GhPrReportRequest, GhPrReportSummary,
+    PluginCapabilityDescriptor,
 };
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
@@ -298,7 +299,9 @@ struct GhNamespaceStatus {
     owner_repo: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     owner_poll_interval_secs: Option<u64>,
-    actions: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capability_descriptor: Option<PluginCapabilityDescriptor>,
+    actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1364,7 +1367,8 @@ fn print_namespace_status(health: &GhMonitorHealth, json: bool) -> Result<()> {
 }
 
 fn namespace_status_view(health: &GhMonitorHealth) -> GhNamespaceStatus {
-    let namespace_state = namespace_state_for_health(health);
+    let capability_descriptor = capability_descriptor_for_health(health);
+    let namespace_state = namespace_state_from_descriptor(capability_descriptor.as_ref());
     GhNamespaceStatus {
         team: health.team.clone(),
         configured: health.configured,
@@ -1389,42 +1393,72 @@ fn namespace_status_view(health: &GhMonitorHealth) -> GhNamespaceStatus {
         owner_atm_home: health.owner_atm_home.clone(),
         owner_repo: health.owner_repo.clone(),
         owner_poll_interval_secs: health.owner_poll_interval_secs,
-        actions: namespace_actions(namespace_state),
+        capability_descriptor: capability_descriptor.clone(),
+        actions: namespace_actions(capability_descriptor.as_ref(), namespace_state),
     }
 }
 
-fn namespace_state_for_health(health: &GhMonitorHealth) -> GhNamespaceState {
-    if !health.configured {
-        GhNamespaceState::Absent
+fn capability_descriptor_for_health(
+    health: &GhMonitorHealth,
+) -> Option<PluginCapabilityDescriptor> {
+    let commands = if !health.configured {
+        return None;
     } else if health.enabled && health.availability_state != "disabled_config_error" {
-        GhNamespaceState::PresentEnabled
+        vec![
+            "atm gh".to_string(),
+            "atm gh status".to_string(),
+            "atm gh status <pr|workflow|run> <target>".to_string(),
+            "atm gh monitor pr <number>".to_string(),
+            "atm gh monitor workflow <name> --ref <ref>".to_string(),
+            "atm gh monitor run <run-id>".to_string(),
+            "atm gh pr list".to_string(),
+            "atm gh pr report <pr-number>".to_string(),
+            "atm gh pr init-report [--output <path>]".to_string(),
+            "atm gh monitor start|stop|restart|status".to_string(),
+            "atm gh init".to_string(),
+        ]
     } else {
-        GhNamespaceState::PresentDisabled
+        vec![
+            "atm gh".to_string(),
+            "atm gh init".to_string(),
+            "atm gh status".to_string(),
+            "atm gh monitor status".to_string(),
+        ]
+    };
+
+    Some(PluginCapabilityDescriptor {
+        namespace: "gh".to_string(),
+        plugin_name: "gh_monitor".to_string(),
+        commands,
+    })
+}
+
+fn namespace_state_from_descriptor(
+    descriptor: Option<&PluginCapabilityDescriptor>,
+) -> GhNamespaceState {
+    match descriptor {
+        None => GhNamespaceState::Absent,
+        Some(descriptor)
+            if descriptor.commands.iter().any(|command| {
+                command.starts_with("atm gh pr ")
+                    || command.starts_with("atm gh monitor pr ")
+                    || command.starts_with("atm gh monitor workflow ")
+                    || command.starts_with("atm gh monitor run ")
+            }) =>
+        {
+            GhNamespaceState::PresentEnabled
+        }
+        Some(_) => GhNamespaceState::PresentDisabled,
     }
 }
 
-fn namespace_actions(state: GhNamespaceState) -> Vec<&'static str> {
-    match state {
-        GhNamespaceState::Absent => vec!["atm gh init"],
-        GhNamespaceState::PresentDisabled => vec![
-            "atm gh",
-            "atm gh init",
-            "atm gh status",
-            "atm gh monitor status",
-        ],
-        GhNamespaceState::PresentEnabled => vec![
-            "atm gh",
-            "atm gh status",
-            "atm gh status <pr|workflow|run> <target>",
-            "atm gh monitor pr <number>",
-            "atm gh monitor workflow <name> --ref <ref>",
-            "atm gh monitor run <run-id>",
-            "atm gh pr list",
-            "atm gh pr report <pr-number>",
-            "atm gh pr init-report [--output <path>]",
-            "atm gh monitor start|stop|restart|status",
-            "atm gh init",
-        ],
+fn namespace_actions(
+    descriptor: Option<&PluginCapabilityDescriptor>,
+    state: GhNamespaceState,
+) -> Vec<String> {
+    match (descriptor, state) {
+        (Some(descriptor), _) if !descriptor.commands.is_empty() => descriptor.commands.clone(),
+        _ => vec!["atm gh init".to_string()],
     }
 }
 
@@ -1948,6 +1982,87 @@ mod tests {
         assert_eq!(rollup.pass, 1);
         assert_eq!(rollup.fail, 1);
         assert_eq!(rollup.pending, 1);
+    }
+
+    #[test]
+    fn capability_descriptor_for_disabled_namespace_is_management_only() {
+        let health = GhMonitorHealth {
+            team: "atm-dev".to_string(),
+            configured: true,
+            enabled: false,
+            config_source: None,
+            config_path: None,
+            lifecycle_state: "stopped".to_string(),
+            availability_state: "disabled_config_error".to_string(),
+            in_flight: 0,
+            updated_at: "2026-03-20T00:00:00Z".to_string(),
+            message: None,
+            repo_state_updated_at: None,
+            budget_limit_per_hour: None,
+            budget_used_in_window: None,
+            rate_limit_remaining: None,
+            rate_limit_limit: None,
+            poll_owner: None,
+            owner_runtime_kind: None,
+            owner_pid: None,
+            owner_binary_path: None,
+            owner_atm_home: None,
+            owner_repo: None,
+            owner_poll_interval_secs: None,
+        };
+
+        let descriptor = capability_descriptor_for_health(&health).expect("descriptor");
+        assert_eq!(descriptor.namespace, "gh");
+        assert_eq!(
+            namespace_state_from_descriptor(Some(&descriptor)),
+            GhNamespaceState::PresentDisabled
+        );
+        assert!(descriptor.commands.iter().all(|command| {
+            !command.starts_with("atm gh pr ")
+                && !command.starts_with("atm gh monitor pr ")
+                && !command.starts_with("atm gh monitor workflow ")
+                && !command.starts_with("atm gh monitor run ")
+        }));
+    }
+
+    #[test]
+    fn capability_descriptor_for_enabled_namespace_exposes_full_actions() {
+        let health = GhMonitorHealth {
+            team: "atm-dev".to_string(),
+            configured: true,
+            enabled: true,
+            config_source: None,
+            config_path: None,
+            lifecycle_state: "running".to_string(),
+            availability_state: "ready".to_string(),
+            in_flight: 0,
+            updated_at: "2026-03-20T00:00:00Z".to_string(),
+            message: None,
+            repo_state_updated_at: None,
+            budget_limit_per_hour: None,
+            budget_used_in_window: None,
+            rate_limit_remaining: None,
+            rate_limit_limit: None,
+            poll_owner: None,
+            owner_runtime_kind: None,
+            owner_pid: None,
+            owner_binary_path: None,
+            owner_atm_home: None,
+            owner_repo: None,
+            owner_poll_interval_secs: None,
+        };
+
+        let descriptor = capability_descriptor_for_health(&health).expect("descriptor");
+        assert_eq!(
+            namespace_state_from_descriptor(Some(&descriptor)),
+            GhNamespaceState::PresentEnabled
+        );
+        assert!(
+            descriptor
+                .commands
+                .iter()
+                .any(|command| command == "atm gh pr list")
+        );
     }
 
     #[test]

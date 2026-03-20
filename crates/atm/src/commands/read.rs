@@ -41,7 +41,7 @@ pub struct ReadArgs {
     #[arg(long, conflicts_with_all = ["unread_only", "history", "all"])]
     pending_ack_only: bool,
 
-    /// Show only historical messages (acknowledged or read-only)
+    /// Expand view to include the history bucket (shows unread, pending-ack, and historical messages)
     #[arg(long, conflicts_with_all = ["unread_only", "pending_ack_only"])]
     history: bool,
 

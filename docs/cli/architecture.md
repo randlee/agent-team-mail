@@ -1,6 +1,6 @@
 # CLI Architecture
 
-**Status**: Planned (Phase BA)
+**Status**: Implemented (Phase BA, 2026-03-20)
 **Primary crate**: `atm`
 **See also**:
 - `docs/cli/requirements.md`

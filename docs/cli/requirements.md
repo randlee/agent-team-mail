@@ -1,6 +1,6 @@
 # CLI Requirements
 
-**Status**: Planned (Phase BA)
+**Status**: Implemented (Phase BA, 2026-03-20)
 **Scope**: `atm` CLI, CLI-facing shared contracts in `atm-core`, inbox/message-management UX
 **See also**:
 - `docs/cli/architecture.md`
