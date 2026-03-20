@@ -2790,10 +2790,17 @@ fn parse_and_dispatch(
             SOCKET_ERROR_INTERNAL_ERROR,
             "stream-event command should have been handled by the async path",
         ),
-        // gh-monitor family commands are handled asynchronously before
+        // gh namespace commands are handled asynchronously before
         // parse_and_dispatch is called. If one reaches this sync path, return a
         // clear internal error from the router boundary.
-        "gh-monitor" | "gh-status" | "gh-monitor-control" | "gh-monitor-health" => {
+        "gh-monitor"
+        | "gh-status"
+        | "gh-monitor-control"
+        | "gh-monitor-health"
+        | "gh-pr-list"
+        | "gh-pr-report"
+        | "gh-cli-prereqs"
+        | "gh-rate-limit-audit" => {
             gh_monitor_router::async_dispatch_error(&request.request_id, request.command.as_str())
                 .expect("gh-monitor async-dispatch error should exist for known commands")
         }
