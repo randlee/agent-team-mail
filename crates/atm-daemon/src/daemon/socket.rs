@@ -4136,6 +4136,10 @@ mod tests {
         }
     }
 
+    fn runtime_home(root: &std::path::Path) -> std::path::PathBuf {
+        root.join("runtime-home")
+    }
+
     struct LiveMismatchProcess(Child);
 
     impl LiveMismatchProcess {
@@ -5010,7 +5014,10 @@ mod tests {
     #[serial]
     async fn test_restart_partial_lifecycle_teammate_idle_converges_deterministically() {
         let temp = TempDir::new().unwrap();
-        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        let runtime_home = runtime_home(temp.path());
+        std::fs::create_dir_all(&runtime_home).unwrap();
+        let _home_guard = EnvGuard::set("HOME", temp.path().to_str().unwrap());
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", runtime_home.to_str().unwrap());
         write_hook_auth_team_config(
             temp.path(),
             "atm-dev",
@@ -5021,7 +5028,7 @@ mod tests {
         // backend validation against the cargo test process.
         set_member_backend(temp.path(), "atm-dev", "arch-ctm", "external");
 
-        let persist_path = temp.path().join(".atm/daemon/session-registry.json");
+        let persist_path = runtime_home.join(".atm/daemon/session-registry.json");
         {
             let mut seeded = crate::daemon::session_registry::SessionRegistry::with_persist_path(
                 persist_path.clone(),
@@ -7564,9 +7571,12 @@ mod tests {
         use tokio_util::sync::CancellationToken;
 
         let temp_dir = tempfile::TempDir::new().unwrap();
-        let home_dir = temp_dir.path().to_path_buf();
-        let _env = EnvGuard::set("ATM_HOME", home_dir.to_str().unwrap());
-        write_hook_auth_team_config(&home_dir, "atm-dev", "team-lead", &["team-lead"]);
+        let config_home = temp_dir.path().to_path_buf();
+        let home_dir = runtime_home(temp_dir.path());
+        std::fs::create_dir_all(&home_dir).unwrap();
+        let _home_guard = EnvGuard::set("HOME", config_home.to_str().unwrap());
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", home_dir.to_str().unwrap());
+        write_hook_auth_team_config(&config_home, "atm-dev", "team-lead", &["team-lead"]);
         let cancel = CancellationToken::new();
         let daemon_lock = {
             let path = home_dir.join(".atm/daemon/daemon.lock");
@@ -7691,9 +7701,12 @@ mod tests {
         use tokio_util::sync::CancellationToken;
 
         let temp_dir = tempfile::TempDir::new().unwrap();
-        let home_dir = temp_dir.path().to_path_buf();
-        let _env = EnvGuard::set("ATM_HOME", home_dir.to_str().unwrap());
-        write_hook_auth_team_config(&home_dir, "atm-dev", "team-lead", &["team-lead"]);
+        let config_home = temp_dir.path().to_path_buf();
+        let home_dir = runtime_home(temp_dir.path());
+        std::fs::create_dir_all(&home_dir).unwrap();
+        let _home_guard = EnvGuard::set("HOME", config_home.to_str().unwrap());
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", home_dir.to_str().unwrap());
+        write_hook_auth_team_config(&config_home, "atm-dev", "team-lead", &["team-lead"]);
         let cancel = CancellationToken::new();
         let daemon_lock = {
             let path = home_dir.join(".atm/daemon/daemon.lock");
