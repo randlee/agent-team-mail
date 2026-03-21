@@ -919,12 +919,20 @@ mod tests {
     fn set_atm_home(dir: &TempDir) -> String {
         let p = dir.path().to_string_lossy().to_string();
         // SAFETY: single-threaded within a test function; serial attribute prevents races.
-        unsafe { std::env::set_var("ATM_HOME", &p) };
+        unsafe {
+            std::env::set_var("HOME", &p);
+            std::env::set_var("USERPROFILE", &p);
+            std::env::set_var("ATM_HOME", &p);
+        };
         p
     }
 
     fn unset_atm_home() {
-        unsafe { std::env::remove_var("ATM_HOME") };
+        unsafe {
+            std::env::remove_var("HOME");
+            std::env::remove_var("USERPROFILE");
+            std::env::remove_var("ATM_HOME");
+        };
     }
 
     /// Write a minimal team config with the given member names.

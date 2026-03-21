@@ -170,6 +170,20 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    fn set_config_root(path: &std::path::Path) {
+        unsafe {
+            std::env::set_var("HOME", path);
+            std::env::set_var("USERPROFILE", path);
+        }
+    }
+
+    fn clear_config_root() {
+        unsafe {
+            std::env::remove_var("HOME");
+            std::env::remove_var("USERPROFILE");
+        }
+    }
+
     // ── Default values ────────────────────────────────────────────────────────
 
     #[test]
@@ -243,13 +257,13 @@ mod tests {
     #[serial]
     fn test_load_tui_config_missing_file_returns_defaults() {
         let dir = tempfile::TempDir::new().unwrap();
-        unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+        set_config_root(dir.path());
 
         let cfg = load_tui_config();
         assert_eq!(cfg.interrupt_policy, InterruptPolicy::Confirm);
         assert!(cfg.follow_mode_default);
 
-        unsafe { std::env::remove_var("ATM_HOME") };
+        clear_config_root();
     }
 
     #[test]
@@ -264,13 +278,13 @@ mod tests {
         )
         .unwrap();
 
-        unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+        set_config_root(dir.path());
 
         let cfg = load_tui_config();
         assert_eq!(cfg.interrupt_policy, InterruptPolicy::Never);
         assert!(!cfg.follow_mode_default);
 
-        unsafe { std::env::remove_var("ATM_HOME") };
+        clear_config_root();
     }
 
     #[test]
@@ -281,12 +295,12 @@ mod tests {
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(config_dir.join("tui.toml"), "this is not valid toml!!!").unwrap();
 
-        unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+        set_config_root(dir.path());
 
         let cfg = load_tui_config();
         // Malformed file must silently fall back to defaults.
         assert_eq!(cfg.interrupt_policy, InterruptPolicy::Confirm);
 
-        unsafe { std::env::remove_var("ATM_HOME") };
+        clear_config_root();
     }
 }

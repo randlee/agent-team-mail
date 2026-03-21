@@ -3944,6 +3944,24 @@ pub fn make_error_response(id: Value, code: i64, message: &str, data: Value) -> 
 mod tests {
     use super::*;
 
+    fn set_test_home_env(path: &std::path::Path) {
+        // SAFETY: serial tests own process env mutations for these paths.
+        unsafe {
+            std::env::set_var("HOME", path);
+            std::env::set_var("USERPROFILE", path);
+            std::env::set_var("ATM_HOME", path);
+        }
+    }
+
+    fn clear_test_home_env() {
+        // SAFETY: serial tests own process env mutations for these paths.
+        unsafe {
+            std::env::remove_var("HOME");
+            std::env::remove_var("USERPROFILE");
+            std::env::remove_var("ATM_HOME");
+        }
+    }
+
     #[test]
     fn test_intercept_tools_list_appends_synthetic() {
         let mut response = json!({
@@ -4705,7 +4723,7 @@ mod tests {
     #[serial_test::serial]
     async fn codex_call_with_agent_file_and_prompt_returns_invalid_params() {
         let _dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("ATM_HOME", _dir.path()) };
+        set_test_home_env(_dir.path());
 
         let config = crate::config::AgentMcpConfig::default();
         let mut proxy = ProxyServer::new(config);
@@ -4730,7 +4748,7 @@ mod tests {
             .handle_tools_call(msg, &pending, &upstream_tx, &dropped)
             .await;
         let resp = upstream_rx.try_recv().expect("should get error response");
-        unsafe { std::env::remove_var("ATM_HOME") };
+        clear_test_home_env();
 
         assert_eq!(
             resp.pointer("/error/code").and_then(|v| v.as_i64()),
@@ -4743,7 +4761,7 @@ mod tests {
     #[serial_test::serial]
     async fn codex_call_with_missing_agent_file_returns_not_found() {
         let _dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("ATM_HOME", _dir.path()) };
+        set_test_home_env(_dir.path());
 
         let config = crate::config::AgentMcpConfig::default();
         let mut proxy = ProxyServer::new(config);
@@ -4770,7 +4788,7 @@ mod tests {
             .handle_tools_call(msg, &pending, &upstream_tx, &dropped)
             .await;
         let resp = upstream_rx.try_recv().expect("should get error response");
-        unsafe { std::env::remove_var("ATM_HOME") };
+        clear_test_home_env();
 
         assert_eq!(
             resp.pointer("/error/code").and_then(|v| v.as_i64()),
@@ -4808,9 +4826,7 @@ mod tests {
     #[serial_test::serial]
     async fn synthetic_tool_prefers_thread_bound_identity_over_args_identity() {
         let dir = tempfile::tempdir().unwrap();
-        let atm_home = dir.path().to_string_lossy().to_string();
-        // SAFETY: isolated tmp dir, no parallelism risk in serial test
-        unsafe { std::env::set_var("ATM_HOME", &atm_home) };
+        set_test_home_env(dir.path());
 
         let config = crate::config::AgentMcpConfig {
             identity: Some("config-identity".to_string()),
@@ -4878,8 +4894,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].from, "bound-identity");
 
-        // SAFETY: restoring process env after isolated test
-        unsafe { std::env::remove_var("ATM_HOME") };
+        clear_test_home_env();
     }
 
     /// FR-3.2: Persisted active sessions loaded on startup are marked stale.
@@ -4921,12 +4936,12 @@ mod tests {
 
         let atm_home = dir.path().to_string_lossy().to_string();
         // SAFETY: isolated tmp dir, no parallelism risk here (single-threaded test)
-        unsafe { std::env::set_var("ATM_HOME", &atm_home) };
+        set_test_home_env(std::path::Path::new(&atm_home));
 
         let config = crate::config::AgentMcpConfig::default();
         let proxy = ProxyServer::new_with_team(config, team);
 
-        unsafe { std::env::remove_var("ATM_HOME") };
+        clear_test_home_env();
 
         // The registry should have the persisted session as Stale
         let reg = proxy.registry.try_lock().unwrap();
@@ -4948,7 +4963,7 @@ mod tests {
     #[serial_test::serial]
     async fn codex_resume_with_unknown_agent_id_returns_error() {
         let _dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("ATM_HOME", _dir.path()) };
+        set_test_home_env(_dir.path());
 
         let config = crate::config::AgentMcpConfig::default();
         let mut proxy = ProxyServer::new(config);
@@ -4973,7 +4988,7 @@ mod tests {
             .handle_tools_call(msg, &pending, &upstream_tx, &dropped)
             .await;
         let resp = upstream_rx.try_recv().expect("should get error response");
-        unsafe { std::env::remove_var("ATM_HOME") };
+        clear_test_home_env();
 
         assert_eq!(
             resp.pointer("/error/code").and_then(|v| v.as_i64()),
@@ -5155,7 +5170,7 @@ mod tests {
     #[serial_test::serial]
     async fn identity_conflict_error_uses_conflicting_agent_id_key() {
         let _dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("ATM_HOME", _dir.path()) };
+        set_test_home_env(_dir.path());
 
         let config = crate::config::AgentMcpConfig::default();
         let mut proxy = ProxyServer::new(config);
@@ -5194,7 +5209,7 @@ mod tests {
         proxy
             .handle_tools_call(msg, &pending, &upstream_tx, &dropped)
             .await;
-        unsafe { std::env::remove_var("ATM_HOME") };
+        clear_test_home_env();
 
         let resp = upstream_rx.try_recv().expect("should get error response");
         assert_eq!(
@@ -5221,8 +5236,7 @@ mod tests {
     #[serial_test::serial]
     async fn agent_close_allows_immediate_codex_reuse_same_identity() {
         let dir = tempfile::tempdir().unwrap();
-        let atm_home = dir.path().to_string_lossy().to_string();
-        unsafe { std::env::set_var("ATM_HOME", &atm_home) };
+        set_test_home_env(dir.path());
 
         let config = crate::config::AgentMcpConfig::default();
         let mut proxy = ProxyServer::new(config);
@@ -5295,7 +5309,7 @@ mod tests {
             "expected no ERR_IDENTITY_CONFLICT after agent_close"
         );
 
-        unsafe { std::env::remove_var("ATM_HOME") };
+        clear_test_home_env();
     }
 
     // -----------------------------------------------------------------------
@@ -5319,7 +5333,7 @@ mod tests {
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
-        unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+        set_test_home_env(dir.path());
 
         // Seed inbox with one unread message.
         let team = "test-team";
@@ -5425,7 +5439,7 @@ mod tests {
             "thread state must be restored to Idle after failed dispatch"
         );
 
-        unsafe { std::env::remove_var("ATM_HOME") };
+        clear_test_home_env();
     }
 
     /// When ATM_HOME is set, `watch_feed_path` must produce
@@ -5434,11 +5448,11 @@ mod tests {
     #[serial_test::serial]
     fn test_watch_feed_path_uses_atm_home() {
         let dir = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+        set_test_home_env(dir.path());
 
         let result = watch_feed_path("test-agent");
 
-        unsafe { std::env::remove_var("ATM_HOME") };
+        clear_test_home_env();
 
         let path = result.expect("watch_feed_path should return Some when ATM_HOME is set");
         let expected = dir.path().join("watch-stream").join("test-agent.jsonl");
