@@ -2043,6 +2043,135 @@ blocking CI/QA failure.
 
 ---
 
+## 17.30 Phase BB: Daemon Reset
+
+**Goal**: Remove multi-daemon support and replace the current daemon/runtime model with a
+smaller, deterministic single-daemon design. Deletion-heavy reset — not a feature phase.
+
+**Integration branch**: `integrate/phase-BB`
+
+**Status**: IN PROGRESS
+
+**Dependency graph**: BB.0 → BB.1 → BB.2 → BB.3 → BB.4 (serial)
+
+**Canonical roots**:
+- Config root: `~/.claude`
+- Team state root: `~/.claude/teams`
+- Runtime root: `ATM_HOME` (runtime-state only — no team config lookup)
+
+**Detail plan**: `docs/phase-bb-daemon-reset.md`
+
+### Sprint Map
+| Sprint | Focus | Branch | Status |
+|---|---|---|---|
+| BB.0 | Dead code cleanup: remove SchemaVersion scaffolding, deprecated logging::init, visibility tightening | feature/pBB-s0-dead-code-cleanup | COMPLETE |
+| BB.1 | Path separation: config root vs runtime root split; ATM_HOME becomes runtime-state-only | feature/pBB-s1-path-separation | IN PROGRESS |
+| BB.2 | Single-daemon model collapse: remove multi-daemon runtime ownership, RuntimeKind arbitration | feature/pBB-s2-single-daemon-collapse | PLANNED |
+| BB.3 | Artifact collapse + transactional startup: remove PID file, daemon-touch.json, bridge plugin, issues plugin (~9 files) | feature/pBB-s3-artifact-collapse | PLANNED |
+| BB.4 | Test model rewrite + final deletion: serialized shared-fixture test model, delete obsolete multi-daemon tests | feature/pBB-s4-test-rewrite | PLANNED |
+
+### Exit Criteria
+1. Multi-daemon support removed from active requirements and implementation.
+2. Config root and runtime root are separate.
+3. Dead-code cleanup from BB.0 complete.
+4. Daemon startup/shutdown behavior is deterministic.
+5. Stale-artifact ambiguity removed.
+6. Dogfood start/restart/stop passes repeatedly on clean machine.
+7. Daemon code and documentation are materially smaller than before the phase.
+
+---
+
+## 17.31 Phase BC: SC-Observability Extraction
+
+**Goal**: Extract `sc-observability`, `sc-observability-types`, and `sc-observability-macros`
+to a standalone repo at `github.com/randlee/sc-observability`, resolving the inverted
+dependency where `sc-observability` currently imports `LogEventV1` from `atm-core`.
+
+**Integration branch**: `integrate/phase-BC`
+
+**Status**: PLANNED
+
+**Prerequisites**: Phase BB complete
+
+**Dependency graph**: BC.1 → BC.2 → BC.3 (serial)
+
+**Detail plan**: `docs/phase-bc-sc-observability-extraction.md`
+
+### Sprint Map
+| Sprint | Focus | Branch | Status |
+|---|---|---|---|
+| BC.1 | Migrate LogEventV1/OtelHealthSnapshot/OtelLastError from atm-core to sc-observability-types; re-export shims in atm-core; fix publish_order | feature/pBC-s1-type-migration | PLANNED |
+| BC.2 | Decouple sc-composer from atm-core; decouple sc-compose from get_home_dir(); add OtelConfig::from_env_with_prefix() | feature/pBC-s2-decouple | PLANNED |
+| BC.3 | Create github.com/randlee/sc-observability; publish 3 crates at 0.1.0; remove from atm workspace | feature/pBC-s3-extract-repo | PLANNED |
+
+### Exit Criteria
+1. `sc-observability` has zero imports from any `agent-team-mail-*` crate.
+2. `sc-observability-types` is the authoritative location for `LogEventV1`, `OtelHealthSnapshot`, `OtelLastError`.
+3. All three crates published to crates.io from the standalone repo.
+4. ATM workspace compiles against pinned external versions.
+
+---
+
+## 17.32 Phase BD: SC-Compose Extraction
+
+**Goal**: Extract `sc-composer` and `sc-compose` to a standalone repo at
+`github.com/randlee/sc-compose`. Depends on BC.2 removing the last `atm-core` coupling.
+
+**Integration branch**: `integrate/phase-BD`
+
+**Status**: PLANNED
+
+**Prerequisites**: Phase BC complete (BC.2 removes sc-composer's atm-core dep)
+
+**Detail plan**: `docs/phase-bc-sc-observability-extraction.md` (BD.1 section)
+
+### Sprint Map
+| Sprint | Focus | Branch | Status |
+|---|---|---|---|
+| BD.1 | Create github.com/randlee/sc-compose; publish sc-composer + sc-compose at 0.1.0; remove from atm workspace | feature/pBD-s1-extract-repo | PLANNED |
+
+### Exit Criteria
+1. `sc-composer` and `sc-compose` have zero imports from any `agent-team-mail-*` crate.
+2. Both crates published to crates.io from standalone repo.
+3. ATM workspace compiles against pinned external versions.
+
+---
+
+## 17.33 Phase BE: CI-Monitor Extraction
+
+**Goal**: Extract `agent-team-mail-ci-monitor` to a two-crate standalone repo at
+`github.com/randlee/ci-monitor`. Three-layer abstraction: ci-monitor has no knowledge of
+GitHub; gh-monitor has no knowledge of ATM; daemon has no knowledge of specific plugins.
+Plugin command extension protocol: `atm gh` becomes plugin-provided, not hardcoded in CLI.
+
+**Integration branch**: `integrate/phase-BE`
+
+**Status**: PLANNED
+
+**Prerequisites**: Phase BB complete
+
+**Dependency graph**: BE.1 → BE.2 → BE.3 → BE.4 (serial)
+
+**Detail plan**: `docs/phase-be-ci-monitor-extraction.md`
+
+### Sprint Map
+| Sprint | Focus | Branch | Status |
+|---|---|---|---|
+| BE.1 | AlertSink + EventSink traits; move GH constants to gh-monitor; configurable paths; break observability.rs atm-core dep | feature/pBE-s1-trait-extraction | PLANNED |
+| BE.2 | Move daemon wire types (CiMonitorRequest, JobUpdate, etc.) from atm-ci-monitor to atm-daemon | feature/pBE-s2-wire-type-migration | PLANNED |
+| BE.3 | Plugin command extension protocol: generic `atm <cmd>` proxy; delete ci_monitor plugin module from daemon; config-driven plugin loading | feature/pBE-s3-plugin-protocol | PLANNED |
+| BE.4 | Create github.com/randlee/ci-monitor with ci-monitor + gh-monitor crates; publish; delete atm-ci-monitor from workspace | feature/pBE-s4-extract-repo | PLANNED |
+
+### Exit Criteria
+1. `ci-monitor` crate has zero GitHub-specific code.
+2. `gh-monitor` crate has zero ATM-specific imports.
+3. Daemon has zero compile-time knowledge of any specific plugin.
+4. `atm gh` subcommands advertised and handled entirely by gh-monitor plugin.
+5. Both crates published to crates.io from standalone repo.
+6. `cli_boundary_check.sh` CI gate updated or removed per BE.3 changes.
+
+---
+
 ## 17.11 Phase Z: Daemon SSoT + Observability Hardening
 
 **Goal**: Close daemon single-source-of-truth gaps for member/session state and make
