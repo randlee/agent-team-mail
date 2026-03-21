@@ -210,3 +210,13 @@ After startup completes:
 3. Output concise project summary and status to user
 4. Identify the next sprint(s) ready to execute
 5. Be prepared to begin the next sprint upon user approval
+
+---
+
+## gh Keychain — Do NOT Diagnose ACL Issues
+
+gh tokens are stored as generic passwords in the macOS login keychain (via
+go-keyring). Generic passwords have no per-application ACL — any user process
+can read them. Do not recommend `gh auth login` to "fix" keychain permissions.
+If `gh auth token` returns a token without error, authentication is working.
+See `~/Documents/.configuration/git-config.md` for multi-account setup details.

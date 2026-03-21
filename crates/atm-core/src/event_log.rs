@@ -3,6 +3,9 @@
 //! This module provides a compact, cross-process event sink used by `atm`,
 //! `atm-daemon`, and `atm-agent-mcp`.
 
+use crate::logging_event::LogEventV1;
+use std::sync::{Arc, Mutex, OnceLock};
+
 #[derive(Clone, Debug, Default)]
 pub struct EventFields {
     pub level: &'static str,
@@ -66,6 +69,14 @@ fn generate_span_id(seed_parts: &[&str]) -> String {
     hex.chars().take(16).collect()
 }
 
+pub fn trace_id_for_request(source: &str, request_id: &str) -> String {
+    generate_trace_id(&[source, request_id])
+}
+
+pub fn span_id_for_action(trace_id: &str, action: &str) -> String {
+    generate_span_id(&[action, trace_id])
+}
+
 /// Forward `event` to the unified producer channel if a sender is registered.
 fn fallback_home_dir() -> Option<std::path::PathBuf> {
     crate::home::get_home_dir().ok()
@@ -90,6 +101,35 @@ fn logging_enabled() -> bool {
             .map(|v| v.trim().to_ascii_lowercase()),
         Some(ref v) if v == "0" || v == "false" || v == "off" || v == "disabled" || v == "no"
     )
+}
+
+pub type EventObserverHook = Arc<dyn Fn(&LogEventV1) + Send + Sync>;
+
+fn event_observer_hook_slot() -> &'static Mutex<Option<EventObserverHook>> {
+    static EVENT_OBSERVER_HOOK: OnceLock<Mutex<Option<EventObserverHook>>> = OnceLock::new();
+    EVENT_OBSERVER_HOOK.get_or_init(|| Mutex::new(None))
+}
+
+pub fn install_event_observer_hook(hook: EventObserverHook) {
+    *event_observer_hook_slot()
+        .lock()
+        .expect("event observer hook lock poisoned") = Some(hook);
+}
+
+pub fn clear_event_observer_hook() {
+    *event_observer_hook_slot()
+        .lock()
+        .expect("event observer hook lock poisoned") = None;
+}
+
+fn notify_event_observer(event: &LogEventV1) {
+    let hook = event_observer_hook_slot()
+        .lock()
+        .expect("event observer hook lock poisoned")
+        .clone();
+    if let Some(hook) = hook {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook(event)));
+    }
 }
 
 /// Map [`EventFields`] to a [`LogEventV1`] for the unified pipeline.
@@ -256,6 +296,26 @@ fn fields_to_log_event(fields: &EventFields) -> crate::logging_event::LogEventV1
     }
 }
 
+/// Write a single structured event synchronously to the spool directory,
+/// bypassing the background log-forwarder thread entirely.
+///
+/// This is the correct path for events emitted just before process exit, where
+/// the forwarder thread may be reclaimed by the OS before it can flush its
+/// channel. Unlike [`emit_event_best_effort`], this function:
+///
+/// - Does **not** check `ATM_LOG` (the event is always persisted).
+/// - Does **not** attempt to send via the producer channel.
+/// - Writes the spool file synchronously in the calling thread before returning.
+///
+/// If `home_dir` is `None`, the home directory is resolved via
+/// [`crate::home::get_home_dir`]. The call is a no-op when the home directory
+/// cannot be resolved.
+pub fn emit_event_to_spool_direct(fields: &EventFields, home_dir: &std::path::Path) {
+    let event = fields_to_log_event(fields);
+    notify_event_observer(&event);
+    crate::logging_event::write_to_spool(&event, home_dir);
+}
+
 /// Emit a single structured event to the unified logging channel.
 ///
 /// This function is intentionally fail-open with a two-tier fallback:
@@ -295,6 +355,7 @@ pub fn emit_event_best_effort(mut fields: EventFields) {
     }
 
     let event = fields_to_log_event(&fields);
+    notify_event_observer(&event);
     forward_to_unified(event);
 }
 

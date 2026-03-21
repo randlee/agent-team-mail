@@ -1,5 +1,6 @@
 //! Inbox file operations with atomic writes and conflict detection
 
+use crate::event_log::{EventFields, emit_event_best_effort};
 use crate::io::{atomic::atomic_swap, error::InboxError, hash::compute_hash, lock::acquire_lock};
 use crate::schema::InboxMessage;
 use std::fs;
@@ -153,24 +154,7 @@ where
         source: e,
     })?;
 
-    {
-        let mut tmp_file = fs::File::create(&tmp_path).map_err(|e| InboxError::Io {
-            path: tmp_path.clone(),
-            source: e,
-        })?;
-
-        tmp_file
-            .write_all(&new_content)
-            .map_err(|e| InboxError::Io {
-                path: tmp_path.clone(),
-                source: e,
-            })?;
-
-        tmp_file.sync_all().map_err(|e| InboxError::Io {
-            path: tmp_path.clone(),
-            source: e,
-        })?;
-    }
+    write_synced_file(&tmp_path, &new_content)?;
 
     // Step 5: Atomic swap
     if !inbox_path.exists() {
@@ -209,10 +193,7 @@ where
             source: e,
         })?;
 
-        fs::write(&tmp_path, &merged_content).map_err(|e| InboxError::Io {
-            path: tmp_path.clone(),
-            source: e,
-        })?;
+        write_synced_file(&tmp_path, &merged_content)?;
 
         // Re-swap
         atomic_swap(inbox_path, &tmp_path)?;
@@ -229,6 +210,70 @@ where
     let _ = fs::remove_file(&tmp_path); // Ignore errors on cleanup
 
     Ok(outcome)
+}
+
+fn write_synced_file(path: &Path, content: &[u8]) -> Result<(), InboxError> {
+    let mut file = fs::File::create(path).map_err(|e| InboxError::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+
+    file.write_all(content).map_err(|e| InboxError::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+
+    file.sync_all().map_err(|e| InboxError::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+
+    Ok(())
+}
+
+fn parse_inbox_messages_tolerant(
+    content: &[u8],
+    inbox_path: &Path,
+) -> Result<Vec<InboxMessage>, InboxError> {
+    let raw_messages: Vec<serde_json::Value> =
+        serde_json::from_slice(content).map_err(|e| InboxError::Json {
+            path: inbox_path.to_path_buf(),
+            source: e,
+        })?;
+
+    let mut messages = Vec::with_capacity(raw_messages.len());
+    for (index, raw_message) in raw_messages.into_iter().enumerate() {
+        match serde_json::from_value::<InboxMessage>(raw_message) {
+            Ok(message) => messages.push(message),
+            Err(error) => {
+                let mut extra_fields = serde_json::Map::new();
+                extra_fields.insert(
+                    "path".to_string(),
+                    serde_json::Value::String(inbox_path.display().to_string()),
+                );
+                extra_fields.insert("record_index".to_string(), serde_json::json!(index));
+                emit_event_best_effort(EventFields {
+                    level: "warn",
+                    source: "atm-core",
+                    action: "inbox_record_skipped",
+                    result: Some("skipped".to_string()),
+                    error: Some(error.to_string()),
+                    extra_fields,
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    Ok(messages)
+}
+
+pub fn inbox_read_file_tolerant(inbox_path: &Path) -> Result<Vec<InboxMessage>, InboxError> {
+    let content = fs::read(inbox_path).map_err(|e| InboxError::Io {
+        path: inbox_path.to_path_buf(),
+        source: e,
+    })?;
+    parse_inbox_messages_tolerant(&content, inbox_path)
 }
 
 /// Read and merge messages from all inbox files for an agent (local + remote origins)
@@ -319,17 +364,7 @@ pub fn inbox_read_merged(
             continue;
         }
 
-        // Read and parse the inbox file
-        let content = fs::read(&path).map_err(|e| InboxError::Io {
-            path: path.clone(),
-            source: e,
-        })?;
-
-        let messages: Vec<InboxMessage> =
-            serde_json::from_slice(&content).map_err(|e| InboxError::Json {
-                path: path.clone(),
-                source: e,
-            })?;
+        let messages = inbox_read_file_tolerant(&path)?;
 
         // Add messages, deduplicating by message_id
         for msg in messages {
@@ -403,6 +438,7 @@ mod tests {
     fn create_test_message(from: &str, text: &str, message_id: Option<String>) -> InboxMessage {
         InboxMessage {
             from: from.to_string(),
+            source_team: None,
             text: text.to_string(),
             timestamp: chrono::Utc::now().to_rfc3339(),
             read: false,
@@ -970,5 +1006,49 @@ mod tests {
                 .iter()
                 .any(|m| m.text == "Unknown (should be ignored)")
         );
+    }
+
+    #[test]
+    fn test_inbox_read_file_tolerant_skips_malformed_record() {
+        let temp_dir = TempDir::new().unwrap();
+        let inbox_path = temp_dir.path().join("agent.json");
+        fs::write(
+            &inbox_path,
+            r#"[
+                {"from":"team-lead","text":"good","timestamp":"2026-02-11T14:30:00Z","read":false,"message_id":"msg-1"},
+                {"from":"broken","timestamp":"2026-02-11T14:31:00Z"},
+                {"from":"legacy","content":"alias ok","timestamp":"2026-02-11T14:32:00Z","message_id":"msg-2"}
+            ]"#,
+        )
+        .unwrap();
+
+        let messages = inbox_read_file_tolerant(&inbox_path).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].text, "good");
+        assert_eq!(messages[1].text, "alias ok");
+        assert!(!messages[1].read);
+    }
+
+    #[test]
+    fn test_inbox_read_merged_skips_malformed_records_in_matching_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let team_dir = temp_dir.path();
+        let inboxes_dir = team_dir.join("inboxes");
+        fs::create_dir_all(&inboxes_dir).unwrap();
+        fs::write(
+            inboxes_dir.join("agent-1.json"),
+            r#"[
+                {"from":"team-lead","text":"good","timestamp":"2026-02-11T14:30:00Z","read":false,"message_id":"msg-1"},
+                {"text":"missing from","timestamp":"2026-02-11T14:31:00Z","read":false},
+                {"from":"legacy","content":"alias ok","timestamp":"2026-02-11T14:32:00Z","message_id":"msg-2"}
+            ]"#,
+        )
+        .unwrap();
+
+        let messages = super::inbox_read_merged(team_dir, "agent-1", None).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].message_id.as_deref(), Some("msg-1"));
+        assert_eq!(messages[1].message_id.as_deref(), Some("msg-2"));
+        assert_eq!(messages[1].text, "alias ok");
     }
 }

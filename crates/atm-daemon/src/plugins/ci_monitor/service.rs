@@ -87,6 +87,7 @@ fn notify_team_lead_of_monitor_control(
     let now = chrono::Utc::now().to_rfc3339();
     let message = InboxMessage {
         from: actor.to_string(),
+        source_team: None,
         text: format!(
             "your gh monitor was {action_word} by {actor}@{actor_team} for {}",
             reason.trim()
@@ -1612,7 +1613,10 @@ poll_interval_secs = 60
             }),
             owner: Some(GhRuntimeOwner {
                 runtime: "dev".to_string(),
-                executable_path: "/tmp/fake-atm-daemon".to_string(),
+                executable_path: std::env::temp_dir()
+                    .join("fake-atm-daemon")
+                    .to_string_lossy()
+                    .into_owned(),
                 home_scope: home.display().to_string(),
                 pid: std::process::id(),
             }),

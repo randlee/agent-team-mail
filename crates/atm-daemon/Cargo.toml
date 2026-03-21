@@ -30,6 +30,8 @@ agent-team-mail-ci-monitor.workspace = true
 agent-team-mail-core.workspace = true
 agent-team-mail-daemon-launch.workspace = true
 sc-observability.workspace = true
+sc-observability-otlp.workspace = true
+sc-observability-types.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 serde.workspace = true
@@ -71,3 +73,5 @@ chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
 rand = "0.8"
 serial_test = "3"
+futures-util = "0.3"
+tracing-test = "0.2"

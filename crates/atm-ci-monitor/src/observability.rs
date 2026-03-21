@@ -918,6 +918,7 @@ fn emit_budget_warning_message(
     let inbox_path = team_dir.join("inboxes").join(format!("{lead_agent}.json"));
     let message = InboxMessage {
         from: "gh_monitor".to_string(),
+        source_team: None,
         text: format!(
             "GitHub monitor budget warning for {} on {}: {}/{} calls used in current window while running `{}`.",
             ctx.team,
@@ -1265,5 +1266,97 @@ mod tests {
         );
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    /// Verify that the budget-gate state file is created at the correct ATM_HOME-relative path
+    /// when ATM_HOME is overridden to an arbitrary temp directory (smoke-test B.4 coverage).
+    ///
+    /// The state file must appear at `$ATM_HOME/.atm/daemon/gh-monitor-repo-state.json` and must
+    /// carry both `budget_limit_per_hour` and `budget_used_in_window` fields so that the gate can
+    /// enforce them when the next call arrives.
+    #[test]
+    fn test_gh_budget_state_written_under_overridden_atm_home() {
+        // Use a nested subdirectory so we verify that the write path creates all missing
+        // intermediate directories — matching the B.4 smoke pattern where ATM_HOME points at a
+        // path that does not yet exist on disk.
+        let temp_root = tempfile::tempdir().unwrap();
+        let atm_home = temp_root.path().join("atm-b4-home");
+
+        // The ATM_HOME directory itself must NOT exist yet; mutate_record must create it.
+        assert!(
+            !atm_home.exists(),
+            "test setup: ATM_HOME must not exist before the observer call"
+        );
+
+        // Invoke read_or_create_record via the SharedGhCliObserver so we exercise the real
+        // before_gh_call path that the CLI uses when running `atm gh pr list`.
+        let ctx = GhCliObserverContext::new(
+            atm_home.clone(),
+            "atm-dev".to_string(),
+            "owner/repo".to_string(),
+            "atm".to_string(),
+        );
+        let observer = SharedGhCliObserver::new(ctx);
+        let metadata = GhCliCallMetadata {
+            request_id: new_gh_request_id(),
+            call_id: new_gh_call_id(),
+            repo_scope: "owner/repo".to_string(),
+            caller: "gh_pr_list".to_string(),
+            action: "gh_pr_list".to_string(),
+            args: vec![
+                "pr".to_string(),
+                "list".to_string(),
+                "--json".to_string(),
+                "number".to_string(),
+            ],
+            branch: None,
+            reference: None,
+            ledger_home: Some(atm_home.clone()),
+            team: Some("atm-dev".to_string()),
+            runtime: Some("atm".to_string()),
+            poller_key: None,
+        };
+        // before_gh_call writes the record; it must succeed (budget is not yet exhausted).
+        observer
+            .before_gh_call(&metadata)
+            .expect("before_gh_call must succeed for a fresh ATM_HOME with no prior budget usage");
+
+        // The state file must now exist at the canonical ATM_HOME-relative path.
+        let expected_state_path = atm_home.join(".atm/daemon/gh-monitor-repo-state.json");
+        assert!(
+            expected_state_path.exists(),
+            "gh budget state file must be written at $ATM_HOME/.atm/daemon/gh-monitor-repo-state.json; \
+             not found at {}",
+            expected_state_path.display()
+        );
+
+        // Parse the file and verify the budget fields are present with sensible defaults.
+        let raw = std::fs::read_to_string(&expected_state_path).expect("read state file");
+        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("parse state JSON");
+        let records = parsed["records"]
+            .as_array()
+            .expect("state file must have a 'records' array");
+        assert!(
+            !records.is_empty(),
+            "state file must contain at least one record after before_gh_call"
+        );
+        let record = &records[0];
+        assert!(
+            record.get("budget_limit_per_hour").is_some(),
+            "record must contain 'budget_limit_per_hour'"
+        );
+        assert!(
+            record.get("budget_used_in_window").is_some(),
+            "record must contain 'budget_used_in_window'"
+        );
+        assert_eq!(
+            record["budget_used_in_window"].as_u64().unwrap_or(u64::MAX),
+            0,
+            "budget_used_in_window must be 0 before any call completes"
+        );
+        assert!(
+            record["budget_limit_per_hour"].as_u64().unwrap_or(0) > 0,
+            "budget_limit_per_hour must be a positive default"
+        );
     }
 }

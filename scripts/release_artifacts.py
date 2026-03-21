@@ -422,6 +422,117 @@ def _cmd_validate_preflight_checks(args: argparse.Namespace) -> int:
     return 0
 
 
+def _workspace_member_package_map(workspace_toml: Path) -> dict[str, Path]:
+    """Map workspace package names to Cargo.toml paths."""
+    workspace_root = workspace_toml.parent
+    package_map: dict[str, Path] = {}
+    for member in _workspace_members(workspace_toml):
+        crate_toml = workspace_root / member / "Cargo.toml"
+        if not crate_toml.exists():
+            continue
+        package_name = _crate_name(crate_toml)
+        if package_name is None:
+            continue
+        package_map[package_name] = crate_toml
+    return package_map
+
+
+def _workspace_dependency_names(crate_toml: Path, workspace_root: Path) -> set[str]:
+    """Return workspace package names referenced by a crate's publish-time deps."""
+    data = tomllib.loads(crate_toml.read_text(encoding="utf-8"))
+    ws_toml = workspace_root / "Cargo.toml"
+    ws_data = tomllib.loads(ws_toml.read_text(encoding="utf-8")) if ws_toml.exists() else {}
+    workspace_deps: dict = ws_data.get("workspace", {}).get("dependencies", {})
+    workspace_packages = set(_workspace_member_package_map(ws_toml).keys()) if ws_toml.exists() else set()
+    crate_dir = crate_toml.parent
+
+    deps: set[str] = set()
+
+    def _resolved_package_name(dep_name: str, dep_spec: object) -> str | None:
+        if isinstance(dep_spec, str):
+            return dep_name if dep_name in workspace_packages else None
+        if not isinstance(dep_spec, dict):
+            return None
+
+        if dep_spec.get("workspace") is True:
+            ws_dep = workspace_deps.get(dep_name, {})
+            if isinstance(ws_dep, str):
+                return dep_name if dep_name in workspace_packages else None
+            if isinstance(ws_dep, dict):
+                package_name = ws_dep.get("package", dep_name)
+                if package_name in workspace_packages:
+                    return package_name
+            return dep_name if dep_name in workspace_packages else None
+
+        package_name = dep_spec.get("package", dep_name)
+        if "path" in dep_spec:
+            dep_path = (crate_dir / dep_spec["path"]).resolve()
+            if dep_path.is_relative_to(workspace_root.resolve()):
+                return package_name if package_name in workspace_packages else dep_name
+
+        if package_name in workspace_packages:
+            return package_name
+        return None
+
+    def _collect(dep_table: object) -> None:
+        if not isinstance(dep_table, dict):
+            return
+        for dep_name, dep_spec in dep_table.items():
+            package_name = _resolved_package_name(dep_name, dep_spec)
+            if package_name is not None:
+                deps.add(package_name)
+
+    _collect(data.get("dependencies", {}))
+    _collect(data.get("build-dependencies", {}))
+    for target_data in data.get("target", {}).values():
+        if isinstance(target_data, dict):
+            _collect(target_data.get("dependencies", {}))
+            _collect(target_data.get("build-dependencies", {}))
+
+    return deps
+
+
+def _cmd_validate_publish_order(args: argparse.Namespace) -> int:
+    """Validate publish_order respects the workspace dependency graph."""
+    manifest_path = Path(args.manifest)
+    workspace_toml = Path(args.workspace_toml)
+    workspace_root = workspace_toml.parent
+
+    manifest = _load_manifest(manifest_path)
+    publishable = [crate for crate in manifest["crates"] if crate["publish"]]
+    package_to_order = {crate["package"]: crate["publish_order"] for crate in publishable}
+    package_to_manifest_path = {
+        crate["package"]: workspace_root / crate["cargo_toml"] for crate in publishable
+    }
+
+    violations: list[str] = []
+    for package, crate_toml in sorted(package_to_manifest_path.items()):
+        for dep_package in sorted(_workspace_dependency_names(crate_toml, workspace_root)):
+            if dep_package not in package_to_order:
+                continue
+            dep_order = package_to_order[dep_package]
+            package_order = package_to_order[package]
+            if package_order <= dep_order:
+                violations.append(
+                    f"{package} (publish_order={package_order}) depends on "
+                    f"{dep_package} (publish_order={dep_order})"
+                )
+
+    if violations:
+        print("publish_order violation(s):")
+        for violation in violations:
+            print(f"  - {violation}")
+        print(
+            "\nExpected rule: if crate A depends on crate B, then "
+            "publish_order(A) > publish_order(B).",
+            file=sys.stderr,
+        )
+        return 1
+
+    print("ok: publish_order matches the workspace dependency graph")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Release artifact manifest utilities")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -521,6 +632,25 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to workspace root Cargo.toml",
     )
     validate_preflight.set_defaults(func=_cmd_validate_preflight_checks)
+
+    validate_publish_order = subparsers.add_parser(
+        "validate-publish-order",
+        help=(
+            "Fail when publish_order in the publish-artifacts manifest does not "
+            "respect the workspace dependency graph"
+        ),
+    )
+    validate_publish_order.add_argument(
+        "--manifest",
+        required=True,
+        help="Path to publish-artifacts.toml",
+    )
+    validate_publish_order.add_argument(
+        "--workspace-toml",
+        required=True,
+        help="Path to workspace root Cargo.toml",
+    )
+    validate_publish_order.set_defaults(func=_cmd_validate_publish_order)
 
     return parser
 

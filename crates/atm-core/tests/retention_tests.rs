@@ -18,6 +18,7 @@ fn create_test_message(
     let timestamp = (Utc::now() - Duration::days(days_ago)).to_rfc3339();
     InboxMessage {
         from: from.to_string(),
+        source_team: None,
         text: text.to_string(),
         timestamp,
         read: false,
@@ -429,6 +430,7 @@ fn test_retention_hours_duration() {
     let messages = vec![
         InboxMessage {
             from: "user1".to_string(),
+            source_team: None,
             text: "Old message".to_string(),
             timestamp: timestamp_48h,
             read: false,
@@ -438,6 +440,7 @@ fn test_retention_hours_duration() {
         },
         InboxMessage {
             from: "user2".to_string(),
+            source_team: None,
             text: "Recent message".to_string(),
             timestamp: timestamp_12h,
             read: false,

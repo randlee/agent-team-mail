@@ -34,6 +34,28 @@ wait_after_publish_seconds = 60
 verify_install = false
 
 [[crates]]
+artifact = "sc-observability-otlp"
+package = "sc-observability-otlp"
+cargo_toml = "crates/sc-observability-otlp/Cargo.toml"
+required = true
+publish = true
+publish_order = 14
+preflight_check = "locked"
+wait_after_publish_seconds = 60
+verify_install = false
+
+[[crates]]
+artifact = "sc-observability-types"
+package = "sc-observability-types"
+cargo_toml = "crates/sc-observability-types/Cargo.toml"
+required = true
+publish = true
+publish_order = 13
+preflight_check = "locked"
+wait_after_publish_seconds = 60
+verify_install = false
+
+[[crates]]
 artifact = "agent-team-mail"
 package = "agent-team-mail"
 cargo_toml = "crates/atm/Cargo.toml"

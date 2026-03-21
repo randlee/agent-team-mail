@@ -218,15 +218,12 @@ pub fn execute(args: SendArgs) -> Result<()> {
         .unwrap_or_else(|| generate_summary(&final_message_text));
 
     // Create inbox message
-    let inbox_message = InboxMessage {
-        from: config.core.identity.clone(),
-        text: final_message_text.clone(),
-        timestamp: Utc::now().to_rfc3339(),
-        read: false,
-        summary: Some(summary.clone()),
-        message_id: Some(Uuid::new_v4().to_string()),
-        unknown_fields: HashMap::new(),
-    };
+    let inbox_message = build_inbox_message(
+        config.core.identity.clone(),
+        Some(sender_team.clone()),
+        final_message_text.clone(),
+        Some(summary.clone()),
+    );
 
     // Dry run output
     if args.dry_run {
@@ -321,17 +318,16 @@ pub fn execute(args: SendArgs) -> Result<()> {
         WriteOutcome::Success | WriteOutcome::ConflictResolved { .. }
     ) {
         let _ = touch_sender_session_heartbeat(&team_name, &config.core.identity);
+        if should_emit_post_send_idle_transition() {
+            if let Some(ref session_id) = sender_session_id {
+                let _ = agent_team_mail_core::daemon_client::emit_teammate_idle_best_effort(
+                    &team_name,
+                    &config.core.identity,
+                    session_id,
+                );
+            }
+        }
     }
-
-    // Auto-subscribe the sender to the target agent's idle event (upsert — refreshes TTL
-    // if a subscription already exists). This is best-effort: errors are silently ignored
-    // because the daemon may not be running.
-    let _ = agent_team_mail_core::daemon_client::subscribe_to_agent(
-        &config.core.identity,
-        &agent_name,
-        &team_name,
-        &["idle".to_string()],
-    );
 
     // Query the daemon for agent state to enrich the output (best-effort, silent fallback).
     let agent_state_info =
@@ -547,7 +543,7 @@ where
 }
 
 /// Generate summary from message text (first ~100 chars)
-fn generate_summary(text: &str) -> String {
+pub(crate) fn generate_summary(text: &str) -> String {
     let trimmed = text.trim();
     if trimmed.chars().count() <= MESSAGE_MAX_LEN {
         trimmed.to_string()
@@ -558,6 +554,24 @@ fn generate_summary(text: &str) -> String {
         } else {
             format!("{slice}...")
         }
+    }
+}
+
+fn build_inbox_message(
+    from: String,
+    source_team: Option<String>,
+    text: String,
+    summary: Option<String>,
+) -> InboxMessage {
+    InboxMessage {
+        from,
+        source_team,
+        text,
+        timestamp: Utc::now().to_rfc3339(),
+        read: false,
+        summary,
+        message_id: Some(Uuid::new_v4().to_string()),
+        unknown_fields: HashMap::new(),
     }
 }
 
@@ -580,6 +594,16 @@ where
 {
     let _ = query(team, sender)?;
     Ok(())
+}
+
+fn should_emit_post_send_idle_transition() -> bool {
+    matches!(
+        std::env::var("ATM_RUNTIME")
+            .ok()
+            .map(|runtime| runtime.trim().to_ascii_lowercase()),
+        Some(runtime)
+            if matches!(runtime.as_str(), "codex" | "codex-cli" | "gemini" | "gemini-cli" | "opencode")
+    )
 }
 
 fn should_warn_self_send(
@@ -745,6 +769,36 @@ mod tests {
     fn test_generate_summary_whitespace() {
         let text = "   Message with whitespace   ";
         assert_eq!(generate_summary(text), "Message with whitespace");
+    }
+
+    #[test]
+    fn test_build_inbox_message_preserves_cross_team_source() {
+        let msg = build_inbox_message(
+            "team-lead".to_string(),
+            Some("src-gen".to_string()),
+            "cross-team note".to_string(),
+            Some("cross-team note".to_string()),
+        );
+
+        assert_eq!(msg.from, "team-lead");
+        assert_eq!(msg.source_team.as_deref(), Some("src-gen"));
+        assert_eq!(msg.text, "cross-team note");
+        assert!(!msg.read);
+    }
+
+    #[test]
+    fn test_build_inbox_message_preserves_same_team_source() {
+        let msg = build_inbox_message(
+            "team-lead".to_string(),
+            Some("atm-dev".to_string()),
+            "same-team note".to_string(),
+            Some("same-team note".to_string()),
+        );
+
+        assert_eq!(msg.from, "team-lead");
+        assert_eq!(msg.source_team.as_deref(), Some("atm-dev"));
+        assert_eq!(msg.text, "same-team note");
+        assert!(!msg.read);
     }
 
     fn make_send_args(offline_action: Option<String>) -> SendArgs {

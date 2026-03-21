@@ -105,6 +105,8 @@ pub fn execute(args: BroadcastArgs) -> Result<()> {
     // Create inbox message
     let inbox_message = InboxMessage {
         from: config.core.identity.clone(),
+        // local system message — source_team intentionally None
+        source_team: None,
         text: message_text.clone(),
         timestamp: Utc::now().to_rfc3339(),
         read: false,

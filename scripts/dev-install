@@ -200,10 +200,56 @@ def restart_daemon() -> None:
         die(f"atm binary not found at {atm_bin}")
     if daemon_bin.exists():
         kill_matching_daemons(daemon_bin)
+    restart_env = os.environ.copy()
+    restart_env["ATM_DEV_MODE"] = "1"
+    for key in ("CLAUDE_SESSION_ID", "ATM_IDENTITY", "ATM_TEAM"):
+        restart_env.pop(key, None)
     try:
-        run([str(atm_bin), "daemon", "restart"])
+        subprocess.run(
+            [str(atm_bin), "daemon", "restart"],
+            check=True,
+            env=restart_env,
+            start_new_session=True,
+            text=True,
+        )
     except SystemExit:
         print("  note: daemon restart returned non-zero (first-time start ok)")
+    except subprocess.CalledProcessError as exc:
+        print(
+            "  note: daemon restart returned non-zero "
+            f"(exit {exc.returncode}; first-time start ok)"
+        )
+    wait_for_daemon_liveness(atm_bin, daemon_bin)
+
+
+def wait_for_daemon_liveness(atm_bin: Path, daemon_bin: Path, timeout_secs: float = 3.0) -> None:
+    deadline = time.monotonic() + timeout_secs
+    last_status_error = ""
+
+    while time.monotonic() < deadline:
+        pids = matching_pids_for_binary(daemon_bin)
+        if pids:
+            print(f"  daemon liveness check passed: pid(s) {', '.join(str(pid) for pid in pids)}")
+            return
+
+        status = subprocess.run(
+            [str(atm_bin), "daemon", "status", "--json"],
+            check=False,
+            capture_output=True,
+            text=True,
+            start_new_session=True,
+        )
+        if status.returncode == 0:
+            print("  daemon liveness check passed via atm daemon status")
+            return
+        last_status_error = status.stderr.strip() or status.stdout.strip()
+        time.sleep(0.1)
+
+    detail = f"; last daemon status output: {last_status_error}" if last_status_error else ""
+    die(
+        "dev daemon restart did not leave a live daemon process within "
+        f"{timeout_secs:.0f}s for {daemon_bin}{detail}"
+    )
 
 
 def matching_pids_for_binary(binary_path: Path) -> list[int]:

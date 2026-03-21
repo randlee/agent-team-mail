@@ -15,7 +15,10 @@ use std::time::{Duration, Instant, SystemTime};
 use sysinfo::{Pid, ProcessStatus, System};
 use uuid::Uuid;
 
-use crate::commands::logging_health::{LoggingHealthSnapshot, build_logging_health_contract};
+use crate::commands::logging_health::{
+    LoggingHealthSnapshot, OtelHealthSnapshot, build_logging_health_contract,
+    build_otel_health_contract,
+};
 use crate::util::settings::{get_home_dir, teams_root_dir_for};
 use agent_team_mail_core::daemon_client::{
     create_isolated_runtime_root, daemon_status_path_for, reap_expired_isolated_runtime_roots,
@@ -309,6 +312,7 @@ fn send_shutdown_request(
     });
     let msg = InboxMessage {
         from: "atm".to_string(),
+        source_team: None,
         text: payload.to_string(),
         timestamp: Utc::now().to_rfc3339(),
         read: false,
@@ -830,15 +834,21 @@ fn execute_status(args: StatusArgs) -> Result<()> {
     let is_stale = is_status_stale(&status.timestamp, stale_threshold_secs);
 
     let logging_health = build_logging_health_contract(&status.logging, &home_dir);
+    let otel_health = build_otel_health_contract(&status.otel);
 
     if args.json {
         // Output as JSON with stale flag and canonical logging schema.
         let mut output = serde_json::to_value(&status)?;
         if let Some(obj) = output.as_object_mut() {
             obj.remove("logging");
+            obj.remove("otel");
             obj.insert(
                 "logging_health".to_string(),
                 serde_json::to_value(&logging_health)?,
+            );
+            obj.insert(
+                "otel_health".to_string(),
+                serde_json::to_value(&otel_health)?,
             );
             obj.insert("stale".to_string(), serde_json::Value::Bool(is_stale));
         }
@@ -966,6 +976,28 @@ fn execute_status(args: StatusArgs) -> Result<()> {
         if let Some(last_at) = &logging_health.last_error.at {
             println!("  last_error.at:   {last_at}");
         }
+        println!();
+        println!("OTel:");
+        println!("  schema_version:  {}", otel_health.schema_version);
+        println!("  enabled:         {}", otel_health.enabled);
+        println!("  protocol:        {}", otel_health.protocol);
+        println!("  collector_state: {}", otel_health.collector_state);
+        println!("  local_mirror_state: {}", otel_health.local_mirror_state);
+        println!("  local_mirror_path:  {}", otel_health.local_mirror_path);
+        println!("  debug_local_export: {}", otel_health.debug_local_export);
+        println!("  debug_local_state:  {}", otel_health.debug_local_state);
+        if let Some(endpoint) = &otel_health.collector_endpoint {
+            println!("  collector_endpoint: {endpoint}");
+        }
+        if let Some(last_code) = &otel_health.last_error.code {
+            println!("  last_error.code: {last_code}");
+        }
+        if let Some(last_message) = &otel_health.last_error.message {
+            println!("  last_error.message: {last_message}");
+        }
+        if let Some(last_at) = &otel_health.last_error.at {
+            println!("  last_error.at:   {last_at}");
+        }
     }
 
     // Exit with error code if stale
@@ -1047,6 +1079,8 @@ struct DaemonStatus {
     teams: Vec<String>,
     #[serde(default)]
     logging: LoggingHealthSnapshot,
+    #[serde(default)]
+    otel: OtelHealthSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1120,13 +1154,19 @@ mod tests {
     fn test_read_daemon_touch_rows_returns_sorted_rows() {
         let tmp = TempDir::new().expect("temp dir");
         let daemon_dir = tmp.path().join(".atm/daemon");
+        let binary_a = std::env::temp_dir().join("daemon-touch-team-a");
+        let binary_b = std::env::temp_dir().join("daemon-touch-team-b");
         std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
         std::fs::write(
             daemon_dir.join("daemon-touch.json"),
-            r#"{
-  "team-b": {"pid": 22, "started_at": "2026-03-16T00:00:02Z", "binary": "/tmp/b"},
-  "team-a": {"pid": 11, "started_at": "2026-03-16T00:00:01Z", "binary": "/tmp/a"}
-}"#,
+            format!(
+                r#"{{
+  "team-b": {{"pid": 22, "started_at": "2026-03-16T00:00:02Z", "binary": "{binary_b}"}},
+  "team-a": {{"pid": 11, "started_at": "2026-03-16T00:00:01Z", "binary": "{binary_a}"}}
+}}"#,
+                binary_a = binary_a.to_string_lossy().replace('\\', "/"),
+                binary_b = binary_b.to_string_lossy().replace('\\', "/"),
+            ),
         )
         .expect("write daemon touch");
 

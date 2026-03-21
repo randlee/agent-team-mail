@@ -4,6 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use agent_team_mail_core::daemon_client::daemon_status_path_for;
+pub(crate) use agent_team_mail_core::observability::{
+    OtelHealthSnapshot, OtelHealthSnapshot as OtelHealthContract,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -71,6 +74,8 @@ impl Default for LoggingHealthContract {
 struct DaemonStatusSnapshot {
     #[serde(default)]
     logging: LoggingHealthSnapshot,
+    #[serde(default)]
+    otel: OtelHealthSnapshot,
 }
 
 pub(crate) fn read_daemon_logging_health(home_dir: &Path) -> LoggingHealthSnapshot {
@@ -80,6 +85,16 @@ pub(crate) fn read_daemon_logging_health(home_dir: &Path) -> LoggingHealthSnapsh
     };
     serde_json::from_str::<DaemonStatusSnapshot>(&content)
         .map(|status| status.logging)
+        .unwrap_or_default()
+}
+
+pub(crate) fn read_daemon_otel_health(home_dir: &Path) -> OtelHealthSnapshot {
+    let status_path = daemon_status_path_for(home_dir);
+    let Ok(content) = fs::read_to_string(status_path) else {
+        return OtelHealthSnapshot::default();
+    };
+    serde_json::from_str::<DaemonStatusSnapshot>(&content)
+        .map(|status| status.otel)
         .unwrap_or_default()
 }
 
@@ -100,6 +115,10 @@ pub(crate) fn build_logging_health_contract(
         oldest_spool_age_seconds: logging.oldest_spool_age,
         last_error,
     }
+}
+
+pub(crate) fn build_otel_health_contract(otel: &OtelHealthSnapshot) -> OtelHealthContract {
+    otel.clone()
 }
 
 pub(crate) fn logging_remediation(state: &str) -> Option<&'static str> {

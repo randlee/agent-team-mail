@@ -1,7 +1,12 @@
 //! Main daemon event loop
 
+use crate::daemon::observability::{
+    export_metric_records_best_effort, export_trace_records_best_effort, otel_config_from_env,
+};
 use crate::daemon::pid_backend_validation::{roster_process_id, validate_pid_backend};
-use crate::daemon::status::{LoggingHealth, PluginStatus, PluginStatusKind, StatusWriter};
+use crate::daemon::status::{
+    LoggingHealth, OtelHealth, PluginStatus, PluginStatusKind, StatusWriter,
+};
 use crate::daemon::{
     InboxEvent, InboxEventKind, LogEventQueue, SharedDedupeStore, SharedPubSubStore,
     SharedSessionRegistry, SharedStateStore, SharedStreamEventSender,
@@ -17,10 +22,12 @@ use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::schema::TeamConfig;
 use agent_team_mail_core::team_config_store::TeamConfigStore;
 use anyhow::{Context, Result};
+use chrono::Utc;
+use sc_observability_types::{MetricKind, MetricRecord, TraceRecord, TraceStatus};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -36,6 +43,235 @@ type SharedCycleState = Arc<std::sync::Mutex<ReconcileCycleState>>;
 
 fn new_reconcile_cycle_state() -> SharedCycleState {
     Arc::new(std::sync::Mutex::new(ReconcileCycleState::default()))
+}
+
+fn emit_plugin_lifecycle_event(
+    action: &'static str,
+    plugin_name: &str,
+    result: &'static str,
+    error: Option<String>,
+) {
+    let request_id = format!("plugin-lifecycle-{plugin_name}-{action}");
+    let trace_id = agent_team_mail_core::event_log::trace_id_for_request("atm-daemon", &request_id);
+    emit_event_best_effort(EventFields {
+        level: if error.is_some() { "error" } else { "info" },
+        source: "atm-daemon",
+        action,
+        target: Some(plugin_name.to_string()),
+        result: Some(result.to_string()),
+        request_id: Some(request_id),
+        trace_id: Some(trace_id.clone()),
+        span_id: Some(agent_team_mail_core::event_log::span_id_for_action(
+            &trace_id, action,
+        )),
+        extra_fields: {
+            let mut fields = serde_json::Map::new();
+            fields.insert(
+                "plugin".to_string(),
+                serde_json::Value::String(plugin_name.to_string()),
+            );
+            fields.insert(
+                "lifecycle_scope".to_string(),
+                serde_json::Value::String("daemon_plugin".to_string()),
+            );
+            fields
+        },
+        error,
+        ..Default::default()
+    });
+}
+
+fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key).ok().and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn build_daemon_metric_record(
+    name: &str,
+    kind: MetricKind,
+    value: f64,
+    unit: Option<&str>,
+    attributes: serde_json::Map<String, serde_json::Value>,
+) -> MetricRecord {
+    MetricRecord {
+        timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        team: env_nonempty("ATM_TEAM"),
+        agent: env_nonempty("ATM_IDENTITY"),
+        runtime: env_nonempty("ATM_RUNTIME"),
+        session_id: crate::daemon::observability::current_session_id(),
+        name: name.to_string(),
+        kind,
+        value,
+        unit: unit.map(str::to_string),
+        source_binary: "atm-daemon".to_string(),
+        attributes,
+    }
+}
+
+fn build_daemon_health_metric_records(
+    logging: &LoggingHealth,
+    otel: &OtelHealth,
+) -> Vec<MetricRecord> {
+    let mut records = Vec::new();
+
+    let mut logging_attrs = serde_json::Map::new();
+    logging_attrs.insert(
+        "logging_state".to_string(),
+        serde_json::Value::String(logging.state.clone()),
+    );
+    records.push(build_daemon_metric_record(
+        "atm_daemon.spool_size",
+        MetricKind::Gauge,
+        logging.spool_count as f64,
+        Some("count"),
+        logging_attrs.clone(),
+    ));
+    records.push(build_daemon_metric_record(
+        "atm_daemon.dropped_events_total",
+        MetricKind::Gauge,
+        logging.dropped_counter as f64,
+        Some("count"),
+        logging_attrs,
+    ));
+
+    if let Some(code) = &otel.last_error.code {
+        let mut otel_attrs = serde_json::Map::new();
+        otel_attrs.insert(
+            "collector_state".to_string(),
+            serde_json::Value::String(otel.collector_state.clone()),
+        );
+        otel_attrs.insert(
+            "error_code".to_string(),
+            serde_json::Value::String(code.clone()),
+        );
+        records.push(build_daemon_metric_record(
+            "atm_daemon.export_failures_total",
+            MetricKind::Counter,
+            1.0,
+            Some("count"),
+            otel_attrs,
+        ));
+    }
+
+    records
+}
+
+fn dispatch_trace_id(event: &InboxEvent, message_id: Option<&str>) -> String {
+    let seed = message_id.unwrap_or_else(|| event.path.to_str().unwrap_or("unknown-dispatch"));
+    agent_team_mail_core::event_log::trace_id_for_request("atm-daemon", seed)
+}
+
+fn build_dispatch_root_trace_record(
+    event: &InboxEvent,
+    message_id: Option<&str>,
+    trace_id: &str,
+    root_span_id: &str,
+    duration_ms: u64,
+    status: TraceStatus,
+) -> TraceRecord {
+    let mut attributes = serde_json::Map::new();
+    attributes.insert(
+        "operation".to_string(),
+        serde_json::Value::String("dispatch_message".to_string()),
+    );
+    attributes.insert(
+        "path".to_string(),
+        serde_json::Value::String(event.path.display().to_string()),
+    );
+    if let Some(message_id) = message_id {
+        attributes.insert(
+            "message_id".to_string(),
+            serde_json::Value::String(message_id.to_string()),
+        );
+    }
+
+    TraceRecord {
+        timestamp: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        team: Some(event.team.clone()),
+        agent: Some(event.agent.clone()),
+        runtime: env_nonempty("ATM_RUNTIME"),
+        session_id: crate::daemon::observability::current_session_id(),
+        trace_id: trace_id.to_string(),
+        span_id: root_span_id.to_string(),
+        parent_span_id: None,
+        name: "atm-daemon.dispatch_message".to_string(),
+        status,
+        duration_ms,
+        source_binary: "atm-daemon".to_string(),
+        attributes,
+    }
+}
+
+struct PluginDispatchTrace<'a> {
+    plugin_name: &'a str,
+    operation: &'a str,
+    duration_ms: u64,
+    status: TraceStatus,
+    error: Option<&'a str>,
+}
+
+fn build_plugin_dispatch_trace_record(
+    event: &InboxEvent,
+    message_id: Option<&str>,
+    trace_id: &str,
+    parent_span_id: &str,
+    plugin_trace: PluginDispatchTrace<'_>,
+) -> TraceRecord {
+    let span_action = format!(
+        "plugin_dispatch_{}_{}",
+        plugin_trace.plugin_name, plugin_trace.operation
+    );
+    let span_id = agent_team_mail_core::event_log::span_id_for_action(trace_id, &span_action);
+    let mut attributes = serde_json::Map::new();
+    attributes.insert(
+        "plugin".to_string(),
+        serde_json::Value::String(plugin_trace.plugin_name.to_string()),
+    );
+    attributes.insert(
+        "operation".to_string(),
+        serde_json::Value::String(plugin_trace.operation.to_string()),
+    );
+    attributes.insert(
+        "path".to_string(),
+        serde_json::Value::String(event.path.display().to_string()),
+    );
+    if let Some(message_id) = message_id {
+        attributes.insert(
+            "message_id".to_string(),
+            serde_json::Value::String(message_id.to_string()),
+        );
+    }
+    if let Some(error) = plugin_trace.error {
+        attributes.insert(
+            "error".to_string(),
+            serde_json::Value::String(error.to_string()),
+        );
+    }
+
+    TraceRecord {
+        timestamp: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        team: Some(event.team.clone()),
+        agent: Some(event.agent.clone()),
+        runtime: env_nonempty("ATM_RUNTIME"),
+        session_id: crate::daemon::observability::current_session_id(),
+        trace_id: trace_id.to_string(),
+        span_id,
+        parent_span_id: Some(parent_span_id.to_string()),
+        name: format!(
+            "atm-daemon.plugin.{}.{}",
+            plugin_trace.plugin_name, plugin_trace.operation
+        ),
+        status: plugin_trace.status,
+        duration_ms: plugin_trace.duration_ms,
+        source_binary: "atm-daemon".to_string(),
+        attributes,
+    }
 }
 
 /// Wait for a daemon shutdown task to finish within `timeout`.
@@ -142,6 +378,12 @@ pub async fn run(
     let _ = registry.init_all(ctx).await;
     let init_failed_plugins = registry.failed_init_plugins();
     for failed in &init_failed_plugins {
+        emit_plugin_lifecycle_event(
+            "plugin_init",
+            &failed.name,
+            "error",
+            Some(failed.error.clone()),
+        );
         warn!(
             plugin = %failed.name,
             error = %failed.error,
@@ -190,17 +432,26 @@ pub async fn run(
 
     for (metadata, plugin_arc) in plugins.clone() {
         let plugin_name = metadata.name.to_string();
+        emit_plugin_lifecycle_event("plugin_init", &plugin_name, "ok", None);
         let cancel_clone = cancel.clone();
 
         let task = tokio::spawn(async move {
+            emit_plugin_lifecycle_event("plugin_run_start", &plugin_name, "starting", None);
             info!("Plugin {} run() starting", plugin_name);
             let mut plugin = plugin_arc.lock().await;
 
             match plugin.run(cancel_clone).await {
                 Ok(()) => {
+                    emit_plugin_lifecycle_event("plugin_run_complete", &plugin_name, "ok", None);
                     info!("Plugin {} run() completed", plugin_name);
                 }
                 Err(e) => {
+                    emit_plugin_lifecycle_event(
+                        "plugin_run_complete",
+                        &plugin_name,
+                        "error",
+                        Some(e.to_string()),
+                    );
                     error!("Plugin {} run() failed: {}", plugin_name, e);
                 }
             }
@@ -370,6 +621,17 @@ pub async fn run(
                     }
 
                     for mut inbox_msg in inbox_msgs {
+                        let dispatch_started_at = Instant::now();
+                        let message_id = inbox_msg.message_id.clone();
+                        let dispatch_trace_id = dispatch_trace_id(&event, message_id.as_deref());
+                        let dispatch_root_span_id =
+                            agent_team_mail_core::event_log::span_id_for_action(
+                                &dispatch_trace_id,
+                                "dispatch_message",
+                            );
+                        let otel_config = otel_config_from_env();
+                        let mut dispatch_failed = false;
+
                         emit_event_best_effort(EventFields {
                             level: "info",
                             source: "atm-daemon",
@@ -404,10 +666,35 @@ pub async fn run(
                         // Dispatch to all plugins with EventListener capability
                         for (metadata, plugin_arc) in &dispatch_plugins {
                             if metadata.capabilities.contains(&Capability::EventListener) {
+                                let plugin_dispatch_started_at = Instant::now();
                                 // Await lock to avoid dropping events under load
                                 let mut plugin = plugin_arc.lock().await;
                                 debug!("Dispatching to plugin: {}", metadata.name);
-                                if let Err(e) = plugin.handle_message(&inbox_msg).await {
+                                let dispatch_result = plugin.handle_message(&inbox_msg).await;
+                                let (trace_status, trace_error) = match &dispatch_result {
+                                    Ok(_) => (TraceStatus::Ok, None),
+                                    Err(e) => (TraceStatus::Error, Some(e.to_string())),
+                                };
+                                export_trace_records_best_effort(
+                                    &[build_plugin_dispatch_trace_record(
+                                        &event,
+                                        message_id.as_deref(),
+                                        &dispatch_trace_id,
+                                        &dispatch_root_span_id,
+                                        PluginDispatchTrace {
+                                            plugin_name: metadata.name,
+                                            operation: "handle_message",
+                                            duration_ms: plugin_dispatch_started_at.elapsed()
+                                                .as_millis()
+                                                as u64,
+                                            status: trace_status,
+                                            error: trace_error.as_deref(),
+                                        },
+                                    )],
+                                    &otel_config,
+                                );
+                                if let Err(e) = dispatch_result {
+                                    dispatch_failed = true;
                                     emit_event_best_effort(EventFields {
                                         level: "error",
                                         source: "atm-daemon",
@@ -426,6 +713,22 @@ pub async fn run(
                                 }
                             }
                         }
+
+                        export_trace_records_best_effort(
+                            &[build_dispatch_root_trace_record(
+                                &event,
+                                message_id.as_deref(),
+                                &dispatch_trace_id,
+                                &dispatch_root_span_id,
+                                dispatch_started_at.elapsed().as_millis() as u64,
+                                if dispatch_failed {
+                                    TraceStatus::Error
+                                } else {
+                                    TraceStatus::Ok
+                                },
+                            )],
+                            &otel_config,
+                        );
                     }
                 }
             }
@@ -533,10 +836,16 @@ pub async fn run(
     )
     .await;
 
+    for (metadata, _) in &plugins {
+        emit_plugin_lifecycle_event("plugin_shutdown", metadata.name, "starting", None);
+    }
     // Graceful shutdown of all plugins
     graceful_shutdown(plugins, Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS))
         .await
         .context("Plugin shutdown encountered errors")?;
+    for (plugin_name, _) in &plugin_tasks {
+        emit_plugin_lifecycle_event("plugin_shutdown", plugin_name, "ok", None);
+    }
 
     // Wait for plugin tasks to complete
     for (plugin_name, task) in plugin_tasks {
@@ -776,10 +1085,11 @@ fn reconcile_team_member_activity_with_mode(
                 );
             }
 
-            // Terminal non-lead members must be fully removed (roster + mailbox)
-            // once daemon confirms the session is dead. A grace-skip cycle is
-            // inserted when a member just re-appeared after an absence (detected
-            // via ABSENT_REGISTRY_CYCLES), preventing premature cleanup during
+            // Terminal non-lead members still need daemon-side cleanup once the
+            // session is confirmed dead, but config.json remains authoritative
+            // for roster membership. A grace-skip cycle is inserted when a
+            // member just re-appeared after an absence (detected via
+            // ABSENT_REGISTRY_CYCLES), preventing premature cleanup during
             // config-watcher races or remove+recreate flows.
             if member.name != "team-lead"
                 && let Some(ref rec) = record
@@ -886,17 +1196,12 @@ fn reconcile_team_member_activity_with_mode(
         }
 
         if changed {
-            let terminal_set: std::collections::HashSet<_> =
-                terminal_non_lead_members.iter().cloned().collect();
             let alive_members = alive_members.clone();
             let _ = store.update(|mut config| {
                 for member in &mut config.members {
                     if alive_members.contains(&member.name) {
                         member.last_active = Some(now_ms);
                     }
-                }
-                if !terminal_set.is_empty() {
-                    config.members.retain(|m| !terminal_set.contains(&m.name));
                 }
                 Ok(Some(config))
             })?;
@@ -1376,10 +1681,17 @@ async fn status_writer_loop(
     let plugin_statuses = build_plugin_statuses(&plugins, &init_failed_plugins, &ctx).await;
     let teams = get_active_teams(&ctx).await;
     let logging = build_logging_health(&ctx, &log_event_queue).await;
+    let otel = build_otel_health(&ctx);
+    export_metric_records_best_effort(
+        &build_daemon_health_metric_records(&logging, &otel),
+        &otel_config_from_env(),
+    );
     if let Err(e) = status_writer.write_daemon_touch(&teams) {
         error!("Failed to write daemon touch sidecar: {}", e);
     }
-    if let Err(e) = status_writer.write_status(plugin_statuses.clone(), teams.clone(), logging) {
+    if let Err(e) =
+        status_writer.write_status(plugin_statuses.clone(), teams.clone(), logging, otel)
+    {
         error!("Failed to write initial daemon status: {}", e);
     }
 
@@ -1399,8 +1711,13 @@ async fn status_writer_loop(
                     build_plugin_statuses(&plugins, &init_failed_plugins, &ctx).await;
                 let teams = get_active_teams(&ctx).await;
                 let logging = build_logging_health(&ctx, &log_event_queue).await;
+                let otel = build_otel_health(&ctx);
+                export_metric_records_best_effort(
+                    &build_daemon_health_metric_records(&logging, &otel),
+                    &otel_config_from_env(),
+                );
 
-                if let Err(e) = status_writer.write_status(plugin_statuses, teams, logging) {
+                if let Err(e) = status_writer.write_status(plugin_statuses, teams, logging, otel) {
                     error!("Failed to write daemon status: {}", e);
                 }
             }
@@ -1464,6 +1781,17 @@ fn build_logging_health_snapshot(
         spool_count,
         oldest_spool_age,
     }
+}
+
+fn build_otel_health(ctx: &PluginContext) -> OtelHealth {
+    let home_dir = ctx
+        .system
+        .claude_root
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let canonical_log_path = agent_team_mail_core::logging_event::configured_log_path(&home_dir);
+    crate::daemon::observability::current_otel_health(&canonical_log_path)
 }
 
 fn derive_logging_state(
@@ -1671,11 +1999,18 @@ fn format_timestamp(time: SystemTime) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{InboxCursor, build_logging_health_snapshot, read_new_inbox_messages};
+    use super::{
+        InboxCursor, PluginDispatchTrace, build_dispatch_root_trace_record,
+        build_logging_health_snapshot, build_plugin_dispatch_trace_record, dispatch_trace_id,
+        read_new_inbox_messages,
+    };
+    use crate::daemon::InboxEventKind;
     use crate::daemon::session_registry::new_session_registry;
     use crate::daemon::socket::new_state_store;
     use crate::plugins::worker_adapter::AgentState;
+    use agent_team_mail_core::event_log::span_id_for_action;
     use agent_team_mail_core::schema::InboxMessage;
+    use sc_observability_types::TraceStatus;
     use std::collections::HashMap;
     use std::fs as stdfs;
     use std::time::Duration;
@@ -1685,6 +2020,16 @@ mod tests {
     async fn write_inbox(path: &std::path::Path, msgs: &[InboxMessage]) {
         let content = serde_json::to_string_pretty(msgs).unwrap();
         fs::write(path, content).await.unwrap();
+    }
+
+    fn sample_inbox_event() -> crate::daemon::InboxEvent {
+        crate::daemon::InboxEvent {
+            team: "atm-dev".to_string(),
+            agent: "arch-ctm".to_string(),
+            path: std::env::temp_dir().join("atm-dev/arch-ctm/inbox.json"),
+            kind: InboxEventKind::MessageReceived,
+            origin: None,
+        }
     }
 
     #[test]
@@ -1761,6 +2106,68 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_build_plugin_dispatch_trace_record_links_to_parent_span() {
+        let event = sample_inbox_event();
+        let trace_id = dispatch_trace_id(&event, Some("msg-123"));
+        let root_span_id = span_id_for_action(&trace_id, "dispatch_message");
+
+        let record = build_plugin_dispatch_trace_record(
+            &event,
+            Some("msg-123"),
+            &trace_id,
+            &root_span_id,
+            PluginDispatchTrace {
+                plugin_name: "ci-monitor",
+                operation: "handle_message",
+                duration_ms: 17,
+                status: TraceStatus::Ok,
+                error: None,
+            },
+        );
+
+        assert_eq!(record.trace_id, trace_id);
+        assert_eq!(
+            record.parent_span_id.as_deref(),
+            Some(root_span_id.as_str())
+        );
+        assert_eq!(record.status, TraceStatus::Ok);
+        assert_eq!(record.name, "atm-daemon.plugin.ci-monitor.handle_message");
+        assert_eq!(
+            record.attributes.get("plugin").and_then(|v| v.as_str()),
+            Some("ci-monitor")
+        );
+        assert_eq!(
+            record.attributes.get("operation").and_then(|v| v.as_str()),
+            Some("handle_message")
+        );
+    }
+
+    #[test]
+    fn test_build_dispatch_root_trace_record_uses_message_context() {
+        let event = sample_inbox_event();
+        let trace_id = dispatch_trace_id(&event, Some("msg-456"));
+        let root_span_id = span_id_for_action(&trace_id, "dispatch_message");
+
+        let record = build_dispatch_root_trace_record(
+            &event,
+            Some("msg-456"),
+            &trace_id,
+            &root_span_id,
+            42,
+            TraceStatus::Error,
+        );
+
+        assert_eq!(record.trace_id, trace_id);
+        assert_eq!(record.span_id, root_span_id);
+        assert_eq!(record.status, TraceStatus::Error);
+        assert_eq!(record.name, "atm-daemon.dispatch_message");
+        assert_eq!(
+            record.attributes.get("message_id").and_then(|v| v.as_str()),
+            Some("msg-456")
+        );
+    }
+
     #[tokio::test]
     async fn test_read_new_inbox_messages_returns_all_new() {
         let temp_dir = TempDir::new().unwrap();
@@ -1769,6 +2176,7 @@ mod tests {
 
         let msg1 = InboxMessage {
             from: "a".to_string(),
+            source_team: None,
             text: "first".to_string(),
             timestamp: "2026-02-11T10:00:00Z".to_string(),
             read: false,
@@ -1779,6 +2187,7 @@ mod tests {
 
         let msg2 = InboxMessage {
             from: "b".to_string(),
+            source_team: None,
             text: "second".to_string(),
             timestamp: "2026-02-11T10:05:00Z".to_string(),
             read: false,
@@ -1797,6 +2206,7 @@ mod tests {
 
         let msg3 = InboxMessage {
             from: "c".to_string(),
+            source_team: None,
             text: "third".to_string(),
             timestamp: "2026-02-11T10:10:00Z".to_string(),
             read: false,
@@ -1831,6 +2241,7 @@ mod tests {
 
         let msg1 = InboxMessage {
             from: "a".to_string(),
+            source_team: None,
             text: "first".to_string(),
             timestamp: "2026-02-11T10:00:00Z".to_string(),
             read: false,
@@ -1841,6 +2252,7 @@ mod tests {
 
         let msg2 = InboxMessage {
             from: "b".to_string(),
+            source_team: None,
             text: "second".to_string(),
             timestamp: "2026-02-11T10:05:00Z".to_string(),
             read: false,
@@ -2296,7 +2708,7 @@ mod tests {
         );
     }
 
-    fn assert_terminal_non_lead_cleanup(
+    fn assert_terminal_non_lead_session_cleanup_preserves_roster(
         home: &std::path::Path,
         team_name: &str,
         inbox_dir: &std::path::Path,
@@ -2307,12 +2719,12 @@ mod tests {
         )
         .unwrap();
         assert!(
-            cfg.members.iter().all(|m| m.name != "arch-ctm"),
-            "terminal non-lead should be removed from roster"
+            cfg.members.iter().any(|m| m.name == "arch-ctm"),
+            "dead non-lead should remain in config roster until explicit removal"
         );
         assert!(
             !inbox_dir.join("arch-ctm.json").exists(),
-            "terminal non-lead inbox should be removed"
+            "dead non-lead inbox should be removed"
         );
     }
 
@@ -2371,7 +2783,7 @@ mod tests {
     }
 
     #[test]
-    fn test_session_end_converges_to_remove_dead_member_from_roster_and_mailbox() {
+    fn test_session_end_converges_to_cleanup_dead_member_session_without_dropping_roster() {
         let (tmp, inbox_dir, team_name, sr, state_store) = setup_dead_terminal_non_lead();
         let home = tmp.path();
         let cycle_state = super::new_reconcile_cycle_state();
@@ -2396,18 +2808,18 @@ mod tests {
             &cycle_state,
         )
         .unwrap();
-        assert_terminal_non_lead_cleanup(home, &team_name, &inbox_dir);
+        assert_terminal_non_lead_session_cleanup_preserves_roster(home, &team_name, &inbox_dir);
         assert!(
             sr.lock()
                 .unwrap()
                 .query_for_team(&team_name, "arch-ctm")
                 .is_none(),
-            "terminal non-lead session record should be removed"
+            "dead non-lead session record should be removed"
         );
     }
 
     #[test]
-    fn test_sigterm_escalation_converges_to_remove_dead_member_from_roster_and_mailbox() {
+    fn test_sigterm_escalation_converges_to_cleanup_dead_member_session_without_dropping_roster() {
         let (tmp, inbox_dir, team_name, sr, state_store) = setup_dead_terminal_non_lead();
         let home = tmp.path();
         let cycle_state = super::new_reconcile_cycle_state();
@@ -2432,18 +2844,19 @@ mod tests {
             &cycle_state,
         )
         .unwrap();
-        assert_terminal_non_lead_cleanup(home, &team_name, &inbox_dir);
+        assert_terminal_non_lead_session_cleanup_preserves_roster(home, &team_name, &inbox_dir);
         assert!(
             sr.lock()
                 .unwrap()
                 .query_for_team(&team_name, "arch-ctm")
                 .is_none(),
-            "terminal non-lead session record should be removed"
+            "dead non-lead session record should be removed"
         );
     }
 
     #[test]
-    fn test_kill_timeout_fallback_converges_to_remove_dead_member_from_roster_and_mailbox() {
+    fn test_kill_timeout_fallback_converges_to_cleanup_dead_member_session_without_dropping_roster()
+    {
         let (tmp, inbox_dir, team_name, sr, state_store) = setup_dead_terminal_non_lead();
         let home = tmp.path();
         let cycle_state = super::new_reconcile_cycle_state();
@@ -2468,13 +2881,13 @@ mod tests {
             &cycle_state,
         )
         .unwrap();
-        assert_terminal_non_lead_cleanup(home, &team_name, &inbox_dir);
+        assert_terminal_non_lead_session_cleanup_preserves_roster(home, &team_name, &inbox_dir);
         assert!(
             sr.lock()
                 .unwrap()
                 .query_for_team(&team_name, "arch-ctm")
                 .is_none(),
-            "terminal non-lead session record should be removed"
+            "dead non-lead session record should be removed"
         );
     }
 

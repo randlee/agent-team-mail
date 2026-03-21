@@ -73,9 +73,10 @@ poll_interval_secs = 60
     fs::write(workdir.join(".atm.toml"), content).unwrap();
 }
 
+#[cfg(unix)]
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir, team: &str, with_plugin: bool) {
     let workdir = temp_dir.path().join("workdir");
-    let fake_daemon_bin = temp_dir.path().join("fake-gh-daemon.py");
+    let fake_daemon_bin = write_fake_gh_daemon_script(temp_dir.path());
     std::fs::create_dir_all(&workdir).ok();
     if with_plugin {
         write_repo_gh_monitor_config(&workdir, team);
@@ -88,6 +89,11 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir, team: &str, w
         .env_remove("CLAUDE_SESSION_ID")
         .env("ATM_IDENTITY", "team-lead")
         .current_dir(&workdir);
+}
+
+#[cfg(unix)]
+fn enable_daemon_autostart(cmd: &mut assert_cmd::Command) {
+    cmd.env("ATM_DAEMON_AUTOSTART", "1");
 }
 
 fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
@@ -153,8 +159,8 @@ from pathlib import Path
 home = Path(os.environ["ATM_HOME"])
 daemon_dir = home / ".atm" / "daemon"
 daemon_dir.mkdir(parents=True, exist_ok=True)
-state_path = daemon_dir / "gh-state.json"
-health_path = daemon_dir / "gh-health.json"
+state_path = daemon_dir / "gh-monitor-state.json"
+health_path = daemon_dir / "gh-monitor-health.json"
 request_log_path = os.environ.get("ATM_FAKE_GH_REQUEST_LOG")
 configured = os.environ.get("ATM_FAKE_GH_CONFIGURED", "1") == "1"
 enabled = os.environ.get("ATM_FAKE_GH_ENABLED", "1") == "1"
@@ -191,6 +197,158 @@ def _stop(_signum, _frame):
 signal.signal(signal.SIGTERM, _stop)
 signal.signal(signal.SIGINT, _stop)
 
+def append_ledger(action, record):
+    ledger_path = daemon_dir / "gh-observability.jsonl"
+    payload = {"action": action, "at": "2026-03-06T03:00:00Z"}
+    payload.update(record)
+    with ledger_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload) + "\n")
+
+def write_repo_state(team, repo, action):
+    state_payload = {
+        "records": [{
+            "team": team,
+            "repo": repo,
+            "updated_at": "2026-03-06T03:00:00Z",
+            "cache_expires_at": "2026-03-06T03:05:00Z",
+            "last_refresh_at": "2026-03-06T03:00:00Z",
+            "budget_limit_per_hour": 100,
+            "budget_used_in_window": 1,
+            "budget_window_started_at": "2026-03-06T03:00:00Z",
+            "budget_warning_threshold": 80,
+            "warning_emitted_at": None,
+            "blocked": False,
+            "in_flight": 0,
+            "idle_poll_interval_secs": 60,
+            "active_poll_interval_secs": 15,
+            "branch_ref_counts": [],
+            "last_call": {"action": action},
+            "rate_limit": {
+                "limit": 5000,
+                "remaining": 4937,
+                "used": 63,
+                "reset_at": "2026-03-06T04:00:00Z"
+            },
+            "owner": None
+        }]
+    }
+    (daemon_dir / "gh-monitor-repo-state.json").write_text(json.dumps(state_payload))
+
+def gh_list_payload(team, repo):
+    items = [
+        {
+            "number": 101,
+            "title": "Add monitor dashboard",
+            "url": f"https://github.com/{repo}/pull/101",
+            "draft": False,
+            "ci": {"state": "pending", "total": 2, "pass": 1, "fail": 0, "pending": 1, "skip": 0, "neutral": 0},
+            "merge": "clean",
+            "review": "approved",
+        },
+        {
+            "number": 102,
+            "title": "Fix flaky monitor test",
+            "url": f"https://github.com/{repo}/pull/102",
+            "draft": True,
+            "ci": {"state": "fail", "total": 1, "pass": 0, "fail": 1, "pending": 0, "skip": 0, "neutral": 0},
+            "merge": "dirty",
+            "review": "changes_requested",
+        },
+    ]
+    return {
+        "team": team,
+        "repo": repo,
+        "generated_at": "2026-03-06T03:00:00Z",
+        "total_open_prs": len(items),
+        "items": items,
+    }
+
+def gh_report_payload(team, repo, pr_number):
+    if pr_number == 103:
+        return {
+            "schema_version": "1.0.0",
+            "team": team,
+            "repo": repo,
+            "generated_at": "2026-03-06T03:00:00Z",
+            "pr": {
+                "number": 103,
+                "title": "Skip-only check sample",
+                "url": f"https://github.com/{repo}/pull/103",
+                "draft": False,
+                "ci": {"state": "pass", "total": 2, "pass": 1, "fail": 0, "pending": 0, "skip": 1, "neutral": 0},
+                "review_decision": "none",
+                "merge": {
+                    "mergeable": "unknown",
+                    "merge_state_status": "pending",
+                    "status": "indeterminate",
+                    "blocking_reasons": [],
+                    "advisory_reasons": ["no explicit review decision"],
+                },
+                "checks": [
+                    {
+                        "name": "tests",
+                        "status": "completed",
+                        "conclusion": "success",
+                        "started_at": "2026-03-06T02:55:00Z",
+                        "completed_at": "2026-03-06T02:56:00Z",
+                        "run_url": f"https://github.com/{repo}/actions/runs/2001",
+                    },
+                    {
+                        "name": "docs",
+                        "status": "completed",
+                        "conclusion": "skipped",
+                        "started_at": None,
+                        "completed_at": None,
+                        "run_url": None,
+                    },
+                ],
+                "reviews": [],
+            },
+        }
+    return {
+        "schema_version": "1.0.0",
+        "team": team,
+        "repo": repo,
+        "generated_at": "2026-03-06T03:00:00Z",
+        "pr": {
+            "number": 101,
+            "title": "Add monitor dashboard",
+            "url": f"https://github.com/{repo}/pull/101",
+            "draft": False,
+            "ci": {"state": "pending", "total": 2, "pass": 1, "fail": 0, "pending": 1, "skip": 0, "neutral": 0},
+            "review_decision": "approved",
+            "merge": {
+                "mergeable": "unknown",
+                "merge_state_status": "pending",
+                "status": "blocked",
+                "blocking_reasons": ["CI checks still pending"],
+                "advisory_reasons": ["mergeability is UNKNOWN (transient)"],
+            },
+            "checks": [
+                {
+                    "name": "clippy",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "started_at": "2026-03-06T02:55:00Z",
+                    "completed_at": "2026-03-06T02:56:00Z",
+                    "run_url": f"https://github.com/{repo}/actions/runs/1001",
+                },
+                {
+                    "name": "integration",
+                    "status": "in_progress",
+                    "conclusion": None,
+                    "started_at": "2026-03-06T02:57:00Z",
+                    "completed_at": None,
+                    "run_url": f"https://github.com/{repo}/actions/runs/1002",
+                },
+            ],
+            "reviews": [
+                {"reviewer": "alice", "state": "approved", "submitted_at": "2026-03-06T02:50:00Z"},
+                {"reviewer": "bob", "state": "commented", "submitted_at": "2026-03-06T02:51:00Z"},
+            ],
+        },
+    }
+
 srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 srv.bind(str(sock_path))
 srv.listen(16)
@@ -221,10 +379,11 @@ while running:
         if request_log_path:
             request_log_file = Path(request_log_path)
             request_log_file.parent.mkdir(parents=True, exist_ok=True)
-            request_log_file.write_text(json.dumps({
-                "command": command,
-                "payload": payload,
-            }))
+            with request_log_file.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({
+                    "command": command,
+                    "payload": payload,
+                }) + "\n")
 
         if command == "gh-monitor":
             if monitor_delay_ms > 0:
@@ -338,6 +497,46 @@ while running:
                     "message": availability_message,
                 }
             resp = {"version": 1, "request_id": request_id, "status": "ok", "payload": health_payload}
+        elif command == "gh-cli-prereqs":
+            resp = {
+                "version": 1,
+                "request_id": request_id,
+                "status": "ok",
+                "payload": {
+                    "gh_installed": True,
+                    "gh_authenticated": True,
+                    "error": None,
+                },
+            }
+        elif command == "gh-pr-list":
+            team = payload.get("team", "test-team")
+            repo = payload.get("repo", "acme/agent-team-mail")
+            append_ledger("gh_info_requested", {"team": team, "repo": repo, "caller": "gh_pr_list"})
+            append_ledger("gh_call_started", {"team": team, "repo": repo, "caller": "gh_pr_list"})
+            append_ledger("gh_call_finished", {"team": team, "repo": repo, "caller": "gh_pr_list", "result": "success"})
+            append_ledger("gh_info_live_refresh", {"team": team, "repo": repo, "caller": "gh_pr_list", "result": "live_refresh"})
+            write_repo_state(team, repo, "gh_pr_list")
+            resp = {
+                "version": 1,
+                "request_id": request_id,
+                "status": "ok",
+                "payload": gh_list_payload(team, repo),
+            }
+        elif command == "gh-pr-report":
+            team = payload.get("team", "test-team")
+            repo = payload.get("repo", "acme/agent-team-mail")
+            pr_number = int(payload.get("pr_number", 101))
+            append_ledger("gh_info_requested", {"team": team, "repo": repo, "caller": "gh_pr_report", "pr_number": pr_number})
+            append_ledger("gh_call_started", {"team": team, "repo": repo, "caller": "gh_pr_report", "pr_number": pr_number})
+            append_ledger("gh_call_finished", {"team": team, "repo": repo, "caller": "gh_pr_report", "pr_number": pr_number, "result": "success"})
+            append_ledger("gh_info_live_refresh", {"team": team, "repo": repo, "caller": "gh_pr_report", "pr_number": pr_number, "result": "live_refresh"})
+            write_repo_state(team, repo, "gh_pr_report")
+            resp = {
+                "version": 1,
+                "request_id": request_id,
+                "status": "ok",
+                "payload": gh_report_payload(team, repo, pr_number),
+            }
         elif command == "status":
             resp = {"version": 1, "request_id": request_id, "status": "ok", "payload": {"state":"running"}}
         else:
@@ -411,6 +610,18 @@ fn start_fake_gh_daemon(home: &Path) -> Child {
 #[cfg(unix)]
 fn start_fake_gh_daemon_with_mode(home: &Path, configured: bool, enabled: bool) -> Child {
     start_fake_gh_daemon_with_mode_and_delays(home, configured, enabled, 0, 0, None)
+}
+
+#[cfg(unix)]
+fn read_last_request_matching(request_log: &std::path::Path, command: &str) -> serde_json::Value {
+    std::fs::read_to_string(request_log)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .rev()
+        .find(|request| request["command"].as_str() == Some(command))
+        .unwrap_or_else(|| panic!("missing {command} request in {}", request_log.display()))
 }
 
 /// Start the fake daemon with an explicit request log path.
@@ -1045,6 +1256,7 @@ fn test_gh_init_dry_run_does_not_write_config() {
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    enable_daemon_autostart(&mut cmd);
     let output = cmd
         .env("PATH", path_env)
         .env("ATM_TEAM", "test-team")
@@ -1086,6 +1298,7 @@ fn test_gh_init_writes_plugin_config() {
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    enable_daemon_autostart(&mut cmd);
     cmd.env("PATH", path_env)
         .env("ATM_TEAM", "test-team")
         .arg("gh")
@@ -1123,6 +1336,7 @@ fn test_gh_init_auto_populates_repo_from_git_remote() {
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    enable_daemon_autostart(&mut cmd);
     cmd.env("PATH", path_env)
         .env("ATM_TEAM", "test-team")
         .arg("gh")
@@ -1170,8 +1384,7 @@ fn test_gh_monitor_infers_repo_scope_from_git_remote() {
         .stdout
         .clone();
     let _json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let request: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&request_log).unwrap()).unwrap();
+    let request = read_last_request_matching(&request_log, "gh-monitor");
     assert_eq!(request["command"].as_str(), Some("gh-monitor"));
     assert_eq!(
         request["payload"]["repo"].as_str(),
@@ -1223,8 +1436,7 @@ fn test_gh_monitor_repo_override_accepts_github_url_and_cc() {
         .stdout
         .clone();
     let _json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let request: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&request_log).unwrap()).unwrap();
+    let request = read_last_request_matching(&request_log, "gh-monitor");
     assert_eq!(
         request["payload"]["repo"].as_str(),
         Some("example/other-repo")
@@ -1295,9 +1507,21 @@ fn test_gh_namespace_status_missing_repo_is_actionable() {
         status["availability_state"].as_str(),
         Some("disabled_config_error")
     );
+    assert_eq!(status["namespace_state"].as_str(), Some("present_disabled"));
     let message = status["message"].as_str().unwrap_or_default();
     assert!(message.contains("missing required field: repo"));
     assert!(message.contains("atm gh init"));
+    let actions = status["actions"].as_array().unwrap();
+    assert!(
+        actions
+            .iter()
+            .any(|value| value.as_str() == Some("atm gh init"))
+    );
+    assert!(
+        actions
+            .iter()
+            .all(|value| value.as_str() != Some("atm gh monitor pr <number>"))
+    );
 
     let _ = daemon.kill();
     let _ = daemon.wait();
@@ -1400,6 +1624,7 @@ fn test_gh_monitor_status_json_has_stable_schema() {
         "team",
         "configured",
         "enabled",
+        "namespace_state",
         "lifecycle_state",
         "availability_state",
         "in_flight",
@@ -1409,6 +1634,69 @@ fn test_gh_monitor_status_json_has_stable_schema() {
         assert!(json.get(key).is_some(), "missing key: {key}");
     }
     assert!(json["actions"].is_array());
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+}
+
+#[test]
+#[cfg(unix)]
+fn test_gh_namespace_absent_only_advertises_init() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["namespace_state"].as_str(), Some("absent"));
+    assert_eq!(json["actions"], serde_json::json!(["atm gh init"]));
+}
+
+#[test]
+#[cfg(unix)]
+#[serial]
+fn test_gh_namespace_enabled_advertises_full_command_surface() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let mut daemon = start_fake_gh_daemon(temp_dir.path());
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", true);
+    let output = cmd
+        .env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["namespace_state"].as_str(), Some("present_enabled"));
+    let actions = json["actions"].as_array().unwrap();
+    assert!(
+        actions
+            .iter()
+            .any(|value| value.as_str() == Some("atm gh pr list"))
+    );
+    assert!(
+        actions
+            .iter()
+            .any(|value| value.as_str() == Some("atm gh monitor pr <number>"))
+    );
 
     let _ = daemon.kill();
     let _ = daemon.wait();
@@ -1453,6 +1741,7 @@ fn test_gh_monitor_list_json_reports_rollups_without_daemon() {
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    enable_daemon_autostart(&mut cmd);
     let output = cmd
         .env("ATM_TEAM", "test-team")
         .env("PATH", path)
@@ -1522,6 +1811,7 @@ fn test_gh_monitor_list_human_output_has_one_line_rollups() {
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    enable_daemon_autostart(&mut cmd);
     let output = cmd
         .env("ATM_TEAM", "test-team")
         .env("PATH", path)
@@ -1545,6 +1835,55 @@ fn test_gh_monitor_list_human_output_has_one_line_rollups() {
 
 #[test]
 #[cfg(unix)]
+fn test_gh_pr_list_writes_budget_state_under_overridden_atm_home() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let workdir = temp_dir.path().join("workdir");
+    fs::create_dir_all(&workdir).unwrap();
+    write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "acme", "agent-team-mail");
+    let gh_bin = write_fake_gh_cli_script(temp_dir.path(), "acme/agent-team-mail");
+    let path = format!(
+        "{}:{}",
+        gh_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    enable_daemon_autostart(&mut cmd);
+    cmd.env("ATM_TEAM", "test-team")
+        .env("PATH", path)
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("pr")
+        .arg("list")
+        .arg("--limit")
+        .arg("1")
+        .assert()
+        .success();
+
+    let state_path = temp_dir
+        .path()
+        .join(".atm/daemon/gh-monitor-repo-state.json");
+    assert!(
+        state_path.exists(),
+        "gh repo-state file must be written under overridden ATM_HOME"
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let record = json["records"]
+        .as_array()
+        .and_then(|records| records.first())
+        .expect("repo-state record");
+    assert_eq!(record["team"].as_str(), Some("test-team"));
+    assert_eq!(record["repo"].as_str(), Some("acme/agent-team-mail"));
+    assert_eq!(record["budget_limit_per_hour"].as_u64(), Some(100));
+    assert_eq!(record["budget_used_in_window"].as_u64(), Some(1));
+}
+
+#[test]
+#[cfg(unix)]
 fn test_gh_monitor_report_json_includes_checks_reviews_and_merge_fields() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
@@ -1560,6 +1899,7 @@ fn test_gh_monitor_report_json_includes_checks_reviews_and_merge_fields() {
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    enable_daemon_autostart(&mut cmd);
     let output = cmd
         .env("ATM_TEAM", "test-team")
         .env("PATH", path)
@@ -1621,6 +1961,7 @@ fn test_gh_monitor_report_human_output_is_detailed() {
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    enable_daemon_autostart(&mut cmd);
     let output = cmd
         .env("ATM_TEAM", "test-team")
         .env("PATH", path)
@@ -1667,6 +2008,7 @@ fn test_gh_monitor_report_json_no_reviews_and_skips_are_non_blocking() {
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    enable_daemon_autostart(&mut cmd);
     let output = cmd
         .env("ATM_TEAM", "test-team")
         .env("PATH", path)
@@ -1732,6 +2074,7 @@ fn test_gh_monitor_report_template_renders_custom_output() {
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    enable_daemon_autostart(&mut cmd);
     let output = cmd
         .env("ATM_TEAM", "test-team")
         .env("PATH", path)
@@ -1774,6 +2117,7 @@ fn test_gh_monitor_report_template_missing_file_is_actionable() {
     let missing_display = missing.display().to_string();
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    enable_daemon_autostart(&mut cmd);
     cmd.env("ATM_TEAM", "test-team")
         .env("PATH", path)
         .arg("gh")
@@ -1838,6 +2182,7 @@ fn test_gh_monitor_report_template_render_failure_is_actionable() {
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    enable_daemon_autostart(&mut cmd);
     cmd.env("ATM_TEAM", "test-team")
         .env("PATH", path)
         .arg("gh")

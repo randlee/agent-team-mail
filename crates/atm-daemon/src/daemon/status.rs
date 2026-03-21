@@ -6,6 +6,7 @@
 use agent_team_mail_core::daemon_client::{
     DaemonTouchEntry, DaemonTouchSnapshot, RuntimeOwnerMetadata, daemon_touch_path_for,
 };
+pub use agent_team_mail_core::observability::{OtelHealthSnapshot as OtelHealth, OtelLastError};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -32,6 +33,9 @@ pub struct DaemonStatus {
     /// Logging pipeline health snapshot
     #[serde(default)]
     pub logging: LoggingHealth,
+    /// OTel exporter health snapshot.
+    #[serde(default)]
+    pub otel: OtelHealth,
 }
 
 /// Logging pipeline health snapshot.
@@ -54,6 +58,7 @@ pub struct LoggingHealth {
     pub oldest_spool_age: Option<u64>,
 }
 
+/// OTel exporter health snapshot.
 impl Default for LoggingHealth {
     fn default() -> Self {
         Self {
@@ -218,6 +223,7 @@ impl StatusWriter {
         plugins: Vec<PluginStatus>,
         teams: Vec<String>,
         logging: LoggingHealth,
+        otel: OtelHealth,
     ) -> Result<()> {
         // Ensure parent directory exists
         if let Some(parent) = self.status_path.parent() {
@@ -241,6 +247,7 @@ impl StatusWriter {
             plugins,
             teams,
             logging,
+            otel,
         };
 
         // Serialize to JSON
@@ -301,6 +308,21 @@ mod tests {
         }
     }
 
+    fn otel_health() -> OtelHealth {
+        OtelHealth {
+            schema_version: "v1".to_string(),
+            enabled: true,
+            collector_endpoint: Some("http://collector:4318".to_string()),
+            protocol: "otlp_http".to_string(),
+            collector_state: "healthy".to_string(),
+            local_mirror_state: "healthy".to_string(),
+            local_mirror_path: "atm.log.otel.jsonl".to_string(),
+            debug_local_export: false,
+            debug_local_state: "disabled".to_string(),
+            last_error: OtelLastError::default(),
+        }
+    }
+
     fn runtime_owner(home: &std::path::Path) -> RuntimeOwnerMetadata {
         RuntimeOwnerMetadata {
             runtime_kind: RuntimeKind::Isolated,
@@ -330,7 +352,7 @@ mod tests {
         let teams = vec!["test-team".to_string()];
 
         writer
-            .write_status(plugins, teams, logging_health())
+            .write_status(plugins, teams, logging_health(), otel_health())
             .unwrap();
 
         assert!(writer.status_path().exists());
@@ -378,7 +400,12 @@ mod tests {
 
         // First write
         writer
-            .write_status(plugins.clone(), teams.clone(), logging_health())
+            .write_status(
+                plugins.clone(),
+                teams.clone(),
+                logging_health(),
+                otel_health(),
+            )
             .unwrap();
         let first_content = std::fs::read_to_string(writer.status_path()).unwrap();
 
@@ -386,7 +413,7 @@ mod tests {
         // Sleep for more than 1 second to ensure timestamp changes
         std::thread::sleep(std::time::Duration::from_millis(1100));
         writer
-            .write_status(plugins, teams, logging_health())
+            .write_status(plugins, teams, logging_health(), otel_health())
             .unwrap();
         let second_content = std::fs::read_to_string(writer.status_path()).unwrap();
 
@@ -423,7 +450,12 @@ mod tests {
         let teams = vec!["my-team".to_string()];
 
         writer
-            .write_status(plugins.clone(), teams.clone(), logging_health())
+            .write_status(
+                plugins.clone(),
+                teams.clone(),
+                logging_health(),
+                otel_health(),
+            )
             .unwrap();
 
         // Read back and verify structure
@@ -474,7 +506,12 @@ mod tests {
 
         // First write
         writer
-            .write_status(plugins.clone(), teams.clone(), logging_health())
+            .write_status(
+                plugins.clone(),
+                teams.clone(),
+                logging_health(),
+                otel_health(),
+            )
             .unwrap();
         let first_content = std::fs::read_to_string(writer.status_path()).unwrap();
         let first_status: DaemonStatus = serde_json::from_str(&first_content).unwrap();
@@ -484,7 +521,7 @@ mod tests {
 
         // Second write
         writer
-            .write_status(plugins, teams, logging_health())
+            .write_status(plugins, teams, logging_health(), otel_health())
             .unwrap();
         let second_content = std::fs::read_to_string(writer.status_path()).unwrap();
         let second_status: DaemonStatus = serde_json::from_str(&second_content).unwrap();

@@ -446,6 +446,7 @@ impl CiMonitorPlugin {
 
         InboxMessage {
             from: self.config.agent.clone(),
+            source_team: None,
             text: content,
             timestamp: chrono::Utc::now().to_rfc3339(),
             read: false,
@@ -683,6 +684,7 @@ impl CiMonitorPlugin {
 
         Some(InboxMessage {
             from: self.config.agent.clone(),
+            source_team: None,
             text: format!(
                 "[runtime-drift:{}] Significant runtime drift detected\nWorkflow: {}\nBranch: {}\nRun URL: {}\n{}",
                 run.id, run.name, run.head_branch, run.url, details
@@ -933,6 +935,7 @@ impl CiMonitorPlugin {
             } else {
                 self.config.agent.clone()
             },
+            source_team: None,
             text,
             timestamp: chrono::Utc::now().to_rfc3339(),
             read: false,

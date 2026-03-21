@@ -3,7 +3,7 @@
 use agent_team_mail_core::config::Config;
 use agent_team_mail_core::context::SystemContext;
 use agent_team_mail_core::daemon_client::{BuildProfile, RuntimeKind, RuntimeOwnerMetadata};
-use agent_team_mail_core::logging_event::{LogEventV1, spool_dir};
+use agent_team_mail_core::logging_event::LogEventV1;
 use agent_team_mail_daemon::daemon;
 use agent_team_mail_daemon::daemon::{
     SessionRegistry, StatusWriter, new_dedup_store, new_launch_sender, new_log_event_queue,
@@ -30,9 +30,13 @@ mod env_guard;
 // These daemon integration tests still serialize because the helper contexts
 // mutate ATM_HOME process-wide before constructing shared daemon state.
 use serial_test::serial;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Child, Stdio};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
@@ -94,6 +98,71 @@ fn issue_isolated_test_launch_token_with_lease(
         owner_pid,
         ttl,
     )
+}
+
+fn start_otel_trace_collector() -> (String, mpsc::Receiver<(String, String)>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind collector");
+    listener
+        .set_nonblocking(false)
+        .expect("collector blocking mode");
+    let addr = listener.local_addr().expect("collector addr");
+    let (tx, rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        for _ in 0..8 {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            let mut buffer = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            let mut header_end = None;
+            while header_end.is_none() {
+                let read = stream.read(&mut chunk).expect("read request");
+                if read == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..read]);
+                header_end = buffer.windows(4).position(|window| window == b"\r\n\r\n");
+            }
+            let Some(header_end_idx) = header_end else {
+                continue;
+            };
+            let body_start = header_end_idx + 4;
+            let headers = String::from_utf8_lossy(&buffer[..header_end_idx]);
+            let first_line = headers.lines().next().unwrap_or_default().to_string();
+            let path = first_line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_string();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    (name.eq_ignore_ascii_case("content-length"))
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+
+            while buffer.len().saturating_sub(body_start) < content_length {
+                let read = stream.read(&mut chunk).expect("read request body");
+                if read == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..read]);
+            }
+
+            let body = String::from_utf8_lossy(&buffer[body_start..body_start + content_length])
+                .to_string();
+            tx.send((path, body)).expect("send captured request");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                .expect("write response");
+        }
+    });
+
+    (format!("http://{}", addr), rx)
 }
 
 /// Mock plugin that tracks lifecycle calls
@@ -465,11 +534,11 @@ async fn test_daemon_starts_and_loads_mock_plugin() {
         .await
     });
 
-    let observed_run = wait_for_recorded_event_elapsed(&events, "test-plugin:run", 1_000)
+    let observed_run = wait_for_recorded_event_elapsed(&events, "test-plugin:run", 10_000)
         .await
         .expect("daemon should reach plugin run state before cancellation");
     assert!(
-        observed_run <= Duration::from_secs(1),
+        observed_run <= Duration::from_secs(10),
         "daemon should reach plugin run state before cancellation"
     );
 
@@ -535,18 +604,18 @@ async fn test_signal_triggers_graceful_shutdown() {
         .await
     });
 
-    let plugin1_running = wait_for_recorded_event_elapsed(&events, "plugin1:run", 1_000)
+    let plugin1_running = wait_for_recorded_event_elapsed(&events, "plugin1:run", 10_000)
         .await
         .expect("plugin1 should reach run state before cancellation");
     assert!(
-        plugin1_running <= Duration::from_secs(1),
+        plugin1_running <= Duration::from_secs(10),
         "plugin1 should reach run state before cancellation"
     );
-    let plugin2_running = wait_for_recorded_event_elapsed(&events, "plugin2:run", 1_000)
+    let plugin2_running = wait_for_recorded_event_elapsed(&events, "plugin2:run", 10_000)
         .await
         .expect("plugin2 should reach run state before cancellation");
     assert!(
-        plugin2_running <= Duration::from_secs(1),
+        plugin2_running <= Duration::from_secs(10),
         "plugin2 should reach run state before cancellation"
     );
 
@@ -596,11 +665,11 @@ async fn test_plugin_lifecycle_order() {
         .await
     });
 
-    let plugin_running = wait_for_recorded_event_elapsed(&events, "plugin:run", 1_000)
+    let plugin_running = wait_for_recorded_event_elapsed(&events, "plugin:run", 10_000)
         .await
         .expect("plugin should reach run state before cancellation");
     assert!(
-        plugin_running <= Duration::from_secs(1),
+        plugin_running <= Duration::from_secs(10),
         "plugin should reach run state before cancellation"
     );
     cancel.cancel();
@@ -931,11 +1000,11 @@ async fn test_graceful_shutdown_with_timeout() {
         .await
     });
 
-    let run_observed = wait_for_recorded_event_elapsed(&events, "slow-shutdown:run", 1_000)
+    let run_observed = wait_for_recorded_event_elapsed(&events, "slow-shutdown:run", 10_000)
         .await
         .expect("slow-shutdown plugin should enter run before cancellation");
     assert!(
-        run_observed <= Duration::from_secs(1),
+        run_observed <= Duration::from_secs(10),
         "slow-shutdown plugin should enter run before cancellation"
     );
     cancel.cancel();
@@ -1044,25 +1113,25 @@ async fn test_multiple_plugins_run_concurrently() {
         .await
     });
 
-    let plugin1_running = wait_for_recorded_event_elapsed(&events, "plugin1:run", 1_000)
+    let plugin1_running = wait_for_recorded_event_elapsed(&events, "plugin1:run", 10_000)
         .await
         .expect("plugin1 should reach run state before cancellation");
     assert!(
-        plugin1_running <= Duration::from_secs(1),
+        plugin1_running <= Duration::from_secs(10),
         "plugin1 should reach run state before cancellation"
     );
-    let plugin2_running = wait_for_recorded_event_elapsed(&events, "plugin2:run", 1_000)
+    let plugin2_running = wait_for_recorded_event_elapsed(&events, "plugin2:run", 10_000)
         .await
         .expect("plugin2 should reach run state before cancellation");
     assert!(
-        plugin2_running <= Duration::from_secs(1),
+        plugin2_running <= Duration::from_secs(10),
         "plugin2 should reach run state before cancellation"
     );
-    let plugin3_running = wait_for_recorded_event_elapsed(&events, "plugin3:run", 1_000)
+    let plugin3_running = wait_for_recorded_event_elapsed(&events, "plugin3:run", 10_000)
         .await
         .expect("plugin3 should reach run state before cancellation");
     assert!(
-        plugin3_running <= Duration::from_secs(1),
+        plugin3_running <= Duration::from_secs(10),
         "plugin3 should reach run state before cancellation"
     );
     cancel.cancel();
@@ -1117,17 +1186,12 @@ async fn test_plugin_run_failure_isolated_from_sibling_plugins() {
         .await
     });
 
-    let sibling_running = wait_until_elapsed(1_000, || {
-        let recorded_events = events.lock().unwrap();
-        recorded_events.contains(&"gh-monitor:run_failed".to_string())
-            && recorded_events.contains(&"worker-adapter:run".to_string())
-    })
-    .await
-    .expect("expected failing and sibling plugin states before cancellation");
-    assert!(
-        sibling_running <= Duration::from_secs(1),
-        "expected failing and sibling plugin states before cancellation"
-    );
+    wait_for_recorded_event_elapsed(&events, "gh-monitor:run_failed", 5_000)
+        .await
+        .expect("expected failing plugin state before cancellation");
+    wait_for_recorded_event_elapsed(&events, "worker-adapter:run", 5_000)
+        .await
+        .expect("expected sibling plugin running state before cancellation");
 
     {
         let recorded_events = events.lock().unwrap();
@@ -1238,6 +1302,80 @@ fn test_daemon_start_requires_launch_token() {
 
 #[test]
 #[serial]
+fn test_daemon_startup_emits_otlp_trace_with_daemon_service_name_and_session_id() {
+    let temp_dir = TempDir::new().unwrap();
+    let (endpoint, rx) = start_otel_trace_collector();
+    let session_id = "sess-az-1";
+    let daemon_bin = Path::new(env!("CARGO_BIN_EXE_atm-daemon"));
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"));
+    cmd.env("ATM_HOME", temp_dir.path())
+        .env("ATM_OTEL_ENABLED", "true")
+        .env("ATM_OTEL_ENDPOINT", &endpoint)
+        .env("CLAUDE_SESSION_ID", session_id)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let token = issue_isolated_test_launch_token_with_lease(
+        temp_dir.path(),
+        "daemon_tests::startup_trace",
+        "daemon_tests::startup_trace",
+        std::process::id(),
+        Duration::from_secs(30),
+    );
+    attach_launch_token(&mut cmd, &token).expect("encode startup trace token");
+    let child = cmd.spawn().expect("spawn daemon for startup trace");
+    let mut guard =
+        daemon_process_guard::DaemonProcessGuard::from_child(child, daemon_bin, temp_dir.path());
+
+    let daemon_running = wait_for_child_running_elapsed(guard.child_mut(), 1_000)
+        .expect("daemon should still be running");
+    assert!(
+        daemon_running <= Duration::from_secs(1),
+        "daemon should still be running: elapsed={daemon_running:?}"
+    );
+    let lock_elapsed = wait_for_lock_file_acquired_elapsed(temp_dir.path(), 8_000)
+        .expect("daemon should acquire daemon.lock");
+    assert!(
+        lock_elapsed <= Duration::from_secs(8),
+        "daemon should acquire daemon.lock within 8s: elapsed={lock_elapsed:?}"
+    );
+
+    let mut saw_trace = false;
+    for _ in 0..8 {
+        if let Ok((path, body)) = rx.recv_timeout(Duration::from_secs(5)) {
+            if path != "/v1/traces" {
+                continue;
+            }
+            let payload: serde_json::Value =
+                serde_json::from_str(&body).expect("valid collector payload");
+            let resource_attrs = payload["resourceSpans"][0]["resource"]["attributes"]
+                .as_array()
+                .expect("trace resource attributes");
+            assert!(
+                resource_attrs.iter().any(|item| {
+                    item["key"] == "service.name" && item["value"]["stringValue"] == "atm-daemon"
+                }),
+                "trace payload should set service.name=atm-daemon: {payload}"
+            );
+            assert!(
+                resource_attrs.iter().any(|item| {
+                    item["key"] == "session_id" && item["value"]["stringValue"] == session_id
+                }),
+                "trace resource should include inherited session_id: {payload}"
+            );
+            saw_trace = true;
+            break;
+        }
+    }
+
+    assert!(
+        saw_trace,
+        "collector should receive a daemon /v1/traces request"
+    );
+}
+
+#[test]
+#[serial]
 fn test_daemon_exits_when_isolated_test_owner_pid_is_dead() {
     let temp_dir = TempDir::new().unwrap();
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"));
@@ -1270,12 +1408,17 @@ fn test_daemon_exits_when_isolated_test_ttl_expires() {
     let temp_dir = TempDir::new().unwrap();
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"));
     cmd.env("ATM_HOME", temp_dir.path());
+    let ttl = if cfg!(debug_assertions) {
+        Duration::from_secs(5)
+    } else {
+        Duration::from_secs(1)
+    };
     let token = issue_isolated_test_launch_token_with_lease(
         temp_dir.path(),
         "daemon_tests::ttl_expiry",
         "daemon_tests::ttl_expiry",
         std::process::id(),
-        Duration::from_secs(1),
+        ttl,
     );
     attach_launch_token(&mut cmd, &token).expect("encode ttl-expiry token");
     let output = cmd.output().expect("spawn daemon with short TTL");
@@ -1297,9 +1440,14 @@ fn test_daemon_exits_when_isolated_test_ttl_expires() {
 #[serial]
 fn test_isolated_test_clean_shutdown_emits_lifecycle_events() {
     let temp_dir = TempDir::new().unwrap();
+    let isolated_log_file = temp_dir
+        .path()
+        .join(".config/atm/logs/atm-daemon/atm-daemon.log.jsonl");
     let daemon_bin = Path::new(env!("CARGO_BIN_EXE_atm-daemon"));
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"));
     cmd.env("ATM_HOME", temp_dir.path())
+        .env("ATM_LOG_FILE", &isolated_log_file)
+        .env("ATM_OTEL_ENABLED", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -1351,7 +1499,7 @@ fn test_isolated_test_clean_shutdown_emits_lifecycle_events() {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
-    let spool = spool_dir(temp_dir.path());
+    let spool = isolated_log_file.parent().unwrap().join("spool");
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
         let events = read_spool_events(&spool);

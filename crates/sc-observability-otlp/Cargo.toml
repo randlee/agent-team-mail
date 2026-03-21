@@ -1,0 +1,23 @@
+[package]
+name = "sc-observability-otlp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "OTLP transport adapter for ATM observability"
+keywords = ["otel", "otlp", "observability", "telemetry"]
+categories = ["development-tools", "network-programming"]
+
+[dependencies]
+chrono.workspace = true
+reqwest.workspace = true
+sc-observability-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3.13"

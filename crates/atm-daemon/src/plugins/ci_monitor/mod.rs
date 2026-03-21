@@ -26,14 +26,17 @@ pub(crate) mod service;
 pub(crate) mod test_support;
 pub(crate) mod types;
 
-pub use config::{CiMonitorConfig, DedupStrategy, NotifyTarget};
-pub use gh_command_routing::{
+pub use agent_team_mail_core::gh_command::{
     GH_MONITOR_REPORT_SCHEMA_VERSION, GhCiRollup, GhMergeReport, GhMonitorCheckReport,
     GhMonitorListItem, GhMonitorReportPr, GhMonitorReviewReport, GhPrListSummary,
-    GhPrReportSummary, build_merge_report, build_pr_list_summary, build_pr_report_summary,
+    GhPrReportSummary, GhRateLimitAudit,
+};
+pub use config::{CiMonitorConfig, DedupStrategy, NotifyTarget};
+pub use gh_command_routing::{
+    build_gh_rate_limit_audit, build_merge_report, build_pr_list_summary, build_pr_report_summary,
     extract_check_reports, extract_review_reports, normalize_merge_status,
     normalize_report_review_decision, normalize_review_status, summarize_ci_rollup,
-    validate_gh_cli_prerequisites,
+    validate_gh_cli_prerequisites, validate_gh_cli_prerequisites_status,
 };
 pub use github_provider::{
     GitHubActionsProvider, run_attributed_gh_command, run_attributed_gh_command_with_ids,

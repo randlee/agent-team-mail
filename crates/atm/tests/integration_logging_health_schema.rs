@@ -56,11 +56,43 @@ fn setup_daemon_status(home: &Path) {
                 "canonical_log_path": log_path,
                 "spool_count": 3,
                 "oldest_spool_age": 15
+            },
+            "otel": {
+                "schema_version": "v1",
+                "enabled": true,
+                "collector_endpoint": "http://collector:4318",
+                "protocol": "otlp_http",
+                "collector_state": "degraded",
+                "local_mirror_state": "healthy",
+                "local_mirror_path": tmp.join("atm.log.otel.jsonl").to_string_lossy(),
+                "debug_local_export": false,
+                "debug_local_state": "disabled",
+                "last_error": {
+                    "code": "COLLECTOR_EXPORT_FAILED",
+                    "message": "collector timeout",
+                    "at": "2026-03-18T00:00:00Z"
+                }
             }
         })
         .to_string(),
     )
     .expect("write daemon status");
+}
+
+fn assert_canonical_otel_health(otel_health: &Value) {
+    assert_eq!(otel_health["schema_version"], "v1");
+    assert!(otel_health["enabled"].is_boolean());
+    assert!(
+        otel_health["collector_endpoint"].is_string()
+            || otel_health["collector_endpoint"].is_null()
+    );
+    assert!(otel_health["protocol"].is_string());
+    assert!(otel_health["collector_state"].is_string());
+    assert!(otel_health["local_mirror_state"].is_string());
+    assert!(otel_health["local_mirror_path"].is_string());
+    assert!(otel_health["debug_local_export"].is_boolean());
+    assert!(otel_health["debug_local_state"].is_string());
+    assert!(otel_health["last_error"].is_object());
 }
 
 fn assert_canonical_logging_health(logging_health: &Value) {
@@ -119,10 +151,14 @@ fn status_json_includes_extended_logging_fields() {
     );
     let logging_health = &value["logging_health"];
     assert_canonical_logging_health(logging_health);
+    let otel_health = &value["otel_health"];
+    assert_canonical_otel_health(otel_health);
     assert_eq!(logging_health["state"], "degraded_spooling");
     assert_eq!(logging_health["spool_file_count"], 3);
     assert_eq!(logging_health["dropped_events_total"], 2);
     assert_eq!(logging_health["last_error"]["code"], "DEGRADED_SPOOLING");
+    assert_eq!(otel_health["collector_state"], "degraded");
+    assert_eq!(otel_health["last_error"]["code"], "COLLECTOR_EXPORT_FAILED");
 }
 
 #[test]
@@ -155,6 +191,7 @@ fn doctor_json_includes_extended_logging_fields() {
     );
     let logging_health = &value["logging_health"];
     assert_canonical_logging_health(logging_health);
+    assert_canonical_otel_health(&value["otel_health"]);
 }
 
 #[test]
@@ -185,10 +222,13 @@ fn daemon_status_json_includes_extended_logging_fields() {
     );
     let logging_health = &value["logging_health"];
     assert_canonical_logging_health(logging_health);
+    let otel_health = &value["otel_health"];
+    assert_canonical_otel_health(otel_health);
     assert_eq!(logging_health["state"], "degraded_spooling");
     assert_eq!(logging_health["spool_file_count"], 3);
     assert_eq!(logging_health["dropped_events_total"], 2);
     assert_eq!(logging_health["last_error"]["code"], "DEGRADED_SPOOLING");
+    assert_eq!(otel_health["collector_state"], "degraded");
 }
 
 #[test]
@@ -249,6 +289,12 @@ fn doctor_and_status_logging_health_schema_parity() {
     assert_canonical_logging_health(status_health);
     assert_canonical_logging_health(doctor_health);
     assert_canonical_logging_health(daemon_health);
+    let status_otel = &status_value["otel_health"];
+    let doctor_otel = &doctor_value["otel_health"];
+    let daemon_otel = &daemon_value["otel_health"];
+    assert_canonical_otel_health(status_otel);
+    assert_canonical_otel_health(doctor_otel);
+    assert_canonical_otel_health(daemon_otel);
 
     let status_keys = status_health
         .as_object()
@@ -303,4 +349,25 @@ fn doctor_and_status_logging_health_schema_parity() {
         status_last_error_keys, daemon_last_error_keys,
         "daemon/status logging_health.last_error keys must be identical"
     );
+
+    let status_otel_keys = status_otel
+        .as_object()
+        .expect("status otel_health object")
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let doctor_otel_keys = doctor_otel
+        .as_object()
+        .expect("doctor otel_health object")
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let daemon_otel_keys = daemon_otel
+        .as_object()
+        .expect("daemon otel_health object")
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(status_otel_keys, doctor_otel_keys);
+    assert_eq!(status_otel_keys, daemon_otel_keys);
 }

@@ -2,52 +2,8 @@
 
 //! Shared GitHub CLI response schemas used by the CI monitor subsystem.
 
+pub(crate) use agent_team_mail_ci_monitor::{GhJob, GhRun};
 use serde::Deserialize;
-
-/// GitHub run JSON schema (from `gh run list --json` and `gh run view --json`).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct GhRun {
-    pub(crate) database_id: u64,
-    pub(crate) name: String,
-    pub(crate) status: String,
-    pub(crate) conclusion: Option<String>,
-    pub(crate) head_branch: String,
-    pub(crate) head_sha: String,
-    pub(crate) url: String,
-    pub(crate) created_at: String,
-    pub(crate) updated_at: String,
-    #[serde(default)]
-    pub(crate) attempt: Option<u64>,
-    #[serde(default)]
-    pub(crate) pull_requests: Option<Vec<GhPullRequest>>,
-    pub(crate) jobs: Option<Vec<GhJob>>,
-}
-
-/// GitHub job JSON schema.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct GhJob {
-    pub(crate) database_id: u64,
-    pub(crate) name: String,
-    pub(crate) status: String,
-    pub(crate) conclusion: Option<String>,
-    pub(crate) started_at: Option<String>,
-    pub(crate) completed_at: Option<String>,
-    #[serde(default)]
-    pub(crate) url: Option<String>,
-    pub(crate) steps: Option<Vec<GhStep>>,
-}
-
-/// GitHub step JSON schema.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct GhStep {
-    pub(crate) name: String,
-    pub(crate) status: String,
-    pub(crate) conclusion: Option<String>,
-    pub(crate) number: u64,
-}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]

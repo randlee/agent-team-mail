@@ -2,7 +2,7 @@
 
 **Version**: 0.7
 **Date**: 2026-03-10
-**Status**: Phase AM refactor in progress. Phase AK queued.
+**Status**: Phases through BA complete on the current integration branches; released phases through AV are complete (v0.45.0). Phase AW traces/metrics planning updated.
 
 ---
 
@@ -178,12 +178,15 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AN | CI Monitor Extraction Readiness | Prepare CI monitor for clean extraction: crate boundaries, multi-repo routing, shared type consolidation | COMPLETE ([#748](https://github.com/randlee/agent-team-mail/pull/748)) |
 | AO | GH Monitor Guardrails + Runtime Admission | Prevent accidental shared-runtime pollers, add isolated-runtime TTL policy, and make GH usage attributable/self-limiting with cached repo-state and operator controls | COMPLETE ([#751](https://github.com/randlee/agent-team-mail/pull/751)) |
 | AP | Test Stability and Harness Hardening | Eliminate hang-prone, flaky, and operationally unsafe test patterns; RAII guard consolidation; daemon lifecycle hardening | COMPLETE ([#756](https://github.com/randlee/agent-team-mail/pull/756), [#767](https://github.com/randlee/agent-team-mail/pull/767), [#768](https://github.com/randlee/agent-team-mail/pull/768)) |
-| AJ | Session-ID SSoT Normalization | Canonical `session_id` naming, shared caller resolver, runtime session resolution closure, doctor/session consistency | PLANNED |
-| AK | Mandatory OTel Rollout | Non-optional OTel across in-scope tools with canonical correlation and health/reporting contracts | PLANNED |
+| AJ | Session-ID SSoT Normalization | Canonical `session_id` naming, shared caller resolver, runtime session resolution closure, doctor/session consistency | COMPLETE |
+| AK | Mandatory OTel Rollout | Superseded by Phase AV (logs rollout) and Phase AW (traces + metrics expansion) | SUPERSEDED |
 | AQ | Codebase Cleanup + Rogue Daemon Spawn Elimination | Remove cleanup debt from AN/AO/AP reviews, consolidate constants/dead code, and eliminate non-canonical test daemon spawn paths | COMPLETE |
 | AR | Smoke Follow-Up + Lifecycle Timing Corrections | Fix daemon harness flake, drain timeout regression, and EnvGuard::unset gap identified during smoke testing | COMPLETE (PR #795) |
-| AS | Backlog Gap-Filling + GH API Governance | 14 backlog bug/gap fixes + GH API hard firewall, ledgers, and explicit GitHub ownership requirements | ACTIVE |
-| AT | GitHub Boundary Elimination | Remove all remaining audited GitHub-boundary violations so only the gh plugin/provider layer owns GitHub behavior | PLANNED |
+| AS | Backlog Gap-Filling + GH API Governance | 14 backlog bug/gap fixes + GH API hard firewall, ledgers, and explicit GitHub ownership requirements | COMPLETE |
+| AT | GitHub Boundary Elimination | Remove all remaining audited GitHub-boundary violations so only the gh plugin/provider layer owns GitHub behavior | COMPLETE |
+| AV | OTel Collector Logs Rollout | Ship OTLP HTTP logs export, dogfood it against a Grafana-compatible receiver, and preserve fail-open local logging | COMPLETE |
+| AW | OTel Traces + Metrics Expansion | Add native traces and metrics, Grafana dashboards/smoke, and external repo rollout on top of AV | PLANNED |
+| BA | CLI Message Management + Plugin Boundary | Fix inbox lifecycle noise, add atomic queue/ack semantics, and remove current `atm -> daemon plugin` command coupling | PLANNED |
 
 ---
 
@@ -1485,17 +1488,52 @@ the current tranche focused on onboarding contract closure.
 | | AG.3 | `sc-compose` Binary + Logging Baseline | COMPLETE | [#552](https://github.com/randlee/agent-team-mail/pull/552) |
 | | AG.4 | ATM Spawn Integration (`--system-prompt .j2`) | COMPLETE | [#553](https://github.com/randlee/agent-team-mail/pull/553) |
 
+## 17.16 Phase BA: CLI Message Management + Plugin Boundary — COMPLETE
+
+**Goal**: stabilize ATM inbox/task UX for long-running agent workflows and
+close the remaining CLI/plugin boundary gaps after the GitHub-behavior
+separation work.
+
+**Planning doc**: `docs/phase-ba-cli-message-boundary-planning.md`
+**Requirements doc**: `docs/cli/requirements.md`
+**Architecture doc**: `docs/cli/architecture.md`
+**Integration branch**: `integrate/phase-BA`
+**Integration PR**: [#941](https://github.com/randlee/agent-team-mail/pull/941)
+
+### Planned Sprint Map
+| Sprint | Focus | Status | PR |
+|---|---|---|---|
+| BA.1 | Idle lifecycle hygiene + inbox clear defaults | COMPLETE | [#936](https://github.com/randlee/agent-team-mail/pull/936) |
+| BA.2 | Queue-style `atm read` + explicit atomic `atm ack <message-id> \"reply\"` | COMPLETE | [#937](https://github.com/randlee/agent-team-mail/pull/937) |
+| BA.3 | CLI/plugin command-boundary extraction via neutral `atm-core` GH contracts | COMPLETE | [#938](https://github.com/randlee/agent-team-mail/pull/938) |
+| BA.4 | Boundary enforcement + plugin namespace availability UX | COMPLETE | [#939](https://github.com/randlee/agent-team-mail/pull/939) |
+
+### Exit Criteria
+- Inbox idle-notification churn is suppressed and explicit inbox clear behavior
+  is available.
+- `atm read` surfaces unread and pending-ack work ahead of history by default.
+- `atm ack <message-id> \"reply\"` is the canonical explicit task-ack path.
+- The CLI no longer imports daemon plugin implementation helpers for GH command
+  behavior.
+- CI gates enforce the CLI/plugin boundary and the GH execution boundary.
+
+### Version Note
+Phase BA is post-`v0.45.0` queue/boundary work prepared on
+`integrate/phase-BA` for the next `develop` landing after PR `#941`.
+
 **Completed**: 133+ sprints across 29 phases (CI green)
-**Current version**: v0.42.0
-**Current planning phase**: Phase AJ
-**Next planned phase**: Phase AK (mandatory OTel rollout)
+**Current version**: v0.45.0
+**Current planning phase**: Phase AW
+**Next planned observability phase**: Phase AW (traces + metrics expansion)
 
 ---
 
 ## 17.17 Phase AH: Observability Unification + AG Deferred Closure (Historical)
 
-_Historical record: AH delivered logging unification baseline. OTel/scmux/schook
-rollout is deferred and planned in AJ/AK._
+_Historical record: AH delivered logging unification baseline. The old AK
+placeholder is superseded by Phase AV, which narrows scope to in-repo ATM
+binaries and adds explicit OTel transport partitioning. `scmux`/`schook`
+follow-on remains queued in their own repositories._
 
 **Goal**: Extract `sc-observability` as a shared logging platform across ATM
 tools and close deferred AG observability/render/docs gaps.
@@ -1538,6 +1576,7 @@ observability scope.
 **Goal**: Make daemon registry the canonical session authority and eliminate
 identity/session ambiguity by standardizing on `session_id` across ATM surfaces.
 **Prerequisites**: Phase AH baseline complete.
+**Status**: COMPLETE
 
 **Planning doc**: `docs/phase-aj-planning.md`  
 **Test plan**: `docs/test-plan-phase-AJ.md`
@@ -1545,37 +1584,141 @@ identity/session ambiguity by standardizing on `session_id` across ATM surfaces.
 ### Planned Sprint Map
 | Sprint | Focus | Primary Issues | Status |
 |---|---|---|---|
-| AJ.1 | Shared resolver SSoT for `send/read/register/doctor` | #593, #595 | PLANNED |
-| AJ.2 | Codex/Gemini runtime session resolution closure | #597 | PLANNED |
-| AJ.3 | Stale session lifecycle + cleanup reliability | #594 | PLANNED |
-| AJ.4 | Doctor/members session display consistency | #596 | PLANNED |
-| AJ.5 | Spawn env normalization + resume/continue semantics | #593, #597 | PLANNED |
+| AJ.1 | Shared resolver SSoT for `send/read/register/doctor` | #593, #595 | COMPLETE |
+| AJ.2 | Codex/Gemini runtime session resolution closure | #597 | COMPLETE |
+| AJ.3 | Stale session lifecycle + cleanup reliability | #594 | COMPLETE |
+| AJ.4 | Doctor/members session display consistency | #596 | COMPLETE |
+| AJ.5 | Spawn env normalization + resume/continue semantics | #593, #597 | COMPLETE |
 
 ---
 
-## 17.20 Phase AK: Mandatory OTel Rollout
+## 17.20 Phase AV: OTel Collector Logs Rollout
 
-**Goal**: Ship non-optional OpenTelemetry across in-scope tools while keeping
-local structured logging always-on and fail-open.
+**Status**: COMPLETE
+**Goal**: Ship OTLP HTTP logs export across in-scope tools, verify the Grafana
+hookup against a real collector-compatible endpoint, and keep canonical local
+logging always-on and fail-open.
 **Prerequisites**: Phase AH and Phase AJ complete.
 
-**Planning doc**: `docs/phase-ak-planning.md`  
+**Planning docs**:
+- `docs/observability/grafana-rollout-smoke.md`
+- Phase AV implementation and dogfood notes on the AV sprint branches
 **Requirements**: `docs/observability/requirements.md`  
 **Architecture**: `docs/observability/architecture.md`  
-**Test plan**: `docs/test-plan-phase-AK.md`
+**Smoke plan**: `docs/observability/grafana-rollout-smoke.md`
 
 ### Planned Sprint Map
 | Sprint | Focus | Primary Issues | Status |
 |---|---|---|---|
-| AK.1 | Contract reconciliation + schema hardening (`trace_id/span_id/subagent_id`, paths, health JSON keys) | ATM-QA-004, ATM-QA-008, ATM-QA-007, ATM-QA-009 | PLANNED |
-| AK.2 | `sc-observability` mandatory OTel core (`default-on`, retry/fail-open, correlation contract) | OTel baseline | PLANNED |
-| AK.3 | Producer integration (`atm`, `atm-daemon`, `atm-tui`, `atm-agent-mcp`, `scmux`, `schook`, `sc-compose`, `sc-composer`) | OTel rollout | PLANNED |
-| AK.4 | Doctor/status observability health + runbook finalization | health/reporting | PLANNED |
-| AK.5 | End-to-end QA, release gates, and cross-platform validation | release confidence | PLANNED |
+| AV.0 | Boundary remediation prerequisite | OTel import/boundary cleanup | COMPLETE |
+| AV.1 | Boundary + config contract | adapter seam and config contract | COMPLETE |
+| AV.2 | OTLP HTTP transport adapter | AW-planned dedicated transport crate seam defined; AV implementation stays behind the `sc-observability` exporter path | COMPLETE |
+| AV.3 | CLI/daemon instrumentation and correlation | request/span lifecycle coverage | COMPLETE |
+| AV.4 | Producer rollout + health/reporting | in-repo producer adoption | COMPLETE |
+| AV.5 | Dogfood + Grafana hookup smoke + external handoff | real collector logs rollout and handoff notes | COMPLETE |
+
+### Exit Criteria
+1. In-repo producers can export OTLP HTTP logs to a Grafana-compatible receiver.
+2. Local canonical JSONL logging remains intact.
+3. Collector outage, auth failure, and TLS failure are fail-open.
+4. The Grafana rollout smoke in `docs/observability/grafana-rollout-smoke.md`
+   passes.
 
 ---
 
-## 17.21 Phase AM: CI Monitor Subsystem Refactor
+## 17.21 Phase AW: OTel Traces + Metrics Expansion
+
+**Goal**: Build on AV’s logs rollout to add native traces and metrics while
+keeping transport concerns isolated in `sc-observability-otlp`.
+
+**Planning doc**: `docs/phase-aw-traces-metrics-planning.md`
+**Requirements**: `docs/observability/requirements.md`
+**Architecture**: `docs/observability/architecture.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Deliverable | Status |
+|---|---|---|---|
+| AW.1 | Signal contracts + transport crate creation | create `crates/sc-observability-otlp` as a workspace member plus neutral `TraceRecord` / `MetricRecord` contracts and correlation rules | PLANNED |
+| AW.2 | OTLP traces + metrics transport | expand the new `sc-observability-otlp` crate beyond AV-era logs export | PLANNED |
+| AW.3 | Producer trace rollout | native spans for key ATM flows | PLANNED |
+| AW.4 | Metrics rollout | counters/histograms/gauges and export | PLANNED |
+| AW.5 | Grafana dashboards + smoke | logs/traces/metrics dashboard and smoke | PLANNED |
+| AW.6 | External repo rollout | `scmux` / `schook` adoption contract and validation | PLANNED |
+
+### Exit Criteria
+1. Native traces and metrics export in addition to logs.
+2. Grafana-ready dashboards and smoke coverage for all three signal types.
+3. `sc-observability-otlp` remains the only OTLP transport-owning crate.
+4. External repo adoption has a concrete contract and rollout checklist.
+| AV.5 | Dogfood, QA, and release confidence: collector-backed smoke, fail-open outage tests, and explicit external follow-on handoff for `scmux`/`schook` | PLANNED |
+
+### Execution Contract
+- `sc-observability` remains provider-neutral; it must not become the place
+  where OTLP clients, auth, or collector-specific policy accumulate.
+- One dedicated adapter layer owns all `opentelemetry*` / OTLP SDK
+  dependencies and collector transport wiring.
+- Application crates must use the generic observability facade and must not
+  instantiate exporters directly.
+- AV scope is limited to the code that ships from this repository. External
+  repo follow-on work (`scmux`, `schook`) must be documented, not silently
+  assumed complete.
+
+### Exit Criteria
+1. ATM binaries in this repository can export to a real OTLP collector without
+   losing local JSONL/`.otel.jsonl` fail-open behavior.
+2. OTel transport dependencies are isolated behind one dedicated adapter
+   boundary instead of being spread through CLI/daemon/application crates.
+3. High-value OTLP log coverage is present for daemon requests, CLI command
+   flows, GitHub governance paths, and MCP/session lifecycle paths.
+4. `atm doctor --json` and `atm status --json` expose canonical OTel health
+   information for collector connectivity and local mirror state.
+5. QA confirms the collector path, local fail-open path, and outage behavior
+   all work without blocking normal command flow.
+
+### Follow-on Notes
+- Issue `#624` remains the external follow-up for `scmux` and `schook`.
+- Issue `#640` remains the docs cross-reference closure item and should be
+  closed as part of AV.4/AV.5, not left as silent drift.
+
+---
+
+## 17.22 Phase AY: Grafana Dogfood Readiness
+
+**Goal**: Close the live-signal and shared-daemon gaps uncovered by AW smoke so
+Grafana-backed ATM dogfooding is practical and repeatable on `develop`.
+
+**Planning doc**: `docs/phase-ay-grafana-dogfood-readiness.md`
+**Requirements**: `docs/observability/requirements.md`
+**Architecture**: `docs/observability/architecture.md`
+
+### Planned Sprint Map
+| Sprint | Focus | Primary Deliverable | Status |
+|---|---|---|---|
+| AY.0 | Flaky test hardening | small reliability fixes for known flaky tests surfaced by AW smoke/CI | COMPLETE |
+| AY.1 | Live signal correctness | verify Loki/Tempo/Mimir live results and align smoke/docs/scripts to real signal ownership | COMPLETE |
+| AY.2 | Shared dev-daemon dogfood readiness | preserve OTel config through canonical shared daemon/dev-install startup and add live dogfood smoke | COMPLETE |
+| AY.3a | Struct and operator-smoke cleanup | move OTel mirror structs into `atm-core` and add operator smoke script | COMPLETE |
+| AY.3b | Boundary extraction | create `sc-observability-types` and relocate `otlp_adapter` wiring to entry-point crates | COMPLETE |
+| AY.4 | Spool/inbox reliability | fix spool filename collision risk, merged-write durability, and spool cleanup diagnostics | COMPLETE |
+| AY.5 | Observability test hardening | harden OTel collector/env-var tests and bounded shutdown behavior | COMPLETE |
+
+### Exit Criteria
+1. Loki returns recent ATM CLI logs under `service_name="atm"` in live Grafana.
+2. Tempo returns fresh `atm-daemon` traces after a smoke-controlled daemon
+   stop/start sequence.
+3. Mimir queries use and document the canonical exported ATM metric names.
+4. The shared dev-daemon/dev-install flow preserves OTel config well enough for
+   repeatable Grafana dogfooding.
+5. `sc-observability-types` is the canonical shared OTel type surface, with
+   daemon/library modules consuming shared types instead of duplicating signal
+   enums across producer and transport crates.
+6. Observability collector/env-var tests are hardened with RAII env guards,
+   required `#[serial]` coverage, and bounded collector teardown so AY merge
+   validation is stable across platforms.
+
+---
+
+## 17.23 Phase AM: CI Monitor Subsystem Refactor
 
 **Goal**: Refactor CI monitoring into a dedicated daemon subsystem so
 `socket.rs` remains transport glue while provider-neutral orchestration,

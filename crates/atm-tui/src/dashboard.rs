@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use agent_team_mail_core::home::{get_home_dir, teams_root_dir_for};
+use agent_team_mail_core::io::inbox_read_file_tolerant;
 use agent_team_mail_core::io::lock::acquire_lock;
 use agent_team_mail_core::schema::InboxMessage;
 use serde_json::Value;
@@ -30,13 +31,9 @@ pub fn get_inbox_count(home: &Path, team: &str, agent: &str) -> usize {
         return 0;
     }
 
-    match std::fs::read_to_string(&inbox_path) {
-        Ok(content) if !content.trim().is_empty() => {
-            serde_json::from_str::<Vec<serde_json::Value>>(&content)
-                .map(|v| v.len())
-                .unwrap_or(0)
-        }
-        _ => 0,
+    match inbox_read_file_tolerant(&inbox_path) {
+        Ok(messages) => messages.len(),
+        Err(_) => 0,
     }
 }
 
@@ -86,11 +83,7 @@ pub fn read_inbox_preview(home: &Path, team: &str, agent: &str, max_items: usize
         Ok(lock) => lock,
         Err(_) => return Vec::new(),
     };
-    let content = match std::fs::read(&inbox_path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    let messages: Vec<InboxMessage> = match serde_json::from_slice(&content) {
+    let messages: Vec<InboxMessage> = match inbox_read_file_tolerant(&inbox_path) {
         Ok(v) => v,
         Err(_) => return Vec::new(),
     };
@@ -128,11 +121,7 @@ pub fn read_inbox_messages(
         Ok(lock) => lock,
         Err(_) => return Vec::new(),
     };
-    let content = match std::fs::read(&inbox_path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    let messages: Vec<InboxMessage> = match serde_json::from_slice(&content) {
+    let messages: Vec<InboxMessage> = match inbox_read_file_tolerant(&inbox_path) {
         Ok(v) => v,
         Err(_) => return Vec::new(),
     };
@@ -283,8 +272,8 @@ mod tests {
             fs::create_dir_all(&inbox_dir).unwrap();
             let inbox_path = inbox_dir.join("arch-ctm.json");
 
-            // Write a valid JSON array with 3 messages.
-            let payload = r#"[{"message_id":"m1"},{"message_id":"m2"},{"message_id":"m3"}]"#;
+            // Write a valid JSON array with 3 minimally valid messages.
+            let payload = r#"[{"message_id":"m1","from":"a","text":"one","timestamp":"2026-01-01T00:00:00Z"},{"message_id":"m2","from":"b","text":"two","timestamp":"2026-01-01T00:00:01Z"},{"message_id":"m3","from":"c","text":"three","timestamp":"2026-01-01T00:00:02Z"}]"#;
             fs::write(&inbox_path, payload).unwrap();
 
             let count = get_inbox_count(home, "atm-dev", "arch-ctm");

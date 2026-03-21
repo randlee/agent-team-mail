@@ -274,6 +274,7 @@ async fn test_inbox_reply_posts_comment() {
     // Send a message with issue reference (on its own line)
     let msg = InboxMessage {
         from: "test-user".to_string(),
+        source_team: None,
         text: "[issue:42]\nThis is my reply\nWith multiple lines".to_string(),
         timestamp: chrono::Utc::now().to_rfc3339(),
         read: false,

@@ -21,6 +21,10 @@
 //! The socket server is only compiled and active on Unix platforms.
 //! On non-Unix platforms the module exposes stub functions that do nothing.
 
+use crate::daemon::observability::{
+    SOCKET_ERROR_INTERNAL_ERROR, SOCKET_ERROR_INVALID_PAYLOAD, SOCKET_ERROR_VERSION_MISMATCH,
+    export_metric_records_best_effort, otel_config_from_env,
+};
 use agent_team_mail_core::control::{
     CONTROL_SCHEMA_VERSION, ContentRef, ControlAck, ControlAction, ControlRequest, ControlResult,
 };
@@ -31,11 +35,11 @@ use agent_team_mail_core::schema::AgentMember;
 use agent_team_mail_core::team_config_store::TeamConfigStore;
 use agent_team_mail_core::text::DEFAULT_MAX_MESSAGE_BYTES;
 use anyhow::Result;
-use sc_observability::{
-    SOCKET_ERROR_INTERNAL_ERROR, SOCKET_ERROR_INVALID_PAYLOAD, SOCKET_ERROR_VERSION_MISMATCH,
-};
+use chrono::Utc;
+use sc_observability_types::{MetricKind, MetricRecord};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
+use std::time::Instant;
 use tracing::{debug, error, info, warn};
 
 use crate::daemon::log_writer::LogEventQueue;
@@ -68,6 +72,72 @@ pub type SharedDedupeStore = std::sync::Arc<std::sync::Mutex<DurableDedupeStore>
 pub fn new_dedup_store(home_dir: &std::path::Path) -> Result<SharedDedupeStore> {
     let store = DurableDedupeStore::from_env(home_dir)?;
     Ok(std::sync::Arc::new(std::sync::Mutex::new(store)))
+}
+
+fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key).ok().and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn build_metric_record(
+    name: &str,
+    kind: MetricKind,
+    value: f64,
+    unit: Option<&str>,
+    attributes: serde_json::Map<String, serde_json::Value>,
+) -> MetricRecord {
+    MetricRecord {
+        timestamp: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        team: env_nonempty("ATM_TEAM"),
+        agent: env_nonempty("ATM_IDENTITY"),
+        runtime: env_nonempty("ATM_RUNTIME"),
+        session_id: crate::daemon::observability::current_session_id(),
+        name: name.to_string(),
+        kind,
+        value,
+        unit: unit.map(str::to_string),
+        source_binary: "atm-daemon".to_string(),
+        attributes,
+    }
+}
+
+fn build_daemon_request_metric_records(
+    command_name: &str,
+    outcome: &str,
+    duration_ms: u64,
+) -> Vec<MetricRecord> {
+    let mut attrs = serde_json::Map::new();
+    attrs.insert(
+        "command".to_string(),
+        serde_json::Value::String(command_name.to_string()),
+    );
+    attrs.insert(
+        "outcome".to_string(),
+        serde_json::Value::String(outcome.to_string()),
+    );
+
+    vec![
+        build_metric_record(
+            "atm_daemon.request_count",
+            MetricKind::Counter,
+            1.0,
+            Some("count"),
+            attrs.clone(),
+        ),
+        build_metric_record(
+            "atm_daemon.request_duration_ms",
+            MetricKind::Histogram,
+            duration_ms as f64,
+            Some("ms"),
+            attrs,
+        ),
+    ]
 }
 
 /// Start the Unix socket server and return a handle that cleans up the socket
@@ -801,8 +871,10 @@ async fn handle_log_event_command(
     request_str: &str,
     log_event_queue: &LogEventQueue,
 ) -> SocketResponse {
+    use crate::daemon::observability::{
+        SOCKET_ERROR_INVALID_PAYLOAD, SOCKET_ERROR_VERSION_MISMATCH,
+    };
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
-    use sc_observability::{SOCKET_ERROR_INVALID_PAYLOAD, SOCKET_ERROR_VERSION_MISMATCH};
 
     let request: SocketRequest = match serde_json::from_str(request_str) {
         Ok(r) => r,
@@ -2651,6 +2723,7 @@ fn parse_and_dispatch(
     stream_state_store: &SharedStreamStateStore,
 ) -> Result<SocketResponse> {
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
+    let request_started = Instant::now();
 
     // Parse request envelope
     let request: SocketRequest = match serde_json::from_str(request_str) {
@@ -2717,10 +2790,17 @@ fn parse_and_dispatch(
             SOCKET_ERROR_INTERNAL_ERROR,
             "stream-event command should have been handled by the async path",
         ),
-        // gh-monitor family commands are handled asynchronously before
+        // gh namespace commands are handled asynchronously before
         // parse_and_dispatch is called. If one reaches this sync path, return a
         // clear internal error from the router boundary.
-        "gh-monitor" | "gh-status" | "gh-monitor-control" | "gh-monitor-health" => {
+        "gh-monitor"
+        | "gh-status"
+        | "gh-monitor-control"
+        | "gh-monitor-health"
+        | "gh-pr-list"
+        | "gh-pr-report"
+        | "gh-cli-prereqs"
+        | "gh-rate-limit-audit" => {
             gh_monitor_router::async_dispatch_error(&request.request_id, request.command.as_str())
                 .expect("gh-monitor async-dispatch error should exist for known commands")
         }
@@ -2730,6 +2810,12 @@ fn parse_and_dispatch(
             &format!("Unknown command: '{other}'"),
         ),
     };
+
+    let duration_ms = request_started.elapsed().as_millis() as u64;
+    export_metric_records_best_effort(
+        &build_daemon_request_metric_records(&request.command, &response.status, duration_ms),
+        &otel_config_from_env(),
+    );
 
     Ok(response)
 }
@@ -4035,8 +4121,10 @@ mod tests {
     use agent_team_mail_core::control::{CONTROL_SCHEMA_VERSION, ControlAction, ControlRequest};
     use agent_team_mail_core::daemon_client::{PROTOCOL_VERSION, SocketRequest};
     use serial_test::serial;
+    use std::process::{Child, Command};
     use std::time::Duration;
     use tempfile::TempDir;
+    use tracing_test::traced_test;
 
     fn make_store() -> SharedStateStore {
         std::sync::Arc::new(std::sync::Mutex::new(AgentStateTracker::new()))
@@ -4072,33 +4160,26 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Default)]
-    struct SharedLogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    struct LiveMismatchProcess(Child);
 
-    impl SharedLogCapture {
-        fn contents(&self) -> String {
-            String::from_utf8(self.0.lock().unwrap().clone()).unwrap_or_default()
+    impl LiveMismatchProcess {
+        fn spawn() -> Self {
+            let child = Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn live mismatch helper process");
+            Self(child)
+        }
+
+        fn pid(&self) -> u32 {
+            self.0.id()
         }
     }
 
-    struct SharedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for SharedLogWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for SharedLogCapture {
-        type Writer = SharedLogWriter;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            SharedLogWriter(self.0.clone())
+    impl Drop for LiveMismatchProcess {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
         }
     }
 
@@ -5174,6 +5255,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[traced_test]
     #[test]
     #[serial]
     fn test_handle_register_hint_rejects_codex_backend_pid_mismatch_with_warn_log() {
@@ -5181,15 +5263,7 @@ mod tests {
         set_member_backend(fixture._temp.path(), "atm-dev", "arch-ctm", "codex");
         let store = make_store();
         let sr = make_sr();
-
-        let capture = SharedLogCapture::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .without_time()
-            .with_target(false)
-            .with_writer(capture.clone())
-            .finish();
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let mismatch_process = LiveMismatchProcess::spawn();
 
         let req = make_request(
             "register-hint",
@@ -5197,7 +5271,7 @@ mod tests {
                 "team": "atm-dev",
                 "agent": "arch-ctm",
                 "session_id": "codex:sess-mismatch",
-                "process_id": std::process::id(),
+                "process_id": mismatch_process.pid(),
                 "runtime": "codex",
             }),
         );
@@ -5206,9 +5280,8 @@ mod tests {
         let payload = resp.payload.expect("payload required");
         assert_eq!(payload["processed"].as_bool(), Some(true));
 
-        let logs = capture.contents();
-        assert!(logs.contains("pid/backend mismatch at register_hint"));
-        assert!(logs.contains("backend='codex'"));
+        assert!(logs_contain("pid/backend mismatch at register_hint"));
+        assert!(logs_contain("backend='codex'"));
         assert!(
             sr.lock()
                 .unwrap()
@@ -5219,6 +5292,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[traced_test]
     #[test]
     #[serial]
     fn test_handle_register_hint_rejects_claude_backend_pid_mismatch_with_warn_log() {
@@ -5232,15 +5306,7 @@ mod tests {
         );
         let store = make_store();
         let sr = make_sr();
-
-        let capture = SharedLogCapture::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .without_time()
-            .with_target(false)
-            .with_writer(capture.clone())
-            .finish();
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let mismatch_process = LiveMismatchProcess::spawn();
 
         let req = make_request(
             "register-hint",
@@ -5248,7 +5314,7 @@ mod tests {
                 "team": "atm-dev",
                 "agent": "team-lead-2",
                 "session_id": "claude:sess-mismatch",
-                "process_id": std::process::id(),
+                "process_id": mismatch_process.pid(),
                 "runtime": "claude",
             }),
         );
@@ -5257,9 +5323,8 @@ mod tests {
         let payload = resp.payload.expect("payload required");
         assert_eq!(payload["processed"].as_bool(), Some(true));
 
-        let logs = capture.contents();
-        assert!(logs.contains("pid/backend mismatch at register_hint"));
-        assert!(logs.contains("backend='claude-code'"));
+        assert!(logs_contain("pid/backend mismatch at register_hint"));
+        assert!(logs_contain("backend='claude-code'"));
         assert!(
             sr.lock()
                 .unwrap()

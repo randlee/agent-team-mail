@@ -166,6 +166,7 @@ mod tests {
     fn make_test_message(from: &str, text: &str) -> InboxMessage {
         InboxMessage {
             from: from.to_string(),
+            source_team: None,
             text: text.to_string(),
             timestamp: "2026-02-14T00:00:00Z".to_string(),
             read: false,

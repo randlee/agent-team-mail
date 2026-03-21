@@ -36,6 +36,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::event_log::EventFields;
+use crate::gh_command::{
+    GhCliPrereqRequest, GhCliPrereqStatus, GhPrListRequest, GhPrListSummary, GhPrReportRequest,
+    GhPrReportSummary, GhRateLimitAudit, GhRateLimitAuditRequest,
+};
 use agent_team_mail_daemon_launch::{LaunchClass, SpawnDaemonRequest, spawn_daemon_process};
 
 use crate::consts::{
@@ -1176,6 +1181,31 @@ pub fn subscribe_to_agent(
     query_daemon(&request)
 }
 
+/// Emit a best-effort non-Claude teammate idle lifecycle event to the daemon.
+///
+/// This is used by CLI sender paths that already know the caller runtime session
+/// and need to restore the sender to `idle` after a successful command. The
+/// call is silent when the daemon is unavailable.
+pub fn emit_teammate_idle_best_effort(
+    team: &str,
+    agent: &str,
+    session_id: &str,
+) -> anyhow::Result<Option<SocketResponse>> {
+    let request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "hook-event".to_string(),
+        payload: serde_json::json!({
+            "event": "teammate_idle",
+            "agent": agent,
+            "team": team,
+            "session_id": session_id,
+            "source": LifecycleSource::new(LifecycleSourceKind::AgentHook),
+        }),
+    };
+    query_daemon(&request)
+}
+
 /// Send an unsubscribe request to the daemon.
 ///
 /// Removes the subscription for `(subscriber, agent)`. This is a best-effort
@@ -1905,6 +1935,66 @@ pub fn gh_monitor_health_with_context(
     decode_gh_monitor_health_response(response).map(Some)
 }
 
+pub fn gh_pr_list(request: &GhPrListRequest) -> anyhow::Result<Option<GhPrListSummary>> {
+    let socket_request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "gh-pr-list".to_string(),
+        payload: serde_json::to_value(request)?,
+    };
+    let response = match query_daemon_with_timeout(&socket_request, Duration::from_secs(120))? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    decode_gh_command_response(response, "gh-pr-list").map(Some)
+}
+
+pub fn gh_pr_report(request: &GhPrReportRequest) -> anyhow::Result<Option<GhPrReportSummary>> {
+    let socket_request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "gh-pr-report".to_string(),
+        payload: serde_json::to_value(request)?,
+    };
+    let response = match query_daemon_with_timeout(&socket_request, Duration::from_secs(120))? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    decode_gh_command_response(response, "gh-pr-report").map(Some)
+}
+
+pub fn gh_cli_prerequisites(
+    request: &GhCliPrereqRequest,
+) -> anyhow::Result<Option<GhCliPrereqStatus>> {
+    let socket_request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "gh-cli-prereqs".to_string(),
+        payload: serde_json::to_value(request)?,
+    };
+    let response = match query_daemon(&socket_request)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    decode_gh_command_response(response, "gh-cli-prereqs").map(Some)
+}
+
+pub fn gh_rate_limit_audit(
+    request: &GhRateLimitAuditRequest,
+) -> anyhow::Result<Option<Option<GhRateLimitAudit>>> {
+    let socket_request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "gh-rate-limit-audit".to_string(),
+        payload: serde_json::to_value(request)?,
+    };
+    let response = match query_daemon(&socket_request)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    decode_gh_command_response(response, "gh-rate-limit-audit").map(Some)
+}
+
 fn decode_gh_monitor_response(response: SocketResponse) -> anyhow::Result<GhMonitorStatus> {
     if !response.is_ok() {
         let Some(err) = response.error else {
@@ -1947,6 +2037,31 @@ fn decode_gh_monitor_health_response(response: SocketResponse) -> anyhow::Result
         .map_err(|e| anyhow::anyhow!("Failed to parse GhMonitorHealth from daemon response: {e}"))
 }
 
+fn decode_gh_command_response<T: serde::de::DeserializeOwned>(
+    response: SocketResponse,
+    command_name: &str,
+) -> anyhow::Result<T> {
+    if !response.is_ok() {
+        let Some(err) = response.error else {
+            anyhow::bail!("Daemon returned {command_name} error status without error payload");
+        };
+        anyhow::bail!(
+            "Daemon returned error for {} command: {}: {}",
+            response.request_id,
+            err.code,
+            err.message
+        );
+    }
+
+    let payload = response
+        .payload
+        .ok_or_else(|| anyhow::anyhow!("Daemon returned ok status but no payload"))?;
+
+    serde_json::from_value::<T>(payload).map_err(|e| {
+        anyhow::anyhow!("Failed to parse {command_name} payload from daemon response: {e}")
+    })
+}
+
 fn decode_register_hint_response(response: SocketResponse) -> anyhow::Result<RegisterHintOutcome> {
     if response.is_ok() {
         return Ok(RegisterHintOutcome::Registered);
@@ -1979,6 +2094,34 @@ fn new_request_id() -> String {
         .subsec_nanos();
     let id = std::process::id();
     format!("req-{id}-{nanos}")
+}
+
+fn daemon_autostart_event(
+    request_id: &str,
+    trace_id: &str,
+    action: &'static str,
+    result: &'static str,
+    target: Option<String>,
+    error: Option<String>,
+) -> EventFields {
+    let mut extra_fields = serde_json::Map::new();
+    extra_fields.insert(
+        "autostart_phase".to_string(),
+        serde_json::Value::String(action.to_string()),
+    );
+    EventFields {
+        level: if error.is_some() { "error" } else { "info" },
+        source: "atm",
+        action,
+        result: Some(result.to_string()),
+        request_id: Some(request_id.to_string()),
+        trace_id: Some(trace_id.to_string()),
+        span_id: Some(crate::event_log::span_id_for_action(trace_id, action)),
+        target,
+        error,
+        extra_fields,
+        ..Default::default()
+    }
 }
 
 // ── Unix implementation ──────────────────────────────────────────────────────
@@ -2090,60 +2233,82 @@ fn daemon_autostart_enabled() -> bool {
 }
 
 #[cfg(unix)]
-fn resolve_daemon_binary() -> anyhow::Result<std::ffi::OsString> {
+fn resolve_daemon_binary_candidates() -> anyhow::Result<Vec<PathBuf>> {
+    let mut candidates = Vec::new();
+
     if let Some(override_bin) = std::env::var_os("ATM_DAEMON_BIN")
         && !override_bin.is_empty()
     {
-        return Ok(override_bin);
+        candidates.push(PathBuf::from(override_bin));
     }
 
     let name = std::ffi::OsString::from("atm-daemon");
-
     if let Ok(current_exe) = std::env::current_exe()
         && let Some(dir) = current_exe.parent()
     {
         let sibling = dir.join(std::path::Path::new(&name));
-        if sibling.exists() {
-            return Ok(sibling.into_os_string());
+        if sibling.exists() && !candidates.iter().any(|candidate| candidate == &sibling) {
+            candidates.push(sibling);
         }
-        anyhow::bail!(
-            "failed to resolve atm-daemon binary: ATM_DAEMON_BIN is unset and sibling binary '{}' is missing",
-            sibling.display()
-        );
+    }
+
+    if !candidates.is_empty() {
+        return Ok(candidates);
     }
 
     anyhow::bail!(
-        "failed to resolve atm-daemon binary: ATM_DAEMON_BIN is unset and current executable path is unavailable"
+        "failed to resolve atm-daemon binary: ATM_DAEMON_BIN is unset and no sibling atm-daemon binary was found next to the current executable"
     )
 }
 
 #[cfg(unix)]
-fn ensure_daemon_running_unix() -> anyhow::Result<()> {
-    use crate::event_log::{EventFields, emit_event_best_effort};
-    use crate::io::InboxError;
-    use std::io::ErrorKind;
-    use std::process::Stdio;
-    use std::sync::{Mutex, OnceLock};
-    use std::time::{Duration, Instant};
+fn resolve_daemon_binary_for_home(home: &Path) -> anyhow::Result<(PathBuf, RuntimeOwnerMetadata)> {
+    // Shells may export a dev-channel ATM_DAEMON_BIN globally while commands
+    // target the default shared ATM_HOME. Prefer a compatible sibling daemon
+    // binary for the resolved runtime instead of letting a cross-channel
+    // override strand release-runtime diagnostics at autostart time.
+    let mut candidates = resolve_daemon_binary_candidates()?;
+    let override_was_explicit =
+        std::env::var_os("ATM_DAEMON_BIN").is_some_and(|value| !value.is_empty());
+    let mut first_error = None;
 
-    // When autostart is disabled, the daemon lifecycle is managed externally.
-    // Skip identity validation and restart logic — trust the external daemon as-is.
-    if !daemon_autostart_enabled() {
-        return Ok(());
-    }
-
-    let home = crate::home::get_home_dir()?;
-    let socket_connectable = daemon_socket_connectable(&home);
-    if daemon_is_running() || socket_connectable {
-        if let Some(reason) = detect_daemon_identity_mismatch(&home, socket_connectable) {
-            restart_mismatched_daemon(&home, &reason)?;
-        } else if socket_connectable {
-            // Command paths require a live daemon socket, not just a PID file.
-            return Ok(());
+    while let Some(candidate) = candidates.first().cloned() {
+        candidates.remove(0);
+        match validate_runtime_admission(home, &candidate) {
+            Ok(owner) => return Ok((candidate, owner)),
+            Err(err) => {
+                let can_fallback = override_was_explicit
+                    && candidate.exists()
+                    && !candidates.is_empty()
+                    && err.to_string().contains("approved installed daemon binary");
+                if can_fallback {
+                    first_error.get_or_insert(err);
+                    continue;
+                }
+                return Err(err);
+            }
         }
     }
 
-    cleanup_stale_daemon_runtime_files(&home);
+    Err(first_error.unwrap_or_else(|| {
+        anyhow::anyhow!(
+            "failed to resolve a daemon binary candidate for {}",
+            home.display()
+        )
+    }))
+}
+
+#[cfg(unix)]
+struct DaemonStartupGuards {
+    _startup_process_guard: std::sync::MutexGuard<'static, ()>,
+    _startup_lock: Option<crate::io::lock::FileLock>,
+}
+
+#[cfg(unix)]
+fn acquire_daemon_startup_guards(home: &std::path::Path) -> anyhow::Result<DaemonStartupGuards> {
+    use crate::io::InboxError;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
 
     let startup_lock_path = daemon_start_lock_path()?;
     if let Some(parent) = startup_lock_path.parent() {
@@ -2152,24 +2317,22 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
 
     static STARTUP_PROCESS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     let startup_process_lock = STARTUP_PROCESS_LOCK.get_or_init(|| Mutex::new(()));
-    let _startup_process_guard = startup_process_lock
+    let startup_process_guard = startup_process_lock
         .lock()
         .expect("daemon startup process lock poisoned");
 
-    // Serialize daemon startup across concurrent CLI processes.
-    let _startup_lock = match crate::io::lock::acquire_lock(&startup_lock_path, 3) {
+    let startup_lock = match crate::io::lock::acquire_lock(&startup_lock_path, 3) {
         Ok(lock) => Some(lock),
         Err(InboxError::LockTimeout { .. }) => {
-            // Another process likely holds the startup lock and is spawning the daemon.
-            // Wait briefly for that startup attempt to converge.
             for _ in 0..10 {
-                if daemon_socket_connectable(&home) {
-                    return Ok(());
+                if daemon_socket_connectable(home) {
+                    return Ok(DaemonStartupGuards {
+                        _startup_process_guard: startup_process_guard,
+                        _startup_lock: None,
+                    });
                 }
                 std::thread::sleep(Duration::from_millis(RETRY_SLEEP_MS));
             }
-            // Startup did not converge yet. Re-attempt lock acquisition so any
-            // fallback spawn still occurs under lock (single-daemon invariant).
             match crate::io::lock::acquire_lock(&startup_lock_path, 10) {
                 Ok(lock) => Some(lock),
                 Err(e) => anyhow::bail!(
@@ -2183,6 +2346,43 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
             startup_lock_path.display()
         ),
     };
+
+    Ok(DaemonStartupGuards {
+        _startup_process_guard: startup_process_guard,
+        _startup_lock: startup_lock,
+    })
+}
+
+#[cfg(unix)]
+fn ensure_daemon_running_unix() -> anyhow::Result<()> {
+    use crate::event_log::emit_event_best_effort;
+    use std::io::ErrorKind;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    // When autostart is disabled, the daemon lifecycle is managed externally.
+    // Skip identity validation and restart logic — trust the external daemon as-is.
+    if !daemon_autostart_enabled() {
+        return Ok(());
+    }
+
+    let home = crate::home::get_home_dir()?;
+    let autostart_request_id = new_request_id();
+    let autostart_trace_id =
+        crate::event_log::trace_id_for_request("atm:daemon_autostart", &autostart_request_id);
+    let socket_connectable = daemon_socket_connectable(&home);
+    if daemon_is_running() || socket_connectable {
+        if let Some(reason) = detect_daemon_identity_mismatch(&home, socket_connectable) {
+            restart_mismatched_daemon(&home, &reason)?;
+        } else if socket_connectable {
+            // Command paths require a live daemon socket, not just a PID file.
+            return Ok(());
+        }
+    }
+
+    cleanup_stale_daemon_runtime_files(&home);
+
+    let _startup_guards = acquire_daemon_startup_guards(&home)?;
 
     let socket_connectable = daemon_socket_connectable(&home);
     if daemon_is_running() || socket_connectable {
@@ -2207,40 +2407,26 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         }
     }
 
-    let daemon_bin = resolve_daemon_binary().map_err(|e| {
+    let (daemon_bin_path, runtime_owner) = resolve_daemon_binary_for_home(&home).map_err(|e| {
         let error = e.to_string();
-        emit_event_best_effort(EventFields {
-            level: "error",
-            source: "atm",
-            action: "daemon_autostart_failure",
-            result: Some("binary_resolution_error".to_string()),
-            error: Some(error.clone()),
-            ..Default::default()
-        });
+        emit_event_best_effort(daemon_autostart_event(
+            &autostart_request_id,
+            &autostart_trace_id,
+            "daemon_autostart_failure",
+            "binary_resolution_error",
+            None,
+            Some(error.clone()),
+        ));
         anyhow::anyhow!("{error}")
     })?;
-    let daemon_bin_path = PathBuf::from(&daemon_bin);
-    let runtime_owner = validate_runtime_admission(&home, &daemon_bin_path).map_err(|e| {
-        let error = e.to_string();
-        emit_event_best_effort(EventFields {
-            level: "error",
-            source: "atm",
-            action: "daemon_autostart_failure",
-            result: Some("runtime_admission_denied".to_string()),
-            target: Some(daemon_bin_path.display().to_string()),
-            error: Some(error.clone()),
-            ..Default::default()
-        });
-        anyhow::anyhow!("{error}")
-    })?;
-    emit_event_best_effort(EventFields {
-        level: "info",
-        source: "atm",
-        action: "daemon_autostart_attempt",
-        result: Some("attempt".to_string()),
-        target: Some(daemon_bin_path.display().to_string()),
-        ..Default::default()
-    });
+    emit_event_best_effort(daemon_autostart_event(
+        &autostart_request_id,
+        &autostart_trace_id,
+        "daemon_autostart_attempt",
+        "attempt",
+        Some(daemon_bin_path.display().to_string()),
+        None,
+    ));
     let stderr_capture = std::env::temp_dir().join(format!(
         "atm-daemon-stderr-{}-{}.log",
         std::process::id(),
@@ -2253,7 +2439,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to prepare daemon stderr capture: {e}"))?;
 
     let mut child = match spawn_daemon_process(SpawnDaemonRequest {
-        daemon_bin: daemon_bin.as_os_str(),
+        daemon_bin: daemon_bin_path.as_os_str(),
         atm_home: &home,
         launch_class: launch_class_for_runtime_kind(&runtime_owner.runtime_kind),
         issuer: "agent-team-mail-core::daemon_client::ensure_daemon_running_unix",
@@ -2266,24 +2452,25 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         Err(e) => {
             let error = if e.kind() == ErrorKind::NotFound {
                 format!(
-                    "failed to auto-start daemon: binary '{}' is missing or not executable",
-                    std::path::PathBuf::from(&daemon_bin).display()
+                    "failed to auto-start daemon: binary '{}' is missing or not executable (stderr_capture={})",
+                    daemon_bin_path.display(),
+                    stderr_capture.display()
                 )
             } else {
                 format!(
-                    "failed to auto-start daemon via '{}': {e}",
-                    std::path::PathBuf::from(&daemon_bin).display()
+                    "failed to auto-start daemon via '{}': {e} (stderr_capture={})",
+                    daemon_bin_path.display(),
+                    stderr_capture.display()
                 )
             };
-            emit_event_best_effort(EventFields {
-                level: "error",
-                source: "atm",
-                action: "daemon_autostart_failure",
-                result: Some("spawn_error".to_string()),
-                target: Some(daemon_bin_path.display().to_string()),
-                error: Some(error.clone()),
-                ..Default::default()
-            });
+            emit_event_best_effort(daemon_autostart_event(
+                &autostart_request_id,
+                &autostart_trace_id,
+                "daemon_autostart_failure",
+                "spawn_error",
+                Some(daemon_bin_path.display().to_string()),
+                Some(error.clone()),
+            ));
             anyhow::bail!("{error}");
         }
     };
@@ -2291,18 +2478,18 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(STARTUP_DEADLINE_SECS);
     while Instant::now() < deadline {
         if daemon_socket_connectable(&home) {
-            emit_event_best_effort(EventFields {
-                level: "info",
-                source: "atm",
-                action: "daemon_autostart_success",
-                result: Some("ok".to_string()),
-                target: Some(format!(
+            emit_event_best_effort(daemon_autostart_event(
+                &autostart_request_id,
+                &autostart_trace_id,
+                "daemon_autostart_success",
+                "ok",
+                Some(format!(
                     "{} {}",
                     daemon_bin_path.display(),
                     format_runtime_owner_summary(&runtime_owner)
                 )),
-                ..Default::default()
-            });
+                None,
+            ));
             return Ok(());
         }
         if let Some(status) = child.try_wait()? {
@@ -2321,21 +2508,23 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
             let error = match stderr_tail {
                 Some(tail) => {
                     format!(
-                        "daemon process exited during startup with status {status}; stderr_tail={tail}"
+                        "daemon process exited during startup with status {status}; stderr_capture={}; stderr_tail={tail}",
+                        stderr_capture.display()
                     )
                 }
-                None => format!("daemon process exited during startup with status {status}"),
+                None => format!(
+                    "daemon process exited during startup with status {status}; stderr_capture={}",
+                    stderr_capture.display()
+                ),
             };
-            emit_event_best_effort(EventFields {
-                level: "error",
-                source: "atm",
-                action: "daemon_autostart_failure",
-                result: Some("process_exit".to_string()),
-                target: Some(daemon_bin_path.display().to_string()),
-                error: Some(error.clone()),
-                ..Default::default()
-            });
-            let _ = std::fs::remove_file(&stderr_capture);
+            emit_event_best_effort(daemon_autostart_event(
+                &autostart_request_id,
+                &autostart_trace_id,
+                "daemon_autostart_failure",
+                "process_exit",
+                Some(daemon_bin_path.display().to_string()),
+                Some(error.clone()),
+            ));
             anyhow::bail!("{error}");
         }
         std::thread::sleep(Duration::from_millis(RETRY_SLEEP_MS));
@@ -2345,31 +2534,32 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     let socket_path = daemon_socket_path()?;
     let pid_path = daemon_pid_path()?;
     let timeout_error = format!(
-        "daemon startup timed out after {}s; pid_file_exists={}, socket_exists={}, pid_path={}, socket_path={}",
+        "daemon startup timed out after {}s; pid_file_exists={}, socket_exists={}, pid_path={}, socket_path={}, stderr_capture={}",
         STARTUP_DEADLINE_SECS,
         pid_path.exists(),
         socket_path.exists(),
         pid_path.display(),
-        socket_path.display()
+        socket_path.display(),
+        stderr_capture.display()
     );
-    emit_event_best_effort(EventFields {
-        level: "warn",
-        source: "atm",
-        action: "daemon_autostart_timeout",
-        result: Some("timeout".to_string()),
-        target: Some(daemon_bin_path.display().to_string()),
-        error: Some(timeout_error.clone()),
-        ..Default::default()
-    });
-    emit_event_best_effort(EventFields {
-        level: "error",
-        source: "atm",
-        action: "daemon_autostart_failure",
-        result: Some("timeout".to_string()),
-        target: Some(daemon_bin_path.display().to_string()),
-        error: Some(timeout_error.clone()),
-        ..Default::default()
-    });
+    let mut timeout_event = daemon_autostart_event(
+        &autostart_request_id,
+        &autostart_trace_id,
+        "daemon_autostart_timeout",
+        "timeout",
+        Some(daemon_bin_path.display().to_string()),
+        Some(timeout_error.clone()),
+    );
+    timeout_event.level = "warn";
+    emit_event_best_effort(timeout_event);
+    emit_event_best_effort(daemon_autostart_event(
+        &autostart_request_id,
+        &autostart_trace_id,
+        "daemon_autostart_failure",
+        "timeout",
+        Some(daemon_bin_path.display().to_string()),
+        Some(timeout_error.clone()),
+    ));
     if child.try_wait()?.is_none() {
         let _ = child.kill();
         let _ = child.wait();
@@ -2571,7 +2761,10 @@ fn detect_daemon_identity_mismatch(
         .unwrap_or_else(|_| home.to_path_buf())
         .to_string_lossy()
         .to_string();
-    let expected_bin = resolve_daemon_binary().ok();
+    let expected_bin = resolve_daemon_binary_candidates()
+        .ok()
+        .and_then(|candidates| candidates.into_iter().next())
+        .map(|path| path.into_os_string());
     let snapshot = DaemonIdentitySnapshot {
         pid_from_file,
         pid_from_status,
@@ -2917,6 +3110,35 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn wait_for_sigterm_and_reap_pid(pid: i32) {
+        send_signal(pid, 15);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(crate::consts::SHORT_DEADLINE_SECS);
+        while std::time::Instant::now() < deadline {
+            if !pid_alive(pid) {
+                reap_child_pid_best_effort(pid);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::consts::POLL_CHECK_SLEEP_MS,
+            ));
+        }
+        reap_child_pid_best_effort(pid);
+    }
+
+    #[cfg(unix)]
+    fn reap_child_pid_best_effort(pid: i32) {
+        unsafe extern "C" {
+            fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+        }
+
+        const WNOHANG: i32 = 1;
+        let mut status = 0;
+        // SAFETY: Best-effort reap for test children after a bounded SIGTERM wait.
+        let _ = unsafe { waitpid(pid, &mut status, WNOHANG) };
+    }
+
+    #[cfg(unix)]
     fn fake_lock_metadata(home: &str, pid: u32) -> DaemonLockMetadata {
         DaemonLockMetadata {
             pid,
@@ -3068,8 +3290,8 @@ mod tests {
         let custom = tmp.path().join("custom-atm-daemon");
         std::fs::write(&custom, "#!/bin/sh\nexit 0\n").unwrap();
         let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", custom.to_str().unwrap());
-        let resolved = resolve_daemon_binary().expect("override should resolve");
-        assert_eq!(std::path::PathBuf::from(resolved), custom);
+        let candidates = resolve_daemon_binary_candidates().expect("override should resolve");
+        assert_eq!(candidates.first(), Some(&custom));
     }
 
     #[cfg(unix)]
@@ -3184,6 +3406,10 @@ exit 42
             msg.contains("daemon process exited during startup with status"),
             "startup exit must still be reported clearly: {msg}"
         );
+        assert!(
+            msg.contains("stderr_capture="),
+            "startup exit should report the stderr capture path: {msg}"
+        );
     }
 
     #[cfg(unix)]
@@ -3229,122 +3455,50 @@ sleep 10
     #[test]
     #[serial]
     fn test_ensure_daemon_running_serializes_concurrent_start() {
-        use std::fs;
-        use std::os::unix::fs::PermissionsExt;
-        use std::sync::Arc;
+        use std::sync::mpsc;
         use std::thread;
 
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().to_path_buf();
-        let script_path = home.join("fake-daemon.sh");
-
-        let script = format!(
-            r#"#!/bin/sh
-set -eu
-home="${{ATM_HOME:?}}"
-mkdir -p "$home/.atm/daemon"
-mkdir -p "$home/spawn-markers"
-touch "$home/spawn-markers/spawn.$$"
-echo $$ > "$home/.atm/daemon/atm-daemon.pid"
-cat > "$home/.atm/daemon/status.json" <<'EOF'
-{{"pid":$$,"version":"{}"}}
-EOF
-cat > "$home/.atm/daemon/daemon.lock.meta.json" <<'EOF'
-{{
-  "pid": $$,
-  "owner": {{
-    "runtime_kind": "isolated",
-    "build_profile": "release",
-    "executable_path": "{}",
-    "home_scope": "{}"
-  }},
-  "version": "{}",
-  "written_at": "2026-03-16T00:00:00Z"
-}}
-EOF
-python3 - "$home/.atm/daemon/atm-daemon.sock" "$home/stop-daemon" <<'PY' &
-import os, socket, sys, time
-sock_path=sys.argv[1]
-stop_path=sys.argv[2]
-try:
-    os.unlink(sock_path)
-except FileNotFoundError:
-    pass
-srv=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-srv.bind(sock_path)
-srv.listen(1)
-srv.settimeout(0.1)
-try:
-    while not os.path.exists(stop_path):
-        try:
-            conn, _ = srv.accept()
-        except socket.timeout:
-            continue
-        else:
-            conn.close()
-finally:
-    srv.close()
-    try:
-        os.unlink(sock_path)
-    except FileNotFoundError:
-        pass
-PY
-server_pid=$!
-cleanup() {{
-  kill "$server_pid" 2>/dev/null || true
-  wait "$server_pid" 2>/dev/null || true
-}}
-term_cleanup() {{
-  cleanup
-  exit 0
-}}
-trap cleanup EXIT
-trap term_cleanup INT TERM
-while [ ! -f "$home/stop-daemon" ]; do
-  sleep 0.1
-done
-"#,
-            env!("CARGO_PKG_VERSION"),
-            script_path.display(),
-            home.display(),
-            env!("CARGO_PKG_VERSION"),
-        );
-        fs::write(&script_path, script).unwrap();
-        let mut perms = fs::metadata(&script_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&script_path, perms).unwrap();
-
         let _home_guard = EnvGuard::set("ATM_HOME", home.to_str().unwrap());
-        let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", script_path.to_str().unwrap());
-        let _auto_guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "1");
+        let (first_acquired_tx, first_acquired_rx) = mpsc::channel();
+        let (release_first_tx, release_first_rx) = mpsc::channel();
+        let (second_acquired_tx, second_acquired_rx) = mpsc::channel();
 
-        let mut handles = Vec::new();
-        let barrier = Arc::new(std::sync::Barrier::new(2));
-        for _ in 0..2 {
-            let b = Arc::clone(&barrier);
-            handles.push(thread::spawn(move || {
-                b.wait();
-                ensure_daemon_running_unix().unwrap();
-            }));
-        }
-        for h in handles {
-            h.join().unwrap();
-        }
+        let first_home = home.clone();
+        let first = thread::spawn(move || {
+            let guards = acquire_daemon_startup_guards(&first_home).expect("first startup guards");
+            first_acquired_tx.send(()).unwrap();
+            release_first_rx.recv().unwrap();
+            drop(guards);
+        });
 
-        let current_pid = fs::read_to_string(home.join(".atm/daemon/atm-daemon.pid"))
-            .ok()
-            .and_then(|raw| raw.trim().parse::<i32>().ok());
-        let socket_ready = super::daemon_socket_connectable(&home);
-        fs::write(home.join("stop-daemon"), "stop").unwrap();
-        assert_eq!(
-            current_pid.map(pid_alive),
-            Some(true),
-            "concurrent startup attempts must converge to a live daemon pid"
-        );
+        first_acquired_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first thread should acquire startup guards");
+
+        let second_home = home.clone();
+        let second = thread::spawn(move || {
+            let guards =
+                acquire_daemon_startup_guards(&second_home).expect("second startup guards");
+            second_acquired_tx.send(()).unwrap();
+            drop(guards);
+        });
+
         assert!(
-            socket_ready,
-            "concurrent startup attempts must converge to a connectable daemon socket"
+            second_acquired_rx
+                .recv_timeout(Duration::from_millis(250))
+                .is_err(),
+            "second startup attempt must stay blocked while first holds startup guards"
         );
+
+        release_first_tx.send(()).unwrap();
+
+        second_acquired_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("second thread should acquire startup guards after release");
+        first.join().unwrap();
+        second.join().unwrap();
     }
 
     #[cfg(unix)]
@@ -3790,7 +3944,7 @@ done
             && let Ok(pid) = pid_str.trim().parse::<i32>()
             && pid_alive(pid)
         {
-            send_signal(pid, 15);
+            wait_for_sigterm_and_reap_pid(pid);
         }
     }
 
@@ -3954,7 +4108,7 @@ sleep 8
         assert!(new_pid > 1, "replacement daemon pid must be valid");
 
         if pid_alive(new_pid) {
-            send_signal(new_pid, 15);
+            wait_for_sigterm_and_reap_pid(new_pid);
         }
     }
 
@@ -4577,12 +4731,11 @@ sleep 8
     }
 
     #[test]
+    #[serial]
     fn test_send_control_no_daemon_returns_err() {
-        if daemon_is_running() {
-            // Shared dev machines may have daemon active; this test validates
-            // no-daemon behavior only.
-            return;
-        }
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let _home_guard = EnvGuard::set("ATM_HOME", tmp.path().to_str().unwrap());
+        let _autostart_guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "0");
         // Without a running daemon, send_control must return Err (not None or panic).
         use crate::control::{CONTROL_SCHEMA_VERSION, ControlAction, ControlRequest};
 

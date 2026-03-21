@@ -85,6 +85,29 @@ print `ok:` lines confirming the manifest and preflight assignments are valid.
 
 ---
 
+## Release Notes Requirement
+
+**Before merging `develop` → `main`, `team-lead` must provide completed release notes.**
+
+The template is at `release/RELEASE-NOTES-TEMPLATE.md`. If team-lead has not
+provided filled release notes by Step 3, publisher must request them:
+
+```
+ATM to team-lead: "Please provide completed release notes
+(release/RELEASE-NOTES-TEMPLATE.md) before I proceed with the merge."
+```
+
+Do not merge `develop` → `main` (Step 9) until release notes are received.
+
+After the release workflow completes and the GitHub Release is created, publisher
+updates the release body with the provided notes:
+
+```bash
+gh release edit v{VERSION} --notes "$(cat /tmp/release-notes.md)"
+```
+
+---
+
 ## Standard Release Flow
 1. **Step 0 — Tag gate (must pass before any PR/workflow action):**
    - Determine release version from `develop` (workspace/crate version already in source).

@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::event_log::{
+    EventFields, emit_event_best_effort, emit_event_to_spool_direct,
+};
 use agent_team_mail_daemon_launch::{
     ATM_LAUNCH_TOKEN_ENV, DaemonLaunchToken, LaunchClass, decode_launch_token,
 };
@@ -106,10 +108,22 @@ fn emit_lifecycle_event(
     atm_home: &Path,
     detail: Option<&str>,
 ) {
+    #[cfg(test)]
+    note_test_lifecycle_event(event_name);
+
     let token_id = token.map(|value| value.token_id.clone());
     let test_identifier = token.and_then(|value| value.test_identifier.clone());
     let owner_pid = token.and_then(|value| value.owner_pid);
     let atm_home_text = canonicalize_lossy(atm_home).display().to_string();
+    let request_id = token_id
+        .as_ref()
+        .map(|token_id| format!("daemon-launch-{token_id}"));
+    let trace_id = request_id.as_deref().map(|request_id| {
+        agent_team_mail_core::event_log::trace_id_for_request("atm-daemon", request_id)
+    });
+    let span_id = trace_id
+        .as_deref()
+        .map(|trace_id| agent_team_mail_core::event_log::span_id_for_action(trace_id, event_name));
     let lifecycle_phase = lifecycle_phase(event_name);
     let termination_reason = termination_reason(event_name);
     let mut extra = serde_json::Map::new();
@@ -158,11 +172,87 @@ fn emit_lifecycle_event(
         source: "atm-daemon",
         action: event_name,
         result: Some(event_name.to_string()),
+        request_id,
+        trace_id,
+        span_id,
         target: Some(atm_home_text),
         error: detail.map(str::to_string),
         extra_fields: extra,
         ..Default::default()
     });
+
+    export_lifecycle_trace(level, event_name, token, atm_home, detail);
+}
+
+fn export_lifecycle_trace(
+    level: &'static str,
+    event_name: &'static str,
+    token: Option<&DaemonLaunchToken>,
+    atm_home: &Path,
+    detail: Option<&str>,
+) {
+    let request_id = token
+        .map(|value| format!("daemon-launch-{}", value.token_id))
+        .unwrap_or_else(|| {
+            let unique_suffix = Utc::now()
+                .timestamp_nanos_opt()
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| Utc::now().timestamp_micros().to_string());
+            format!("daemon-lifecycle-{event_name}-{}", unique_suffix)
+        });
+    let trace_id = agent_team_mail_core::event_log::trace_id_for_request("atm-daemon", &request_id);
+    let span_id = agent_team_mail_core::event_log::span_id_for_action(&trace_id, event_name);
+    let mut record = crate::daemon::observability::LifecycleTraceRecord::new(
+        format!("atm-daemon.lifecycle.{event_name}"),
+        if level == "warn" {
+            crate::daemon::observability::LifecycleTraceStatus::Error
+        } else {
+            crate::daemon::observability::LifecycleTraceStatus::Ok
+        },
+        trace_id,
+        span_id,
+    );
+    record
+        .attributes
+        .insert("event_name".to_string(), event_name.to_string());
+    record.attributes.insert(
+        "lifecycle_phase".to_string(),
+        lifecycle_phase(event_name).to_string(),
+    );
+    record.attributes.insert(
+        "atm_home".to_string(),
+        canonicalize_lossy(atm_home).display().to_string(),
+    );
+    if let Some(reason) = termination_reason(event_name) {
+        record
+            .attributes
+            .insert("termination_reason".to_string(), reason.to_string());
+    }
+    if let Some(token) = token {
+        record.attributes.insert(
+            "launch_class".to_string(),
+            token.launch_class.as_str().to_string(),
+        );
+        record
+            .attributes
+            .insert("token_id".to_string(), token.token_id.clone());
+        if let Some(test_identifier) = &token.test_identifier {
+            record
+                .attributes
+                .insert("test_identifier".to_string(), test_identifier.clone());
+        }
+        if let Some(owner_pid) = token.owner_pid {
+            record
+                .attributes
+                .insert("owner_pid".to_string(), owner_pid.to_string());
+        }
+    }
+    if let Some(detail) = detail {
+        record
+            .attributes
+            .insert("detail".to_string(), detail.to_string());
+    }
+    crate::daemon::observability::export_lifecycle_trace(record);
 }
 
 pub fn log_launch_accepted(home: &Path, token: &DaemonLaunchToken) {
@@ -176,12 +266,79 @@ pub fn log_launch_accepted(home: &Path, token: &DaemonLaunchToken) {
 }
 
 pub fn log_clean_owner_shutdown(home: &Path, token: &DaemonLaunchToken) {
-    emit_lifecycle_event(
+    // Write directly to spool, bypassing the background log-forwarder thread.
+    // The forwarder is a fire-and-forget thread that the OS reclaims on process
+    // exit; events queued just before exit are silently lost on macOS.
+    // log_clean_owner_shutdown() is called after daemon::run() returns, making
+    // it the most vulnerable. Writing synchronously guarantees the event is
+    // durably persisted before main() returns.
+    let event_name = "clean_owner_shutdown";
+    let token_id = Some(token.token_id.clone());
+    let atm_home_text = canonicalize_lossy(home).display().to_string();
+    let request_id = token_id.as_ref().map(|id| format!("daemon-launch-{id}"));
+    let trace_id = request_id
+        .as_deref()
+        .map(|rid| agent_team_mail_core::event_log::trace_id_for_request("atm-daemon", rid));
+    let span_id = trace_id
+        .as_deref()
+        .map(|tid| agent_team_mail_core::event_log::span_id_for_action(tid, event_name));
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "event_name".to_string(),
+        serde_json::Value::String(event_name.to_string()),
+    );
+    extra.insert(
+        "lifecycle_phase".to_string(),
+        serde_json::Value::String("shutdown".to_string()),
+    );
+    extra.insert(
+        "launch_class".to_string(),
+        serde_json::Value::String(token.launch_class.as_str().to_string()),
+    );
+    extra.insert(
+        "token_id".to_string(),
+        serde_json::Value::String(token.token_id.clone()),
+    );
+    if let Some(test_identifier) = &token.test_identifier {
+        extra.insert(
+            "test_identifier".to_string(),
+            serde_json::Value::String(test_identifier.clone()),
+        );
+    }
+    if let Some(owner_pid) = token.owner_pid {
+        extra.insert(
+            "owner_pid".to_string(),
+            serde_json::Value::Number(owner_pid.into()),
+        );
+    }
+    extra.insert(
+        "atm_home".to_string(),
+        serde_json::Value::String(atm_home_text.clone()),
+    );
+    extra.insert(
+        "termination_reason".to_string(),
+        serde_json::Value::String(event_name.to_string()),
+    );
+    let fields = EventFields {
+        level: "info",
+        source: "atm-daemon",
+        action: event_name,
+        result: Some(event_name.to_string()),
+        request_id,
+        trace_id,
+        span_id,
+        target: Some(atm_home_text),
+        error: Some("daemon exited after clean owner-controlled shutdown".to_string()),
+        extra_fields: extra,
+        ..Default::default()
+    };
+    emit_event_to_spool_direct(&fields, home);
+    export_lifecycle_trace(
         "info",
-        "clean_owner_shutdown",
+        event_name,
         Some(token),
         home,
-        Some("daemon exited after clean owner-controlled shutdown"),
+        fields.error.as_deref(),
     );
 }
 
@@ -193,6 +350,15 @@ fn emit_startup_rejection(
 ) {
     let token_id = token.map(|token| token.token_id.clone());
     let atm_home_text = canonicalize_lossy(atm_home).display().to_string();
+    let request_id = token_id
+        .as_ref()
+        .map(|token_id| format!("daemon-launch-{token_id}"));
+    let trace_id = request_id.as_deref().map(|request_id| {
+        agent_team_mail_core::event_log::trace_id_for_request("atm-daemon", request_id)
+    });
+    let span_id = trace_id.as_deref().map(|trace_id| {
+        agent_team_mail_core::event_log::span_id_for_action(trace_id, "daemon_start_rejected")
+    });
     let mut extra = serde_json::Map::new();
     extra.insert(
         "rejection_reason".to_string(),
@@ -217,6 +383,9 @@ fn emit_startup_rejection(
         source: "atm-daemon",
         action: "daemon_start_rejected",
         result: Some(reason.as_str().to_string()),
+        request_id,
+        trace_id,
+        span_id,
         target: Some(atm_home_text),
         error: detail.map(str::to_string),
         extra_fields: extra,
@@ -275,7 +444,7 @@ fn validate_token_inner(
         return Err(StartupAuthError::MissingIsolatedLeaseFields);
     }
 
-    let mut seen = seen_tokens().lock().unwrap();
+    let mut seen = seen_tokens().lock().expect("startup_auth mutex poisoned");
     if !seen.insert(token.token_id.clone()) {
         return Err(StartupAuthError::ReplayedToken);
     }
@@ -384,7 +553,9 @@ pub fn spawn_isolated_test_lease_monitor(
                             &home,
                             Some("isolated-test daemon reached lease expiry"),
                         );
-                        *lease_violation.lock().unwrap() = Some(LeaseViolation {
+                        *lease_violation
+                            .lock()
+                            .expect("startup_auth mutex poisoned") = Some(LeaseViolation {
                             event_name: "ttl_expiry_shutdown",
                             detail: "isolated-test daemon reached lease expiry".to_string(),
                         });
@@ -402,7 +573,9 @@ pub fn spawn_isolated_test_lease_monitor(
                             &home,
                             Some("isolated-test daemon owner process is no longer alive"),
                         );
-                        *lease_violation.lock().unwrap() = Some(LeaseViolation {
+                        *lease_violation
+                            .lock()
+                            .expect("startup_auth mutex poisoned") = Some(LeaseViolation {
                             event_name: "dead_owner_shutdown",
                             detail: format!("owner_pid {owner_pid} is no longer alive"),
                         });
@@ -413,6 +586,40 @@ pub fn spawn_isolated_test_lease_monitor(
             }
         }
     }))
+}
+
+#[cfg(test)]
+type TestLifecycleHook = Arc<dyn Fn(&'static str) + Send + Sync>;
+
+#[cfg(test)]
+fn test_lifecycle_hook_slot() -> &'static Mutex<Option<TestLifecycleHook>> {
+    static TEST_LIFECYCLE_HOOK: OnceLock<Mutex<Option<TestLifecycleHook>>> = OnceLock::new();
+    TEST_LIFECYCLE_HOOK.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+fn note_test_lifecycle_event(event_name: &'static str) {
+    let hook = test_lifecycle_hook_slot()
+        .lock()
+        .expect("startup_auth test lifecycle hook lock poisoned")
+        .clone();
+    if let Some(hook) = hook {
+        hook(event_name);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_test_lifecycle_hook(hook: TestLifecycleHook) {
+    *test_lifecycle_hook_slot()
+        .lock()
+        .expect("startup_auth test lifecycle hook lock poisoned") = Some(hook);
+}
+
+#[cfg(test)]
+pub(crate) fn clear_test_lifecycle_hook() {
+    *test_lifecycle_hook_slot()
+        .lock()
+        .expect("startup_auth test lifecycle hook lock poisoned") = None;
 }
 
 #[cfg(test)]
@@ -427,16 +634,14 @@ mod tests {
         RuntimeKind, RuntimeMetadata, write_runtime_metadata,
     };
     use agent_team_mail_core::logging::{RotationConfig, UnifiedLogMode, init_unified};
-    use agent_team_mail_core::logging_event::{LogEventV1, spool_dir};
     use agent_team_mail_daemon_launch::{
         encode_launch_token, issue_isolated_test_launch_token, issue_launch_token,
     };
     use serial_test::serial;
     use std::fs;
-    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
-    use std::time::Instant;
-    use tempfile::TempDir;
+    use tempfile::{Builder, TempDir};
 
     struct EnvGuard {
         key: &'static str,
@@ -467,42 +672,13 @@ mod tests {
         }
     }
 
-    fn read_jsonl_events(path: &std::path::Path) -> Vec<LogEventV1> {
-        if !path.exists() {
-            return Vec::new();
-        }
-        let mut events = Vec::new();
-        let paths = if path.is_file() {
-            vec![path.to_path_buf()]
-        } else {
-            match fs::read_dir(path) {
-                Ok(entries) => entries.flatten().map(|entry| entry.path()).collect(),
-                Err(_) => return Vec::new(),
-            }
-        };
-        for path in paths {
-            if path
-                .extension()
-                .and_then(|x| x.to_str())
-                .map(|x| x == "jsonl")
-                != Some(true)
-            {
-                continue;
-            }
-            let Ok(content) = fs::read_to_string(&path) else {
-                continue;
-            };
-            for line in content.lines().filter(|line| !line.trim().is_empty()) {
-                if let Ok(event) = serde_json::from_str::<LogEventV1>(line) {
-                    events.push(event);
-                }
-            }
-        }
-        events
-    }
-
-    fn isolated_runtime_root(name: &str) -> PathBuf {
-        std::env::temp_dir().join("atm-isolated").join(name)
+    fn isolated_runtime_root(name: &str) -> TempDir {
+        let root = std::env::temp_dir().join("atm-isolated");
+        fs::create_dir_all(&root).expect("create isolated runtime root parent");
+        Builder::new()
+            .prefix(name)
+            .tempdir_in(root)
+            .expect("create isolated runtime root tempdir")
     }
 
     fn token_for(home: &Path, class: LaunchClass, ttl_secs: i64) -> DaemonLaunchToken {
@@ -631,16 +807,19 @@ mod tests {
     #[serial]
     fn non_isolated_tokens_may_omit_lease_fields() {
         clear_seen_tokens_for_tests();
-        let temp = agent_team_mail_core::home::get_os_home_dir().unwrap();
+        // ProdShared tokens require the real OS home dir. On Windows,
+        // dirs::home_dir() bypasses USERPROFILE env overrides, so TempDir
+        // cannot classify as shared runtime.
+        let os_home = agent_team_mail_core::home::get_os_home_dir().unwrap();
         let token = issue_launch_token(
             LaunchClass::ProdShared,
-            &temp,
+            &os_home,
             "test-binary",
             "startup-auth-test",
             Duration::from_secs(30),
         );
         let raw = encode_launch_token(&token).unwrap();
-        let accepted = validate_token_inner(&temp, Some(&raw)).unwrap();
+        let accepted = validate_token_inner(&os_home, Some(&raw)).unwrap();
         assert_eq!(accepted.launch_class, LaunchClass::ProdShared);
     }
 
@@ -661,9 +840,9 @@ mod tests {
         )
         .expect("init daemon-writer logging");
 
-        let runtime_home =
+        let runtime_home_guard =
             isolated_runtime_root(&format!("startup-auth-janitor-{}", uuid::Uuid::new_v4()));
-        let _ = fs::remove_dir_all(&runtime_home);
+        let runtime_home = runtime_home_guard.path().to_path_buf();
         fs::create_dir_all(runtime_home.join(".atm").join("daemon")).unwrap();
         let metadata = RuntimeMetadata {
             runtime_kind: RuntimeKind::Isolated,
@@ -676,37 +855,30 @@ mod tests {
         };
         write_runtime_metadata(&runtime_home, &metadata).unwrap();
 
+        let observed = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        install_test_lifecycle_hook({
+            let observed = Arc::clone(&observed);
+            Arc::new(move |event_name| {
+                observed
+                    .lock()
+                    .expect("capture startup_auth lifecycle events")
+                    .push(event_name);
+            })
+        });
         let reaped = sweep_stale_isolated_runtimes().unwrap();
+        clear_test_lifecycle_hook();
         assert!(
             reaped.contains(&runtime_home),
             "expected janitor sweep to reap test runtime; saw {reaped:?}"
         );
         assert!(!runtime_home.exists(), "stale runtime should be removed");
 
-        let spool = spool_dir(temp.path());
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline {
-            let events = read_jsonl_events(&spool);
-            if events.iter().any(|event| {
-                event.action == "janitor_reap"
-                    && event
-                        .fields
-                        .get("event_name")
-                        .and_then(|value| value.as_str())
-                        == Some("janitor_reap")
-            }) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-
-        let events = read_jsonl_events(&spool);
-        panic!(
-            "expected janitor_reap event in daemon spool; saw actions: {:?}",
-            events
-                .iter()
-                .map(|event| event.action.as_str())
-                .collect::<Vec<_>>()
+        assert!(
+            observed
+                .lock()
+                .expect("read observed lifecycle events")
+                .contains(&"janitor_reap"),
+            "expected janitor_reap lifecycle event to be emitted synchronously"
         );
     }
 }

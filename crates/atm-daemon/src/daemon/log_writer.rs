@@ -22,7 +22,8 @@
 //! starts a fresh base file. The oldest rotation file (`.N`) is removed.
 
 use agent_team_mail_core::logging_event::{LogEventV1, configured_log_path};
-use sc_observability::{DEFAULT_QUEUE_CAPACITY, export_otel_best_effort_from_path};
+use chrono::Utc;
+use sc_observability_types::{MetricKind, MetricRecord};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -32,6 +33,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::daemon::consts::LOG_WARNING_RATE_LIMIT_SECS;
+use crate::daemon::observability::{
+    LOG_EVENT_QUEUE_CAPACITY, export_metric_records_best_effort, export_otel_best_effort,
+    otel_config_from_env,
+};
 
 // ── Queue ─────────────────────────────────────────────────────────────────────
 
@@ -115,7 +120,103 @@ pub type LogEventQueue = Arc<Mutex<BoundedQueue>>;
 
 /// Create a new [`LogEventQueue`] with the default capacity of 4096.
 pub fn new_log_event_queue() -> LogEventQueue {
-    Arc::new(Mutex::new(BoundedQueue::new(DEFAULT_QUEUE_CAPACITY)))
+    Arc::new(Mutex::new(BoundedQueue::new(LOG_EVENT_QUEUE_CAPACITY)))
+}
+
+fn metric_record(
+    name: &str,
+    kind: MetricKind,
+    value: f64,
+    unit: Option<&str>,
+    attributes: serde_json::Map<String, serde_json::Value>,
+) -> MetricRecord {
+    MetricRecord {
+        timestamp: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        team: None,
+        agent: None,
+        runtime: std::env::var("ATM_RUNTIME")
+            .ok()
+            .filter(|v| !v.trim().is_empty()),
+        session_id: std::env::var("CLAUDE_SESSION_ID")
+            .ok()
+            .filter(|v| !v.trim().is_empty()),
+        name: name.to_string(),
+        kind,
+        value,
+        unit: unit.map(str::to_string),
+        source_binary: "atm-daemon".to_string(),
+        attributes,
+    }
+}
+
+fn metric_number(value: &serde_json::Value) -> Option<f64> {
+    match value {
+        serde_json::Value::Number(number) => number.as_f64(),
+        _ => None,
+    }
+}
+
+fn build_event_metric_records(event: &LogEventV1) -> Vec<MetricRecord> {
+    let mut records = Vec::new();
+
+    let mut event_attrs = serde_json::Map::new();
+    event_attrs.insert(
+        "action".to_string(),
+        serde_json::Value::String(event.action.clone()),
+    );
+    event_attrs.insert(
+        "source_binary".to_string(),
+        serde_json::Value::String(event.source_binary.clone()),
+    );
+    records.push(metric_record(
+        "atm_daemon.event_volume_total",
+        MetricKind::Counter,
+        1.0,
+        Some("count"),
+        event_attrs,
+    ));
+
+    let subagent_id = event.subagent_id.clone().or_else(|| {
+        event
+            .action
+            .starts_with("subagent.")
+            .then(|| "unknown".to_string())
+    });
+    if let Some(subagent_id) = subagent_id {
+        let mut subagent_attrs = serde_json::Map::new();
+        subagent_attrs.insert(
+            "subagent_id".to_string(),
+            serde_json::Value::String(subagent_id),
+        );
+        subagent_attrs.insert(
+            "action".to_string(),
+            serde_json::Value::String(event.action.clone()),
+        );
+        records.push(metric_record(
+            "atm_daemon.subagent_activity_total",
+            MetricKind::Counter,
+            1.0,
+            Some("count"),
+            subagent_attrs.clone(),
+        ));
+
+        let duration_value = event
+            .fields
+            .get("duration_ms")
+            .and_then(metric_number)
+            .or_else(|| event.fields.get("elapsed_ms").and_then(metric_number));
+        if let Some(duration_ms) = duration_value {
+            records.push(metric_record(
+                "atm_daemon.subagent_duration_ms",
+                MetricKind::Histogram,
+                duration_ms,
+                Some("ms"),
+                subagent_attrs,
+            ));
+        }
+    }
+
+    records
 }
 
 // ── Writer configuration ──────────────────────────────────────────────────────
@@ -270,7 +371,11 @@ fn write_events(config: &LogWriterConfig, events: &[LogEventV1]) {
                     warn!("log_writer: write error: {e}");
                     continue;
                 }
-                export_otel_best_effort_from_path(&config.log_path, event);
+                export_otel_best_effort(&config.log_path, event);
+                export_metric_records_best_effort(
+                    &build_event_metric_records(event),
+                    &otel_config_from_env(),
+                );
             }
             Err(e) => {
                 warn!("log_writer: failed to serialize event: {e}");
@@ -313,15 +418,71 @@ fn rotation_path(base: &Path, n: u32) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::observability::{clear_otel_export_hook, install_otel_export_hook};
     use agent_team_mail_core::logging_event::new_log_event;
-    use sc_observability::OtelRecord;
     use serial_test::serial;
+    use std::fs::OpenOptions;
+    use std::io::Write;
     use std::time::Duration;
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
 
+    #[derive(Debug, serde::Deserialize)]
+    struct ExportedOtelRecord {
+        name: String,
+        trace_id: Option<String>,
+        span_id: Option<String>,
+        attributes: serde_json::Map<String, serde_json::Value>,
+    }
+
     fn make_event() -> LogEventV1 {
         new_log_event("atm-daemon", "test_event", "atm_daemon::test", "info")
+    }
+
+    fn append_test_otel_record(log_path: &Path, event: &LogEventV1) {
+        let mut otel_path = log_path.to_path_buf();
+        let stem = log_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("telemetry");
+        otel_path.set_file_name(format!("{stem}.otel.jsonl"));
+
+        let mut attributes = serde_json::Map::new();
+        if let Some(team) = &event.team {
+            attributes.insert("team".to_string(), serde_json::Value::String(team.clone()));
+        }
+        if let Some(agent) = &event.agent {
+            attributes.insert(
+                "agent".to_string(),
+                serde_json::Value::String(agent.clone()),
+            );
+        }
+        if let Some(runtime) = &event.runtime {
+            attributes.insert(
+                "runtime".to_string(),
+                serde_json::Value::String(runtime.clone()),
+            );
+        }
+        if let Some(session_id) = &event.session_id {
+            attributes.insert(
+                "session_id".to_string(),
+                serde_json::Value::String(session_id.clone()),
+            );
+        }
+
+        let line = serde_json::json!({
+            "name": event.action,
+            "trace_id": event.trace_id,
+            "span_id": event.span_id,
+            "attributes": attributes,
+        });
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&otel_path)
+            .expect("open test otel output");
+        writeln!(file, "{line}").expect("append test otel output");
     }
 
     // ── BoundedQueue unit tests ───────────────────────────────────────────────
@@ -559,6 +720,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_write_events_exports_otel_for_each_producer_source() {
         let dir = TempDir::new().expect("temp dir");
         let log_path = dir.path().join("atm.log.jsonl");
@@ -568,6 +730,7 @@ mod tests {
             max_files: 5,
             flush_interval_ms: 100,
         };
+        install_otel_export_hook(Arc::new(append_test_otel_record));
         let mut events = Vec::new();
         for (idx, source, action) in [
             (1u8, "atm", "send"),
@@ -592,7 +755,7 @@ mod tests {
             .map(str::to_string)
             .collect();
         assert_eq!(lines.len(), 3);
-        let exported: Vec<OtelRecord> = lines
+        let exported: Vec<ExportedOtelRecord> = lines
             .iter()
             .map(|line| serde_json::from_str(line).expect("valid otel record json"))
             .collect();
@@ -627,5 +790,6 @@ mod tests {
                 Some("sess-123")
             );
         }
+        clear_otel_export_hook();
     }
 }

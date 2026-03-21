@@ -24,6 +24,7 @@ pub(crate) fn emit_ci_monitor_message(
             .join(format!("{agent}.json"));
         let message = InboxMessage {
             from: from_agent.to_string(),
+            source_team: None,
             text: text.to_string(),
             timestamp: chrono::Utc::now().to_rfc3339(),
             read: false,
@@ -72,6 +73,7 @@ pub(crate) fn emit_ci_not_started_alert(
             .join(format!("{agent}.json"));
         let message = InboxMessage {
             from: from_agent.clone(),
+            source_team: None,
             text: text.clone(),
             timestamp: chrono::Utc::now().to_rfc3339(),
             read: false,
@@ -180,6 +182,7 @@ pub(crate) fn emit_merge_conflict_alert(
             .join(format!("{agent}.json"));
         let message = InboxMessage {
             from: from_agent.clone(),
+            source_team: None,
             text: text.clone(),
             timestamp: chrono::Utc::now().to_rfc3339(),
             read: false,
@@ -371,78 +374,4 @@ pub(crate) fn repo_scope_matches(configured: &str, expected: &str) -> bool {
         .split_once('/')
         .map(|(_, repo)| repo == configured)
         .unwrap_or(false)
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use super::emit_merge_conflict_alert;
-    use crate::plugins::ci_monitor::types::{CiMonitorStatus, CiMonitorTargetKind, GhAlertTargets};
-    use agent_team_mail_core::schema::InboxMessage;
-    use tempfile::TempDir;
-
-    fn read_inbox(path: &std::path::Path) -> Vec<InboxMessage> {
-        let raw = std::fs::read_to_string(path).unwrap();
-        serde_json::from_str(&raw).unwrap()
-    }
-
-    #[test]
-    fn gh_ci_fr_17_merge_conflict_alert_includes_required_payload_fields() {
-        let temp = TempDir::new().unwrap();
-        let repo_dir = temp.path().join("repo");
-        let inbox_dir = temp.path().join(".claude/teams/atm-dev/inboxes");
-        std::fs::create_dir_all(&repo_dir).unwrap();
-        std::fs::create_dir_all(&inbox_dir).unwrap();
-        std::fs::write(
-            repo_dir.join(".atm.toml"),
-            r#"[core]
-default_team = "atm-dev"
-identity = "team-lead"
-
-[plugins.gh_monitor]
-enabled = true
-team = "atm-dev"
-agent = "gh-monitor"
-repo = "randlee/agent-team-mail"
-notify_target = "team-lead"
-"#,
-        )
-        .unwrap();
-
-        let status = CiMonitorStatus {
-            team: "atm-dev".to_string(),
-            configured: true,
-            enabled: true,
-            config_source: Some("repo".to_string()),
-            config_path: Some(repo_dir.join(".atm.toml").to_string_lossy().to_string()),
-            target_kind: CiMonitorTargetKind::Pr,
-            target: "123".to_string(),
-            state: "merge_conflict".to_string(),
-            run_id: Some(99),
-            reference: None,
-            updated_at: chrono::Utc::now().to_rfc3339(),
-            message: Some("preflight dirty".to_string()),
-            repo_state_updated_at: None,
-        };
-
-        emit_merge_conflict_alert(
-            temp.path(),
-            &status,
-            Some("https://github.com/randlee/agent-team-mail/pull/123"),
-            "DIRTY",
-            Some("failure"),
-            Some(repo_dir.to_string_lossy().as_ref()),
-            GhAlertTargets::default(),
-        );
-
-        let inbox = read_inbox(&inbox_dir.join("team-lead.json"));
-        let message = inbox.last().expect("merge conflict alert");
-        assert!(message.text.contains("classification: merge_conflict"));
-        assert!(message.text.contains("status: merge_conflict"));
-        assert!(
-            message
-                .text
-                .contains("pr_url: https://github.com/randlee/agent-team-mail/pull/123")
-        );
-        assert!(message.text.contains("merge_state_status: DIRTY"));
-    }
 }

@@ -5329,6 +5329,7 @@ mod tests {
         let inbox_path = inbox_dir.join(format!("{identity}.json"));
         let msg = agent_team_mail_core::InboxMessage {
             from: "alice".to_string(),
+            source_team: None,
             text: "hello from alice".to_string(),
             timestamp: "2026-02-22T10:00:00Z".to_string(),
             read: false,
