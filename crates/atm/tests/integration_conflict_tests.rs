@@ -158,17 +158,19 @@ fn mirror_team_config_to_home(temp_dir: &TempDir, team_name: &str, home_root: &s
 }
 
 #[cfg(unix)]
-fn daemon_pid_path(temp_dir: &TempDir) -> PathBuf {
-    temp_dir
-        .path()
-        .join("runtime-home/.atm/daemon/atm-daemon.pid")
-}
-
-#[cfg(unix)]
 fn read_daemon_pid(temp_dir: &TempDir) -> Option<u32> {
-    let pid_path = daemon_pid_path(temp_dir);
-    let raw = fs::read_to_string(pid_path).ok()?;
-    raw.trim().parse::<u32>().ok()
+    let runtime_home = temp_dir.path().join("runtime-home");
+    agent_team_mail_core::daemon_client::read_daemon_lock_metadata(&runtime_home)
+        .map(|metadata| metadata.pid)
+        .or_else(|| {
+            let status_path =
+                agent_team_mail_core::daemon_client::daemon_status_path_for(&runtime_home);
+            fs::read_to_string(status_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
+                .map(|pid| pid as u32)
+        })
 }
 
 #[cfg(unix)]
@@ -194,13 +196,17 @@ fn write_lock_metadata(temp_dir: &TempDir, pid: u32, home_scope: String, executa
     if let Some(parent) = metadata_path.parent() {
         fs::create_dir_all(parent).expect("create metadata dir");
     }
-    let payload = serde_json::json!({
-        "pid": pid,
-        "home_scope": home_scope,
-        "executable_path": executable_path,
-        "version": env!("CARGO_PKG_VERSION"),
-        "written_at": "2026-01-01T00:00:00Z",
-    });
+    let payload = agent_team_mail_core::daemon_client::DaemonLockMetadata {
+        pid,
+        owner: agent_team_mail_core::daemon_client::RuntimeOwnerMetadata {
+            runtime_kind: agent_team_mail_core::daemon_client::RuntimeKind::Shared,
+            build_profile: agent_team_mail_core::daemon_client::BuildProfile::Debug,
+            executable_path,
+            home_scope,
+        },
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        written_at: "2026-01-01T00:00:00Z".to_string(),
+    };
     fs::write(
         metadata_path,
         serde_json::to_string_pretty(&payload).expect("serialize metadata"),

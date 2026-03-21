@@ -1474,7 +1474,15 @@ fn execute_init(
     repo_override: Option<&str>,
     json: bool,
 ) -> Result<()> {
-    let prereqs = fetch_gh_cli_prereqs(team)?;
+    let prereqs = if args.dry_run {
+        GhCliPrereqStatus {
+            gh_installed: false,
+            gh_authenticated: false,
+            error: None,
+        }
+    } else {
+        fetch_gh_cli_prereqs(team)?
+    };
 
     let detected = detect_github_remote(current_dir);
     let (owner, repo) = resolve_repo_coordinates(repo_override, detected.as_ref())?;

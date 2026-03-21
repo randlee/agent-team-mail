@@ -2,9 +2,7 @@
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::consts::ISOLATED_RUNTIME_DEFAULT_TTL_SECS;
-use agent_team_mail_core::daemon_client::{
-    DaemonTouchSnapshot, RuntimeOwnerMetadata, daemon_touch_path_for,
-};
+use agent_team_mail_core::daemon_client::RuntimeOwnerMetadata;
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
 use anyhow::{Context, Result};
@@ -21,7 +19,8 @@ use crate::commands::logging_health::{
 };
 use crate::util::settings::get_home_dir;
 use agent_team_mail_core::daemon_client::{
-    create_isolated_runtime_root, daemon_status_path_for, reap_expired_isolated_runtime_roots,
+    create_isolated_runtime_root, daemon_lock_metadata_path_for, daemon_runtime_metadata_path_for,
+    daemon_status_path_for, read_daemon_lock_metadata, reap_expired_isolated_runtime_roots,
 };
 use std::path::{Path, PathBuf};
 
@@ -328,7 +327,7 @@ fn send_shutdown_request(
     Ok(())
 }
 
-/// Stop the running daemon by sending SIGTERM to the PID recorded in the PID file.
+/// Stop the running daemon by sending SIGTERM to the PID reported in daemon metadata.
 ///
 /// On non-Unix platforms this is a no-op (returns `Ok(())`).
 fn execute_stop(timeout_secs: u64) -> Result<()> {
@@ -336,10 +335,10 @@ fn execute_stop(timeout_secs: u64) -> Result<()> {
     {
         let runtime = daemon_runtime_paths()?;
 
-        if !runtime.pid_path.exists() {
+        if !agent_team_mail_core::daemon_client::daemon_is_running() {
             println!(
-                "Daemon is not running (no PID file at {}).",
-                runtime.pid_path.display()
+                "Daemon is not running (no live daemon socket at {}).",
+                runtime.socket_path.display()
             );
             return Ok(());
         }
@@ -414,8 +413,10 @@ fn execute_restart(timeout_secs: u64) -> Result<()> {
 #[cfg(unix)]
 #[derive(Debug, Clone)]
 struct DaemonRuntimePaths {
-    pid_path: PathBuf,
+    home_dir: PathBuf,
     socket_path: PathBuf,
+    status_path: PathBuf,
+    metadata_path: PathBuf,
 }
 
 #[cfg(unix)]
@@ -444,27 +445,28 @@ impl RestartTiming {
 
 #[cfg(unix)]
 fn daemon_runtime_paths() -> Result<DaemonRuntimePaths> {
+    let home_dir = get_home_dir()?;
     Ok(DaemonRuntimePaths {
-        pid_path: agent_team_mail_core::daemon_client::daemon_pid_path()
-            .context("failed to resolve daemon PID file path")?,
+        home_dir: home_dir.clone(),
         socket_path: agent_team_mail_core::daemon_client::daemon_socket_path()
             .context("failed to resolve daemon socket path")?,
+        status_path: agent_team_mail_core::daemon_client::daemon_status_path()
+            .context("failed to resolve daemon status path")?,
+        metadata_path: agent_team_mail_core::daemon_client::daemon_lock_metadata_path()
+            .context("failed to resolve daemon lock metadata path")?,
     })
 }
 
 #[cfg(unix)]
-fn read_daemon_pid(pid_path: &Path) -> Result<i32> {
-    let content = std::fs::read_to_string(pid_path)
-        .with_context(|| format!("failed to read daemon PID file {}", pid_path.display()))?;
-    let pid: i32 = content.trim().parse().with_context(|| {
-        format!(
-            "daemon PID file {} contains non-integer content",
-            pid_path.display()
-        )
-    })?;
+fn read_daemon_pid(paths: &DaemonRuntimePaths) -> Result<i32> {
+    let pid: i32 = daemon_pid_from_runtime_artifacts(&paths.home_dir)
+        .map(|pid| pid as i32)
+        .ok_or_else(|| {
+            anyhow::anyhow!("failed to determine daemon pid from status/lock metadata")
+        })?;
     if pid <= 1 {
         anyhow::bail!(
-            "daemon PID file contains invalid PID {}; refusing to send signal",
+            "daemon metadata contains invalid PID {}; refusing to send signal",
             pid
         );
     }
@@ -633,8 +635,25 @@ where
 
 #[cfg(unix)]
 fn cleanup_runtime_files(paths: &DaemonRuntimePaths) {
-    let _ = std::fs::remove_file(&paths.pid_path);
     let _ = std::fs::remove_file(&paths.socket_path);
+    let _ = std::fs::remove_file(&paths.status_path);
+    let _ = std::fs::remove_file(&paths.metadata_path);
+    let _ = std::fs::remove_file(daemon_runtime_metadata_path_for(&paths.home_dir));
+    let _ = std::fs::remove_file(daemon_lock_metadata_path_for(&paths.home_dir));
+}
+
+#[cfg(unix)]
+fn daemon_pid_from_runtime_artifacts(home: &Path) -> Option<u32> {
+    read_daemon_lock_metadata(home)
+        .map(|metadata| metadata.pid)
+        .or_else(|| {
+            let status_path = daemon_status_path_for(home);
+            std::fs::read_to_string(status_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
+                .map(|pid| pid as u32)
+        })
 }
 
 #[cfg(unix)]
@@ -645,12 +664,15 @@ fn wait_for_runtime_files_absent(
 ) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if !paths.pid_path.exists() && !paths.socket_path.exists() {
+        if !paths.socket_path.exists()
+            && !paths.status_path.exists()
+            && !paths.metadata_path.exists()
+        {
             return true;
         }
         std::thread::sleep(poll_interval);
     }
-    !paths.pid_path.exists() && !paths.socket_path.exists()
+    !paths.socket_path.exists() && !paths.status_path.exists() && !paths.metadata_path.exists()
 }
 
 #[cfg(unix)]
@@ -665,7 +687,7 @@ where
     FSignal: Fn(i32, i32) -> std::io::Result<()>,
     FAlive: Fn(i32) -> bool,
 {
-    let pid = read_daemon_pid(&paths.pid_path)?;
+    let pid = read_daemon_pid(paths)?;
     let post_timeout_grace = Duration::from_secs(timeout_secs.clamp(1, 5));
 
     if let Err(err) = send_signal(pid, libc::SIGTERM) {
@@ -732,7 +754,7 @@ where
     FEnsure: Fn() -> Result<()>,
     FDaemonRunning: Fn() -> bool,
 {
-    if runtime.pid_path.exists() {
+    if daemon_pid_from_runtime_artifacts(&runtime.home_dir).is_some() {
         match stop_daemon_with(
             runtime,
             timeout_secs,
@@ -827,7 +849,6 @@ fn execute_status(args: StatusArgs) -> Result<()> {
 
     let status: DaemonStatus =
         serde_json::from_str(&content).context("Failed to parse daemon status file")?;
-    let touch_rows = read_daemon_touch_rows(&home_dir);
 
     // Check if status is stale (timestamp older than 2x poll interval = 60 seconds)
     let stale_threshold_secs = 60;
@@ -878,31 +899,7 @@ fn execute_status(args: StatusArgs) -> Result<()> {
             println!("         The daemon may not be running.");
         }
 
-        if !touch_rows.is_empty() {
-            println!();
-            println!("Teams ({}):", touch_rows.len());
-            let team_width = touch_rows
-                .iter()
-                .map(|row| row.team.len())
-                .max()
-                .unwrap_or(4)
-                .max(4);
-            println!(
-                "  {team:<team_width$}  {pid:<7}  STARTED_AT",
-                team = "TEAM",
-                pid = "PID",
-                team_width = team_width
-            );
-            for row in &touch_rows {
-                println!(
-                    "  {team:<team_width$}  {pid:<7}  {started_at}",
-                    team = row.team,
-                    pid = row.pid,
-                    started_at = row.started_at,
-                    team_width = team_width
-                );
-            }
-        } else if !status.teams.is_empty() {
+        if !status.teams.is_empty() {
             println!();
             println!("Teams ({}):", status.teams.len());
             for team in &status.teams {
@@ -1045,25 +1042,6 @@ fn format_duration(secs: u64) -> String {
     }
 }
 
-fn read_daemon_touch_rows(home_dir: &Path) -> Vec<DaemonTouchRow> {
-    let touch_path = daemon_touch_path_for(home_dir);
-    let Ok(raw) = std::fs::read_to_string(&touch_path) else {
-        return Vec::new();
-    };
-    let Ok(snapshot) = serde_json::from_str::<DaemonTouchSnapshot>(&raw) else {
-        return Vec::new();
-    };
-
-    snapshot
-        .into_iter()
-        .map(|(team, entry)| DaemonTouchRow {
-            team,
-            pid: entry.pid,
-            started_at: entry.started_at,
-        })
-        .collect()
-}
-
 // Re-export types from daemon crate for status file parsing
 use serde::{Deserialize, Serialize};
 
@@ -1081,13 +1059,6 @@ struct DaemonStatus {
     logging: LoggingHealthSnapshot,
     #[serde(default)]
     otel: OtelHealthSnapshot,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DaemonTouchRow {
-    team: String,
-    pid: u32,
-    started_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1150,40 +1121,50 @@ mod tests {
         assert!(is_status_stale("not-a-timestamp", 60));
     }
 
-    #[test]
-    fn test_read_daemon_touch_rows_returns_sorted_rows() {
-        let tmp = TempDir::new().expect("temp dir");
+    #[cfg(unix)]
+    fn temp_runtime_paths(tmp: &TempDir) -> DaemonRuntimePaths {
         let daemon_dir = tmp.path().join(".atm/daemon");
-        let binary_a = std::env::temp_dir().join("daemon-touch-team-a");
-        let binary_b = std::env::temp_dir().join("daemon-touch-team-b");
-        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
-        std::fs::write(
-            daemon_dir.join("daemon-touch.json"),
-            format!(
-                r#"{{
-  "team-b": {{"pid": 22, "started_at": "2026-03-16T00:00:02Z", "binary": "{binary_b}"}},
-  "team-a": {{"pid": 11, "started_at": "2026-03-16T00:00:01Z", "binary": "{binary_a}"}}
-}}"#,
-                binary_a = binary_a.to_string_lossy().replace('\\', "/"),
-                binary_b = binary_b.to_string_lossy().replace('\\', "/"),
-            ),
-        )
-        .expect("write daemon touch");
-
-        let rows = read_daemon_touch_rows(tmp.path());
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].team, "team-a");
-        assert_eq!(rows[0].pid, 11);
-        assert_eq!(rows[1].team, "team-b");
-        assert_eq!(rows[1].started_at, "2026-03-16T00:00:02Z");
+        DaemonRuntimePaths {
+            home_dir: tmp.path().to_path_buf(),
+            socket_path: daemon_dir.join("atm-daemon.sock"),
+            status_path: daemon_dir.join("status.json"),
+            metadata_path: daemon_dir.join("daemon.lock.meta.json"),
+        }
     }
 
     #[cfg(unix)]
-    fn temp_runtime_paths(tmp: &TempDir) -> DaemonRuntimePaths {
-        DaemonRuntimePaths {
-            pid_path: tmp.path().join("atm-daemon.pid"),
-            socket_path: tmp.path().join("atm-daemon.sock"),
-        }
+    fn write_runtime_pid(runtime: &DaemonRuntimePaths, pid: u32) {
+        std::fs::create_dir_all(runtime.status_path.parent().unwrap()).expect("create daemon dir");
+        let owner = agent_team_mail_core::daemon_client::RuntimeOwnerMetadata {
+            runtime_kind: agent_team_mail_core::daemon_client::RuntimeKind::Shared,
+            build_profile: agent_team_mail_core::daemon_client::BuildProfile::Debug,
+            executable_path: "/tmp/atm-daemon".to_string(),
+            home_scope: runtime.home_dir.to_string_lossy().into_owned(),
+        };
+        let metadata = agent_team_mail_core::daemon_client::DaemonLockMetadata {
+            pid,
+            owner,
+            version: "test-version".to_string(),
+            written_at: chrono::Utc::now().to_rfc3339(),
+        };
+        let status = serde_json::json!({
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "pid": pid,
+            "version": "test-version",
+            "uptime_secs": 0,
+            "owner": metadata.owner,
+            "plugins": [],
+            "teams": [],
+            "logging": {},
+            "otel": {}
+        });
+        std::fs::write(
+            &runtime.metadata_path,
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .expect("write daemon metadata");
+        std::fs::write(&runtime.status_path, serde_json::to_vec(&status).unwrap())
+            .expect("write daemon status");
     }
 
     #[test]
@@ -1191,7 +1172,7 @@ mod tests {
     fn test_stop_daemon_cleans_socket_when_sigterm_reports_esrch() {
         let tmp = TempDir::new().expect("temp dir");
         let runtime = temp_runtime_paths(&tmp);
-        std::fs::write(&runtime.pid_path, "4242\n").expect("write pid");
+        write_runtime_pid(&runtime, 4242);
         std::fs::write(&runtime.socket_path, "").expect("write socket");
 
         let outcome = stop_daemon_with(
@@ -1210,7 +1191,14 @@ mod tests {
                 already_dead: true
             }
         );
-        assert!(!runtime.pid_path.exists(), "pid file should be removed");
+        assert!(
+            !runtime.metadata_path.exists(),
+            "daemon metadata should be removed"
+        );
+        assert!(
+            !runtime.status_path.exists(),
+            "status file should be removed"
+        );
         assert!(
             !runtime.socket_path.exists(),
             "socket file should be removed on ESRCH cleanup"
@@ -1222,7 +1210,7 @@ mod tests {
     fn test_stop_daemon_times_out_when_pid_stays_alive() {
         let tmp = TempDir::new().expect("temp dir");
         let runtime = temp_runtime_paths(&tmp);
-        std::fs::write(&runtime.pid_path, "4242\n").expect("write pid");
+        write_runtime_pid(&runtime, 4242);
 
         let outcome = stop_daemon_with(
             &runtime,
@@ -1241,7 +1229,7 @@ mod tests {
     fn test_stop_daemon_accepts_exit_detected_after_timeout_loop() {
         let tmp = TempDir::new().expect("temp dir");
         let runtime = temp_runtime_paths(&tmp);
-        std::fs::write(&runtime.pid_path, "4242\n").expect("write pid");
+        write_runtime_pid(&runtime, 4242);
         std::fs::write(&runtime.socket_path, "").expect("write socket");
 
         let outcome = stop_daemon_with(
@@ -1260,7 +1248,14 @@ mod tests {
                 already_dead: false
             }
         );
-        assert!(!runtime.pid_path.exists(), "pid file should be removed");
+        assert!(
+            !runtime.metadata_path.exists(),
+            "daemon metadata should be removed"
+        );
+        assert!(
+            !runtime.status_path.exists(),
+            "status file should be removed"
+        );
         assert!(
             !runtime.socket_path.exists(),
             "socket file should be removed"
@@ -1272,7 +1267,7 @@ mod tests {
     fn test_stop_daemon_accepts_exit_during_post_timeout_grace() {
         let tmp = TempDir::new().expect("temp dir");
         let runtime = temp_runtime_paths(&tmp);
-        std::fs::write(&runtime.pid_path, "4242\n").expect("write pid");
+        write_runtime_pid(&runtime, 4242);
         std::fs::write(&runtime.socket_path, "").expect("write socket");
 
         let checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1295,7 +1290,14 @@ mod tests {
                 already_dead: false
             }
         );
-        assert!(!runtime.pid_path.exists(), "pid file should be removed");
+        assert!(
+            !runtime.metadata_path.exists(),
+            "daemon metadata should be removed"
+        );
+        assert!(
+            !runtime.status_path.exists(),
+            "status file should be removed"
+        );
         assert!(
             !runtime.socket_path.exists(),
             "socket file should be removed"
@@ -1307,7 +1309,7 @@ mod tests {
     fn test_stop_daemon_removes_runtime_files() {
         let tmp = TempDir::new().expect("temp dir");
         let runtime = temp_runtime_paths(&tmp);
-        std::fs::write(&runtime.pid_path, "4242\n").expect("write pid");
+        write_runtime_pid(&runtime, 4242);
         std::fs::write(&runtime.socket_path, "").expect("write socket");
 
         let checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1330,7 +1332,14 @@ mod tests {
                 already_dead: false
             }
         );
-        assert!(!runtime.pid_path.exists(), "pid file should be removed");
+        assert!(
+            !runtime.metadata_path.exists(),
+            "daemon metadata should be removed"
+        );
+        assert!(
+            !runtime.status_path.exists(),
+            "status file should be removed"
+        );
         assert!(
             !runtime.socket_path.exists(),
             "socket file should be removed"
@@ -1342,15 +1351,17 @@ mod tests {
     fn test_wait_for_runtime_files_absent_returns_true_after_cleanup() {
         let tmp = TempDir::new().expect("temp dir");
         let runtime = temp_runtime_paths(&tmp);
-        std::fs::write(&runtime.pid_path, "4242\n").expect("write pid");
+        write_runtime_pid(&runtime, 4242);
         std::fs::write(&runtime.socket_path, "").expect("write socket");
 
-        let pid_path = runtime.pid_path.clone();
+        let metadata_path = runtime.metadata_path.clone();
         let socket_path = runtime.socket_path.clone();
+        let status_path = runtime.status_path.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(20));
-            let _ = std::fs::remove_file(pid_path);
+            let _ = std::fs::remove_file(metadata_path);
             let _ = std::fs::remove_file(socket_path);
+            let _ = std::fs::remove_file(status_path);
         });
 
         assert!(wait_for_runtime_files_absent(
@@ -1365,7 +1376,7 @@ mod tests {
     fn test_daemon_restart_produces_new_pid() {
         let tmp = TempDir::new().expect("temp dir");
         let runtime = temp_runtime_paths(&tmp);
-        std::fs::write(&runtime.pid_path, "4242\n").expect("write pid");
+        write_runtime_pid(&runtime, 4242);
         std::fs::write(&runtime.socket_path, "").expect("write socket");
 
         let signals = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1390,7 +1401,7 @@ mod tests {
                 let runtime = runtime.clone();
                 let restarted = std::sync::Arc::clone(&restarted);
                 move || {
-                    std::fs::write(&runtime.pid_path, "5252\n").expect("write new pid");
+                    write_runtime_pid(&runtime, 5252);
                     std::fs::write(&runtime.socket_path, "").expect("write new socket");
                     restarted.store(true, std::sync::atomic::Ordering::SeqCst);
                     Ok(())
@@ -1407,9 +1418,9 @@ mod tests {
 
         assert_eq!(*signals.lock().unwrap(), vec![(4242, libc::SIGTERM)]);
         assert_eq!(
-            std::fs::read_to_string(&runtime.pid_path).unwrap(),
-            "5252\n",
-            "restart should leave the new daemon pid file in place"
+            daemon_pid_from_runtime_artifacts(&runtime.home_dir),
+            Some(5252),
+            "restart should leave the new daemon metadata in place"
         );
         assert!(
             runtime.socket_path.exists(),
@@ -1490,7 +1501,7 @@ mod tests {
     fn test_stop_matching_daemon_processes_all_exit_before_sigkill() {
         let tmp = TempDir::new().expect("temp dir");
         let runtime = temp_runtime_paths(&tmp);
-        std::fs::write(&runtime.pid_path, "1111\n").expect("write pid");
+        write_runtime_pid(&runtime, 1111);
         std::fs::write(&runtime.socket_path, "").expect("write socket");
 
         let signals = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1524,7 +1535,8 @@ mod tests {
             *signals.lock().unwrap(),
             vec![(1111, libc::SIGTERM), (2222, libc::SIGTERM)]
         );
-        assert!(!runtime.pid_path.exists());
+        assert!(!runtime.metadata_path.exists());
+        assert!(!runtime.status_path.exists());
         assert!(!runtime.socket_path.exists());
     }
 

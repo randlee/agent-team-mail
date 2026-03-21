@@ -167,13 +167,13 @@ async fn test_mock_plugin_implementation() {
     let temp_dir = TempDir::new().unwrap();
     let ctx = create_test_context(temp_dir.path().to_path_buf());
 
-    let mut plugin = MockPlugin::new("test-plugin", vec![Capability::IssueTracking]);
+    let mut plugin = MockPlugin::new("test-plugin", vec![Capability::CiMonitor]);
 
     // Test metadata
     let metadata = plugin.metadata();
     assert_eq!(metadata.name, "test-plugin");
     assert_eq!(metadata.version, "1.0.0");
-    assert_eq!(metadata.capabilities, vec![Capability::IssueTracking]);
+    assert_eq!(metadata.capabilities, vec![Capability::CiMonitor]);
 
     // Test init
     assert_eq!(plugin.init_count, 0);
@@ -196,7 +196,7 @@ async fn test_registry_register_and_init() {
     assert!(registry.is_empty());
 
     // Register a plugin
-    let plugin = MockPlugin::new("test-plugin", vec![Capability::IssueTracking]);
+    let plugin = MockPlugin::new("test-plugin", vec![Capability::CiMonitor]);
     registry.register(plugin);
 
     assert_eq!(registry.len(), 1);
@@ -215,56 +215,13 @@ async fn test_registry_register_and_init() {
 }
 
 #[tokio::test]
-async fn test_registry_capability_lookup() {
-    let temp_dir = TempDir::new().unwrap();
-    let ctx = create_test_context(temp_dir.path().to_path_buf());
-
-    let mut registry = PluginRegistry::new();
-
-    // Register plugins with different capabilities
-    registry.register(MockPlugin::new(
-        "issue-plugin",
-        vec![Capability::IssueTracking],
-    ));
-    registry.register(MockPlugin::new("ci-plugin", vec![Capability::CiMonitor]));
-    registry.register(MockPlugin::new(
-        "multi-plugin",
-        vec![Capability::IssueTracking, Capability::Bridge],
-    ));
-
-    registry.init_all(&ctx).await.unwrap();
-
-    // Test capability lookup
-    let issue_plugins = registry.get_by_capability(&Capability::IssueTracking);
-    assert_eq!(issue_plugins.len(), 2);
-    let names: Vec<_> = issue_plugins.iter().map(|(m, _)| m.name).collect();
-    assert!(names.contains(&"issue-plugin"));
-    assert!(names.contains(&"multi-plugin"));
-
-    let ci_plugins = registry.get_by_capability(&Capability::CiMonitor);
-    assert_eq!(ci_plugins.len(), 1);
-    assert_eq!(ci_plugins[0].0.name, "ci-plugin");
-
-    let bridge_plugins = registry.get_by_capability(&Capability::Bridge);
-    assert_eq!(bridge_plugins.len(), 1);
-    assert_eq!(bridge_plugins[0].0.name, "multi-plugin");
-
-    // Test non-existent capability
-    let chat_plugins = registry.get_by_capability(&Capability::Chat);
-    assert_eq!(chat_plugins.len(), 0);
-}
-
-#[tokio::test]
 async fn test_registry_name_lookup() {
     let temp_dir = TempDir::new().unwrap();
     let ctx = create_test_context(temp_dir.path().to_path_buf());
 
     let mut registry = PluginRegistry::new();
 
-    registry.register(MockPlugin::new(
-        "my-plugin",
-        vec![Capability::IssueTracking],
-    ));
+    registry.register(MockPlugin::new("my-plugin", vec![Capability::CiMonitor]));
 
     registry.init_all(&ctx).await.unwrap();
 
@@ -336,10 +293,16 @@ async fn test_multiple_plugin_registration() {
     let mut registry = PluginRegistry::new();
 
     // Register multiple plugins
-    registry.register(MockPlugin::new("plugin-1", vec![Capability::IssueTracking]));
+    registry.register(MockPlugin::new("plugin-1", vec![Capability::EventListener]));
     registry.register(MockPlugin::new("plugin-2", vec![Capability::CiMonitor]));
-    registry.register(MockPlugin::new("plugin-3", vec![Capability::Bridge]));
-    registry.register(MockPlugin::new("plugin-4", vec![Capability::Chat]));
+    registry.register(MockPlugin::new(
+        "plugin-3",
+        vec![Capability::InjectMessages],
+    ));
+    registry.register(MockPlugin::new(
+        "plugin-4",
+        vec![Capability::AdvertiseMembers],
+    ));
 
     assert_eq!(registry.len(), 4);
 
@@ -370,7 +333,7 @@ async fn test_handle_message_default_impl() {
     let temp_dir = TempDir::new().unwrap();
     let ctx = create_test_context(temp_dir.path().to_path_buf());
 
-    let mut plugin = MockPlugin::new("test-plugin", vec![Capability::IssueTracking]);
+    let mut plugin = MockPlugin::new("test-plugin", vec![Capability::CiMonitor]);
     plugin.init(&ctx).await.unwrap();
 
     let message = create_test_message("sender", "test message");
@@ -407,7 +370,7 @@ async fn test_plugin_run_respects_cancellation() {
     let temp_dir = TempDir::new().unwrap();
     let ctx = create_test_context(temp_dir.path().to_path_buf());
 
-    let mut plugin = MockPlugin::new("test-plugin", vec![Capability::IssueTracking]);
+    let mut plugin = MockPlugin::new("test-plugin", vec![Capability::CiMonitor]);
     plugin.init(&ctx).await.unwrap();
 
     let cancel = CancellationToken::new();

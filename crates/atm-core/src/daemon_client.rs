@@ -2775,10 +2775,16 @@ fn restart_mismatched_daemon(home: &std::path::Path, reason: &str) -> anyhow::Re
     use crate::event_log::{EventFields, emit_event_best_effort};
     use std::time::Duration;
 
-    let pid_path = home.join(".atm/daemon/atm-daemon.pid");
-    let pid = std::fs::read_to_string(&pid_path)
-        .ok()
-        .and_then(|s| s.trim().parse::<i32>().ok());
+    let pid = read_daemon_lock_metadata(home)
+        .map(|metadata| metadata.pid as i32)
+        .or_else(|| {
+            let status_path = daemon_status_path_for(home);
+            std::fs::read_to_string(status_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|json| json.get("pid").and_then(serde_json::Value::as_i64))
+                .map(|pid| pid as i32)
+        });
 
     emit_event_best_effort(EventFields {
         level: "warn",
@@ -2826,7 +2832,7 @@ fn restart_mismatched_daemon(home: &std::path::Path, reason: &str) -> anyhow::Re
     if let Some(parent) = lock_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _lock_guard = crate::io::lock::acquire_lock(&lock_path, 5).map_err(|e| {
+    let _lock_guard = crate::io::lock::acquire_lock(&lock_path, 40).map_err(|e| {
         anyhow::anyhow!(
             "failed to acquire daemon lock at {} before runtime cleanup: {e}",
             lock_path.display()
