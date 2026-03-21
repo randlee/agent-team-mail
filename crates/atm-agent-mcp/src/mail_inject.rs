@@ -433,13 +433,16 @@ mod tests {
         unsafe {
             std::env::set_var("HOME", dir.path());
             std::env::set_var("ATM_HOME", dir.path().join("runtime-home"));
+            std::env::set_var("USERPROFILE", dir.path());
+            std::env::set_var("ATM_HOME", dir.path().join("runtime-home"));
         };
     }
 
     fn unset_atm_home() {
         unsafe {
-            std::env::remove_var("ATM_HOME");
             std::env::remove_var("HOME");
+            std::env::remove_var("USERPROFILE");
+            std::env::remove_var("ATM_HOME");
         };
     }
 

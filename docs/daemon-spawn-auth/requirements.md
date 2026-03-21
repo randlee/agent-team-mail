@@ -159,7 +159,7 @@ No other crate may define or issue a competing launch token schema.
   - `atm_home`
     - canonicalized runtime path for the accepted launch
   - `launch_class`
-    - `prod-shared`, `dev-shared`, or `isolated-test`
+    - `shared` or `isolated-test`
   - `token_id`
     - launch token nonce / UUID for the accepted daemon start
   - `ts` (top-level `LogEventV1` key)
@@ -170,8 +170,8 @@ No other crate may define or issue a competing launch token schema.
   - `atm_home`
     - canonicalized runtime path for the terminated daemon
   - `launch_class`
-    - emitted for all launch classes (`prod-shared`, `dev-shared`,
-      `isolated-test`); not restricted to test-owned daemons
+    - emitted for all launch classes (`shared`, `isolated-test`); not
+      restricted to test-owned daemons
   - `token_id`
     - launch token nonce / UUID when known
   - `ts` (top-level `LogEventV1` key)

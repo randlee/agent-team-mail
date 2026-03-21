@@ -55,6 +55,11 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///
 /// This metadata is used by CLI autostart/health paths to validate daemon
 /// identity (PID/home scope/executable) before trusting a pre-existing process.
+///
+/// `shared` is the only production runtime class after BB.2. The `release`
+/// and `dev` serde aliases remain only to decode pre-BB.2 metadata safely
+/// during the migration window; new metadata must serialize as `shared` or
+/// `isolated`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeKind {
@@ -617,11 +622,6 @@ fn looks_like_repo_or_worktree_binary(path: &Path) -> bool {
     false
 }
 
-fn is_approved_shared_binary(path: &Path, input: &RuntimePolicyInput) -> bool {
-    let _ = input;
-    !looks_like_repo_or_worktree_binary(path)
-}
-
 fn evaluate_runtime_owner_metadata(input: &RuntimePolicyInput) -> RuntimeOwnerMetadata {
     let home_scope = canonicalize_lossy(&input.home_scope);
     let daemon_bin = canonicalize_lossy(&input.daemon_bin);
@@ -635,6 +635,8 @@ fn evaluate_runtime_owner_metadata(input: &RuntimePolicyInput) -> RuntimeOwnerMe
     }
 }
 
+/// Used only for test isolation boundary checks. Not part of the production
+/// shared-daemon admission path after BB.2.
 fn classify_runtime_kind_from_home_scope(home_scope: &Path) -> RuntimeKind {
     let canonical_temp_root = canonicalize_lossy(&std::env::temp_dir());
     let is_isolated = read_runtime_metadata(home_scope)
@@ -653,6 +655,46 @@ fn classify_runtime_kind_from_home_scope(home_scope: &Path) -> RuntimeKind {
     }
 }
 
+fn canonical_shared_runtime_root() -> anyhow::Result<PathBuf> {
+    Ok(canonicalize_lossy(&crate::home::get_os_home_dir()?))
+}
+
+// Enforces BB.2 single-daemon invariant: one canonical runtime root, one
+// binary selection policy. See docs/daemon-spawn-auth/requirements.md.
+fn enforce_shared_runtime_invariant(
+    input: &RuntimePolicyInput,
+    owner: &RuntimeOwnerMetadata,
+) -> anyhow::Result<()> {
+    let expected_home = canonical_shared_runtime_root()?;
+    let actual_home = canonicalize_lossy(&input.home_scope);
+    if actual_home != expected_home {
+        anyhow::bail!(
+            "shared runtime must use canonical runtime root {}; refusing ATM_HOME={}",
+            expected_home.display(),
+            actual_home.display()
+        );
+    }
+
+    if owner.build_profile != BuildProfile::Release {
+        anyhow::bail!(
+            "shared runtime requires a release build; refusing daemon at {} (build_profile={})",
+            owner.executable_path,
+            owner.build_profile.as_str()
+        );
+    }
+
+    let daemon_bin = PathBuf::from(&owner.executable_path);
+    if looks_like_repo_or_worktree_binary(&daemon_bin) {
+        anyhow::bail!(
+            "shared runtime requires an approved daemon binary; refusing {} for ATM_HOME={}",
+            owner.executable_path,
+            owner.home_scope
+        );
+    }
+
+    Ok(())
+}
+
 fn validate_runtime_admission_input(
     input: &RuntimePolicyInput,
 ) -> anyhow::Result<RuntimeOwnerMetadata> {
@@ -662,29 +704,7 @@ fn validate_runtime_admission_input(
         return Ok(owner);
     }
 
-    if owner.build_profile != BuildProfile::Release {
-        anyhow::bail!(
-            "shared {} runtime requires a release build; refusing daemon at {} (build_profile={})",
-            owner.runtime_kind.as_str(),
-            owner.executable_path,
-            owner.build_profile.as_str()
-        );
-    }
-
-    let daemon_bin = PathBuf::from(&owner.executable_path);
-    let approved = match owner.runtime_kind {
-        RuntimeKind::Shared => is_approved_shared_binary(&daemon_bin, input),
-        RuntimeKind::Isolated => true,
-    };
-
-    if !approved {
-        anyhow::bail!(
-            "shared runtime requires an approved daemon binary; refusing {} for ATM_HOME={}",
-            owner.executable_path,
-            owner.home_scope
-        );
-    }
-
+    enforce_shared_runtime_invariant(input, &owner)?;
     Ok(owner)
 }
 
@@ -2185,13 +2205,11 @@ fn daemon_autostart_enabled() -> bool {
 }
 
 #[cfg(unix)]
-fn resolve_daemon_binary_candidates() -> anyhow::Result<Vec<PathBuf>> {
-    let mut candidates = Vec::new();
-
+fn resolve_daemon_binary_path() -> anyhow::Result<PathBuf> {
     if let Some(override_bin) = std::env::var_os("ATM_DAEMON_BIN")
         && !override_bin.is_empty()
     {
-        candidates.push(PathBuf::from(override_bin));
+        return Ok(PathBuf::from(override_bin));
     }
 
     let name = std::ffi::OsString::from("atm-daemon");
@@ -2199,13 +2217,9 @@ fn resolve_daemon_binary_candidates() -> anyhow::Result<Vec<PathBuf>> {
         && let Some(dir) = current_exe.parent()
     {
         let sibling = dir.join(std::path::Path::new(&name));
-        if sibling.exists() && !candidates.iter().any(|candidate| candidate == &sibling) {
-            candidates.push(sibling);
+        if sibling.exists() {
+            return Ok(sibling);
         }
-    }
-
-    if !candidates.is_empty() {
-        return Ok(candidates);
     }
 
     anyhow::bail!(
@@ -2215,39 +2229,9 @@ fn resolve_daemon_binary_candidates() -> anyhow::Result<Vec<PathBuf>> {
 
 #[cfg(unix)]
 fn resolve_daemon_binary_for_home(home: &Path) -> anyhow::Result<(PathBuf, RuntimeOwnerMetadata)> {
-    // Shells may export a dev-channel ATM_DAEMON_BIN globally while commands
-    // target the default shared ATM_HOME. Prefer a compatible sibling daemon
-    // binary for the resolved runtime instead of letting a cross-channel
-    // override strand release-runtime diagnostics at autostart time.
-    let mut candidates = resolve_daemon_binary_candidates()?;
-    let override_was_explicit =
-        std::env::var_os("ATM_DAEMON_BIN").is_some_and(|value| !value.is_empty());
-    let mut first_error = None;
-
-    while let Some(candidate) = candidates.first().cloned() {
-        candidates.remove(0);
-        match validate_runtime_admission(home, &candidate) {
-            Ok(owner) => return Ok((candidate, owner)),
-            Err(err) => {
-                let can_fallback = override_was_explicit
-                    && candidate.exists()
-                    && !candidates.is_empty()
-                    && err.to_string().contains("approved daemon binary");
-                if can_fallback {
-                    first_error.get_or_insert(err);
-                    continue;
-                }
-                return Err(err);
-            }
-        }
-    }
-
-    Err(first_error.unwrap_or_else(|| {
-        anyhow::anyhow!(
-            "failed to resolve a daemon binary candidate for {}",
-            home.display()
-        )
-    }))
+    let daemon_bin = resolve_daemon_binary_path()?;
+    let owner = validate_runtime_admission(home, &daemon_bin)?;
+    Ok((daemon_bin, owner))
 }
 
 #[cfg(unix)]
@@ -2713,9 +2697,8 @@ fn detect_daemon_identity_mismatch(
         .unwrap_or_else(|_| home.to_path_buf())
         .to_string_lossy()
         .to_string();
-    let expected_bin = resolve_daemon_binary_candidates()
+    let expected_bin = resolve_daemon_binary_path()
         .ok()
-        .and_then(|candidates| candidates.into_iter().next())
         .map(|path| path.into_os_string());
     let snapshot = DaemonIdentitySnapshot {
         pid_from_file,
@@ -2977,6 +2960,21 @@ fn pid_alive(pid: i32) -> bool {
 mod tests {
     use super::*;
     use crate::home::get_os_home_dir;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn non_temp_shared_home() -> tempfile::TempDir {
+        let base = std::env::current_dir().expect("current dir");
+        tempfile::Builder::new()
+            .prefix("bb2-shared-home-")
+            .tempdir_in(base)
+            .expect("shared home tempdir")
+    }
+
     struct EnvGuard {
         key: &'static str,
         old: Option<String>,
@@ -3243,8 +3241,8 @@ mod tests {
         let custom = tmp.path().join("custom-atm-daemon");
         std::fs::write(&custom, "#!/bin/sh\nexit 0\n").unwrap();
         let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", custom.to_str().unwrap());
-        let candidates = resolve_daemon_binary_candidates().expect("override should resolve");
-        assert_eq!(candidates.first(), Some(&custom));
+        let resolved = resolve_daemon_binary_path().expect("override should resolve");
+        assert_eq!(resolved, custom);
     }
 
     #[cfg(unix)]
@@ -3491,9 +3489,12 @@ sleep 10
     #[cfg(unix)]
     #[test]
     fn test_validate_runtime_admission_accepts_shared_override_binary() {
-        let shared_home = get_os_home_dir()
-            .unwrap()
-            .join(".atm-shared-runtime-override-test");
+        let _lock = env_lock().lock().unwrap();
+        let shared_home_dir = non_temp_shared_home();
+        let _home_guard = EnvGuard::set("HOME", shared_home_dir.path().to_str().unwrap());
+        let _user_guard = EnvGuard::set("USERPROFILE", shared_home_dir.path().to_str().unwrap());
+        let _atm_guard = EnvGuard::unset("ATM_HOME");
+        let shared_home = get_os_home_dir().unwrap();
         let input = RuntimePolicyInput {
             home_scope: shared_home,
             daemon_bin: PathBuf::from("/bin/sh"),
@@ -3509,12 +3510,15 @@ sleep 10
     #[cfg(unix)]
     #[test]
     fn test_validate_runtime_admission_rejects_repo_binary_for_shared_runtime() {
+        let _lock = env_lock().lock().unwrap();
+        let shared_home_dir = non_temp_shared_home();
+        let _home_guard = EnvGuard::set("HOME", shared_home_dir.path().to_str().unwrap());
+        let _user_guard = EnvGuard::set("USERPROFILE", shared_home_dir.path().to_str().unwrap());
+        let _atm_guard = EnvGuard::unset("ATM_HOME");
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
-        let shared_home = get_os_home_dir()
-            .unwrap()
-            .join(".atm-shared-runtime-repo-test");
+        let shared_home = get_os_home_dir().unwrap();
         let input = RuntimePolicyInput {
             home_scope: shared_home,
             daemon_bin: repo.join("target").join("release").join("atm-daemon"),
@@ -3528,9 +3532,12 @@ sleep 10
     #[cfg(unix)]
     #[test]
     fn test_validate_runtime_admission_rejects_debug_build_for_shared_release_runtime() {
-        let shared_home = get_os_home_dir()
-            .unwrap()
-            .join(".atm-shared-runtime-debug-test");
+        let _lock = env_lock().lock().unwrap();
+        let shared_home_dir = non_temp_shared_home();
+        let _home_guard = EnvGuard::set("HOME", shared_home_dir.path().to_str().unwrap());
+        let _user_guard = EnvGuard::set("USERPROFILE", shared_home_dir.path().to_str().unwrap());
+        let _atm_guard = EnvGuard::unset("ATM_HOME");
+        let shared_home = get_os_home_dir().unwrap();
         let input = RuntimePolicyInput {
             home_scope: shared_home,
             daemon_bin: PathBuf::from("/opt/homebrew/bin/atm-daemon"),
@@ -3539,6 +3546,26 @@ sleep 10
 
         let err = validate_runtime_admission_input(&input).expect_err("debug build must be denied");
         assert!(err.to_string().contains("requires a release build"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_runtime_admission_rejects_noncanonical_shared_home() {
+        let _lock = env_lock().lock().unwrap();
+        let shared_home_dir = non_temp_shared_home();
+        let _home_guard = EnvGuard::set("HOME", shared_home_dir.path().to_str().unwrap());
+        let _user_guard = EnvGuard::set("USERPROFILE", shared_home_dir.path().to_str().unwrap());
+        let _atm_guard = EnvGuard::unset("ATM_HOME");
+        let shared_home = get_os_home_dir().unwrap().join(".atm-alt-runtime-home");
+        let input = RuntimePolicyInput {
+            home_scope: shared_home,
+            daemon_bin: PathBuf::from("/bin/sh"),
+            build_profile: BuildProfile::Release,
+        };
+
+        let err = validate_runtime_admission_input(&input)
+            .expect_err("noncanonical shared runtime home must be denied");
+        assert!(err.to_string().contains("canonical runtime root"));
     }
 
     #[cfg(unix)]

@@ -1511,6 +1511,7 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::env;
+    use std::ffi::{OsStr, OsString};
     use tempfile::TempDir;
 
     fn entry_uses_session_hook_schema(entry: &serde_json::Value) -> bool {
@@ -1529,6 +1530,41 @@ mod tests {
     // -----------------------------------------------------------------------
     fn temp_settings(dir: &TempDir) -> PathBuf {
         dir.path().join(".claude").join("settings.json")
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &Path) -> Self {
+            let guard = Self {
+                key,
+                original: env::vars_os().find_map(|(current_key, current_value)| {
+                    (current_key == OsStr::new(key)).then_some(current_value)
+                }),
+            };
+
+            // SAFETY: serialized tests own process env mutations.
+            unsafe {
+                env::set_var(key, value);
+            }
+
+            guard
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: serialized tests own process env mutations.
+            unsafe {
+                match &self.original {
+                    Some(value) => env::set_var(self.key, value),
+                    None => env::remove_var(self.key),
+                }
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1860,22 +1896,10 @@ mod tests {
     #[serial]
     fn test_resolve_settings_path_global_uses_os_home() {
         let dir = TempDir::new().expect("tempdir");
-        let old_home = env::var("HOME").ok();
-
-        // SAFETY: single-threaded test manipulating env var.
-        unsafe {
-            env::set_var("HOME", dir.path());
-        }
+        let _home_guard = EnvVarGuard::set_path("HOME", dir.path());
 
         let path = resolve_settings_path(true).expect("resolve global");
         assert_eq!(path, dir.path().join(".claude").join("settings.json"));
-
-        unsafe {
-            match old_home {
-                Some(v) => env::set_var("HOME", v),
-                None => env::remove_var("HOME"),
-            }
-        }
     }
 
     /// Global hook commands must use resolved absolute script paths, not
@@ -1934,13 +1958,9 @@ mod tests {
         let repo_dir = dir.path().join("repo");
         std::fs::create_dir_all(&repo_dir).expect("create repo");
         let original_dir = env::current_dir().expect("original cwd");
-        let old_home = env::var("HOME").ok();
+        let _home_guard = EnvVarGuard::set_path("HOME", dir.path());
+        let _atm_home_guard = EnvVarGuard::set_path("ATM_HOME", &dir.path().join("runtime-home"));
 
-        // SAFETY: serialized test controls process env and cwd.
-        unsafe {
-            env::set_var("HOME", dir.path());
-            env::set_var("ATM_HOME", dir.path().join("runtime-home"));
-        }
         env::set_current_dir(&repo_dir).expect("set cwd");
 
         let result = execute(InitArgs {
@@ -1953,14 +1973,6 @@ mod tests {
         });
 
         env::set_current_dir(original_dir).expect("restore cwd");
-        // SAFETY: serialized test cleanup.
-        unsafe {
-            match old_home {
-                Some(v) => env::set_var("HOME", v),
-                None => env::remove_var("HOME"),
-            }
-            env::remove_var("ATM_HOME");
-        }
 
         assert!(result.is_ok());
         assert!(
