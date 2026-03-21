@@ -325,7 +325,7 @@ mod tests {
 
     fn runtime_owner(home: &std::path::Path) -> RuntimeOwnerMetadata {
         RuntimeOwnerMetadata {
-            runtime_kind: RuntimeKind::Isolated,
+            runtime_kind: RuntimeKind::Shared,
             build_profile: BuildProfile::Release,
             executable_path: home.join("atm-daemon").to_string_lossy().into_owned(),
             home_scope: home.to_string_lossy().into_owned(),

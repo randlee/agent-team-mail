@@ -282,7 +282,7 @@ fn create_test_status_writer(temp_dir: &TempDir) -> Arc<StatusWriter> {
         temp_dir.path().to_path_buf(),
         "test-version".to_string(),
         RuntimeOwnerMetadata {
-            runtime_kind: RuntimeKind::Dev,
+            runtime_kind: RuntimeKind::Shared,
             build_profile: BuildProfile::Release,
             executable_path: temp_dir
                 .path()

@@ -45,6 +45,9 @@ fn check_file(path: &Path) -> Result<(), Vec<String>> {
     }
 
     let mut violations = Vec::new();
+    let mut pending_cfg_test = false;
+    let mut in_cfg_test_module = false;
+    let mut test_module_brace_depth: isize = 0;
 
     for (line_num, line) in content.lines().enumerate() {
         let line_num = line_num + 1; // 1-indexed
@@ -55,10 +58,22 @@ fn check_file(path: &Path) -> Result<(), Vec<String>> {
             continue;
         }
 
+        if trimmed == "#[cfg(test)]" {
+            pending_cfg_test = true;
+            continue;
+        }
+
+        if pending_cfg_test && trimmed.starts_with("mod tests") {
+            in_cfg_test_module = true;
+            pending_cfg_test = false;
+        } else if !trimmed.is_empty() {
+            pending_cfg_test = false;
+        }
+
         // Check for forbidden calls
         if line.contains("dirs::home_dir()") {
             violations.push(format!(
-                "{}:{}: Found raw `dirs::home_dir()` call - use `agent_team_mail_core::home::get_home_dir()` instead",
+                "{}:{}: Found raw `dirs::home_dir()` call - use `agent_team_mail_core::home::get_home_dir()` or `get_os_home_dir()` instead",
                 path.display(),
                 line_num
             ));
@@ -66,22 +81,33 @@ fn check_file(path: &Path) -> Result<(), Vec<String>> {
 
         if line.contains("dirs::config_dir()") {
             violations.push(format!(
-                "{}:{}: Found raw `dirs::config_dir()` call - use `agent_team_mail_core::home::get_home_dir()` instead",
+                "{}:{}: Found raw `dirs::config_dir()` call - use config-root helpers from `agent_team_mail_core::home` instead",
                 path.display(),
                 line_num
             ));
         }
 
-        if line.contains("std::env::var(\"HOME\")")
+        let raw_home_lookup = line.contains("std::env::var(\"HOME\")")
             || line.contains("std::env::var(\"USERPROFILE\")")
             || line.contains("env::var(\"HOME\")")
-            || line.contains("env::var(\"USERPROFILE\")")
-        {
+            || line.contains("env::var(\"USERPROFILE\")");
+        let allow_raw_home_lookup =
+            path.to_string_lossy().contains("/tests/") || in_cfg_test_module;
+        if raw_home_lookup && !allow_raw_home_lookup {
             violations.push(format!(
-                "{}:{}: Found raw HOME/USERPROFILE env lookup - use `agent_team_mail_core::home::get_home_dir()` instead",
+                "{}:{}: Found raw HOME/USERPROFILE env lookup - use `agent_team_mail_core::home::get_home_dir()` or `get_os_home_dir()` instead",
                 path.display(),
                 line_num
             ));
+        }
+
+        if in_cfg_test_module {
+            test_module_brace_depth += line.matches('{').count() as isize;
+            test_module_brace_depth -= line.matches('}').count() as isize;
+            if test_module_brace_depth <= 0 && trimmed == "}" {
+                in_cfg_test_module = false;
+                test_module_brace_depth = 0;
+            }
         }
     }
 
@@ -134,9 +160,11 @@ fn audit_no_raw_home_dir_calls() {
             eprintln!("  {}", violation);
         }
         eprintln!(
-            "\nAll home directory resolution must use `agent_team_mail_core::home::get_home_dir()`"
+            "\nAll production home directory resolution must use canonical helpers in `agent_team_mail_core::home`"
         );
-        eprintln!("This ensures consistent behavior across platforms and respect for ATM_HOME.\n");
+        eprintln!(
+            "This ensures runtime-root vs config-root behavior stays explicit across platforms.\n"
+        );
         panic!(
             "Home directory audit failed with {} violations",
             all_violations.len()
@@ -144,7 +172,7 @@ fn audit_no_raw_home_dir_calls() {
     }
 
     println!(
-        "✓ Home directory audit passed - all {} files use canonical get_home_dir()",
+        "✓ Home directory audit passed - all {} files use canonical home helpers",
         rust_files.len()
     );
 }

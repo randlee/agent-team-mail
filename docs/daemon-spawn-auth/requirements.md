@@ -24,12 +24,14 @@ and are no longer part of the product contract.
 
 ## Single-Daemon Invariant
 
-- `atm-daemon` MUST only start against the canonical shared runtime root for the
-  current user.
-- Startup MUST reject:
-  - missing launch tokens
-  - invalid, expired, replayed, or mismatched tokens
-  - attempts to start a second shared daemon while the canonical daemon is live
+- `atm-daemon` MUST reject startup without a valid launch token issued by the
+  canonical launcher.
+- Missing, invalid, expired, replayed, or mismatched tokens MUST cause
+  immediate exit with structured rejection logs.
+- `atm-daemon` MUST only start against the canonical shared runtime root for
+  the current user.
+- Shared startup MUST hard-fail duplicate starts while the canonical daemon is
+  live.
 - There is one approved daemon binary selection policy for the shared daemon.
   Product code MUST NOT loop across competing binary candidates or runtime-home
   ownership claims.
@@ -40,15 +42,13 @@ and are no longer part of the product contract.
 
 Required fields:
 - `launch_class`
+  - enum: `shared`
 - `atm_home`
 - `binary_identity`
 - `issuer`
 - `token_id`
 - `issued_at`
 - `expires_at`
-
-Supported launch classes:
-- `shared`
 
 Compatibility note:
 - older serialized values may still decode during migration work, but only the
@@ -67,26 +67,4 @@ Serialization note:
 - lifecycle events are stored as `LogEventV1` JSONL records
 - the canonical event name is the top-level `action`
 - `fields.event_name` may mirror the same value for consumers that still read
-  structured fields
-- the emission timestamp is always top-level `ts`
-
-## Dogfood Gate
-
-The canonical manual daemon smoke protocol is Phase AR:
-- `docs/project-plan.md` section `17.26`
-- `scripts/dev-daemon-smoke.py`
-
-Any daemon reset or release-readiness change MUST use that protocol as the
-manual dogfood gate before merge or release.
-
-## CI / Boundary Contract
-
-- Any non-canonical daemon spawn path is a blocking violation.
-- `scripts/ci/gh_boundary_check.sh` remains the required CI enforcement surface
-  for daemon-launch boundary regressions.
-
-## Non-Goals
-
-- multi-daemon ownership arbitration
-- per-test isolated daemon runtime support as a product behavior
-- daemon launch-token fields that embed GitHub/provider-specific payloads
+  structured field maps

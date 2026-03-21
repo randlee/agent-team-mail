@@ -73,7 +73,7 @@ fn autostart_failure_logs_structured_event_with_stderr_tail_context() {
     let script_path = home.join("fake-daemon-fail.sh");
     let leaked_pid_path = home.join("leaked-autostart-child.pid");
     let script = format!(
-        "#!/bin/sh\nset -eu\n(sleep 30) &\nbgpid=$!\nprintf '%s\\n' \"$bgpid\" > \"{}\"\necho \"fatal: invalid plugin config\" >&2\nexit 42\n",
+        "#!/bin/sh\nset -eu\nnohup sleep 30 >/dev/null 2>&1 &\nbgpid=$!\nprintf '%s\\n' \"$bgpid\" > \"{}\"\necho \"fatal: invalid plugin config\" >&2\nexit 42\n",
         leaked_pid_path.display()
     );
     fs::write(&script_path, script).expect("write script");
@@ -84,8 +84,10 @@ fn autostart_failure_logs_structured_event_with_stderr_tail_context() {
     fs::set_permissions(&script_path, perms).expect("chmod script");
 
     let _home_guard = EnvGuard::set("ATM_HOME", &home);
+    let _os_home_guard = EnvGuard::set("HOME", &home);
     let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", &script_path);
     let _autostart_guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "1");
+    let _shared_guard = EnvGuard::set("ATM_TEST_SHARED_DAEMON_ADMISSION", "1");
 
     let missing_socket = home.join(".atm/daemon/atm-daemon.sock");
     let spool = spool_dir(&home);

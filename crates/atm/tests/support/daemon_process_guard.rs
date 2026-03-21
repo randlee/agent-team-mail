@@ -1,9 +1,10 @@
-use agent_team_mail_daemon_launch::{attach_launch_token, issue_isolated_test_launch_token};
+use agent_team_mail_daemon_launch::{LaunchClass, attach_launch_token, issue_launch_token};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -20,7 +21,7 @@ pub struct DaemonProcessGuard {
 
 impl DaemonProcessGuard {
     pub fn runtime_home_path(home: &TempDir) -> PathBuf {
-        home.path().join("runtime-home")
+        home.path().to_path_buf()
     }
 
     pub fn spawn(home: &TempDir, team: &str) -> Self {
@@ -39,6 +40,7 @@ impl DaemonProcessGuard {
         let mut cmd = Command::new(&daemon_bin);
         cmd.env("ATM_HOME", &runtime_home)
             .envs([("HOME", home.path())])
+            .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
             .env("ATM_DAEMON_AUTOSTART", "0")
             .env_remove("ATM_CONFIG")
             .env_remove("ATM_DAEMON_BIN") // F-1: prevent inheriting installed binary
@@ -49,16 +51,11 @@ impl DaemonProcessGuard {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let launch_token = issue_isolated_test_launch_token(
+        let launch_token = issue_launch_token(
+            LaunchClass::Shared,
             &runtime_home,
             daemon_bin.display().to_string(),
             "DaemonProcessGuard::spawn",
-            format!(
-                "DaemonProcessGuard::spawn:{}:{}",
-                team,
-                runtime_home.display()
-            ),
-            std::process::id(),
             Duration::from_secs(600),
         );
         attach_launch_token(&mut cmd, &launch_token).expect("encode daemon launch token");
@@ -354,6 +351,30 @@ fn send_signal(_pid: i32, _sig: i32) {}
 fn reap_child_pid_best_effort(_pid: i32) {}
 
 pub(crate) fn daemon_binary_path() -> PathBuf {
+    static BUILT: OnceLock<()> = OnceLock::new();
+    BUILT.get_or_init(|| {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|path| path.parent())
+            .expect("workspace root from crates/atm")
+            .to_path_buf();
+        let status = Command::new("cargo")
+            .arg("build")
+            .arg("-p")
+            .arg("agent-team-mail-daemon")
+            .arg("--bin")
+            .arg("atm-daemon")
+            .current_dir(&workspace_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("build atm-daemon binary for integration tests");
+        assert!(
+            status.success(),
+            "cargo build -p agent-team-mail-daemon --bin atm-daemon failed"
+        );
+    });
     // Locate the build output directory from the current test binary path.
     // For integration tests, `current_exe()` is in `target/<profile>/deps/`.
     // The daemon binary lives one level up in `target/<profile>/`.
