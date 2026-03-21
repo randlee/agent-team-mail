@@ -290,10 +290,14 @@ Detailed observability requirements are defined in:
 - Must use `sc-observability` as the logging implementation (no duplicate local logger).
 - Must emit command lifecycle and composition diagnostics events required by
   observability requirements.
-- Standalone defaults must keep `sc-compose` sink paths tool-scoped.
-- Embedded usage must permit host-injected sink/path configuration.
-- OTel support remains optional and feature-gated, aligned with observability
-  baseline trace/metric naming.
+- Dual-mode observability injection is **mandatory** (see `docs/sc-compose/requirements.md`
+  FR-SCO-001..014 for the full normative spec):
+  - **Library mode**: caller MUST inject log file path and OTel project settings;
+    `sc-composer` MUST NOT resolve defaults or initialize OTel independently.
+  - **Standalone CLI mode**: default per-tool log path and OTel defaults apply.
+- OTel support: when embedded as a library, all spans/records MUST carry caller-injected
+  `session_id`, `team`, `agent`. OTel exporter MUST be caller-supplied; `sc-composer`
+  MUST NOT open its own OTLP connection in library mode.
 
 ## 4. Non-Functional Requirements
 

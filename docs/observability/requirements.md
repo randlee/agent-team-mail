@@ -326,8 +326,35 @@ They must not be treated as delivered by this repository's AV implementation.
 
 - `sc-compose` and `sc-composer` must use `sc-observability` instead of local,
   duplicated logger implementations.
-- Embedded-library usage must allow host-injected sink/path configuration.
-- Standalone tool defaults remain per-tool scoped (for example `sc-compose` log root).
+
+### 10.0 Dual-Mode Observability Injection (Foundational)
+
+This is a foundational requirement. All observability features in `sc-compose` and
+`sc-composer` — logging, OTel, spool, health reporting — MUST be designed around it.
+
+**Library mode** (embedded in a caller):
+- The caller MUST inject the log file path. `sc-compose` MUST NOT resolve or default
+  a log path independently.
+- The caller MUST inject OTel project settings (exporter endpoint, resource attributes,
+  `session_id`, `team`, `agent`). `sc-compose` MUST NOT initialize OTel independently.
+- `sc-compose` MUST NOT fall back to `ATM_HOME`, `SC_COMPOSE_HOME`, or any environment
+  variable for log or OTel resolution in library mode. All paths are caller-supplied.
+- `sc-compose` MUST NOT emit to any observability sink not explicitly supplied by the caller.
+
+**Standalone CLI mode** (invoked directly):
+- `sc-compose` MUST use the default per-tool log path:
+  `${home_dir}/.config/sc-compose/logs/sc-compose.log.jsonl`
+- An explicit operator override MAY override the default log root.
+- OTel defaults: local `.otel.jsonl` sidecar enabled; OTLP export enabled if
+  `SC_COMPOSE_OTEL_ENDPOINT` is set.
+
+**OTel injection**:
+- All OTel spans/records emitted by `sc-compose`/`sc-composer` in library mode MUST
+  carry `session_id`, `team`, and `agent` as injected by the caller.
+- The OTel exporter MUST be caller-supplied in library mode. `sc-compose` MUST accept
+  a pre-configured exporter or no-op; it MUST NOT open its own OTLP connection.
+
+See `docs/sc-compose/requirements.md` for the full normative FR-SCO-001..014 specification.
 
 ### 10.1 External Consumer Contract (`scmux` / `schook`)
 
