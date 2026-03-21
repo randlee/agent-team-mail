@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Canonical manual dev-daemon smoke harness from Phase AR (project-plan 17.26)."""
 import json
 import os
 import pathlib
