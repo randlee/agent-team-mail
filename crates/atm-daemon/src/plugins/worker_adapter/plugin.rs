@@ -21,6 +21,7 @@ use agent_team_mail_core::daemon_client::{LaunchConfig, LaunchResult};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::io::inbox::{inbox_append, inbox_update};
 use agent_team_mail_core::schema::InboxMessage;
+use agent_team_mail_core::team_config_store::TeamConfigStore;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -323,6 +324,51 @@ impl WorkerAdapterPlugin {
         }
     }
 
+    fn parse_sender_identity<'a>(&self, sender: &'a str) -> (&'a str, Option<&'a str>) {
+        match sender.split_once('@') {
+            Some((name, team)) if !name.is_empty() && !team.is_empty() => (name, Some(team)),
+            _ => (sender, None),
+        }
+    }
+
+    fn team_has_member(&self, ctx: &PluginContext, team_name: &str, member_name: &str) -> bool {
+        let team_dir = ctx.system.claude_root.join("teams").join(team_name);
+        let Ok(config) = TeamConfigStore::open(&team_dir).read() else {
+            return false;
+        };
+        let expected_agent_id = format!("{member_name}@{team_name}");
+        config.lead_agent_id == expected_agent_id
+            || config
+                .members
+                .iter()
+                .any(|member| member.name == member_name || member.agent_id == expected_agent_id)
+    }
+
+    fn resolve_sender_route(
+        &self,
+        ctx: &PluginContext,
+        msg: &InboxMessage,
+    ) -> Result<(String, String), PluginError> {
+        let (sender_name, qualified_team) = self.parse_sender_identity(&msg.from);
+        let sender_team = msg
+            .source_team
+            .as_deref()
+            .filter(|team| !team.is_empty())
+            .or(qualified_team)
+            .unwrap_or_else(|| self.resolve_team_name(ctx, Some(msg)));
+
+        if self.team_has_member(ctx, sender_team, sender_name) {
+            Ok((sender_team.to_string(), sender_name.to_string()))
+        } else {
+            Err(PluginError::Runtime {
+                message: format!(
+                    "worker adapter cannot route sender {sender_name}@{sender_team}: sender not found in team roster"
+                ),
+                source: None,
+            })
+        }
+    }
+
     fn team_config_path(&self, ctx: &PluginContext, team_name: &str) -> std::path::PathBuf {
         ctx.system
             .claude_root
@@ -342,13 +388,7 @@ impl WorkerAdapterPlugin {
         }
     }
 
-    fn notify_routing_issue(
-        &self,
-        ctx: &PluginContext,
-        team_name: &str,
-        sender_name: &str,
-        details: &str,
-    ) {
+    fn notify_routing_issue(&self, ctx: &PluginContext, message: &InboxMessage, details: &str) {
         let warning_text = format!(
             "Warning: worker_adapter could not route your message. {details}\n\nAction: Please specify a valid recipient (agent member_name)."
         );
@@ -364,17 +404,25 @@ impl WorkerAdapterPlugin {
             unknown_fields: HashMap::new(),
         };
 
-        let team_root = ctx.system.claude_root.join("teams").join(team_name);
+        let (sender_team, sender_name) = match self.resolve_sender_route(ctx, message) {
+            Ok(route) => route,
+            Err(e) => {
+                error!("{e}");
+                return;
+            }
+        };
+
+        let team_root = ctx.system.claude_root.join("teams").join(&sender_team);
         let sender_inbox = team_root
             .join("inboxes")
             .join(format!("{sender_name}.json"));
-        if let Err(e) = inbox_append(&sender_inbox, &warn_msg, team_name, sender_name) {
+        if let Err(e) = inbox_append(&sender_inbox, &warn_msg, &sender_team, &sender_name) {
             error!("Failed to warn sender {sender_name}: {e}");
         }
 
         if sender_name != "team-lead" {
             let lead_inbox = team_root.join("inboxes").join("team-lead.json");
-            if let Err(e) = inbox_append(&lead_inbox, &warn_msg, team_name, "team-lead") {
+            if let Err(e) = inbox_append(&lead_inbox, &warn_msg, &sender_team, "team-lead") {
                 error!("Failed to warn team-lead: {e}");
             }
         }
@@ -596,23 +644,20 @@ impl WorkerAdapterPlugin {
         };
 
         // Write response to sender's inbox
-        let sender_name = &message.from;
-
         let ctx = self.ctx.as_ref().ok_or_else(|| PluginError::Runtime {
             message: "Plugin context not initialized".to_string(),
             source: None,
         })?;
 
-        // Use workers.team_name or message team (if present)
-        let team_name = self.resolve_team_name(ctx, Some(&message));
+        let (sender_team, sender_name) = self.resolve_sender_route(ctx, &message)?;
         let home_dir = &ctx.system.claude_root;
         let sender_inbox_path = home_dir
             .join("teams")
-            .join(team_name)
+            .join(&sender_team)
             .join("inboxes")
             .join(format!("{sender_name}.json"));
 
-        if let Err(e) = inbox_append(&sender_inbox_path, &response, team_name, sender_name) {
+        if let Err(e) = inbox_append(&sender_inbox_path, &response, &sender_team, &sender_name) {
             error!("Failed to write response to {sender_name} inbox: {e}");
         } else {
             debug!("Wrote response to {sender_name} inbox");
@@ -1381,8 +1426,6 @@ impl Plugin for WorkerAdapterPlugin {
             source: None,
         })?;
 
-        let team_name = self.resolve_team_name(ctx, Some(msg));
-
         let recipient = msg
             .unknown_fields
             .get("recipient")
@@ -1392,12 +1435,7 @@ impl Plugin for WorkerAdapterPlugin {
         let recipient = match recipient {
             Some(recipient) => recipient,
             None => {
-                self.notify_routing_issue(
-                    ctx,
-                    team_name,
-                    &msg.from,
-                    "Recipient not specified in message metadata.",
-                );
+                self.notify_routing_issue(ctx, msg, "Recipient not specified in message metadata.");
                 return Ok(());
             }
         };
@@ -1413,8 +1451,7 @@ impl Plugin for WorkerAdapterPlugin {
         let Some(config_key) = target_config_key else {
             self.notify_routing_issue(
                 ctx,
-                team_name,
-                &msg.from,
+                msg,
                 &format!("Recipient '{recipient}' not found or not enabled."),
             );
             return Ok(());
@@ -1431,6 +1468,8 @@ impl Plugin for WorkerAdapterPlugin {
 
 #[cfg(test)]
 mod tests {
+    use super::super::capture::CaptureConfig;
+    use super::super::config::AgentConfig;
     use super::super::mock_backend::{MockCall, MockTmuxBackend};
     use super::*;
     use crate::daemon::session_registry::new_session_registry;
@@ -1438,6 +1477,7 @@ mod tests {
     use crate::roster::RosterService;
     use agent_team_mail_core::config::Config;
     use agent_team_mail_core::context::{Platform, SystemContext};
+    use agent_team_mail_core::schema::{AgentMember, TeamConfig};
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -1464,6 +1504,47 @@ mod tests {
             Arc::new(config),
             Arc::new(RosterService::new(root.to_path_buf())),
         )
+    }
+
+    fn write_test_team(root: &std::path::Path, team: &str, members: &[&str]) {
+        let team_dir = root.join(".claude/teams").join(team);
+        std::fs::create_dir_all(team_dir.join("inboxes")).unwrap();
+        let config = TeamConfig {
+            name: team.to_string(),
+            description: Some("test".to_string()),
+            created_at: 1,
+            lead_agent_id: format!("team-lead@{team}"),
+            lead_session_id: String::new(),
+            members: members
+                .iter()
+                .map(|member| AgentMember {
+                    agent_id: format!("{member}@{team}"),
+                    name: (*member).to_string(),
+                    agent_type: "general-purpose".to_string(),
+                    model: "test".to_string(),
+                    prompt: None,
+                    color: None,
+                    plan_mode_required: None,
+                    joined_at: 1,
+                    tmux_pane_id: None,
+                    cwd: ".".to_string(),
+                    subscriptions: Vec::new(),
+                    backend_type: None,
+                    is_active: Some(false),
+                    last_active: None,
+                    session_id: None,
+                    external_backend_type: None,
+                    external_model: None,
+                    unknown_fields: HashMap::new(),
+                })
+                .collect(),
+            unknown_fields: HashMap::new(),
+        };
+        std::fs::write(
+            team_dir.join("config.json"),
+            serde_json::to_string_pretty(&config).unwrap(),
+        )
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1516,6 +1597,127 @@ mod tests {
         );
         assert!(messages[0].is_idle_notification());
         assert_eq!(messages[0].idle_notification_sender(), Some("arch-ctm"));
+    }
+
+    #[test]
+    fn test_notify_routing_issue_routes_cross_team_warning_to_sender_team() {
+        let temp = TempDir::new().unwrap();
+        write_test_team(temp.path(), "atm-dev", &["team-lead", "arch-ctm"]);
+        write_test_team(temp.path(), "src-dev", &["team-lead"]);
+
+        let mut plugin = WorkerAdapterPlugin::new();
+        let ctx = make_test_context(temp.path());
+        plugin.ctx = Some(ctx.clone());
+        plugin.config.enabled = true;
+        plugin.config.team_name = "atm-dev".to_string();
+
+        let mut unknown_fields = HashMap::new();
+        unknown_fields.insert(
+            "team".to_string(),
+            serde_json::Value::String("atm-dev".to_string()),
+        );
+        let message = InboxMessage {
+            from: "team-lead@src-dev".to_string(),
+            source_team: None,
+            text: "route me".to_string(),
+            timestamp: "2026-03-20T00:00:00Z".to_string(),
+            read: false,
+            summary: None,
+            message_id: Some(Uuid::new_v4().to_string()),
+            unknown_fields,
+        };
+
+        plugin.notify_routing_issue(
+            &ctx,
+            &message,
+            "Recipient not specified in message metadata.",
+        );
+
+        let sender_inbox = temp
+            .path()
+            .join(".claude/teams/src-dev/inboxes/team-lead.json");
+        let recipient_team_inbox = temp
+            .path()
+            .join(".claude/teams/atm-dev/inboxes/team-lead.json");
+
+        assert!(sender_inbox.exists(), "warning must route to sender team");
+        assert!(
+            !recipient_team_inbox.exists(),
+            "cross-team warning must not create orphan mailbox in recipient team"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_message_routes_cross_team_response_to_sender_team() {
+        let temp = TempDir::new().unwrap();
+        write_test_team(temp.path(), "atm-dev", &["team-lead", "arch-ctm"]);
+        write_test_team(temp.path(), "src-dev", &["team-lead"]);
+
+        let backend = MockTmuxBackend::new(temp.path().join("logs"));
+        let backend_clone = backend.clone();
+
+        let mut plugin = WorkerAdapterPlugin::new();
+        plugin.backend = Some(Box::new(backend));
+        plugin.ctx = Some(make_test_context(temp.path()));
+        plugin.config.enabled = true;
+        plugin.config.team_name = "atm-dev".to_string();
+        plugin.config.agents.insert(
+            "architect".to_string(),
+            AgentConfig {
+                enabled: true,
+                member_name: "arch-ctm".to_string(),
+                command: None,
+                prompt_template: "{message}".to_string(),
+                concurrency_policy: "queue".to_string(),
+            },
+        );
+        plugin.set_log_tailer(LogTailer::with_config(CaptureConfig {
+            timeout_ms: 500,
+            poll_interval_ms: 10,
+            max_response_bytes: 4096,
+            idle_timeout_ms: 20,
+        }));
+
+        let writer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            backend_clone
+                .write_mock_response("arch-ctm", "Cross-team response")
+                .expect("mock response should write");
+        });
+
+        let message = InboxMessage {
+            from: "team-lead".to_string(),
+            source_team: Some("src-dev".to_string()),
+            text: "hello".to_string(),
+            timestamp: "2026-03-20T00:00:00Z".to_string(),
+            read: false,
+            summary: None,
+            message_id: Some(Uuid::new_v4().to_string()),
+            unknown_fields: HashMap::new(),
+        };
+
+        plugin
+            .process_message("architect", message)
+            .await
+            .expect("cross-team response should route");
+        writer.await.unwrap();
+
+        let sender_inbox = temp
+            .path()
+            .join(".claude/teams/src-dev/inboxes/team-lead.json");
+        let recipient_team_inbox = temp
+            .path()
+            .join(".claude/teams/atm-dev/inboxes/team-lead.json");
+
+        let messages: Vec<InboxMessage> =
+            serde_json::from_str(&std::fs::read_to_string(&sender_inbox).unwrap()).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].from, "arch-ctm");
+        assert_eq!(messages[0].text, "Cross-team response");
+        assert!(
+            !recipient_team_inbox.exists(),
+            "cross-team response must not create orphan mailbox in recipient team"
+        );
     }
 
     #[tokio::test]
