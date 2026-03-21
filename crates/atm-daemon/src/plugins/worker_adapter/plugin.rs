@@ -249,6 +249,24 @@ impl WorkerAdapterPlugin {
             .join("home")
     }
 
+    fn config_claude_root(&self) -> PathBuf {
+        agent_team_mail_core::home::config_claude_root_dir().unwrap_or_else(|_| {
+            self.ctx
+                .as_ref()
+                .map(|ctx| ctx.system.claude_root.clone())
+                .unwrap_or_else(|| PathBuf::from(".claude"))
+        })
+    }
+
+    fn config_team_root(&self, team_name: &str) -> PathBuf {
+        agent_team_mail_core::home::config_team_dir(team_name).unwrap_or_else(|_| {
+            self.ctx
+                .as_ref()
+                .map(|ctx| ctx.system.claude_root.join("teams").join(team_name))
+                .unwrap_or_else(|| PathBuf::from(".claude").join("teams").join(team_name))
+        })
+    }
+
     fn resolve_runtime_session_id(
         &self,
         config: &LaunchConfig,
@@ -332,7 +350,8 @@ impl WorkerAdapterPlugin {
     }
 
     fn team_has_member(&self, ctx: &PluginContext, team_name: &str, member_name: &str) -> bool {
-        let team_dir = ctx.system.claude_root.join("teams").join(team_name);
+        let _ = ctx;
+        let team_dir = self.config_team_root(team_name);
         let Ok(config) = TeamConfigStore::open(&team_dir).read() else {
             return false;
         };
@@ -370,11 +389,8 @@ impl WorkerAdapterPlugin {
     }
 
     fn team_config_path(&self, ctx: &PluginContext, team_name: &str) -> std::path::PathBuf {
-        ctx.system
-            .claude_root
-            .join("teams")
-            .join(team_name)
-            .join("config.json")
+        let _ = ctx;
+        self.config_team_root(team_name).join("config.json")
     }
 
     fn record_activity(&self, ctx: &PluginContext, team_name: &str, member_name: &str) {
@@ -412,7 +428,7 @@ impl WorkerAdapterPlugin {
             }
         };
 
-        let team_root = ctx.system.claude_root.join("teams").join(&sender_team);
+        let team_root = self.config_team_root(&sender_team);
         let sender_inbox = team_root
             .join("inboxes")
             .join(format!("{sender_name}.json"));
@@ -432,10 +448,8 @@ impl WorkerAdapterPlugin {
     ///
     /// Path: `{claude_root}/teams/{team_name}/inboxes/{member_name}.json`
     fn agent_inbox_path(&self, ctx: &PluginContext, team_name: &str, member_name: &str) -> PathBuf {
-        ctx.system
-            .claude_root
-            .join("teams")
-            .join(team_name)
+        let _ = ctx;
+        self.config_team_root(team_name)
             .join("inboxes")
             .join(format!("{member_name}.json"))
     }
@@ -650,12 +664,7 @@ impl WorkerAdapterPlugin {
         })?;
 
         let (sender_team, sender_name) = self.resolve_sender_route(ctx, &message)?;
-        let home_dir = &ctx.system.claude_root;
-        let sender_inbox_path = home_dir
-            .join("teams")
-            .join(&sender_team)
-            .join("inboxes")
-            .join(format!("{sender_name}.json"));
+        let sender_inbox_path = self.agent_inbox_path(ctx, &sender_team, &sender_name);
 
         if let Err(e) = inbox_append(&sender_inbox_path, &response, &sender_team, &sender_name) {
             error!("Failed to write response to {sender_name} inbox: {e}");
@@ -1111,8 +1120,7 @@ impl WorkerAdapterPlugin {
 
         // Use workers.team_name for team lookups, falling back to default_team
         let team_name = self.resolve_team_name(ctx, None);
-        let home_dir = &ctx.system.claude_root;
-        let team_config_path = home_dir.join("teams").join(team_name).join("config.json");
+        let team_config_path = self.team_config_path(ctx, team_name);
 
         if team_config_path.exists() {
             self.activity_tracker.check_inactivity(&team_config_path)?;
@@ -1249,7 +1257,7 @@ impl Plugin for WorkerAdapterPlugin {
                     );
                 }
             }
-            let claude_root = ctx.system.claude_root.clone();
+            let claude_root = self.config_claude_root();
             let watcher = if let Some(ref registry) = self.session_registry {
                 HookWatcher::new_with_session_registry(
                     events_path,
@@ -1474,6 +1482,7 @@ mod tests {
     use super::*;
     use crate::daemon::session_registry::new_session_registry;
     use crate::plugin::{MailService, PluginContext};
+    use crate::plugins::ci_monitor::test_support::EnvGuard;
     use crate::roster::RosterService;
     use agent_team_mail_core::config::Config;
     use agent_team_mail_core::context::{Platform, SystemContext};
@@ -1488,7 +1497,8 @@ mod tests {
 
     fn make_test_context(root: &std::path::Path) -> PluginContext {
         let claude_root = root.join(".claude");
-        std::fs::create_dir_all(claude_root.join("teams/atm-dev/inboxes")).unwrap();
+        let teams_root = claude_root.join("teams");
+        std::fs::create_dir_all(teams_root.join("atm-dev/inboxes")).unwrap();
         let system = SystemContext::new(
             "test-host".to_string(),
             Platform::Linux,
@@ -1500,9 +1510,9 @@ mod tests {
         config.core.default_team = "atm-dev".to_string();
         PluginContext::new(
             Arc::new(system),
-            Arc::new(MailService::new(root.to_path_buf())),
+            Arc::new(MailService::new(teams_root.clone())),
             Arc::new(config),
-            Arc::new(RosterService::new(root.to_path_buf())),
+            Arc::new(RosterService::new(teams_root)),
         )
     }
 
@@ -1547,6 +1557,10 @@ mod tests {
         .unwrap();
     }
 
+    fn runtime_home(root: &std::path::Path) -> std::path::PathBuf {
+        root.join("runtime-home")
+    }
+
     #[tokio::test]
     async fn test_handle_launch_no_backend_returns_error() {
         let mut plugin = make_plugin_without_backend();
@@ -1572,6 +1586,14 @@ mod tests {
     #[test]
     fn test_idle_pubsub_notifications_replace_prior_idle_for_same_sender() {
         let temp = TempDir::new().unwrap();
+        let _home_guard = EnvGuard::set("HOME", temp.path().to_str().unwrap());
+        write_test_team(temp.path(), "atm-dev", &["team-lead", "arch-ctm"]);
+        std::fs::write(
+            temp.path()
+                .join(".claude/teams/atm-dev/inboxes/team-lead.json"),
+            "[]",
+        )
+        .unwrap();
         let mut plugin = WorkerAdapterPlugin::new();
         plugin.ctx = Some(make_test_context(temp.path()));
         plugin
@@ -1602,6 +1624,10 @@ mod tests {
     #[test]
     fn test_notify_routing_issue_routes_cross_team_warning_to_sender_team() {
         let temp = TempDir::new().unwrap();
+        let runtime_home = runtime_home(temp.path());
+        std::fs::create_dir_all(&runtime_home).unwrap();
+        let _home_guard = EnvGuard::set("HOME", temp.path().to_str().unwrap());
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", runtime_home.to_str().unwrap());
         write_test_team(temp.path(), "atm-dev", &["team-lead", "arch-ctm"]);
         write_test_team(temp.path(), "src-dev", &["team-lead"]);
 
@@ -1650,6 +1676,10 @@ mod tests {
     #[tokio::test]
     async fn test_process_message_routes_cross_team_response_to_sender_team() {
         let temp = TempDir::new().unwrap();
+        let runtime_home = runtime_home(temp.path());
+        std::fs::create_dir_all(&runtime_home).unwrap();
+        let _home_guard = EnvGuard::set("HOME", temp.path().to_str().unwrap());
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", runtime_home.to_str().unwrap());
         write_test_team(temp.path(), "atm-dev", &["team-lead", "arch-ctm"]);
         write_test_team(temp.path(), "src-dev", &["team-lead"]);
 

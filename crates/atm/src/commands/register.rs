@@ -12,6 +12,7 @@
 //! with `ATM_SESSION_ID` as the explicit override.
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
+use agent_team_mail_core::home::{config_teams_root_dir_for, get_os_home_dir};
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
 use agent_team_mail_core::team_config_store::TeamConfigStore;
@@ -24,7 +25,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::util::caller_identity::resolve_caller_session_id_required;
-use crate::util::settings::{get_home_dir, teams_root_dir_for};
+use crate::util::settings::get_home_dir;
 
 /// Register this agent session with a team.
 ///
@@ -45,8 +46,9 @@ pub struct RegisterArgs {
 
 /// Execute the register command.
 pub fn execute(args: RegisterArgs) -> Result<()> {
-    let home_dir = get_home_dir()?;
-    let team_dir = teams_root_dir_for(&home_dir).join(&args.team);
+    let _runtime_home = get_home_dir()?;
+    let config_home = get_os_home_dir()?;
+    let team_dir = config_teams_root_dir_for(&config_home).join(&args.team);
     let config_path = team_dir.join("config.json");
 
     if !config_path.exists() {
@@ -61,14 +63,20 @@ pub fn execute(args: RegisterArgs) -> Result<()> {
 
     // Resolve session ID through shared caller identity resolver.
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let config = resolve_config(&ConfigOverrides::default(), &current_dir, &home_dir)?;
+    let config = resolve_config(&ConfigOverrides::default(), &current_dir, &config_home)?;
     let caller_identity = &config.core.identity;
     let session_id = resolve_caller_session_id_required(Some(&args.team), Some(caller_identity))?;
 
     if let Some(ref name) = args.name {
         register_teammate(&config_path, &args.team, name, &session_id)
     } else {
-        register_team_lead(&home_dir, &config_path, &args.team, &session_id, args.force)
+        register_team_lead(
+            &config_home,
+            &config_path,
+            &args.team,
+            &session_id,
+            args.force,
+        )
     }
 }
 

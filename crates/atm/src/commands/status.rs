@@ -61,7 +61,8 @@ pub fn execute(args: StatusArgs) -> Result<()> {
     let team_name = &config.core.default_team;
 
     // Load team config
-    let team_dir = teams_root_dir_for(&home_dir).join(team_name);
+    let team_dir = agent_team_mail_core::home::config_team_dir(team_name)
+        .unwrap_or_else(|_| teams_root_dir_for(&home_dir).join(team_name));
     if !team_dir.exists() {
         anyhow::bail!("Team '{team_name}' not found (directory {team_dir:?} doesn't exist)");
     }
@@ -90,7 +91,8 @@ pub fn execute(args: StatusArgs) -> Result<()> {
     let inbox_counts = count_inbox_messages(&team_dir, &member_rows)?;
 
     // Count tasks if tasks directory exists
-    let tasks_dir = crate::util::settings::claude_root_dir_for(&home_dir)
+    let tasks_dir = agent_team_mail_core::home::config_claude_root_dir()
+        .unwrap_or_else(|_| crate::util::settings::claude_root_dir_for(&home_dir))
         .join("tasks")
         .join(team_name);
     let (pending_tasks, completed_tasks) = if tasks_dir.exists() {

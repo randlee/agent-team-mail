@@ -344,9 +344,9 @@ impl CiMonitorPlugin {
             }
         };
 
-        let home_dir =
-            agent_team_mail_core::home::get_home_dir().map_err(|e| PluginError::Init {
-                message: format!("Could not determine home directory: {e}"),
+        let config_home =
+            agent_team_mail_core::home::get_os_home_dir().map_err(|e| PluginError::Init {
+                message: format!("Could not determine config home: {e}"),
                 source: None,
             })?;
         let current_dir = std::env::current_dir().map_err(|e| PluginError::Init {
@@ -361,7 +361,7 @@ impl CiMonitorPlugin {
                 agent_team_mail_core::config::resolve_plugin_config_location(
                     "gh_monitor",
                     &current_dir,
-                    &home_dir,
+                    &config_home,
                 )
                 .map(|location| location.path)
             })

@@ -23,13 +23,17 @@ use env_guard::EnvGuard;
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     let workdir = temp_dir.path().join("workdir");
     std::fs::create_dir_all(&workdir).ok();
-    cmd.env("ATM_HOME", temp_dir.path())
-        .env("ATM_DAEMON_AUTOSTART", "0")
-        .env_remove("ATM_TEAM")
-        .env_remove("ATM_IDENTITY")
-        .env_remove("ATM_CONFIG")
-        .env_remove("CLAUDE_SESSION_ID")
-        .current_dir(&workdir);
+    cmd.env(
+        "ATM_HOME",
+        daemon_process_guard::DaemonProcessGuard::runtime_home_path(temp_dir),
+    )
+    .env("HOME", temp_dir.path())
+    .env("ATM_DAEMON_AUTOSTART", "0")
+    .env_remove("ATM_TEAM")
+    .env_remove("ATM_IDENTITY")
+    .env_remove("ATM_CONFIG")
+    .env_remove("CLAUDE_SESSION_ID")
+    .current_dir(&workdir);
 }
 
 fn setup_test_team(
@@ -127,10 +131,14 @@ fn test_cli_team_scoped_commands_do_not_bleed_members_across_teams() {
     setup_test_team(&temp_dir, team_a, "alpha-lead", alpha_member);
     setup_test_team(&temp_dir, team_b, "beta-lead", beta_member);
 
+    let _home = EnvGuard::set("HOME", temp_dir.path());
     let mut daemon = DaemonProcessGuard::spawn(&temp_dir, team_a);
     daemon.wait_ready(&temp_dir);
 
-    let _atm_home = EnvGuard::set("ATM_HOME", temp_dir.path());
+    let _atm_home = EnvGuard::set(
+        "ATM_HOME",
+        daemon_process_guard::DaemonProcessGuard::runtime_home_path(&temp_dir),
+    );
     let _identity_alpha = EnvGuard::set("ATM_IDENTITY", alpha_member);
     let hint_alpha = register_hint(
         team_a,
@@ -221,10 +229,14 @@ fn test_status_and_members_preserve_registered_member_state_after_daemon_restart
     let member = "persisted-member";
     setup_test_team(&temp_dir, team, "restart-lead", member);
 
+    let _home = EnvGuard::set("HOME", temp_dir.path());
     let mut daemon = DaemonProcessGuard::spawn(&temp_dir, team);
     daemon.wait_ready(&temp_dir);
 
-    let _atm_home = EnvGuard::set("ATM_HOME", temp_dir.path());
+    let _atm_home = EnvGuard::set(
+        "ATM_HOME",
+        daemon_process_guard::DaemonProcessGuard::runtime_home_path(&temp_dir),
+    );
     let _identity = EnvGuard::set("ATM_IDENTITY", member);
     let outcome = register_hint(
         team,

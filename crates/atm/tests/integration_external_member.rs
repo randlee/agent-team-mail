@@ -9,8 +9,8 @@
 //! - Model registry validation
 //! - BackendType validation including `human:<username>`
 //!
-//! All tests use `ATM_HOME` instead of `HOME`/`USERPROFILE` for cross-platform
-//! Windows CI compatibility (see `docs/cross-platform-guidelines.md`).
+//! Tests use the BB.1 split model:
+//! `HOME` provides the canonical config root while `ATM_HOME` is runtime-only.
 
 use assert_cmd::cargo;
 use chrono::Utc;
@@ -21,13 +21,15 @@ use tempfile::TempDir;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Set the ATM_HOME environment variable on a command, pointing at the temp dir.
-///
+/// Set separate config-root and runtime-root env vars on a command.
 /// Uses a subdirectory as CWD to avoid .atm.toml config leaking from the repo.
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     let workdir = temp_dir.path().join("workdir");
+    let runtime_home = temp_dir.path().join("runtime-home");
     std::fs::create_dir_all(&workdir).ok();
-    cmd.env("ATM_HOME", temp_dir.path())
+    std::fs::create_dir_all(&runtime_home).ok();
+    cmd.env("ATM_HOME", &runtime_home)
+        .env("HOME", temp_dir.path())
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
         .env_remove("ATM_IDENTITY")

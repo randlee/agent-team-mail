@@ -6,6 +6,7 @@ use agent_team_mail_core::daemon_client::{
     query_list_agents, query_session_for_team, query_team_member_states, register_hint,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::home::{config_team_dir_for, config_teams_root_dir_for, get_os_home_dir};
 use agent_team_mail_core::io::inbox::inbox_update;
 use agent_team_mail_core::model_registry::ModelId;
 use agent_team_mail_core::schema::{BackendType, TeamConfig};
@@ -28,7 +29,7 @@ use tracing::warn;
 use agent_team_mail_core::spawn::read_agent_frontmatter;
 
 use crate::commands::runtime_adapter::{RuntimeKind, SpawnSpec, adapter_for_runtime};
-use crate::util::settings::{claude_root_dir_for, get_home_dir, teams_root_dir_for};
+use crate::util::settings::get_home_dir;
 use crate::util::state::{SeenState, get_last_seen, load_seen_state};
 
 /// Number of backups to retain per team. Older snapshots are pruned after
@@ -394,8 +395,8 @@ pub fn execute(args: TeamsArgs) -> Result<()> {
         };
     }
 
-    let home_dir = get_home_dir()?;
-    let teams_dir = teams_root_dir_for(&home_dir);
+    let config_home = get_os_home_dir()?;
+    let teams_dir = config_teams_root_dir_for(&config_home);
 
     // Check if teams directory exists
     if !teams_dir.exists() {
@@ -891,8 +892,8 @@ fn ensure_spawn_member_metadata(
     model_override: Option<&str>,
     launch_dir: &Path,
 ) -> Result<()> {
-    let home_dir = get_home_dir()?;
-    let team_dir = teams_root_dir_for(&home_dir).join(team);
+    let config_home = get_os_home_dir()?;
+    let team_dir = config_team_dir_for(&config_home, team);
     let config_path = team_dir.join("config.json");
     if !config_path.exists() {
         // Spawn must remain resilient when team config does not yet exist.
@@ -1107,9 +1108,7 @@ fn resolve_spawn_caller_identity(
     }
 
     let session_id = env_var_nonempty("CLAUDE_SESSION_ID")?;
-    let config_path = teams_root_dir_for(home_dir)
-        .join(team_name)
-        .join("config.json");
+    let config_path = config_team_dir_for(home_dir, team_name).join("config.json");
     if !config_path.exists() {
         return None;
     }
@@ -1295,7 +1294,7 @@ fn resolve_spawn_system_prompt(
         )
     })?;
 
-    let runtime_home = claude_root_dir_for(context.home_dir)
+    let runtime_home = agent_team_mail_core::home::claude_root_dir_for(context.home_dir)
         .join("runtime")
         .join("compose")
         .join(context.team_name)
@@ -1365,9 +1364,7 @@ fn resolve_caller_team_context(home_dir: &Path, current_dir: &Path) -> Result<Op
         return Ok(None);
     }
 
-    let config_path = teams_root_dir_for(home_dir)
-        .join(&configured_team)
-        .join("config.json");
+    let config_path = config_team_dir_for(home_dir, &configured_team).join("config.json");
     if !config_path.exists() {
         return Ok(None);
     }
@@ -1385,9 +1382,9 @@ fn resolve_caller_team_context(home_dir: &Path, current_dir: &Path) -> Result<Op
 }
 
 fn join_member(args: JoinArgs) -> Result<()> {
-    let home_dir = get_home_dir()?;
+    let config_home = get_os_home_dir()?;
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let caller_team = resolve_caller_team_context(&home_dir, &current_dir)?;
+    let caller_team = resolve_caller_team_context(&config_home, &current_dir)?;
 
     let (mode, target_team) = if let Some(caller_team) = caller_team {
         if let Some(requested_team) = args.team.as_deref()
@@ -1412,7 +1409,7 @@ fn join_member(args: JoinArgs) -> Result<()> {
         (JoinMode::SelfJoin, explicit_team)
     };
 
-    let team_dir = teams_root_dir_for(&home_dir).join(&target_team);
+    let team_dir = config_team_dir_for(&config_home, &target_team);
     if !team_dir.exists() {
         anyhow::bail!(
             "Team '{}' not found (directory {} doesn't exist)",
@@ -1523,8 +1520,8 @@ fn effective_add_member_agent_type(agent_type: &str, backend_type: Option<&Backe
 }
 
 fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
-    let home_dir = get_home_dir()?;
-    let team_dir = teams_root_dir_for(&home_dir).join(&args.team);
+    let config_home = get_os_home_dir()?;
+    let team_dir = config_team_dir_for(&config_home, &args.team);
     if !team_dir.exists() {
         anyhow::bail!(
             "Team '{}' not found (directory {} doesn't exist)",
@@ -1816,8 +1813,8 @@ fn sync_member_session_hint(
 /// corresponding flag is `Some` are modified; omitted flags leave the current
 /// value unchanged.
 fn update_member(args: UpdateMemberArgs) -> Result<()> {
-    let home_dir = get_home_dir()?;
-    let team_dir = teams_root_dir_for(&home_dir).join(&args.team);
+    let config_home = get_os_home_dir()?;
+    let team_dir = config_team_dir_for(&config_home, &args.team);
     let config_path = team_dir.join("config.json");
 
     if !config_path.exists() {
@@ -1933,8 +1930,8 @@ fn update_member(args: UpdateMemberArgs) -> Result<()> {
 }
 
 fn remove_member(args: RemoveMemberArgs) -> Result<()> {
-    let home_dir = get_home_dir()?;
-    let team_dir = teams_root_dir_for(&home_dir).join(&args.team);
+    let config_home = get_os_home_dir()?;
+    let team_dir = config_team_dir_for(&config_home, &args.team);
     let config_path = team_dir.join("config.json");
 
     if !config_path.exists() {
@@ -2025,7 +2022,7 @@ fn remove_member(args: RemoveMemberArgs) -> Result<()> {
 
     let mut archived_to: Option<PathBuf> = None;
     if args.archive_inbox {
-        archived_to = archive_member_inbox(&home_dir, &args.team, &args.agent)?;
+        archived_to = archive_member_inbox(&config_home, &args.team, &args.agent)?;
     }
 
     store.update(|mut current| {
@@ -2062,8 +2059,8 @@ fn remove_member(args: RemoveMemberArgs) -> Result<()> {
 /// - For inactive/no session: creates a flat backup snapshot and removes the
 ///   active team directory, prompting the caller to re-establish via TeamCreate.
 fn resume(args: ResumeArgs) -> Result<()> {
-    let home_dir = get_home_dir()?;
-    let team_dir = teams_root_dir_for(&home_dir).join(&args.team);
+    let config_home = get_os_home_dir()?;
+    let team_dir = config_team_dir_for(&config_home, &args.team);
 
     // Check team exists
     let config_path = team_dir.join("config.json");
@@ -2077,7 +2074,7 @@ fn resume(args: ResumeArgs) -> Result<()> {
 
     // Resolve caller identity via full config pipeline (.atm.toml → env → flag)
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let config = resolve_config(&ConfigOverrides::default(), &current_dir, &home_dir)?;
+    let config = resolve_config(&ConfigOverrides::default(), &current_dir, &config_home)?;
     let caller_identity = config.core.identity.clone();
 
     // Only team-lead may call resume
@@ -2137,8 +2134,8 @@ fn resume(args: ResumeArgs) -> Result<()> {
     }
 
     // Snapshot first; abort if backup fails.
-    let backup_path = do_backup(&home_dir, &args.team, args.project.as_deref(), false)?;
-    prune_old_backups(&home_dir, &args.team, BACKUP_RETENTION_COUNT)?;
+    let backup_path = do_backup(&config_home, &args.team, args.project.as_deref(), false)?;
+    prune_old_backups(&config_home, &args.team, BACKUP_RETENTION_COUNT)?;
 
     // Remove active team directory so TeamCreate can re-establish the team lead context.
     fs::remove_dir_all(&team_dir)?;
@@ -2340,8 +2337,8 @@ fn external_agent_missing_state_is_stale(
 /// (or for which no daemon session record exists), deletes their inbox files,
 /// and writes the updated `config.json`.
 fn cleanup(args: CleanupArgs) -> Result<()> {
-    let home_dir = get_home_dir()?;
-    let team_dir = teams_root_dir_for(&home_dir).join(&args.team);
+    let config_home = agent_team_mail_core::home::get_os_home_dir()?;
+    let team_dir = agent_team_mail_core::home::config_team_dir_for(&config_home, &args.team);
     let config_path = team_dir.join("config.json");
 
     if !config_path.exists() {
@@ -2369,7 +2366,7 @@ fn cleanup(args: CleanupArgs) -> Result<()> {
     // Check daemon reachability once before iterating members.
     let daemon_running = agent_team_mail_core::daemon_client::daemon_is_running();
     let seen_state = load_seen_state().unwrap_or_default();
-    let external_stale_days = external_agent_stale_days(&args.team, &home_dir);
+    let external_stale_days = external_agent_stale_days(&args.team, &config_home);
     let external_stale_after = chrono::Duration::days(external_stale_days);
     let now = Utc::now();
     let mut skipped_names: Vec<String> = Vec::new();
@@ -2702,7 +2699,7 @@ fn remove_member_mailbox_artifacts(team_dir: &Path, member_name: &str) {
 }
 
 fn archive_member_inbox(home_dir: &Path, team: &str, member_name: &str) -> Result<Option<PathBuf>> {
-    let inbox_path = teams_root_dir_for(home_dir)
+    let inbox_path = config_teams_root_dir_for(home_dir)
         .join(team)
         .join("inboxes")
         .join(format!("{member_name}.json"));
@@ -2711,7 +2708,7 @@ fn archive_member_inbox(home_dir: &Path, team: &str, member_name: &str) -> Resul
     }
 
     let timestamp = Utc::now().format("%Y%m%dT%H%M%S%fZ").to_string();
-    let archive_dir = teams_root_dir_for(home_dir)
+    let archive_dir = config_teams_root_dir_for(home_dir)
         .join(".archives")
         .join(team)
         .join(format!("removed-{member_name}-{timestamp}"))
@@ -2875,7 +2872,7 @@ fn recompute_highwatermark(tasks_dir: &Path) -> Result<u64> {
 }
 
 fn do_backup(home_dir: &Path, team: &str, project: Option<&str>, json: bool) -> Result<PathBuf> {
-    let team_dir = teams_root_dir_for(home_dir).join(team);
+    let team_dir = config_team_dir_for(home_dir, team);
 
     if !team_dir.exists() {
         anyhow::bail!(
@@ -2898,7 +2895,7 @@ fn do_backup(home_dir: &Path, team: &str, project: Option<&str>, json: bool) -> 
         now.format("%Y%m%dT%H%M%S"),
         now.timestamp_subsec_nanos()
     );
-    let backup_dir = teams_root_dir_for(home_dir)
+    let backup_dir = config_teams_root_dir_for(home_dir)
         .join(".backups")
         .join(team)
         .join(&timestamp);
@@ -2978,7 +2975,7 @@ fn do_backup(home_dir: &Path, team: &str, project: Option<&str>, json: bool) -> 
 /// and the tasks directory under `~/.claude/teams/.backups/<team>/<timestamp>/`.
 /// Automatically prunes old backups keeping only the last 5.
 fn backup(args: BackupArgs) -> Result<()> {
-    let home_dir = get_home_dir()?;
+    let home_dir = get_os_home_dir()?;
     do_backup(&home_dir, &args.team, args.project.as_deref(), args.json)?;
     prune_old_backups(&home_dir, &args.team, BACKUP_RETENTION_COUNT)?;
     Ok(())
@@ -2989,7 +2986,9 @@ fn backup(args: BackupArgs) -> Result<()> {
 /// Backup directories are named with ISO timestamps so lexicographic sort equals
 /// chronological order.  All but the last `keep` entries are removed.
 fn prune_old_backups(home_dir: &Path, team: &str, keep: usize) -> Result<()> {
-    let backups_dir = teams_root_dir_for(home_dir).join(".backups").join(team);
+    let backups_dir = config_teams_root_dir_for(home_dir)
+        .join(".backups")
+        .join(team);
     if !backups_dir.exists() {
         return Ok(());
     }
@@ -3016,8 +3015,8 @@ fn prune_old_backups(home_dir: &Path, team: &str, keep: usize) -> Result<()> {
 /// Restores non-team-lead members and their inbox files from a backup snapshot.
 /// The current `leadSessionId` is never overwritten.
 fn restore(args: RestoreArgs) -> Result<()> {
-    let home_dir = get_home_dir()?;
-    let team_dir = teams_root_dir_for(&home_dir).join(&args.team);
+    let home_dir = get_os_home_dir()?;
+    let team_dir = config_team_dir_for(&home_dir, &args.team);
     let config_path = team_dir.join("config.json");
 
     if !config_path.exists() {
@@ -3033,7 +3032,7 @@ fn restore(args: RestoreArgs) -> Result<()> {
         from_path.clone()
     } else {
         // Find the latest backup by lexicographic sort of timestamps
-        let backups_root = teams_root_dir_for(&home_dir)
+        let backups_root = config_teams_root_dir_for(&home_dir)
             .join(".backups")
             .join(&args.team);
 
@@ -3296,6 +3295,7 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::collections::HashMap;
+    use std::ffi::OsString;
     use tempfile::TempDir;
 
     fn set_autostart_disabled_for_test() -> Option<String> {
@@ -3315,6 +3315,14 @@ mod tests {
                 None => std::env::remove_var("ATM_DAEMON_AUTOSTART"),
             }
         }
+    }
+
+    fn home_env_key() -> &'static str {
+        if cfg!(windows) { "USERPROFILE" } else { "HOME" }
+    }
+
+    fn saved_home_env() -> Option<OsString> {
+        std::env::var_os(home_env_key())
     }
 
     fn create_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
@@ -3469,6 +3477,7 @@ mod tests {
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         let result = add_member_internal(AddMemberArgs {
@@ -3507,11 +3516,13 @@ mod tests {
         let home_env = temp_dir.path().to_str().unwrap().to_string();
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         let identity_original = std::env::var("ATM_IDENTITY").ok();
 
         // SAFETY: test-only env mutation; tests using env vars must be serialized.
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
             std::env::set_var("ATM_IDENTITY", "team-lead");
         }
 
@@ -3560,6 +3571,7 @@ mod tests {
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
             std::env::set_var("ATM_IDENTITY", "arch-ctm"); // wrong caller
         }
 
@@ -3602,9 +3614,11 @@ mod tests {
         let home_env = temp_dir.path().to_str().unwrap().to_string();
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         let args = CleanupArgs {
@@ -3641,10 +3655,12 @@ mod tests {
         fs::write(&inbox, "[]").unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let original_home = saved_home_env();
         let original_autostart = set_autostart_disabled_for_test();
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         let args = CleanupArgs {
@@ -3672,6 +3688,10 @@ mod tests {
                 Some(v) => std::env::set_var("ATM_HOME", v),
                 None => std::env::remove_var("ATM_HOME"),
             }
+            match original_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
         }
         restore_autostart_env(original_autostart);
     }
@@ -3690,9 +3710,11 @@ mod tests {
         fs::write(mailbox_dir.join("meta.json"), "{}").unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         let args = CleanupArgs {
@@ -3732,10 +3754,12 @@ mod tests {
         fs::write(&inbox, "[]").unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let original_home = saved_home_env();
         let original_autostart = set_autostart_disabled_for_test();
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         let args = CleanupArgs {
@@ -3769,6 +3793,10 @@ mod tests {
                 Some(v) => std::env::set_var("ATM_HOME", v),
                 None => std::env::remove_var("ATM_HOME"),
             }
+            match original_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
         }
         restore_autostart_env(original_autostart);
     }
@@ -3798,10 +3826,12 @@ mod tests {
         fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let original_home = saved_home_env();
         let original_autostart = set_autostart_disabled_for_test();
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         let args = CleanupArgs {
@@ -3826,6 +3856,10 @@ mod tests {
             match original {
                 Some(v) => std::env::set_var("ATM_HOME", v),
                 None => std::env::remove_var("ATM_HOME"),
+            }
+            match original_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
             }
         }
         restore_autostart_env(original_autostart);
@@ -3857,10 +3891,12 @@ mod tests {
         fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let original_home = saved_home_env();
         let original_autostart = set_autostart_disabled_for_test();
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         let args = CleanupArgs {
@@ -3890,6 +3926,10 @@ mod tests {
             match original {
                 Some(v) => std::env::set_var("ATM_HOME", v),
                 None => std::env::remove_var("ATM_HOME"),
+            }
+            match original_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
             }
         }
         restore_autostart_env(original_autostart);
@@ -3935,10 +3975,12 @@ mod tests {
         fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         let original_autostart = set_autostart_disabled_for_test();
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         let server = spawn_mock_session_query_team_server(
@@ -3997,6 +4039,7 @@ mod tests {
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
             std::env::set_var("ATM_IDENTITY", "team-lead");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
@@ -4054,9 +4097,11 @@ mod tests {
         fs::write(&inbox, "[]").unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         let args = BackupArgs {
@@ -4108,9 +4153,11 @@ mod tests {
         create_test_team(&temp_dir, "atm-dev");
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         backup(BackupArgs {
@@ -4153,9 +4200,11 @@ mod tests {
         let home_env = set_atm_home(&temp_dir);
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         let args = BackupArgs {
@@ -4192,9 +4241,11 @@ mod tests {
         fs::write(&inbox, r#"[{"from":"team-lead","text":"hello","timestamp":"2026-01-01T00:00:00Z","read":false}]"#).unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         // Create a backup first
@@ -4275,9 +4326,11 @@ mod tests {
         fs::write(&inbox, "[]").unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         // Create backup
@@ -4345,9 +4398,11 @@ mod tests {
         create_test_team(&temp_dir, "atm-dev");
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         // Create a backup
@@ -4400,9 +4455,11 @@ mod tests {
         let team_dir = create_test_team(&temp_dir, "atm-dev");
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         // Backup (captures "old-session-id-1234" from create_test_team)
@@ -4552,6 +4609,7 @@ mod tests {
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
             std::env::set_var("ATM_IDENTITY", "team-lead");
             std::env::set_var("CLAUDE_SESSION_ID", "test-force-session-id");
         }
@@ -4599,10 +4657,12 @@ mod tests {
         let team_dir = create_test_team_multi_dead(&temp_dir, "atm-dev");
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         let original_autostart = set_autostart_disabled_for_test();
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         let args = CleanupArgs {
@@ -4668,9 +4728,11 @@ mod tests {
         fs::write(removable_mailbox.join("state.json"), "{}").unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let original_home = saved_home_env();
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         let args = CleanupArgs {
@@ -4710,6 +4772,10 @@ mod tests {
                 Some(v) => std::env::set_var("ATM_HOME", v),
                 None => std::env::remove_var("ATM_HOME"),
             }
+            match original_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
         }
     }
 
@@ -4729,10 +4795,12 @@ mod tests {
         fs::write(&inbox, "[]").unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let original_home = saved_home_env();
         let original_autostart = set_autostart_disabled_for_test();
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         // Cleanup a specific agent — daemon unreachable but --force removes anyway
@@ -4753,6 +4821,10 @@ mod tests {
                 Some(v) => std::env::set_var("ATM_HOME", v),
                 None => std::env::remove_var("ATM_HOME"),
             }
+            match original_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
         }
         restore_autostart_env(original_autostart);
     }
@@ -4772,6 +4844,7 @@ mod tests {
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
             std::env::set_var("ATM_IDENTITY", "team-lead");
             std::env::set_var("CLAUDE_SESSION_ID", "test-inactive-session-id");
         }
@@ -4826,6 +4899,7 @@ mod tests {
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
             std::env::set_var("ATM_IDENTITY", "team-lead");
             std::env::set_var("CLAUDE_SESSION_ID", "test-identity-session-id");
         }
@@ -4876,6 +4950,7 @@ mod tests {
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
             std::env::set_var("ATM_IDENTITY", "team-lead");
             std::env::remove_var("CLAUDE_SESSION_ID"); // ensure env var is absent
         }
@@ -4932,6 +5007,7 @@ mod tests {
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
             std::env::set_var("ATM_IDENTITY", "team-lead");
             std::env::remove_var("CLAUDE_SESSION_ID"); // ensure env var is absent
         }
@@ -5014,9 +5090,11 @@ mod tests {
         create_test_tasks(&temp_dir, "atm-dev");
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         let args = BackupArgs {
@@ -5065,8 +5143,10 @@ mod tests {
         let project_tasks = create_numeric_task_files(&temp_dir, "agent-team-mail", &[60, 61]);
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         backup(BackupArgs {
@@ -5107,9 +5187,11 @@ mod tests {
         let tasks_dir = create_test_tasks(&temp_dir, "atm-dev");
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         // Create backup (includes tasks)
@@ -5165,8 +5247,10 @@ mod tests {
         create_numeric_task_files(&temp_dir, "agent-team-mail", &[76, 82]);
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         backup(BackupArgs {
@@ -5211,8 +5295,10 @@ mod tests {
         create_test_tasks(&temp_dir, "atm-dev");
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         backup(BackupArgs {
@@ -5253,6 +5339,7 @@ mod tests {
 
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
             std::env::set_var("ATM_IDENTITY", "team-lead");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
@@ -5304,9 +5391,11 @@ mod tests {
         let tasks_dir = create_test_tasks(&temp_dir, "atm-dev");
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         // Create backup (includes tasks)
@@ -5355,8 +5444,10 @@ mod tests {
         create_numeric_task_files(&temp_dir, "agent-team-mail", &[76, 82]);
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         backup(BackupArgs {
@@ -5399,8 +5490,10 @@ mod tests {
         fs::write(tasks_dir.join(".highwatermark"), "75\n").unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         backup(BackupArgs {
@@ -5445,8 +5538,10 @@ mod tests {
         fs::write(tasks_dir.join(".highwatermark"), "99\n").unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         backup(BackupArgs {
@@ -5487,8 +5582,10 @@ mod tests {
         let team_dir = create_test_team(&temp_dir, "atm-dev");
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         backup(BackupArgs {
@@ -5541,9 +5638,11 @@ mod tests {
         fs::write(&inbox, "[]").unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         let original_autostart = set_autostart_disabled_for_test();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         remove_member(RemoveMemberArgs {
@@ -5585,9 +5684,11 @@ mod tests {
         create_test_team(&temp_dir, "atm-dev");
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         let original_autostart = set_autostart_disabled_for_test();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         let err = remove_member(RemoveMemberArgs {
@@ -5628,9 +5729,11 @@ mod tests {
         fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         let original_autostart = set_autostart_disabled_for_test();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         let err = remove_member(RemoveMemberArgs {
@@ -5659,8 +5762,10 @@ mod tests {
         create_test_team(&temp_dir, "atm-dev");
 
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         let err = remove_member(RemoveMemberArgs {
@@ -5687,9 +5792,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let home_env = set_atm_home(&temp_dir);
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         let backups_dir = temp_dir.path().join(".claude/teams/.backups/my-team");
@@ -6447,8 +6554,10 @@ spawn_policy = "any-member"
         let home_env = temp_dir.path().to_str().unwrap().to_string();
         let team_dir = create_test_team(&temp_dir, "atm-dev");
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         let launch_dir = temp_dir.path().join("repo");
@@ -6492,8 +6601,10 @@ spawn_policy = "any-member"
         let home_env = temp_dir.path().to_str().unwrap().to_string();
         let team_dir = create_test_team(&temp_dir, "atm-dev");
         let original = std::env::var("ATM_HOME").ok();
+        let _original_home = saved_home_env();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         ensure_spawn_member_metadata(

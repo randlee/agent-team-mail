@@ -261,7 +261,8 @@ pub(crate) fn monitor_report_json(home_dir: &Path, team: &str) -> Result<serde_j
 
 fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<DoctorReport> {
     let now = Utc::now();
-    let team_dir = teams_root_dir_for(home_dir).join(team);
+    let team_dir = agent_team_mail_core::home::config_team_dir(team)
+        .unwrap_or_else(|_| teams_root_dir_for(home_dir).join(team));
     let config_path = team_dir.join("config.json");
 
     let mut findings: Vec<Finding> = Vec::new();

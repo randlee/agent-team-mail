@@ -56,10 +56,8 @@ pub fn update_last_seen(state: &mut SeenState, team: &str, agent: &str, timestam
 }
 
 pub fn state_path() -> Result<PathBuf> {
-    // Canonical path resolution: ATM_HOME (when set) is home root, and state
-    // file lives under .config/atm for both test and production runs.
-    let home = agent_team_mail_core::home::get_home_dir()?;
-    Ok(home.join(".config/atm/state.json"))
+    let config_home = agent_team_mail_core::home::get_os_home_dir()?;
+    Ok(config_home.join(".config/atm/state.json"))
 }
 
 #[cfg(test)]

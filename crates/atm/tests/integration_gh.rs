@@ -74,14 +74,22 @@ poll_interval_secs = 60
 }
 
 #[cfg(unix)]
+fn runtime_home_path(home: &Path) -> PathBuf {
+    home.join("runtime-home")
+}
+
+#[cfg(unix)]
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir, team: &str, with_plugin: bool) {
     let workdir = temp_dir.path().join("workdir");
+    let runtime_home = runtime_home_path(temp_dir.path());
     let fake_daemon_bin = write_fake_gh_daemon_script(temp_dir.path());
     std::fs::create_dir_all(&workdir).ok();
+    std::fs::create_dir_all(&runtime_home).ok();
     if with_plugin {
         write_repo_gh_monitor_config(&workdir, team);
     }
-    cmd.env("ATM_HOME", temp_dir.path())
+    cmd.env("ATM_HOME", &runtime_home)
+        .env("HOME", temp_dir.path())
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_DAEMON_BIN", &fake_daemon_bin)
         .env_remove("ATM_TEAM")
@@ -128,7 +136,7 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
 
 #[cfg(unix)]
 fn read_gh_ledger_actions(home: &Path) -> Vec<String> {
-    let ledger_path = home.join(".atm/daemon/gh-observability.jsonl");
+    let ledger_path = runtime_home_path(home).join(".atm/daemon/gh-observability.jsonl");
     if !ledger_path.exists() {
         return Vec::new();
     }
@@ -588,7 +596,7 @@ finally:
 
 #[cfg(unix)]
 fn wait_for_daemon_socket(home: &Path) {
-    let socket = home.join(".atm/daemon/atm-daemon.sock");
+    let socket = runtime_home_path(home).join(".atm/daemon/atm-daemon.sock");
     let deadline = Instant::now() + Duration::from_secs(WAIT_FOR_DAEMON_SOCKET_SECS);
     while Instant::now() < deadline {
         if socket.exists() && std::os::unix::net::UnixStream::connect(&socket).is_ok() {
@@ -646,13 +654,15 @@ fn start_fake_gh_daemon_with_mode_and_delays(
     request_log: Option<&std::path::Path>,
 ) -> Child {
     let script = write_fake_gh_daemon_script(home);
+    let runtime_home = runtime_home_path(home);
+    fs::create_dir_all(&runtime_home).expect("create gh runtime home");
     // Retry on ETXTBUSY (code 26): Linux can transiently block execution of a
     // newly-written file on CI while kernel mappings settle.
     let child = {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             let mut cmd = Command::new(&script);
-            cmd.env("ATM_HOME", home)
+            cmd.env("ATM_HOME", &runtime_home)
                 .env("ATM_FAKE_GH_CONFIGURED", if configured { "1" } else { "0" })
                 .env("ATM_FAKE_GH_ENABLED", if enabled { "1" } else { "0" })
                 .env("ATM_FAKE_GH_MONITOR_DELAY_MS", monitor_delay_ms.to_string())
@@ -1865,6 +1875,7 @@ fn test_gh_pr_list_writes_budget_state_under_overridden_atm_home() {
 
     let state_path = temp_dir
         .path()
+        .join("runtime-home")
         .join(".atm/daemon/gh-monitor-repo-state.json");
     assert!(
         state_path.exists(),

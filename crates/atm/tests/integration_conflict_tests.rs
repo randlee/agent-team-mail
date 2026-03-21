@@ -28,12 +28,15 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
 }
 
 fn set_home_env_path(cmd: &mut assert_cmd::Command, home: &std::path::Path) {
+    let runtime_home = home.join("runtime-home");
     // Use a subdirectory as CWD to avoid:
     // 1. .atm.toml config leak from the repo root
     // 2. auto-identity CWD matching against team member CWD (ATM_HOME root)
     let workdir = home.join("workdir");
     std::fs::create_dir_all(&workdir).ok();
-    cmd.env("ATM_HOME", home)
+    std::fs::create_dir_all(&runtime_home).ok();
+    cmd.env("ATM_HOME", &runtime_home)
+        .env("HOME", home)
         // Prevent opportunistic daemon autostart from changing expected
         // offline/online label behavior in deterministic integration tests.
         .env("ATM_DAEMON_AUTOSTART", "0")
@@ -56,7 +59,7 @@ impl RuntimeDaemonCleanupGuard {
     fn new(temp_dir: &TempDir) -> Self {
         daemon_test_registry::sweep_stale_test_daemons();
         Self {
-            home: temp_dir.path().to_path_buf(),
+            home: temp_dir.path().join("runtime-home"),
             daemon_guard: None,
         }
     }
@@ -143,8 +146,22 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
 }
 
 #[cfg(unix)]
+fn mirror_team_config_to_home(temp_dir: &TempDir, team_name: &str, home_root: &std::path::Path) {
+    let source_team_dir = temp_dir.path().join(".claude/teams").join(team_name);
+    let target_team_dir = home_root.join(".claude/teams").join(team_name);
+    fs::create_dir_all(target_team_dir.join("inboxes")).expect("create mirrored team inbox dir");
+    fs::copy(
+        source_team_dir.join("config.json"),
+        target_team_dir.join("config.json"),
+    )
+    .expect("copy mirrored team config");
+}
+
+#[cfg(unix)]
 fn daemon_pid_path(temp_dir: &TempDir) -> PathBuf {
-    temp_dir.path().join(".atm/daemon/atm-daemon.pid")
+    temp_dir
+        .path()
+        .join("runtime-home/.atm/daemon/atm-daemon.pid")
 }
 
 #[cfg(unix)]
@@ -171,7 +188,9 @@ fn wait_for_daemon_pid_change(temp_dir: &TempDir, previous_pid: u32, timeout: Du
 
 #[cfg(unix)]
 fn write_lock_metadata(temp_dir: &TempDir, pid: u32, home_scope: String, executable_path: String) {
-    let metadata_path = temp_dir.path().join(".atm/daemon/daemon.lock.meta.json");
+    let metadata_path = temp_dir
+        .path()
+        .join("runtime-home/.atm/daemon/daemon.lock.meta.json");
     if let Some(parent) = metadata_path.parent() {
         fs::create_dir_all(parent).expect("create metadata dir");
     }
@@ -222,15 +241,18 @@ async fn test_concurrent_sends_no_data_loss() {
 
     for sender_id in 0..num_senders {
         let temp_path = temp_dir.path().to_path_buf();
+        let runtime_home = temp_path.join("runtime-home");
         let workdir_path = workdir.clone();
         let atm_bin_path = atm_bin.to_path_buf();
         senders.spawn(async move {
+            std::fs::create_dir_all(&runtime_home).expect("create runtime home for sender");
             for msg_id in 0..messages_per_sender {
                 let mut attempts = 0u8;
                 loop {
                     attempts += 1;
                     let mut cmd = tokio::process::Command::new(&atm_bin_path);
-                    cmd.env("ATM_HOME", &temp_path)
+                    cmd.env("ATM_HOME", &runtime_home)
+                        .env("HOME", &temp_path)
                         .env("ATM_DAEMON_AUTOSTART", "0")
                         .env_remove("ATM_CONFIG")
                         .env_remove("CLAUDE_SESSION_ID")
@@ -1033,7 +1055,7 @@ fn test_no_duplicate_message_ids_under_concurrent_sends() {
 fn test_runtime_daemon_cleanup_guard_adopts_pid_written_after_creation() {
     let temp_dir = TempDir::new().unwrap();
     let mut daemon_cleanup = RuntimeDaemonCleanupGuard::new(&temp_dir);
-    let daemon_dir = temp_dir.path().join(".atm/daemon");
+    let daemon_dir = temp_dir.path().join("runtime-home/.atm/daemon");
     fs::create_dir_all(&daemon_dir).unwrap();
 
     let launcher = temp_dir.path().join("late-pid-launcher.sh");
@@ -1402,10 +1424,12 @@ fn test_dead_pid_stale_lock_starts_daemon_cleanly() {
     // registry until AP replaces that global file with a per-test-safe owner.
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
+    let config_home = temp_dir.path().join("config-home");
+    mirror_team_config_to_home(&temp_dir, "test-team", &config_home);
     let dead_pid = 999_991_u32;
     assert!(!pid_alive(dead_pid as i32), "fixture pid should be dead");
 
-    let daemon_dir = temp_dir.path().join(".atm/daemon");
+    let daemon_dir = temp_dir.path().join("runtime-home/.atm/daemon");
     fs::create_dir_all(&daemon_dir).unwrap();
     fs::write(daemon_dir.join("atm-daemon.pid"), format!("{dead_pid}\n")).unwrap();
     fs::write(
@@ -1428,14 +1452,17 @@ fn test_dead_pid_stale_lock_starts_daemon_cleanly() {
         home_scope,
         daemon_binary_path().to_string_lossy().to_string(),
     );
-    let lock_path = temp_dir.path().join(".atm/daemon/daemon.lock");
+    let lock_path = temp_dir.path().join("runtime-home/.atm/daemon/daemon.lock");
     fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
     fs::write(&lock_path, "stale").unwrap();
 
     let workdir = temp_dir.path().join("workdir");
     fs::create_dir_all(&workdir).unwrap();
+    let runtime_home = temp_dir.path().join("runtime-home");
+    fs::create_dir_all(&runtime_home).unwrap();
     let mut cmd = cargo::cargo_bin_cmd!("atm");
-    cmd.env("ATM_HOME", temp_dir.path())
+    cmd.env("ATM_HOME", &runtime_home)
+        .env("HOME", &config_home)
         .env("ATM_DAEMON_AUTOSTART", "1")
         .env("ATM_TEAM", "test-team")
         .env("ATM_IDENTITY", "team-lead")
@@ -1451,8 +1478,11 @@ fn test_dead_pid_stale_lock_starts_daemon_cleanly() {
 
     let new_pid = wait_for_daemon_pid_change(&temp_dir, dead_pid, Duration::from_secs(5));
     assert!(new_pid > 1);
-    let _restarted_daemon =
-        DaemonProcessGuard::adopt_registered_pid(new_pid, &daemon_binary_path(), temp_dir.path());
+    let _restarted_daemon = DaemonProcessGuard::adopt_registered_pid(
+        new_pid,
+        &daemon_binary_path(),
+        &temp_dir.path().join("runtime-home"),
+    );
 }
 
 #[cfg(unix)]
@@ -1480,7 +1510,7 @@ fn test_identity_mismatch_socket_is_detected_and_restarted() {
     );
 
     let daemon_bin = daemon_binary_path();
-    let _atm_home = EnvGuard::set("ATM_HOME", temp_dir.path());
+    let _atm_home = EnvGuard::set("ATM_HOME", temp_dir.path().join("runtime-home"));
     let _atm_daemon_bin = EnvGuard::set("ATM_DAEMON_BIN", &daemon_bin);
     let _atm_daemon_autostart = EnvGuard::set("ATM_DAEMON_AUTOSTART", "1");
     let ensure_result = agent_team_mail_core::daemon_client::ensure_daemon_running();

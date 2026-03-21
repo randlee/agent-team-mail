@@ -6,16 +6,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-/// Helper to set home directory for cross-platform test compatibility.
-/// Uses `ATM_HOME` which is checked first by `get_home_dir()`, avoiding
-/// platform-specific differences in how `dirs::home_dir()` resolves.
+/// Set separate config-root and runtime-root env vars on a command.
+///
+/// `HOME` provides the canonical config root (`~/.claude`), while `ATM_HOME`
+/// is runtime-only for daemon state.
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     // Use a subdirectory as CWD to avoid:
     // 1. .atm.toml config leak from the repo root
     // 2. auto-identity CWD matching against team member CWD (temp_dir root)
     let workdir = temp_dir.path().join("workdir");
+    let runtime_home = temp_dir.path().join("runtime-home");
     std::fs::create_dir_all(&workdir).ok();
-    cmd.env("ATM_HOME", temp_dir.path())
+    std::fs::create_dir_all(&runtime_home).ok();
+    cmd.env("ATM_HOME", &runtime_home)
+        .env("HOME", temp_dir.path())
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
         .env_remove("ATM_CONFIG")
@@ -1108,7 +1112,10 @@ fn test_read_own_inbox_no_identity_rejects() {
     std::fs::create_dir_all(&workdir).unwrap();
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
-    cmd.env("ATM_HOME", temp_dir.path())
+    let runtime_home = temp_dir.path().join("runtime-home");
+    std::fs::create_dir_all(&runtime_home).unwrap();
+    cmd.env("ATM_HOME", &runtime_home)
+        .env("HOME", temp_dir.path())
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_TEAM", "test-team")
         .env_remove("ATM_IDENTITY")
@@ -1142,7 +1149,10 @@ fn test_read_own_inbox_with_as_flag_succeeds() {
     std::fs::create_dir_all(&workdir).unwrap();
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
-    cmd.env("ATM_HOME", temp_dir.path())
+    let runtime_home = temp_dir.path().join("runtime-home");
+    std::fs::create_dir_all(&runtime_home).unwrap();
+    cmd.env("ATM_HOME", &runtime_home)
+        .env("HOME", temp_dir.path())
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_TEAM", "test-team")
         .env_remove("ATM_IDENTITY")

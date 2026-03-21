@@ -968,12 +968,8 @@ fn authorize_hook_event(
     agent: &str,
     source: agent_team_mail_core::daemon_client::LifecycleSourceKind,
 ) -> std::result::Result<HookEventAuth, String> {
-    let home_dir = agent_team_mail_core::home::get_home_dir()
-        .map_err(|e| format!("failed to resolve home directory: {e}"))?;
-
-    let config_path = agent_team_mail_core::home::teams_root_dir_for(&home_dir)
-        .join(team)
-        .join("config.json");
+    let config_path = agent_team_mail_core::home::config_team_config_path(team)
+        .map_err(|e| format!("failed to resolve team config path: {e}"))?;
     let team_dir = config_path
         .parent()
         .ok_or_else(|| format!("team config path '{}' has no parent", config_path.display()))?;
@@ -1575,25 +1571,7 @@ async fn handle_hook_event_command_with_dedup(
                     serde_json::json!({"processed": false, "reason": "missing session_id"}),
                 );
             }
-            let home = match agent_team_mail_core::home::get_home_dir() {
-                Ok(h) => h,
-                Err(e) => {
-                    let reason = format!("home resolution failed: {e}");
-                    emit_hook_failure(
-                        Some(event_type.as_str()),
-                        Some(team.as_str()),
-                        Some(agent.as_str()),
-                        Some(session_id.as_str()),
-                        process_id,
-                        &reason,
-                    );
-                    return make_ok_response(
-                        &request.request_id,
-                        serde_json::json!({"processed": false, "reason": reason}),
-                    );
-                }
-            };
-            let Some(member) = load_team_member(&home, &team, &agent) else {
+            let Some(member) = load_team_member(&team, &agent) else {
                 emit_hook_failure(
                     Some(event_type.as_str()),
                     Some(team.as_str()),
@@ -2944,19 +2922,16 @@ fn handle_session_query_team(
     // Team-scoped verification: the queried record must match the team's current leadSessionId
     // for team-lead lookups. This avoids cross-team collisions when names overlap.
     if name == "team-lead" {
-        let home = match agent_team_mail_core::home::get_home_dir() {
-            Ok(h) => h,
+        let config_path = match agent_team_mail_core::home::config_team_config_path(&team) {
+            Ok(path) => path,
             Err(_) => {
                 return make_error_response(
                     &request.request_id,
                     SOCKET_ERROR_INTERNAL_ERROR,
-                    "Failed to resolve home directory",
+                    "Failed to resolve team config path",
                 );
             }
         };
-        let config_path = agent_team_mail_core::home::teams_root_dir_for(&home)
-            .join(&team)
-            .join("config.json");
         let content = match std::fs::read_to_string(&config_path) {
             Ok(c) => c,
             Err(_) => {
@@ -3141,17 +3116,7 @@ fn handle_register_hint(
         .filter(|v| !v.is_empty())
         .map(str::to_string);
 
-    let home = match agent_team_mail_core::home::get_home_dir() {
-        Ok(h) => h,
-        Err(e) => {
-            return make_error_response(
-                &request.request_id,
-                SOCKET_ERROR_INTERNAL_ERROR,
-                &format!("Failed to resolve ATM home: {e}"),
-            );
-        }
-    };
-    let Some(member) = load_team_member(&home, &team, &agent) else {
+    let Some(member) = load_team_member(&team, &agent) else {
         return make_error_response(
             &request.request_id,
             "AGENT_NOT_FOUND",
@@ -3258,16 +3223,6 @@ fn handle_agent_state(
         );
     }
 
-    let home = match agent_team_mail_core::home::get_home_dir() {
-        Ok(h) => h,
-        Err(e) => {
-            return make_error_response(
-                &request.request_id,
-                SOCKET_ERROR_INTERNAL_ERROR,
-                &format!("Failed to resolve ATM home: {e}"),
-            );
-        }
-    };
     let tracker = state_store.lock().unwrap();
     let tracker_state = tracker.get_state(&agent);
     let last_transition = tracker
@@ -3276,7 +3231,7 @@ fn handle_agent_state(
     let tracker_meta = tracker.transition_meta(&agent).cloned();
     drop(tracker);
 
-    let Some(member) = load_team_member(&home, &team, &agent) else {
+    let Some(member) = load_team_member(&team, &agent) else {
         return match tracker_state {
             Some(state) => make_ok_response(
                 &request.request_id,
@@ -3330,17 +3285,7 @@ fn handle_list_agents(
 ) -> SocketResponse {
     let team = request.payload.get("team").and_then(|v| v.as_str());
     if let Some(team_name) = team {
-        let home = match agent_team_mail_core::home::get_home_dir() {
-            Ok(h) => h,
-            Err(e) => {
-                return make_error_response(
-                    &request.request_id,
-                    SOCKET_ERROR_INTERNAL_ERROR,
-                    &format!("Failed to resolve ATM home: {e}"),
-                );
-            }
-        };
-        let members = load_team_members(&home, team_name).unwrap_or_default();
+        let members = load_team_members(team_name).unwrap_or_default();
         let tracker = state_store.lock().unwrap();
         let mut session_guard = session_registry.lock().unwrap();
         let mut merged_states: std::collections::BTreeMap<String, CanonicalMemberState> =
@@ -3348,7 +3293,7 @@ fn handle_list_agents(
 
         for m in members {
             bootstrap_session_from_member_hint(team_name, &m, &mut session_guard);
-            bootstrap_session_from_session_file(&home, team_name, &m, &mut session_guard);
+            bootstrap_session_from_session_file(team_name, &m, &mut session_guard);
             let tracker_state = tracker.get_state(&m.name);
             let tracker_meta = tracker.transition_meta(&m.name);
             let session = session_guard.query_for_team_with_liveness(team_name, &m.name);
@@ -3403,21 +3348,14 @@ fn handle_list_agents(
     make_ok_response(&request.request_id, serde_json::json!(agents))
 }
 
-fn load_team_members(
-    home: &std::path::Path,
-    team: &str,
-) -> Option<Vec<agent_team_mail_core::schema::AgentMember>> {
-    let team_dir = agent_team_mail_core::home::teams_root_dir_for(home).join(team);
+fn load_team_members(team: &str) -> Option<Vec<agent_team_mail_core::schema::AgentMember>> {
+    let team_dir = agent_team_mail_core::home::config_team_dir(team).ok()?;
     let config = TeamConfigStore::open(&team_dir).read().ok()?;
     Some(config.members)
 }
 
-fn load_team_member(
-    home: &std::path::Path,
-    team: &str,
-    agent: &str,
-) -> Option<agent_team_mail_core::schema::AgentMember> {
-    let members = load_team_members(home, team)?;
+fn load_team_member(team: &str, agent: &str) -> Option<agent_team_mail_core::schema::AgentMember> {
+    let members = load_team_members(team)?;
     members
         .into_iter()
         .find(|m| m.name == agent || m.agent_id == format!("{agent}@{team}"))
@@ -3508,14 +3446,11 @@ fn session_file_timestamp(data: &SessionFileHint) -> Option<f64> {
     (timestamp > 0.0).then_some(timestamp)
 }
 
-fn scan_live_session_files(
-    home: &std::path::Path,
-    team: &str,
-    member_name: &str,
-) -> Vec<SessionFileCandidate> {
-    let sessions_dir = agent_team_mail_core::home::teams_root_dir_for(home)
-        .join(team)
-        .join("sessions");
+fn scan_live_session_files(team: &str, member_name: &str) -> Vec<SessionFileCandidate> {
+    let Ok(team_dir) = agent_team_mail_core::home::config_team_dir(team) else {
+        return Vec::new();
+    };
+    let sessions_dir = team_dir.join("sessions");
     let Ok(entries) = std::fs::read_dir(&sessions_dir) else {
         return Vec::new();
     };
@@ -3606,12 +3541,11 @@ fn scan_live_session_files(
 }
 
 fn bootstrap_session_from_session_file(
-    home: &std::path::Path,
     team: &str,
     member: &AgentMember,
     session_registry: &mut crate::daemon::session_registry::SessionRegistry,
 ) {
-    let mut matches = scan_live_session_files(home, team, &member.name);
+    let mut matches = scan_live_session_files(team, &member.name);
     if session_registry
         .query_for_team(team, &member.name)
         .is_some()
@@ -4185,6 +4119,7 @@ mod tests {
 
     struct HookAuthFixture {
         _temp: TempDir,
+        _home_guard: EnvGuard,
         _atm_home_guard: EnvGuard,
     }
 
@@ -4307,7 +4242,10 @@ mod tests {
 
     fn setup_hook_auth_fixture(team: &str, lead: &str, members: &[&str]) -> HookAuthFixture {
         let temp = TempDir::new().unwrap();
-        let atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        let runtime_home = temp.path().join("runtime-home");
+        std::fs::create_dir_all(&runtime_home).unwrap();
+        let home_guard = EnvGuard::set("HOME", temp.path().to_str().unwrap());
+        let atm_home_guard = EnvGuard::set("ATM_HOME", runtime_home.to_str().unwrap());
         write_hook_auth_team_config(temp.path(), team, lead, members);
 
         // Spin-wait until config is readable — macOS APFS directory entry visibility
@@ -4332,6 +4270,7 @@ mod tests {
 
         HookAuthFixture {
             _temp: temp,
+            _home_guard: home_guard,
             _atm_home_guard: atm_home_guard,
         }
     }
@@ -4617,9 +4556,11 @@ mod tests {
     #[test]
     #[serial]
     fn test_list_agents_bootstraps_session_from_config_process_hint() {
-        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
-        let home = std::env::var("ATM_HOME").expect("ATM_HOME set by fixture");
-        let config_path = std::path::Path::new(&home).join(".claude/teams/atm-dev/config.json");
+        let fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let config_path = fixture
+            ._temp
+            .path()
+            .join(".claude/teams/atm-dev/config.json");
         let mut cfg: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
         let members = cfg["members"].as_array_mut().unwrap();
@@ -4664,9 +4605,11 @@ mod tests {
     #[test]
     #[serial]
     fn test_list_agents_bootstrap_skips_member_without_session_id_hint() {
-        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
-        let home = std::env::var("ATM_HOME").expect("ATM_HOME set by fixture");
-        let config_path = std::path::Path::new(&home).join(".claude/teams/atm-dev/config.json");
+        let fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let config_path = fixture
+            ._temp
+            .path()
+            .join(".claude/teams/atm-dev/config.json");
         let mut cfg: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
         let members = cfg["members"].as_array_mut().unwrap();
@@ -4695,9 +4638,11 @@ mod tests {
     #[test]
     #[serial]
     fn test_list_agents_dead_session_without_hint_stays_dead() {
-        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
-        let home = std::env::var("ATM_HOME").expect("ATM_HOME set by fixture");
-        let config_path = std::path::Path::new(&home).join(".claude/teams/atm-dev/config.json");
+        let fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let config_path = fixture
+            ._temp
+            .path()
+            .join(".claude/teams/atm-dev/config.json");
         let mut cfg: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
         let members = cfg["members"].as_array_mut().unwrap();
@@ -4740,9 +4685,11 @@ mod tests {
     #[test]
     #[serial]
     fn test_list_agents_dead_session_with_valid_hint_reactivates() {
-        let _fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
-        let home = std::env::var("ATM_HOME").expect("ATM_HOME set by fixture");
-        let config_path = std::path::Path::new(&home).join(".claude/teams/atm-dev/config.json");
+        let fixture = setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "arch-ctm"]);
+        let config_path = fixture
+            ._temp
+            .path()
+            .join(".claude/teams/atm-dev/config.json");
         let mut cfg: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
         let members = cfg["members"].as_array_mut().unwrap();
@@ -4793,16 +4740,14 @@ mod tests {
     #[test]
     #[serial]
     fn test_list_agents_bootstraps_session_from_live_session_file() {
-        let _fixture =
+        let fixture =
             setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "atm-monitor"]);
-        let home = std::env::var("ATM_HOME").expect("ATM_HOME set by fixture");
-        let home_path = std::path::Path::new(&home);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs_f64();
         write_session_file(
-            home_path,
+            fixture._temp.path(),
             "atm-dev",
             "atm-monitor",
             "sess-monitor-1",
@@ -4839,17 +4784,15 @@ mod tests {
     #[test]
     #[serial]
     fn test_list_agents_prunes_dead_session_file() {
-        let _fixture =
+        let fixture =
             setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "atm-monitor"]);
-        let home = std::env::var("ATM_HOME").expect("ATM_HOME set by fixture");
-        let home_path = std::path::Path::new(&home);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs_f64();
         let dead_pid = (i32::MAX - 1) as u32;
         let session_path = write_session_file(
-            home_path,
+            fixture._temp.path(),
             "atm-dev",
             "atm-monitor",
             "sess-monitor-dead",
@@ -4878,10 +4821,8 @@ mod tests {
     #[test]
     #[serial]
     fn test_list_agents_prunes_dead_duplicate_session_file_for_registered_member() {
-        let _fixture =
+        let fixture =
             setup_hook_auth_fixture("atm-dev", "team-lead", &["team-lead", "atm-monitor"]);
-        let home = std::env::var("ATM_HOME").expect("ATM_HOME set by fixture");
-        let home_path = std::path::Path::new(&home);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -4889,7 +4830,7 @@ mod tests {
 
         let dead_pid = (i32::MAX - 1) as u32;
         let dead_session_path = write_session_file(
-            home_path,
+            fixture._temp.path(),
             "atm-dev",
             "team-lead",
             "sess-team-lead-dead",
@@ -4936,7 +4877,10 @@ mod tests {
         use crate::plugins::worker_adapter::AgentState;
 
         let temp = TempDir::new().unwrap();
-        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        let runtime_home = temp.path().join("runtime-home");
+        std::fs::create_dir_all(&runtime_home).unwrap();
+        let _home_guard = EnvGuard::set("HOME", temp.path().to_str().unwrap());
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", runtime_home.to_str().unwrap());
         write_hook_auth_team_config(temp.path(), "team-a", "team-lead-a", &["team-lead-a", "a1"]);
         write_hook_auth_team_config(temp.path(), "team-b", "team-lead-b", &["team-lead-b", "b1"]);
 
@@ -4969,7 +4913,10 @@ mod tests {
     #[serial]
     fn test_team_scoped_list_agents_isolated_after_registry_reload() {
         let temp = TempDir::new().unwrap();
-        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        let runtime_home = temp.path().join("runtime-home");
+        std::fs::create_dir_all(&runtime_home).unwrap();
+        let _home_guard = EnvGuard::set("HOME", temp.path().to_str().unwrap());
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", runtime_home.to_str().unwrap());
         write_hook_auth_team_config(temp.path(), "team-a", "team-lead-a", &["team-lead-a", "a1"]);
         write_hook_auth_team_config(temp.path(), "team-b", "team-lead-b", &["team-lead-b", "b1"]);
         // Avoid test-process backend mismatch (cargo test != claude) so this
@@ -4977,7 +4924,7 @@ mod tests {
         set_member_backend(temp.path(), "team-a", "a1", "external");
         set_member_backend(temp.path(), "team-b", "b1", "external");
 
-        let persist_path = temp.path().join(".atm/daemon/session-registry.json");
+        let persist_path = runtime_home.join(".atm/daemon/session-registry.json");
         {
             let mut seeded = crate::daemon::session_registry::SessionRegistry::with_persist_path(
                 persist_path.clone(),
@@ -5189,7 +5136,10 @@ mod tests {
     #[serial]
     fn test_handle_register_hint_registers_external_member_session() {
         let temp = TempDir::new().unwrap();
-        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        let runtime_home = temp.path().join("runtime-home");
+        std::fs::create_dir_all(&runtime_home).unwrap();
+        let _home_guard = EnvGuard::set("HOME", temp.path().to_str().unwrap());
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", runtime_home.to_str().unwrap());
         let team_dir = temp.path().join(".claude/teams/atm-dev");
         std::fs::create_dir_all(&team_dir).unwrap();
         let config = serde_json::json!({
@@ -5338,7 +5288,10 @@ mod tests {
     #[serial]
     fn test_handle_register_hint_recovers_mismatch_offline_baseline_to_active() {
         let temp = TempDir::new().unwrap();
-        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        let runtime_home = temp.path().join("runtime-home");
+        std::fs::create_dir_all(&runtime_home).unwrap();
+        let _home_guard = EnvGuard::set("HOME", temp.path().to_str().unwrap());
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", runtime_home.to_str().unwrap());
         let team_dir = temp.path().join(".claude/teams/atm-dev");
         std::fs::create_dir_all(&team_dir).unwrap();
         let config = serde_json::json!({
@@ -5484,7 +5437,10 @@ mod tests {
     #[serial]
     fn test_handle_register_hint_rejects_cross_identity_session_write() {
         let temp = TempDir::new().unwrap();
-        let _atm_home_guard = EnvGuard::set("ATM_HOME", temp.path().to_str().unwrap());
+        let runtime_home = temp.path().join("runtime-home");
+        std::fs::create_dir_all(&runtime_home).unwrap();
+        let _home_guard = EnvGuard::set("HOME", temp.path().to_str().unwrap());
+        let _atm_home_guard = EnvGuard::set("ATM_HOME", runtime_home.to_str().unwrap());
         let team_dir = temp.path().join(".claude/teams/atm-dev");
         std::fs::create_dir_all(&team_dir).unwrap();
         let config = serde_json::json!({

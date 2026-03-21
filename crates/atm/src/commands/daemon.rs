@@ -19,7 +19,7 @@ use crate::commands::logging_health::{
     LoggingHealthSnapshot, OtelHealthSnapshot, build_logging_health_contract,
     build_otel_health_contract,
 };
-use crate::util::settings::{get_home_dir, teams_root_dir_for};
+use crate::util::settings::get_home_dir;
 use agent_team_mail_core::daemon_client::{
     create_isolated_runtime_root, daemon_status_path_for, reap_expired_isolated_runtime_roots,
 };
@@ -179,7 +179,8 @@ fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> 
         anyhow::bail!("daemon is not running");
     }
 
-    let home_dir = get_home_dir()?;
+    let _home_dir = get_home_dir()?;
+    let config_home = agent_team_mail_core::home::get_os_home_dir()?;
     let current_dir = std::env::current_dir()?;
     let config = resolve_config(
         &ConfigOverrides {
@@ -187,7 +188,7 @@ fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> 
             ..Default::default()
         },
         &current_dir,
-        &home_dir,
+        &config_home,
     )?;
     let team_name = team_override.unwrap_or(&config.core.default_team);
 
@@ -215,7 +216,7 @@ fn execute_kill(agent: &str, team_override: Option<&str>, timeout_secs: u64) -> 
         )
     })?;
 
-    send_shutdown_request(&home_dir, team_name, agent)?;
+    send_shutdown_request(&config_home, team_name, agent)?;
     if wait_for_session_dead(team_name, agent, timeout_secs) {
         crate::commands::teams::cleanup_single_agent(
             team_name.to_string(),
@@ -320,8 +321,7 @@ fn send_shutdown_request(
         message_id: Some(Uuid::new_v4().to_string()),
         unknown_fields: HashMap::new(),
     };
-    let inbox_path = teams_root_dir_for(home_dir)
-        .join(team_name)
+    let inbox_path = agent_team_mail_core::home::config_team_dir_for(home_dir, team_name)
         .join("inboxes")
         .join(format!("{agent_name}.json"));
     inbox_append(&inbox_path, &msg, team_name, "atm")?;

@@ -19,6 +19,10 @@ pub struct DaemonProcessGuard {
 }
 
 impl DaemonProcessGuard {
+    pub fn runtime_home_path(home: &TempDir) -> PathBuf {
+        home.path().join("runtime-home")
+    }
+
     pub fn spawn(home: &TempDir, team: &str) -> Self {
         let daemon_bin = daemon_binary_path();
         assert!(
@@ -27,26 +31,32 @@ impl DaemonProcessGuard {
             daemon_bin.display()
         );
         daemon_test_registry::sweep_stale_test_daemons();
-        let daemon_dir = home.path().join(".atm").join("daemon");
+        let runtime_home = Self::runtime_home_path(home);
+        fs::create_dir_all(&runtime_home).expect("create daemon runtime home");
+        let daemon_dir = runtime_home.join(".atm").join("daemon");
+        let workdir = home.path().join("workdir");
+        fs::create_dir_all(&workdir).expect("create daemon test workdir");
         let mut cmd = Command::new(&daemon_bin);
-        cmd.env("ATM_HOME", home.path())
+        cmd.env("ATM_HOME", &runtime_home)
+            .env("HOME", home.path())
             .env("ATM_DAEMON_AUTOSTART", "0")
             .env_remove("ATM_CONFIG")
             .env_remove("ATM_DAEMON_BIN") // F-1: prevent inheriting installed binary
             .env_remove("CLAUDE_SESSION_ID")
             .arg("--team")
             .arg(team)
+            .current_dir(&workdir)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         let launch_token = issue_isolated_test_launch_token(
-            home.path(),
+            &runtime_home,
             daemon_bin.display().to_string(),
             "DaemonProcessGuard::spawn",
             format!(
                 "DaemonProcessGuard::spawn:{}:{}",
                 team,
-                home.path().display()
+                runtime_home.display()
             ),
             std::process::id(),
             Duration::from_secs(600),
@@ -150,7 +160,7 @@ impl DaemonProcessGuard {
     }
 
     pub fn wait_ready(&mut self, home: &TempDir) {
-        let daemon_dir = home.path().join(".atm").join("daemon");
+        let daemon_dir = Self::runtime_home_path(home).join(".atm").join("daemon");
         let pid_path = daemon_dir.join("atm-daemon.pid");
         let status_path = daemon_dir.join("status.json");
         let socket_path = daemon_dir.join("atm-daemon.sock");
@@ -163,10 +173,19 @@ impl DaemonProcessGuard {
             if let Some(child) = self.child.as_mut()
                 && let Ok(Some(status)) = child.try_wait()
             {
+                let output = self
+                    .child
+                    .take()
+                    .expect("child handle should exist after readiness failure")
+                    .wait_with_output()
+                    .expect("collect daemon failure output");
+                daemon_test_registry::unregister_test_daemon(self.pid);
                 panic!(
-                    "daemon exited before readiness (status={status}); expected pid {} at {}",
+                    "daemon exited before readiness (status={status}); expected pid {} at {}; stdout='{}'; stderr='{}'",
                     self.pid,
-                    status_path.display()
+                    status_path.display(),
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
                 );
             }
             let status_pid = fs::read_to_string(&status_path)

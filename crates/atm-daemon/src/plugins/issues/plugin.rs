@@ -313,12 +313,17 @@ impl Plugin for IssuesPlugin {
         })?;
 
         // Determine ATM config root from canonical home resolution.
-        let home_dir =
+        let runtime_home =
             agent_team_mail_core::home::get_home_dir().map_err(|e| PluginError::Init {
-                message: format!("Could not determine home directory: {e}"),
+                message: format!("Could not determine runtime home: {e}"),
                 source: None,
             })?;
-        let atm_config_root = home_dir.join(".config/atm");
+        let config_home =
+            agent_team_mail_core::home::get_os_home_dir().map_err(|e| PluginError::Init {
+                message: format!("Could not determine config home: {e}"),
+                source: None,
+            })?;
+        let atm_config_root = config_home.join(".config/atm");
 
         // Build the provider registry
         let registry = self.build_registry(&atm_config_root);
@@ -346,7 +351,7 @@ impl Plugin for IssuesPlugin {
             self.provider = Some(self.create_provider_from_registry(
                 &registry,
                 git_provider,
-                &home_dir,
+                &runtime_home,
                 &target_team,
                 config_table,
             )?);
