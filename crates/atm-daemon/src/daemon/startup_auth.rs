@@ -21,7 +21,6 @@ pub enum StartupRejectionReason {
     InvalidToken,
     ExpiredToken,
     WrongAtmHome,
-    WrongLaunchClass,
     ReplayedToken,
     SharedRuntimeAlreadyRunning,
 }
@@ -33,7 +32,6 @@ impl StartupRejectionReason {
             Self::InvalidToken => "invalid_token",
             Self::ExpiredToken => "expired_token",
             Self::WrongAtmHome => "wrong_atm_home",
-            Self::WrongLaunchClass => "wrong_launch_class",
             Self::ReplayedToken => "replayed_token",
             Self::SharedRuntimeAlreadyRunning => "shared_runtime_already_running",
         }
@@ -50,8 +48,6 @@ pub enum StartupAuthError {
     ExpiredToken,
     #[error("token ATM_HOME does not match runtime")]
     WrongAtmHome,
-    #[error("wrong launch class for runtime")]
-    WrongLaunchClass,
     #[error("launch token replayed")]
     ReplayedToken,
     #[error("isolated-test launch token missing lease fields")]
@@ -89,16 +85,6 @@ fn termination_reason(event_name: &'static str) -> Option<&'static str> {
         "clean_owner_shutdown" | "ttl_expiry_shutdown" | "dead_owner_shutdown" => Some(event_name),
         _ => None,
     }
-}
-
-fn expected_launch_class(home: &Path) -> Result<LaunchClass> {
-    Ok(
-        match agent_team_mail_core::daemon_client::runtime_kind_for_home(home)? {
-            agent_team_mail_core::daemon_client::RuntimeKind::Release => LaunchClass::ProdShared,
-            agent_team_mail_core::daemon_client::RuntimeKind::Dev => LaunchClass::DevShared,
-            agent_team_mail_core::daemon_client::RuntimeKind::Isolated => LaunchClass::IsolatedTest,
-        },
-    )
 }
 
 fn emit_lifecycle_event(
@@ -427,13 +413,6 @@ fn validate_token_inner(
         return Err(StartupAuthError::WrongAtmHome);
     }
 
-    if token.launch_class
-        != expected_launch_class(home)
-            .map_err(|err| StartupAuthError::InvalidToken(err.to_string()))?
-    {
-        return Err(StartupAuthError::WrongLaunchClass);
-    }
-
     if token.launch_class == LaunchClass::IsolatedTest
         && (token
             .test_identifier
@@ -462,7 +441,6 @@ pub fn validate_startup_token(home: &Path) -> Result<DaemonLaunchToken> {
                 StartupAuthError::InvalidToken(_) => StartupRejectionReason::InvalidToken,
                 StartupAuthError::ExpiredToken => StartupRejectionReason::ExpiredToken,
                 StartupAuthError::WrongAtmHome => StartupRejectionReason::WrongAtmHome,
-                StartupAuthError::WrongLaunchClass => StartupRejectionReason::WrongLaunchClass,
                 StartupAuthError::ReplayedToken => StartupRejectionReason::ReplayedToken,
                 StartupAuthError::MissingIsolatedLeaseFields => {
                     StartupRejectionReason::InvalidToken
@@ -719,7 +697,7 @@ mod tests {
     #[serial]
     fn expired_token_is_rejected() {
         clear_seen_tokens_for_tests();
-        let temp = TempDir::new().unwrap();
+        let temp = isolated_runtime_root("startup-auth-expired");
         let now = Utc::now();
         let token = DaemonLaunchToken {
             launch_class: LaunchClass::IsolatedTest,
@@ -741,7 +719,7 @@ mod tests {
     #[serial]
     fn isolated_test_token_missing_lease_is_rejected() {
         clear_seen_tokens_for_tests();
-        let temp = TempDir::new().unwrap();
+        let temp = isolated_runtime_root("startup-auth-missing-lease");
         let mut token = token_for(temp.path(), LaunchClass::IsolatedTest, 30);
         token.test_identifier = None;
         token.owner_pid = None;
@@ -754,8 +732,8 @@ mod tests {
     #[serial]
     fn wrong_home_is_rejected() {
         clear_seen_tokens_for_tests();
-        let temp = TempDir::new().unwrap();
-        let other = TempDir::new().unwrap();
+        let temp = isolated_runtime_root("startup-auth-wrong-home-a");
+        let other = isolated_runtime_root("startup-auth-wrong-home-b");
         let token = token_for(other.path(), LaunchClass::IsolatedTest, 30);
         let err = validate_token_inner(temp.path(), Some(&encode_launch_token(&token).unwrap()))
             .unwrap_err();
@@ -764,20 +742,9 @@ mod tests {
 
     #[test]
     #[serial]
-    fn wrong_class_is_rejected() {
-        clear_seen_tokens_for_tests();
-        let temp = TempDir::new().unwrap();
-        let token = token_for(temp.path(), LaunchClass::ProdShared, 30);
-        let err = validate_token_inner(temp.path(), Some(&encode_launch_token(&token).unwrap()))
-            .unwrap_err();
-        assert!(matches!(err, StartupAuthError::WrongLaunchClass));
-    }
-
-    #[test]
-    #[serial]
     fn replayed_token_is_rejected() {
         clear_seen_tokens_for_tests();
-        let temp = TempDir::new().unwrap();
+        let temp = isolated_runtime_root("startup-auth-replay");
         let token = token_for(temp.path(), LaunchClass::IsolatedTest, 30);
         let raw = encode_launch_token(&token).unwrap();
         assert!(validate_token_inner(temp.path(), Some(&raw)).is_ok());
@@ -789,7 +756,7 @@ mod tests {
     #[serial]
     fn valid_token_is_accepted() {
         clear_seen_tokens_for_tests();
-        let temp = TempDir::new().unwrap();
+        let temp = isolated_runtime_root("startup-auth-valid");
         let token = issue_isolated_test_launch_token(
             temp.path(),
             "test-binary",
@@ -807,12 +774,12 @@ mod tests {
     #[serial]
     fn non_isolated_tokens_may_omit_lease_fields() {
         clear_seen_tokens_for_tests();
-        // ProdShared tokens require the real OS home dir. On Windows,
+        // Shared tokens require the real OS home dir. On Windows,
         // dirs::home_dir() bypasses USERPROFILE env overrides, so TempDir
         // cannot classify as shared runtime.
         let os_home = agent_team_mail_core::home::get_os_home_dir().unwrap();
         let token = issue_launch_token(
-            LaunchClass::ProdShared,
+            LaunchClass::Shared,
             &os_home,
             "test-binary",
             "startup-auth-test",
@@ -820,7 +787,7 @@ mod tests {
         );
         let raw = encode_launch_token(&token).unwrap();
         let accepted = validate_token_inner(&os_home, Some(&raw)).unwrap();
-        assert_eq!(accepted.launch_class, LaunchClass::ProdShared);
+        assert_eq!(accepted.launch_class, LaunchClass::Shared);
     }
 
     #[cfg(unix)]

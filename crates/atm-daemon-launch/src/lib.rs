@@ -21,16 +21,15 @@ pub const DEFAULT_LAUNCH_TOKEN_TTL_SECS: u64 = 15;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LaunchClass {
-    ProdShared,
-    DevShared,
+    #[serde(alias = "prod-shared", alias = "dev-shared")]
+    Shared,
     IsolatedTest,
 }
 
 impl LaunchClass {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::ProdShared => "prod-shared",
-            Self::DevShared => "dev-shared",
+            Self::Shared => "shared",
             Self::IsolatedTest => "isolated-test",
         }
     }
@@ -219,14 +218,14 @@ mod tests {
     fn issue_launch_token_populates_required_fields() {
         let atm_home = std::env::temp_dir().join("atm-home");
         let token = issue_launch_token(
-            LaunchClass::DevShared,
+            LaunchClass::Shared,
             &atm_home,
             "dev-channel",
             "au.1-test",
             Duration::from_secs(90),
         );
 
-        assert_eq!(token.launch_class, LaunchClass::DevShared);
+        assert_eq!(token.launch_class, LaunchClass::Shared);
         assert_eq!(token.atm_home, atm_home);
         assert_eq!(token.binary_identity, "dev-channel");
         assert_eq!(token.issuer, "au.1-test");
@@ -247,7 +246,7 @@ mod tests {
     fn encode_decode_roundtrip_preserves_token() {
         let prod_home = std::env::temp_dir().join("prod-home");
         let token = issue_launch_token(
-            LaunchClass::ProdShared,
+            LaunchClass::Shared,
             &prod_home,
             "/opt/homebrew/bin/atm-daemon",
             "launcher-test",
@@ -282,7 +281,7 @@ mod tests {
     fn shared_runtime_spawn_scrubs_owner_session_env() {
         let atm_home = std::env::temp_dir().join("shared-home");
         let token = issue_launch_token(
-            LaunchClass::DevShared,
+            LaunchClass::Shared,
             &atm_home,
             "target/debug/atm-daemon",
             "launcher-test",
@@ -299,7 +298,7 @@ mod tests {
             SpawnDaemonRequest {
                 daemon_bin: OsStr::new("atm-daemon"),
                 atm_home: &atm_home,
-                launch_class: LaunchClass::DevShared,
+                launch_class: LaunchClass::Shared,
                 issuer: "launcher-test",
                 team: Some("atm-dev"),
                 stdin: Stdio::null(),
@@ -321,7 +320,7 @@ mod tests {
     fn shared_runtime_spawn_preserves_runtime_session_and_otel_env() {
         let atm_home = std::env::temp_dir().join("shared-home");
         let token = issue_launch_token(
-            LaunchClass::DevShared,
+            LaunchClass::Shared,
             &atm_home,
             "target/debug/atm-daemon",
             "launcher-test",
@@ -346,7 +345,7 @@ mod tests {
             SpawnDaemonRequest {
                 daemon_bin: OsStr::new("atm-daemon"),
                 atm_home: &atm_home,
-                launch_class: LaunchClass::DevShared,
+                launch_class: LaunchClass::Shared,
                 issuer: "launcher-test",
                 team: Some("atm-dev"),
                 stdin: Stdio::null(),

@@ -5,7 +5,7 @@ use std::process::{Child, Stdio};
 use agent_team_mail_core::daemon_client::{
     RuntimeKind, daemon_is_running, daemon_socket_path, runtime_kind_for_home,
 };
-use agent_team_mail_core::home::{get_home_dir, get_os_home_dir};
+use agent_team_mail_core::home::get_home_dir;
 use agent_team_mail_daemon_launch::{LaunchClass, SpawnDaemonRequest, spawn_daemon_process};
 
 pub(crate) fn ensure_daemon_running(team: &str) -> Option<String> {
@@ -18,8 +18,7 @@ pub(crate) fn ensure_daemon_running(team: &str) -> Option<String> {
     let home = get_home_dir().ok()?;
     let daemon_bin = resolve_daemon_binary_for_home(&home)?;
     let launch_class = match runtime_kind_for_home(&home).ok()? {
-        RuntimeKind::Release => LaunchClass::ProdShared,
-        RuntimeKind::Dev => LaunchClass::DevShared,
+        RuntimeKind::Shared => LaunchClass::Shared,
         RuntimeKind::Isolated => LaunchClass::IsolatedTest,
     };
     let child = match spawn_daemon_process(SpawnDaemonRequest {
@@ -105,10 +104,7 @@ pub(crate) fn resolve_daemon_binary_for_home(home: &Path) -> Option<PathBuf> {
 
     let runtime_kind = runtime_kind_for_home(home).ok()?;
     match runtime_kind {
-        RuntimeKind::Dev => {
-            Some(dev_runtime_daemon_binary_path().unwrap_or_else(|| PathBuf::from("atm-daemon")))
-        }
-        RuntimeKind::Release | RuntimeKind::Isolated => scoped_daemon_binary_from_current_exe()
+        RuntimeKind::Shared | RuntimeKind::Isolated => scoped_daemon_binary_from_current_exe()
             .or_else(|| Some(PathBuf::from(OsStr::new("atm-daemon")))),
     }
 }
@@ -118,15 +114,7 @@ fn scoped_daemon_binary_from_current_exe() -> Option<PathBuf> {
     Some(current_exe.parent()?.join("atm-daemon"))
 }
 
-fn dev_runtime_daemon_binary_path() -> Option<PathBuf> {
-    let os_home = get_os_home_dir().ok()?;
-    Some(
-        default_dev_runtime_root_for(&os_home)
-            .join("bin")
-            .join("atm-daemon"),
-    )
-}
-
+#[cfg(test)]
 pub(crate) fn default_dev_runtime_root_for(os_home: &Path) -> PathBuf {
     #[cfg(windows)]
     {
