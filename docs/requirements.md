@@ -36,7 +36,7 @@ until the daemon sections here are fully consolidated.
 
 ## 1. Project Summary
 
-`atm` is a Rust workspace that provides mail-like messaging for Claude agent teams. It consists of a CLI for interactive use, a shared library for safe file I/O against the `~/.claude/teams/` file structure, and (post-MVP) an always-on daemon that hosts plugins for CI monitoring, cross-machine bridging, issue tracking, and human chat interfaces.
+`atm` is a Rust workspace that provides mail-like messaging for Claude agent teams. It consists of a CLI for interactive use, a shared library for safe file I/O against the `~/.claude/teams/` file structure, and a daemon/runtime subsystem whose active simplification requirements are defined in `docs/daemon/requirements.md` and `docs/daemon/architecture.md`.
 
 ### Goals
 
@@ -47,7 +47,6 @@ until the daemon sections here are fully consolidated.
 
 ### Non-Goals (MVP)
 
-- Daemon / background process mode (post-MVP)
 - Team or agent lifecycle management (create/delete teams, spawn agents)
 - Cross-machine networking in core (plugin responsibility)
 - GUI or TUI interface
@@ -76,7 +75,7 @@ agent-team-mail/
 │   │   └── src/
 │   │       ├── main.rs
 │   │       └── commands/       # send, read, broadcast, inbox, teams, etc.
-│   └── atm-daemon/             # daemon binary (post-MVP)
+│   └── atm-daemon/             # daemon binary
 │       ├── Cargo.toml
 │       └── src/
 │           ├── main.rs

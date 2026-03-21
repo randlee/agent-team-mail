@@ -3,6 +3,8 @@
 **Version**: 0.1
 **Date**: 2026-03-20
 **Status**: PLANNED
+**Supersedes**: pre-BB multi-daemon/runtime-splitting assumptions in
+`docs/requirements.md` and `docs/project-plan.md`
 
 This document defines the simplified daemon requirements that supersede the
 current multi-daemon/runtime-splitting model.
@@ -29,6 +31,8 @@ not directly serve the remaining requirements.
 - `ATM_HOME` is a runtime-state root only.
 - Team configuration must resolve from one stable config root independent of
   daemon runtime state.
+- The canonical config root is `~/.claude`.
+- The canonical team-state root is `~/.claude/teams`.
 
 ### 2.3 Minimal Daemon Responsibilities
 

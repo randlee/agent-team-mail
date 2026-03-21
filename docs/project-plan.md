@@ -2695,6 +2695,15 @@ You are the Scrum Master for the agent-team-mail (atm) project.
 collapse daemon runtime artifacts to a minimal authoritative set, and replace
 the current daemon test model with a simpler single-daemon strategy.
 
+**Integration branch**: `integrate/phase-BB`
+
+**Prerequisites**: `develop` at `103bd127` or later, with Phases through BA
+merged to `develop`.
+
+**Dependency graph**: `BB.0 -> BB.1 -> BB.2 -> BB.3 -> BB.4` (serial). `BB.3`
+must not land on the phase branch unless the BB.4 compatibility/test changes
+required by PID-file removal are present on the same integration head.
+
 **Design references**:
 - `docs/daemon/requirements.md`
 - `docs/daemon/architecture.md`
@@ -2714,7 +2723,7 @@ the current daemon test model with a simpler single-daemon strategy.
 3. Dead-code cleanup identified in BB.0 is complete and obsolete surfaces are not carried into later sprints.
 4. Daemon startup failure leaves no misleading live-daemon state behind.
 5. Stop/restart removes all daemon-owned runtime artifacts deterministically.
-6. Dogfood daemon start/restart/stop passes repeatedly under the simplified model.
+6. Dogfood daemon start/restart/stop passes repeatedly on a clean machine/home under the simplified model and follows the canonical Phase AR smoke protocol.
 7. Net phase outcome is deletion-heavy: daemon complexity and documentation are materially smaller than before Phase BB.
 
 ## Communication

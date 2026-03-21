@@ -3,6 +3,8 @@
 **Version**: 0.1
 **Date**: 2026-03-20
 **Status**: PLANNED
+**Supersedes**: pre-BB daemon/runtime architecture assumptions in
+`docs/requirements.md` and `docs/project-plan.md`
 
 ## 1. Target Architecture
 
@@ -10,7 +12,8 @@ The reset architecture is intentionally smaller than the current daemon model.
 
 ### 1.1 Roots
 
-- **Config root**: stable team/config location, independent of `ATM_HOME`
+- **Config root**: `~/.claude`
+- **Team state root**: `~/.claude/teams`
 - **Runtime root**: daemon socket, lock, status, logs, and other runtime files
 
 `ATM_HOME` controls the runtime root only.
@@ -65,6 +68,22 @@ deleting legacy behavior quickly:
 4. remove legacy multi-daemon logic,
 5. rewrite tests to the single-daemon model,
 6. delete the obsolete code and documentation.
+
+BB sequencing is serial:
+
+- `BB.1 -> BB.2 -> BB.3 -> BB.4`
+
+Additional implementation constraints discovered during planning:
+
+- `BB.1` must inventory and migrate the existing path-root call sites in
+  `atm-core`, `atm-daemon`, and daemon plugin initialization before `BB.2`
+  begins.
+- `BB.2` changes span `atm-core`, `atm-daemon`, and `atm-daemon-launch`
+  together; there is no safe partial rollout.
+- `BB.3` must include the schema migration note for `RuntimeOwnerMetadata` in
+  `status.json`.
+- `BB.3` may not land on the integration branch without the BB.4 compatibility
+  work required by PID-file removal and daemon test rewrites.
 
 ## 4. Architectural Rule
 
