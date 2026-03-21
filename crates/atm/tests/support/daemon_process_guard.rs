@@ -351,6 +351,15 @@ fn send_signal(_pid: i32, _sig: i32) {}
 fn reap_child_pid_best_effort(_pid: i32) {}
 
 pub(crate) fn daemon_binary_path() -> PathBuf {
+    let exe = std::env::current_exe().expect("current_exe");
+    let deps_dir = exe.parent().expect("parent of test binary");
+    let target_dir = if deps_dir.ends_with("deps") {
+        deps_dir.parent().expect("parent of deps dir")
+    } else {
+        deps_dir
+    };
+    let build_release = target_dir.file_name().and_then(|name| name.to_str()) == Some("release");
+
     static BUILT: OnceLock<()> = OnceLock::new();
     BUILT.get_or_init(|| {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -358,12 +367,17 @@ pub(crate) fn daemon_binary_path() -> PathBuf {
             .and_then(|path| path.parent())
             .expect("workspace root from crates/atm")
             .to_path_buf();
-        let status = Command::new("cargo")
+        let mut command = Command::new("cargo");
+        command
             .arg("build")
             .arg("-p")
             .arg("agent-team-mail-daemon")
             .arg("--bin")
-            .arg("atm-daemon")
+            .arg("atm-daemon");
+        if build_release {
+            command.arg("--release");
+        }
+        let status = command
             .current_dir(&workspace_root)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -375,16 +389,6 @@ pub(crate) fn daemon_binary_path() -> PathBuf {
             "cargo build -p agent-team-mail-daemon --bin atm-daemon failed"
         );
     });
-    // Locate the build output directory from the current test binary path.
-    // For integration tests, `current_exe()` is in `target/<profile>/deps/`.
-    // The daemon binary lives one level up in `target/<profile>/`.
-    let exe = std::env::current_exe().expect("current_exe");
-    let deps_dir = exe.parent().expect("parent of test binary");
-    let target_dir = if deps_dir.ends_with("deps") {
-        deps_dir.parent().expect("parent of deps dir")
-    } else {
-        deps_dir
-    };
     #[cfg(windows)]
     let name = "atm-daemon.exe";
     #[cfg(not(windows))]

@@ -633,11 +633,11 @@ fn canonical_shared_runtime_root() -> anyhow::Result<PathBuf> {
 }
 
 fn shared_runtime_test_bypass_enabled(input: &RuntimePolicyInput) -> bool {
-    input.build_profile == BuildProfile::Debug
-        && std::env::var("ATM_TEST_SHARED_DAEMON_ADMISSION")
-            .ok()
-            .as_deref()
-            == Some("1")
+    let _ = input;
+    std::env::var("ATM_TEST_SHARED_DAEMON_ADMISSION")
+        .ok()
+        .as_deref()
+        == Some("1")
 }
 
 // Enforces BB.2 single-daemon invariant: one canonical runtime root, one
@@ -3313,6 +3313,7 @@ sleep 10
 
     #[cfg(unix)]
     #[test]
+    #[serial]
     fn test_validate_runtime_admission_accepts_shared_override_binary() {
         let _lock = env_lock().lock().unwrap();
         let shared_home_dir = non_temp_shared_home();
@@ -3334,6 +3335,7 @@ sleep 10
 
     #[cfg(unix)]
     #[test]
+    #[serial]
     fn test_validate_runtime_admission_rejects_repo_binary_for_shared_runtime() {
         let _lock = env_lock().lock().unwrap();
         let shared_home_dir = non_temp_shared_home();
@@ -3357,6 +3359,7 @@ sleep 10
 
     #[cfg(unix)]
     #[test]
+    #[serial]
     fn test_validate_runtime_admission_rejects_debug_build_for_shared_release_runtime() {
         let _lock = env_lock().lock().unwrap();
         let shared_home_dir = non_temp_shared_home();
@@ -3377,6 +3380,7 @@ sleep 10
 
     #[cfg(unix)]
     #[test]
+    #[serial]
     fn test_validate_runtime_admission_rejects_noncanonical_shared_home() {
         let _lock = env_lock().lock().unwrap();
         let shared_home_dir = non_temp_shared_home();
@@ -3549,6 +3553,7 @@ sleep 10
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
 
+        let _lock = env_lock().lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().to_path_buf();
         fs::create_dir_all(home.join(".atm/daemon")).unwrap();

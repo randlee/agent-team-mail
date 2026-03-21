@@ -107,7 +107,6 @@ fn start_daemon(env: &DaemonEnv) -> daemon_process_guard::DaemonProcessGuard {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_atm-daemon"));
     cmd.current_dir(env.workdir.path())
         .env("ATM_HOME", &env.atm_home)
-        .env("HOME", env.workdir.path())
         .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
         .arg("--verbose");
     let token = issue_launch_token(

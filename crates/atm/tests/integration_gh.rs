@@ -665,7 +665,6 @@ fn start_fake_gh_daemon_with_mode_and_delays(
         loop {
             let mut cmd = Command::new(&script);
             cmd.env("ATM_HOME", &runtime_home)
-                .env("HOME", home)
                 .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
                 .env("ATM_FAKE_GH_CONFIGURED", if configured { "1" } else { "0" })
                 .env("ATM_FAKE_GH_ENABLED", if enabled { "1" } else { "0" })
