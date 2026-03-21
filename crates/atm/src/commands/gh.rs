@@ -1475,7 +1475,11 @@ fn execute_init(
     json: bool,
 ) -> Result<()> {
     let prereqs = if args.dry_run {
-        local_gh_cli_prereqs()
+        GhCliPrereqStatus {
+            gh_installed: false,
+            gh_authenticated: false,
+            error: None,
+        }
     } else {
         fetch_gh_cli_prereqs(team)?
     };
@@ -1613,24 +1617,6 @@ fn fetch_gh_cli_prereqs(team: &str) -> Result<GhCliPrereqStatus> {
         bail!("GitHub CLI is not authenticated. Run `gh auth login` first.");
     }
     Ok(status)
-}
-
-fn local_gh_cli_prereqs() -> GhCliPrereqStatus {
-    let gh_installed = Command::new("gh")
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success());
-    let gh_authenticated = gh_installed
-        && Command::new("gh")
-            .args(["auth", "status"])
-            .output()
-            .is_ok_and(|output| output.status.success());
-
-    GhCliPrereqStatus {
-        gh_installed,
-        gh_authenticated,
-        error: None,
-    }
 }
 
 fn detect_github_remote(current_dir: &Path) -> Option<(String, String)> {
