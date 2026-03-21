@@ -86,6 +86,20 @@ fn export_lifecycle_trace_from_entrypoint(
         });
 }
 
+fn cleanup_daemon_runtime_artifacts(home_dir: &std::path::Path) {
+    let runtime_dir = agent_team_mail_core::daemon_client::daemon_runtime_dir_for(home_dir);
+    let _ = std::fs::remove_file(runtime_dir.join("atm-daemon.sock"));
+    let _ = std::fs::remove_file(agent_team_mail_core::daemon_client::daemon_status_path_for(
+        home_dir,
+    ));
+    let _ = std::fs::remove_file(
+        agent_team_mail_core::daemon_client::daemon_lock_metadata_path_for(home_dir),
+    );
+    let _ = std::fs::remove_file(
+        agent_team_mail_core::daemon_client::daemon_runtime_metadata_path_for(home_dir),
+    );
+}
+
 /// ATM Daemon - Background service for agent team mail plugins
 #[derive(Parser, Debug)]
 #[command(name = "atm-daemon")]
@@ -127,6 +141,8 @@ async fn main() -> Result<()> {
     daemon::observability::install_lifecycle_trace_hook(Arc::new(
         export_lifecycle_trace_from_entrypoint,
     ));
+    let _ = daemon::startup_auth::sweep_stale_isolated_runtimes()
+        .context("Failed to sweep stale isolated runtimes")?;
     let launch_token = daemon::startup_auth::validate_startup_token(&home_dir)
         .context("Daemon launch authorization failed")?;
     let runtime_owner =
@@ -196,16 +212,6 @@ async fn main() -> Result<()> {
             ),
         },
     )?;
-    agent_team_mail_core::daemon_client::write_daemon_lock_metadata(
-        &home_dir,
-        env!("CARGO_PKG_VERSION"),
-        &runtime_owner,
-    )
-    .context("Failed to write daemon lock metadata")?;
-    daemon::startup_auth::persist_runtime_metadata_from_token(&home_dir, &launch_token)
-        .context("Failed to persist launch lease metadata")?;
-    daemon::startup_auth::log_launch_accepted(&home_dir, &launch_token);
-
     // Resolve canonical log writer config once and reuse for startup merge + writer task.
     let log_writer_config = LogWriterConfig::from_env(&home_dir);
     let log_file = log_writer_config.log_path.clone();
@@ -318,17 +324,6 @@ async fn main() -> Result<()> {
         info!("Registered GH Monitor plugin");
     }
 
-    // Register Issues plugin if configured
-    if let Some(issues_config) = plugin_ctx.plugin_config("issues")
-        && issues_config
-            .get("enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true)
-    {
-        registry.register(agent_team_mail_daemon::plugins::issues::IssuesPlugin::new());
-        info!("Registered Issues plugin");
-    }
-
     // Create the shared agent state store.  When the worker adapter plugin is
     // enabled we hand the same Arc to both the plugin and the event loop so
     // that the socket server reads live state.  When the plugin is absent the
@@ -406,6 +401,14 @@ async fn main() -> Result<()> {
 
     // Create cancellation token for graceful shutdown
     let cancel_token = CancellationToken::new();
+    let lease_violation = daemon::startup_auth::new_shared_lease_violation();
+    let lease_monitor_task = daemon::startup_auth::spawn_isolated_test_lease_monitor(
+        home_dir.clone(),
+        launch_token.clone(),
+        cancel_token.clone(),
+        lease_violation.clone(),
+    );
+
     // Set up signal handlers
     let cancel_for_signals = cancel_token.clone();
     tokio::spawn(async move {
@@ -464,6 +467,8 @@ async fn main() -> Result<()> {
         &mut registry,
         &plugin_ctx,
         daemon_lock,
+        runtime_owner.clone(),
+        launch_token.clone(),
         cancel_token,
         status_writer,
         state_store,
@@ -476,8 +481,13 @@ async fn main() -> Result<()> {
         log_event_queue,
     )
     .await;
-    match &run_result {
-        Ok(_) => {
+    cleanup_daemon_runtime_artifacts(&home_dir);
+    if let Some(task) = lease_monitor_task {
+        let _ = task.await;
+    }
+    let lease_violation = lease_violation.lock().unwrap().clone();
+    match (&run_result, &lease_violation) {
+        (Ok(_), None) => {
             daemon::startup_auth::log_clean_owner_shutdown(&home_dir, &launch_token);
             emit_event_best_effort(EventFields {
                 level: "info",
@@ -491,7 +501,18 @@ async fn main() -> Result<()> {
                 ..Default::default()
             })
         }
-        Err(e) => emit_event_best_effort(EventFields {
+        (Ok(_), Some(_)) => emit_event_best_effort(EventFields {
+            level: "info",
+            source: "atm-daemon",
+            action: "daemon_stop",
+            team: Some(plugin_ctx.config.core.default_team.clone()),
+            session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+            agent_id: std::env::var("ATM_IDENTITY").ok(),
+            agent_name: std::env::var("ATM_IDENTITY").ok(),
+            result: Some("ok".to_string()),
+            ..Default::default()
+        }),
+        (Err(e), _) => emit_event_best_effort(EventFields {
             level: "error",
             source: "atm-daemon",
             action: "daemon_stop",
@@ -503,6 +524,13 @@ async fn main() -> Result<()> {
             error: Some(e.to_string()),
             ..Default::default()
         }),
+    }
+    if let Some(violation) = lease_violation {
+        anyhow::bail!(
+            "daemon lease violation: {} ({})",
+            violation.event_name,
+            violation.detail
+        );
     }
     run_result.context("Daemon event loop failed")?;
 

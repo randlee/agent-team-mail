@@ -3402,14 +3402,20 @@ mod tests {
         let expected_name = expected_name.to_string();
 
         std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let stream_clone = stream.try_clone().unwrap();
-            let mut reader = BufReader::new(stream_clone);
-            let mut request_line = String::new();
-            reader.read_line(&mut request_line).unwrap();
-
-            let request_json: serde_json::Value =
-                serde_json::from_str(request_line.trim()).unwrap();
+            let (stream, request_json) = loop {
+                let (stream, _) = listener.accept().unwrap();
+                let stream_clone = stream.try_clone().unwrap();
+                let mut reader = BufReader::new(stream_clone);
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).unwrap();
+                if request_line.trim().is_empty() {
+                    continue;
+                }
+                break (
+                    stream,
+                    serde_json::from_str::<serde_json::Value>(request_line.trim()).unwrap(),
+                );
+            };
             let command = request_json["command"].as_str().unwrap_or_default();
             match command {
                 "session-query-team" => {

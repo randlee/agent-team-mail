@@ -1110,7 +1110,7 @@ async fn test_gh_monitor_health_includes_owner_metadata_fields() {
     let health_resp = handle_gh_monitor_health_command(health_req, temp.path()).await;
     assert_eq!(health_resp.status, "ok");
     let health = health_resp.payload.unwrap();
-    assert_eq!(health["owner_runtime_kind"].as_str(), Some("atm-daemon"));
+    assert_eq!(health["owner_runtime_kind"].as_str(), Some("isolated"));
     assert_eq!(health["owner_repo"].as_str(), Some("o/r"));
     assert_eq!(health["owner_poll_interval_secs"].as_u64(), Some(60));
     assert_eq!(

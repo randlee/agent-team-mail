@@ -23,14 +23,23 @@ pub const DEFAULT_LAUNCH_TOKEN_TTL_SECS: u64 = 15;
 pub enum LaunchClass {
     #[serde(alias = "prod-shared", alias = "dev-shared")]
     Shared,
+    IsolatedTest,
 }
 
 impl LaunchClass {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Shared => "shared",
+            Self::IsolatedTest => "isolated-test",
         }
     }
+}
+
+/// Lease metadata required for isolated test daemons.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IsolatedTestLease {
+    pub test_identifier: String,
+    pub owner_pid: u32,
 }
 
 /// Serialized launch token carried from the canonical launcher to `atm-daemon`.
@@ -76,6 +85,27 @@ pub fn issue_launch_token(
         test_identifier: None,
         owner_pid: None,
     }
+}
+
+/// Issue a launch token for an isolated-test daemon with explicit lease metadata.
+pub fn issue_isolated_test_launch_token(
+    atm_home: &Path,
+    binary_identity: impl Into<String>,
+    issuer: impl Into<String>,
+    test_identifier: impl Into<String>,
+    owner_pid: u32,
+    ttl: Duration,
+) -> DaemonLaunchToken {
+    let mut token = issue_launch_token(
+        LaunchClass::IsolatedTest,
+        atm_home,
+        binary_identity,
+        issuer,
+        ttl,
+    );
+    token.test_identifier = Some(test_identifier.into());
+    token.owner_pid = Some(owner_pid);
+    token
 }
 
 pub fn encode_launch_token(token: &DaemonLaunchToken) -> serde_json::Result<String> {
@@ -137,14 +167,16 @@ fn configure_spawn_command(
         .stdin(request.stdin)
         .stdout(request.stdout)
         .stderr(request.stderr);
-    if let Some(session_id) = inherited_shared_runtime_session_id() {
-        command.env("ATM_SESSION_ID", session_id);
-    }
-    scrub_shared_runtime_owner_env(command);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
+    if request.launch_class != LaunchClass::IsolatedTest {
+        if let Some(session_id) = inherited_shared_runtime_session_id() {
+            command.env("ATM_SESSION_ID", session_id);
+        }
+        scrub_shared_runtime_owner_env(command);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
     }
     attach_launch_token(command, token)
 }
@@ -152,13 +184,24 @@ fn configure_spawn_command(
 /// Spawn `atm-daemon` through the canonical launcher surface.
 pub fn spawn_daemon_process(request: SpawnDaemonRequest<'_>) -> io::Result<Child> {
     let binary_identity = request.daemon_bin.to_string_lossy().into_owned();
-    let token = issue_launch_token(
-        request.launch_class,
-        request.atm_home,
-        binary_identity,
-        request.issuer,
-        Duration::from_secs(DEFAULT_LAUNCH_TOKEN_TTL_SECS),
-    );
+    let token = if request.launch_class == LaunchClass::IsolatedTest {
+        issue_isolated_test_launch_token(
+            request.atm_home,
+            binary_identity,
+            request.issuer,
+            format!("{}:{}", request.issuer, std::process::id()),
+            std::process::id(),
+            Duration::from_secs(DEFAULT_LAUNCH_TOKEN_TTL_SECS),
+        )
+    } else {
+        issue_launch_token(
+            request.launch_class,
+            request.atm_home,
+            binary_identity,
+            request.issuer,
+            Duration::from_secs(DEFAULT_LAUNCH_TOKEN_TTL_SECS),
+        )
+    };
 
     let mut command = Command::new(request.daemon_bin);
     configure_spawn_command(&mut command, request, &token)
@@ -195,8 +238,8 @@ mod tests {
 
     #[test]
     fn launch_class_serializes_as_kebab_case() {
-        let encoded = serde_json::to_string(&LaunchClass::Shared).unwrap();
-        assert_eq!(encoded, "\"shared\"");
+        let encoded = serde_json::to_string(&LaunchClass::IsolatedTest).unwrap();
+        assert_eq!(encoded, "\"isolated-test\"");
     }
 
     #[test]
@@ -212,6 +255,26 @@ mod tests {
         let raw = encode_launch_token(&token).unwrap();
         let decoded = decode_launch_token(&raw).unwrap();
         assert_eq!(decoded, token);
+    }
+
+    #[test]
+    fn issue_isolated_test_launch_token_sets_lease_fields() {
+        let atm_home = std::env::temp_dir().join("isolated-home");
+        let token = issue_isolated_test_launch_token(
+            &atm_home,
+            "target/debug/atm-daemon",
+            "launcher-test",
+            "daemon_tests::test_daemon_start_requires_launch_token",
+            4242,
+            Duration::from_secs(600),
+        );
+
+        assert_eq!(token.launch_class, LaunchClass::IsolatedTest);
+        assert_eq!(
+            token.test_identifier.as_deref(),
+            Some("daemon_tests::test_daemon_start_requires_launch_token")
+        );
+        assert_eq!(token.owner_pid, Some(4242));
     }
 
     #[test]
@@ -337,5 +400,53 @@ mod tests {
                 unsafe { std::env::remove_var("CLAUDE_SESSION_ID") };
             }
         }
+    }
+
+    #[test]
+    fn isolated_test_spawn_keeps_caller_env_available() {
+        let atm_home = std::env::temp_dir().join("isolated-home");
+        let token = issue_isolated_test_launch_token(
+            &atm_home,
+            "target/debug/atm-daemon",
+            "launcher-test",
+            "daemon_tests::isolated",
+            4242,
+            Duration::from_secs(600),
+        );
+        let mut command = Command::new("sh");
+        command
+            .env("CLAUDE_SESSION_ID", "session-123")
+            .env("ATM_IDENTITY", "team-lead")
+            .env("ATM_TEAM", "atm-dev");
+
+        configure_spawn_command(
+            &mut command,
+            SpawnDaemonRequest {
+                daemon_bin: OsStr::new("atm-daemon"),
+                atm_home: &atm_home,
+                launch_class: LaunchClass::IsolatedTest,
+                issuer: "launcher-test",
+                team: None,
+                stdin: Stdio::null(),
+                stdout: Stdio::null(),
+                stderr: Stdio::null(),
+            },
+            &token,
+        )
+        .unwrap();
+
+        let envs: std::collections::HashMap<_, _> = command.get_envs().collect();
+        assert_eq!(
+            envs.get(OsStr::new("CLAUDE_SESSION_ID")),
+            Some(&Some(OsStr::new("session-123")))
+        );
+        assert_eq!(
+            envs.get(OsStr::new("ATM_IDENTITY")),
+            Some(&Some(OsStr::new("team-lead")))
+        );
+        assert_eq!(
+            envs.get(OsStr::new("ATM_TEAM")),
+            Some(&Some(OsStr::new("atm-dev")))
+        );
     }
 }

@@ -263,12 +263,7 @@ impl Drop for DaemonProcessGuard {
                     std::thread::sleep(Duration::from_millis(25));
                 }
             }
-            // On the adopt path (`child` is None), `self.pid` is not a direct child of
-            // this process. `waitpid` will return ECHILD, which is expected and harmless.
-            // We call reap_child_pid_best_effort here to handle the uncommon case where
-            // the adopted daemon was originally spawned as a child of a prior test process
-            // that has since exited, leaving the daemon as a re-parented orphan.
-            reap_child_pid_best_effort(self.pid as i32);
+            waitpid_until_reaped_or_echild(self.pid as i32, Duration::from_secs(2));
         }
         let lock_path = self.daemon_dir.join("daemon.lock");
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -316,19 +311,23 @@ fn send_signal(pid: i32, sig: i32) {
 }
 
 #[cfg(unix)]
-fn reap_child_pid_best_effort(pid: i32) {
+fn waitpid_until_reaped_or_echild(pid: i32, timeout: Duration) {
     unsafe extern "C" {
         fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
     }
-    const WNOHANG: i32 = 1;
-    for _ in 0..20 {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
         let mut status = 0;
-        // SAFETY: best-effort reap for test child processes; WNOHANG avoids blocking.
-        let waited = unsafe { waitpid(pid, &mut status, WNOHANG) };
-        if waited == pid || waited == -1 || !pid_alive(pid) {
-            break;
+        // SAFETY: best-effort reap for test child processes. A return value of
+        // -1 means ECHILD or another terminal waitpid condition; both are
+        // sufficient for teardown before the serial lock is released.
+        let waited = unsafe { waitpid(pid, &mut status, 0) };
+        if waited == pid || waited == -1 {
+            return;
         }
-        std::thread::sleep(Duration::from_millis(25));
+        if !pid_alive(pid) {
+            return;
+        }
     }
 }
 
@@ -348,7 +347,7 @@ pub fn wait_for_pid_exit(_pid: i32, _timeout: std::time::Duration) {
 fn send_signal(_pid: i32, _sig: i32) {}
 
 #[cfg(not(unix))]
-fn reap_child_pid_best_effort(_pid: i32) {}
+fn waitpid_until_reaped_or_echild(_pid: i32, _timeout: Duration) {}
 
 pub(crate) fn daemon_binary_path() -> PathBuf {
     let exe = std::env::current_exe().expect("current_exe");

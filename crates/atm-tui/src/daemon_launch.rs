@@ -19,6 +19,7 @@ pub(crate) fn ensure_daemon_running(team: &str) -> Option<String> {
     let daemon_bin = resolve_daemon_binary_for_home(&home)?;
     let launch_class = match runtime_kind_for_home(&home).ok()? {
         RuntimeKind::Shared => LaunchClass::Shared,
+        RuntimeKind::Isolated => LaunchClass::IsolatedTest,
     };
     let child = match spawn_daemon_process(SpawnDaemonRequest {
         daemon_bin: daemon_bin.as_os_str(),
@@ -103,7 +104,7 @@ pub(crate) fn resolve_daemon_binary_for_home(home: &Path) -> Option<PathBuf> {
 
     let runtime_kind = runtime_kind_for_home(home).ok()?;
     match runtime_kind {
-        RuntimeKind::Shared => scoped_daemon_binary_from_current_exe()
+        RuntimeKind::Shared | RuntimeKind::Isolated => scoped_daemon_binary_from_current_exe()
             .or_else(|| Some(PathBuf::from(OsStr::new("atm-daemon")))),
     }
 }

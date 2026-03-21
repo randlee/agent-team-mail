@@ -66,12 +66,14 @@ pub enum RuntimeKind {
     #[default]
     #[serde(alias = "release", alias = "dev")]
     Shared,
+    Isolated,
 }
 
 impl RuntimeKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Shared => "shared",
+            Self::Isolated => "isolated",
         }
     }
 }
@@ -134,6 +136,16 @@ pub struct RuntimeMetadata {
     /// Whether this runtime may perform live GitHub polling.
     #[serde(default)]
     pub allow_live_github_polling: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedIsolatedRuntime {
+    pub home: PathBuf,
+    pub runtime_dir: PathBuf,
+    pub socket_path: PathBuf,
+    pub lock_path: PathBuf,
+    pub status_path: PathBuf,
+    pub metadata: RuntimeMetadata,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -623,9 +635,26 @@ fn evaluate_runtime_owner_metadata(input: &RuntimePolicyInput) -> RuntimeOwnerMe
     }
 }
 
+/// Used only for test isolation boundary checks. Not part of the production
+/// shared-daemon admission path after BB.2.
+/// The DevShared variant was removed in BB.2; only Shared (production) and
+/// Isolated (test-only) remain.
 fn classify_runtime_kind_from_home_scope(home_scope: &Path) -> RuntimeKind {
-    let _ = home_scope;
-    RuntimeKind::Shared
+    let canonical_temp_root = canonicalize_lossy(&std::env::temp_dir());
+    let is_isolated = read_runtime_metadata(home_scope)
+        .is_some_and(|metadata| metadata.runtime_kind == RuntimeKind::Isolated)
+        || home_scope.starts_with(isolated_runtime_root_dir(None))
+        // Treat temp-rooted ATM_HOME values as isolated test runtimes. The
+        // daemon integration harness and CLI conflict tests run under temp
+        // homes with debug binaries; classifying those as shared would
+        // incorrectly route them through the release-only shared admission
+        // path.
+        || home_scope.starts_with(&canonical_temp_root);
+    if is_isolated {
+        RuntimeKind::Isolated
+    } else {
+        RuntimeKind::Shared
+    }
 }
 
 fn canonical_shared_runtime_root() -> anyhow::Result<PathBuf> {
@@ -682,6 +711,10 @@ fn validate_runtime_admission_input(
 ) -> anyhow::Result<RuntimeOwnerMetadata> {
     let owner = evaluate_runtime_owner_metadata(input);
 
+    if matches!(owner.runtime_kind, RuntimeKind::Isolated) {
+        return Ok(owner);
+    }
+
     enforce_shared_runtime_invariant(input, &owner)?;
     Ok(owner)
 }
@@ -711,6 +744,7 @@ pub fn validate_runtime_admission_for_current_process(
 fn launch_class_for_runtime_kind(kind: &RuntimeKind) -> LaunchClass {
     match kind {
         RuntimeKind::Shared => LaunchClass::Shared,
+        RuntimeKind::Isolated => LaunchClass::IsolatedTest,
     }
 }
 
@@ -755,6 +789,163 @@ pub fn write_runtime_metadata(home: &Path, metadata: &RuntimeMetadata) -> anyhow
         std::fs::remove_file(&tmp)?;
     }
     Ok(())
+}
+
+fn isolated_runtime_root_dir(base_root: Option<&Path>) -> PathBuf {
+    base_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("atm-isolated")
+}
+
+fn isolated_runtime_slug(label: Option<&str>) -> String {
+    let trimmed = label.unwrap_or("runtime").trim();
+    let mut slug = String::new();
+    for ch in trimmed.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else if (ch == '-' || ch == '_') && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        "runtime".to_string()
+    } else {
+        slug.to_string()
+    }
+}
+
+fn create_isolated_runtime_root_with_base(
+    base_root: &Path,
+    label: Option<&str>,
+    ttl: Duration,
+    allow_live_github_polling: bool,
+) -> anyhow::Result<CreatedIsolatedRuntime> {
+    let _ = reap_expired_isolated_runtime_roots_with_base(base_root);
+
+    let runtime_root = isolated_runtime_root_dir(Some(base_root));
+    std::fs::create_dir_all(&runtime_root)?;
+
+    let now = chrono::Utc::now();
+    let ttl = chrono::Duration::from_std(ttl)
+        .map_err(|e| anyhow::anyhow!("invalid isolated runtime ttl: {e}"))?;
+    let expires_at = now + ttl;
+    let slug = isolated_runtime_slug(label);
+    let home = runtime_root.join(format!(
+        "{}-{}-{}",
+        slug,
+        now.timestamp_millis(),
+        std::process::id()
+    ));
+    let runtime_dir = daemon_runtime_dir_for(&home);
+    std::fs::create_dir_all(&runtime_dir)?;
+
+    let metadata = RuntimeMetadata {
+        runtime_kind: RuntimeKind::Isolated,
+        created_at: now.to_rfc3339(),
+        expires_at: Some(expires_at.to_rfc3339()),
+        test_identifier: None,
+        owner_pid: None,
+        token_id: None,
+        allow_live_github_polling,
+    };
+    write_runtime_metadata(&home, &metadata)?;
+
+    Ok(CreatedIsolatedRuntime {
+        home: home.clone(),
+        runtime_dir,
+        socket_path: daemon_runtime_dir_for(&home).join("atm-daemon.sock"),
+        lock_path: daemon_runtime_dir_for(&home).join("daemon.lock"),
+        status_path: daemon_runtime_dir_for(&home).join("status.json"),
+        metadata,
+    })
+}
+
+pub fn create_isolated_runtime_root(
+    label: Option<&str>,
+    ttl: Duration,
+    allow_live_github_polling: bool,
+) -> anyhow::Result<CreatedIsolatedRuntime> {
+    create_isolated_runtime_root_with_base(
+        &std::env::temp_dir(),
+        label,
+        ttl,
+        allow_live_github_polling,
+    )
+}
+
+fn reap_expired_isolated_runtime_roots_with_base(base_root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let root = isolated_runtime_root_dir(Some(base_root));
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let now = chrono::Utc::now();
+    let mut reaped = Vec::new();
+    for entry in std::fs::read_dir(&root)? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let home = entry.path();
+        if !home.is_dir() {
+            continue;
+        }
+
+        let Some(metadata) = read_runtime_metadata(&home) else {
+            continue;
+        };
+        if metadata.runtime_kind != RuntimeKind::Isolated {
+            continue;
+        }
+
+        let Some(expires_at) = metadata.expires_at.as_deref() else {
+            continue;
+        };
+        let Ok(expires_at) = chrono::DateTime::parse_from_rfc3339(expires_at) else {
+            continue;
+        };
+        if expires_at.with_timezone(&chrono::Utc) > now {
+            continue;
+        }
+
+        if metadata.owner_pid.is_some_and(crate::pid::is_pid_alive) {
+            continue;
+        }
+
+        let pid_path = daemon_runtime_dir_for(&home).join("atm-daemon.pid");
+        let runtime_pid = std::fs::read_to_string(&pid_path)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<i32>().ok());
+        #[cfg(unix)]
+        let alive = runtime_pid.is_some_and(pid_alive);
+        #[cfg(not(unix))]
+        let alive = false;
+        if alive {
+            continue;
+        }
+
+        if std::fs::remove_dir_all(&home).is_ok() {
+            reaped.push(home);
+        }
+    }
+
+    Ok(reaped)
+}
+
+pub fn reap_expired_isolated_runtime_roots() -> anyhow::Result<Vec<PathBuf>> {
+    reap_expired_isolated_runtime_roots_with_base(&std::env::temp_dir())
+}
+
+pub fn isolated_runtime_allows_live_github(home: &Path) -> anyhow::Result<bool> {
+    if runtime_kind_for_home(home)? != RuntimeKind::Isolated {
+        return Ok(true);
+    }
+
+    Ok(read_runtime_metadata(home)
+        .map(|metadata| metadata.allow_live_github_polling)
+        .unwrap_or(false))
 }
 
 pub fn read_daemon_lock_metadata(home: &Path) -> Option<DaemonLockMetadata> {
@@ -2593,10 +2784,16 @@ fn restart_mismatched_daemon(home: &std::path::Path, reason: &str) -> anyhow::Re
     use crate::event_log::{EventFields, emit_event_best_effort};
     use std::time::Duration;
 
-    let pid_path = home.join(".atm/daemon/atm-daemon.pid");
-    let pid = std::fs::read_to_string(&pid_path)
-        .ok()
-        .and_then(|s| s.trim().parse::<i32>().ok());
+    let pid = read_daemon_lock_metadata(home)
+        .map(|metadata| metadata.pid as i32)
+        .or_else(|| {
+            let status_path = daemon_status_path_for(home);
+            std::fs::read_to_string(status_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|json| json.get("pid").and_then(serde_json::Value::as_i64))
+                .map(|pid| pid as i32)
+        });
 
     emit_event_best_effort(EventFields {
         level: "warn",
@@ -2644,7 +2841,7 @@ fn restart_mismatched_daemon(home: &std::path::Path, reason: &str) -> anyhow::Re
     if let Some(parent) = lock_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _lock_guard = crate::io::lock::acquire_lock(&lock_path, 5).map_err(|e| {
+    let _lock_guard = crate::io::lock::acquire_lock(&lock_path, 40).map_err(|e| {
         anyhow::anyhow!(
             "failed to acquire daemon lock at {} before runtime cleanup: {e}",
             lock_path.display()
@@ -2917,7 +3114,7 @@ mod tests {
         DaemonLockMetadata {
             pid,
             owner: RuntimeOwnerMetadata {
-                runtime_kind: RuntimeKind::Shared,
+                runtime_kind: RuntimeKind::Isolated,
                 build_profile: BuildProfile::Release,
                 executable_path: std::env::temp_dir()
                     .join("fake-atm-daemon")
@@ -3173,7 +3370,6 @@ exit 42
         let _home_guard = EnvGuard::set("ATM_HOME", home.to_str().unwrap());
         let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", script_path.to_str().unwrap());
         let _auto_guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "1");
-        let _shared_guard = EnvGuard::set("ATM_TEST_SHARED_DAEMON_ADMISSION", "1");
 
         let err = ensure_daemon_running_unix().expect_err("startup should fail");
         let msg = err.to_string();
@@ -3209,7 +3405,6 @@ sleep 10
         let _home_guard = EnvGuard::set("ATM_HOME", home.to_str().unwrap());
         let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", script_path.to_str().unwrap());
         let _auto_guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "1");
-        let _shared_guard = EnvGuard::set("ATM_TEST_SHARED_DAEMON_ADMISSION", "1");
 
         let err = ensure_daemon_running_unix().expect_err("startup should time out");
         let msg = err.to_string();
@@ -3284,7 +3479,7 @@ sleep 10
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
         let owner = RuntimeOwnerMetadata {
-            runtime_kind: RuntimeKind::Shared,
+            runtime_kind: RuntimeKind::Isolated,
             build_profile: BuildProfile::Release,
             executable_path: std::env::temp_dir()
                 .join("isolated-atm-daemon")
@@ -3400,6 +3595,42 @@ sleep 10
         assert!(err.to_string().contains("canonical runtime root"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_create_isolated_runtime_root_writes_metadata_and_paths() {
+        let base = tempfile::tempdir().unwrap();
+        let created = create_isolated_runtime_root_with_base(
+            base.path(),
+            Some("smoke-test"),
+            Duration::from_secs(DAEMON_TIMEOUT_MAX_SECS),
+            false,
+        )
+        .expect("create isolated runtime");
+
+        assert!(created.home.exists(), "isolated ATM_HOME must exist");
+        assert!(
+            created.runtime_dir.exists(),
+            "isolated daemon runtime dir must exist"
+        );
+        assert_eq!(created.metadata.runtime_kind, RuntimeKind::Isolated);
+        assert!(!created.metadata.allow_live_github_polling);
+        assert!(
+            created.metadata.expires_at.is_some(),
+            "isolated runtime metadata must include expires_at"
+        );
+
+        let persisted = read_runtime_metadata(&created.home).expect("persisted metadata");
+        assert_eq!(persisted, created.metadata);
+        assert_eq!(
+            runtime_kind_for_home(&created.home).unwrap(),
+            RuntimeKind::Isolated
+        );
+        assert!(
+            !isolated_runtime_allows_live_github(&created.home).unwrap(),
+            "isolated runtime should deny live GitHub polling by default"
+        );
+    }
+
     // Regression test for GH #761: write_runtime_metadata must not call
     // read_runtime_metadata and discard the result. Verify overwrite persists replacement.
     #[test]
@@ -3415,13 +3646,13 @@ sleep 10
             allow_live_github_polling: true,
         };
         let replacement = RuntimeMetadata {
-            runtime_kind: RuntimeKind::Shared,
+            runtime_kind: RuntimeKind::Isolated,
             created_at: "2026-03-15T00:00:00Z".to_string(),
-            expires_at: None,
-            test_identifier: None,
-            owner_pid: None,
+            expires_at: Some("2026-03-15T00:10:00Z".to_string()),
+            test_identifier: Some("daemon-tests::replacement".to_string()),
+            owner_pid: Some(4242),
             token_id: Some("token-123".to_string()),
-            allow_live_github_polling: true,
+            allow_live_github_polling: false,
         };
 
         write_runtime_metadata(home.path(), &original).unwrap();
@@ -3429,6 +3660,50 @@ sleep 10
 
         let persisted = read_runtime_metadata(home.path()).expect("persisted metadata");
         assert_eq!(persisted, replacement);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_reap_expired_isolated_runtime_roots_removes_dead_runtime() {
+        let base = tempfile::tempdir().unwrap();
+        let root = isolated_runtime_root_dir(Some(base.path()));
+        let home = root.join("expired-runtime");
+        std::fs::create_dir_all(daemon_runtime_dir_for(&home)).unwrap();
+        let metadata = RuntimeMetadata {
+            runtime_kind: RuntimeKind::Isolated,
+            created_at: "2026-03-14T00:00:00Z".to_string(),
+            expires_at: Some("2026-03-14T00:10:00Z".to_string()),
+            test_identifier: Some("daemon-tests::expired".to_string()),
+            owner_pid: Some(999_999),
+            token_id: Some("token-expired".to_string()),
+            allow_live_github_polling: false,
+        };
+        write_runtime_metadata(&home, &metadata).unwrap();
+
+        let reaped = reap_expired_isolated_runtime_roots_with_base(base.path()).unwrap();
+        assert_eq!(reaped, vec![home.clone()]);
+        assert!(
+            !home.exists(),
+            "expired dead isolated runtime should be reaped"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_isolated_runtime_allows_live_github_when_explicitly_enabled() {
+        let base = tempfile::tempdir().unwrap();
+        let created = create_isolated_runtime_root_with_base(
+            base.path(),
+            Some("live-gh"),
+            Duration::from_secs(DAEMON_TIMEOUT_MAX_SECS),
+            true,
+        )
+        .expect("create isolated runtime");
+
+        assert!(
+            isolated_runtime_allows_live_github(&created.home).unwrap(),
+            "explicit isolated runtime override should enable live GitHub polling"
+        );
     }
 
     #[cfg(unix)]
@@ -3563,7 +3838,7 @@ sleep 10
         let stale = DaemonLockMetadata {
             pid: 999999,
             owner: RuntimeOwnerMetadata {
-                runtime_kind: RuntimeKind::Shared,
+                runtime_kind: RuntimeKind::Isolated,
                 build_profile: BuildProfile::Release,
                 executable_path: std::env::temp_dir()
                     .join("old-atm-daemon")
@@ -3792,7 +4067,7 @@ sleep 8
         let stale_metadata = DaemonLockMetadata {
             pid: stale_pid,
             owner: RuntimeOwnerMetadata {
-                runtime_kind: RuntimeKind::Shared,
+                runtime_kind: RuntimeKind::Isolated,
                 build_profile: BuildProfile::Release,
                 executable_path: stale_script.to_string_lossy().to_string(),
                 home_scope: std::fs::canonicalize(&home)

@@ -3,6 +3,7 @@
 use agent_team_mail_core::config::Config;
 use agent_team_mail_core::context::SystemContext;
 use agent_team_mail_core::daemon_client::{BuildProfile, RuntimeKind, RuntimeOwnerMetadata};
+use agent_team_mail_core::logging_event::LogEventV1;
 use agent_team_mail_daemon::daemon;
 use agent_team_mail_daemon::daemon::{
     SessionRegistry, StatusWriter, new_dedup_store, new_launch_sender, new_log_event_queue,
@@ -13,6 +14,13 @@ use agent_team_mail_daemon::plugin::{
     Capability, MailService, Plugin, PluginContext, PluginError, PluginMetadata, PluginRegistry,
 };
 use agent_team_mail_daemon::roster::RosterService;
+use agent_team_mail_daemon_launch::{
+    DaemonLaunchToken, attach_launch_token,
+    issue_isolated_test_launch_token as issue_isolated_test_launch_token_inner,
+};
+#[path = "../../atm/tests/support/daemon_process_guard.rs"]
+#[allow(dead_code)]
+mod daemon_process_guard;
 #[path = "../../atm/tests/support/daemon_test_registry.rs"]
 #[allow(dead_code)]
 mod daemon_test_registry;
@@ -22,10 +30,148 @@ mod env_guard;
 // These daemon integration tests still serialize because the helper contexts
 // mutate ATM_HOME process-wide before constructing shared daemon state.
 use serial_test::serial;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::path::Path;
+use std::process::{Child, Stdio};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
+
+fn read_jsonl_events(path: &std::path::Path) -> Vec<LogEventV1> {
+    if !path.exists() {
+        return Vec::new();
+    }
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
+    for line in content.lines().filter(|line| !line.trim().is_empty()) {
+        if let Ok(event) = serde_json::from_str::<LogEventV1>(line) {
+            events.push(event);
+        }
+    }
+    events
+}
+
+fn read_spool_events(spool: &std::path::Path) -> Vec<LogEventV1> {
+    if !spool.exists() {
+        return Vec::new();
+    }
+    let mut events = Vec::new();
+    let entries = match std::fs::read_dir(spool) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .extension()
+            .and_then(|x| x.to_str())
+            .map(|x| x == "jsonl")
+            == Some(true)
+        {
+            events.extend(read_jsonl_events(&path));
+        }
+    }
+    events
+}
+
+fn issue_isolated_test_launch_token(home: &Path, issuer: &str) -> DaemonLaunchToken {
+    issue_isolated_test_launch_token_inner(
+        home,
+        env!("CARGO_BIN_EXE_atm-daemon"),
+        issuer,
+        format!("{issuer}:{}", std::process::id()),
+        std::process::id(),
+        Duration::from_secs(600),
+    )
+}
+
+fn issue_isolated_test_launch_token_with_lease(
+    home: &Path,
+    issuer: &str,
+    test_identifier: &str,
+    owner_pid: u32,
+    ttl: Duration,
+) -> DaemonLaunchToken {
+    issue_isolated_test_launch_token_inner(
+        home,
+        env!("CARGO_BIN_EXE_atm-daemon"),
+        issuer,
+        test_identifier.to_string(),
+        owner_pid,
+        ttl,
+    )
+}
+
+fn start_otel_trace_collector() -> (String, mpsc::Receiver<(String, String)>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind collector");
+    listener
+        .set_nonblocking(false)
+        .expect("collector blocking mode");
+    let addr = listener.local_addr().expect("collector addr");
+    let (tx, rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        for _ in 0..8 {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            let mut buffer = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            let mut header_end = None;
+            while header_end.is_none() {
+                let read = stream.read(&mut chunk).expect("read request");
+                if read == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..read]);
+                header_end = buffer.windows(4).position(|window| window == b"\r\n\r\n");
+            }
+            let Some(header_end_idx) = header_end else {
+                continue;
+            };
+            let body_start = header_end_idx + 4;
+            let headers = String::from_utf8_lossy(&buffer[..header_end_idx]);
+            let first_line = headers.lines().next().unwrap_or_default().to_string();
+            let path = first_line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_string();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    (name.eq_ignore_ascii_case("content-length"))
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+
+            while buffer.len().saturating_sub(body_start) < content_length {
+                let read = stream.read(&mut chunk).expect("read request body");
+                if read == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..read]);
+            }
+
+            let body = String::from_utf8_lossy(&buffer[body_start..body_start + content_length])
+                .to_string();
+            tx.send((path, body)).expect("send captured request");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                .expect("write response");
+        }
+    });
+
+    (format!("http://{}", addr), rx)
+}
 
 /// Mock plugin that tracks lifecycle calls
 struct MockPlugin {
@@ -276,13 +422,78 @@ async fn wait_for_recorded_event_elapsed(
     .await
 }
 
+fn wait_for_child_running_elapsed(
+    child: &mut Child,
+    timeout_ms: u64,
+) -> Option<std::time::Duration> {
+    let start = std::time::Instant::now();
+    let deadline = start + Duration::from_millis(timeout_ms);
+    while std::time::Instant::now() < deadline {
+        if child
+            .try_wait()
+            .expect("failed to poll child process")
+            .is_none()
+        {
+            return Some(start.elapsed());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    child
+        .try_wait()
+        .expect("failed to poll child process at timeout")
+        .is_none()
+        .then(|| start.elapsed())
+}
+
+fn wait_for_lock_file_acquired_elapsed(
+    home: &std::path::Path,
+    timeout_ms: u64,
+) -> Option<std::time::Duration> {
+    let lock_path = home.join(".atm/daemon/daemon.lock");
+    let metadata_path = home.join(".atm/daemon/daemon.lock.meta.json");
+    let status_path = home.join(".atm/daemon/status.json");
+    let start = std::time::Instant::now();
+    let deadline = start + Duration::from_millis(timeout_ms);
+    while std::time::Instant::now() < deadline {
+        let metadata_ready = std::fs::read_to_string(&metadata_path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+            .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
+            .is_some();
+        let status_ready = std::fs::read_to_string(&status_path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+            .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
+            .is_some();
+        let lock_contended = lock_path.exists()
+            && agent_team_mail_core::io::lock::acquire_lock(&lock_path, 0).is_err();
+        if lock_contended || metadata_ready || status_ready {
+            return Some(start.elapsed());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let metadata_ready = std::fs::read_to_string(&metadata_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
+        .is_some();
+    let status_ready = std::fs::read_to_string(&status_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
+        .is_some();
+    let lock_contended =
+        lock_path.exists() && agent_team_mail_core::io::lock::acquire_lock(&lock_path, 0).is_err();
+    (lock_contended || metadata_ready || status_ready).then(|| start.elapsed())
+}
+
 /// Create a test status writer
 fn create_test_status_writer(temp_dir: &TempDir) -> Arc<StatusWriter> {
     Arc::new(StatusWriter::new(
         temp_dir.path().to_path_buf(),
         "test-version".to_string(),
         RuntimeOwnerMetadata {
-            runtime_kind: RuntimeKind::Shared,
+            runtime_kind: RuntimeKind::Isolated,
             build_profile: BuildProfile::Release,
             executable_path: temp_dir
                 .path()
@@ -298,6 +509,54 @@ fn create_test_daemon_lock(temp_dir: &TempDir) -> agent_team_mail_core::io::lock
     let lock_path = temp_dir.path().join(".atm/daemon/daemon.lock");
     std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
     agent_team_mail_core::io::lock::acquire_lock(&lock_path, 0).unwrap()
+}
+
+fn create_test_runtime_owner(home: &std::path::Path) -> RuntimeOwnerMetadata {
+    RuntimeOwnerMetadata {
+        runtime_kind: RuntimeKind::Isolated,
+        build_profile: BuildProfile::Release,
+        executable_path: home.join("atm-daemon").to_string_lossy().into_owned(),
+        home_scope: home.to_string_lossy().into_owned(),
+    }
+}
+
+struct DaemonTestRunDeps {
+    status_writer: Arc<StatusWriter>,
+    state_store: daemon::SharedStateStore,
+    pubsub_store: daemon::SharedPubSubStore,
+    launch_tx: daemon::LaunchSender,
+    session_registry: daemon::SharedSessionRegistry,
+    dedup_store: daemon::SharedDedupeStore,
+    stream_state_store: daemon::SharedStreamStateStore,
+    stream_event_sender: daemon::SharedStreamEventSender,
+    log_event_queue: daemon::LogEventQueue,
+}
+
+async fn run_daemon_for_test(
+    registry: &mut PluginRegistry,
+    ctx: &PluginContext,
+    daemon_lock: agent_team_mail_core::io::lock::FileLock,
+    cancel: CancellationToken,
+    deps: DaemonTestRunDeps,
+) -> anyhow::Result<()> {
+    daemon::run(
+        registry,
+        ctx,
+        daemon_lock,
+        create_test_runtime_owner(&ctx.system.runtime_home),
+        issue_isolated_test_launch_token(&ctx.system.runtime_home, "daemon_tests"),
+        cancel,
+        deps.status_writer,
+        deps.state_store,
+        deps.pubsub_store,
+        deps.launch_tx,
+        deps.session_registry,
+        deps.dedup_store,
+        deps.stream_state_store,
+        deps.stream_event_sender,
+        deps.log_event_queue,
+    )
+    .await
 }
 
 #[tokio::test]
@@ -317,20 +576,22 @@ async fn test_daemon_starts_and_loads_mock_plugin() {
 
     // Run daemon in background, cancel after a short delay
     let daemon_task = tokio::spawn(async move {
-        daemon::run(
+        run_daemon_for_test(
             &mut registry,
             &ctx,
             daemon_lock,
             cancel_clone,
-            status_writer,
-            new_state_store(),
-            new_pubsub_store(),
-            new_launch_sender(),
-            new_session_registry(),
-            dedup_store,
-            new_stream_state_store(),
-            new_stream_event_sender(),
-            new_log_event_queue(),
+            DaemonTestRunDeps {
+                status_writer,
+                state_store: new_state_store(),
+                pubsub_store: new_pubsub_store(),
+                launch_tx: new_launch_sender(),
+                session_registry: new_session_registry(),
+                dedup_store,
+                stream_state_store: new_stream_state_store(),
+                stream_event_sender: new_stream_event_sender(),
+                log_event_queue: new_log_event_queue(),
+            },
         )
         .await
     });
@@ -387,20 +648,22 @@ async fn test_signal_triggers_graceful_shutdown() {
     let daemon_lock = create_test_daemon_lock(&temp_dir);
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(
+        run_daemon_for_test(
             &mut registry,
             &ctx,
             daemon_lock,
             cancel_clone,
-            status_writer.clone(),
-            new_state_store(),
-            new_pubsub_store(),
-            new_launch_sender(),
-            new_session_registry(),
-            dedup_store,
-            new_stream_state_store(),
-            new_stream_event_sender(),
-            new_log_event_queue(),
+            DaemonTestRunDeps {
+                status_writer: status_writer.clone(),
+                state_store: new_state_store(),
+                pubsub_store: new_pubsub_store(),
+                launch_tx: new_launch_sender(),
+                session_registry: new_session_registry(),
+                dedup_store,
+                stream_state_store: new_stream_state_store(),
+                stream_event_sender: new_stream_event_sender(),
+                log_event_queue: new_log_event_queue(),
+            },
         )
         .await
     });
@@ -448,20 +711,22 @@ async fn test_plugin_lifecycle_order() {
     let daemon_lock = create_test_daemon_lock(&temp_dir);
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(
+        run_daemon_for_test(
             &mut registry,
             &ctx,
             daemon_lock,
             cancel_clone,
-            status_writer.clone(),
-            new_state_store(),
-            new_pubsub_store(),
-            new_launch_sender(),
-            new_session_registry(),
-            dedup_store,
-            new_stream_state_store(),
-            new_stream_event_sender(),
-            new_log_event_queue(),
+            DaemonTestRunDeps {
+                status_writer: status_writer.clone(),
+                state_store: new_state_store(),
+                pubsub_store: new_pubsub_store(),
+                launch_tx: new_launch_sender(),
+                session_registry: new_session_registry(),
+                dedup_store,
+                stream_state_store: new_stream_state_store(),
+                stream_event_sender: new_stream_event_sender(),
+                log_event_queue: new_log_event_queue(),
+            },
         )
         .await
     });
@@ -504,20 +769,22 @@ async fn test_spool_drain_runs_on_interval() {
     let daemon_lock = create_test_daemon_lock(&temp_dir);
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(
+        run_daemon_for_test(
             &mut registry,
             &ctx,
             daemon_lock,
             cancel_clone,
-            status_writer.clone(),
-            new_state_store(),
-            new_pubsub_store(),
-            new_launch_sender(),
-            new_session_registry(),
-            dedup_store,
-            new_stream_state_store(),
-            new_stream_event_sender(),
-            new_log_event_queue(),
+            DaemonTestRunDeps {
+                status_writer: status_writer.clone(),
+                state_store: new_state_store(),
+                pubsub_store: new_pubsub_store(),
+                launch_tx: new_launch_sender(),
+                session_registry: new_session_registry(),
+                dedup_store,
+                stream_state_store: new_stream_state_store(),
+                stream_event_sender: new_stream_event_sender(),
+                log_event_queue: new_log_event_queue(),
+            },
         )
         .await
     });
@@ -582,20 +849,22 @@ async fn test_startup_reconcile_seeds_roster_without_interval_delay() {
     let state_store_probe = state_store.clone();
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(
+        run_daemon_for_test(
             &mut registry,
             &ctx,
             daemon_lock,
             cancel_clone,
-            status_writer,
-            state_store,
-            new_pubsub_store(),
-            new_launch_sender(),
-            new_session_registry(),
-            dedup_store,
-            new_stream_state_store(),
-            new_stream_event_sender(),
-            new_log_event_queue(),
+            DaemonTestRunDeps {
+                status_writer,
+                state_store,
+                pubsub_store: new_pubsub_store(),
+                launch_tx: new_launch_sender(),
+                session_registry: new_session_registry(),
+                dedup_store,
+                stream_state_store: new_stream_state_store(),
+                stream_event_sender: new_stream_event_sender(),
+                log_event_queue: new_log_event_queue(),
+            },
         )
         .await
     });
@@ -670,20 +939,22 @@ async fn test_config_watch_event_updates_and_removes_members() {
     let session_registry = Arc::new(Mutex::new(SessionRegistry::new()));
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(
+        run_daemon_for_test(
             &mut registry,
             &ctx,
             daemon_lock,
             cancel_clone,
-            status_writer,
-            state_store,
-            new_pubsub_store(),
-            new_launch_sender(),
-            session_registry,
-            dedup_store,
-            new_stream_state_store(),
-            new_stream_event_sender(),
-            new_log_event_queue(),
+            DaemonTestRunDeps {
+                status_writer,
+                state_store,
+                pubsub_store: new_pubsub_store(),
+                launch_tx: new_launch_sender(),
+                session_registry,
+                dedup_store,
+                stream_state_store: new_stream_state_store(),
+                stream_event_sender: new_stream_event_sender(),
+                log_event_queue: new_log_event_queue(),
+            },
         )
         .await
     });
@@ -783,20 +1054,22 @@ async fn test_graceful_shutdown_with_timeout() {
     let daemon_lock = create_test_daemon_lock(&temp_dir);
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(
+        run_daemon_for_test(
             &mut registry,
             &ctx,
             daemon_lock,
             cancel_clone,
-            status_writer.clone(),
-            new_state_store(),
-            new_pubsub_store(),
-            new_launch_sender(),
-            new_session_registry(),
-            dedup_store,
-            new_stream_state_store(),
-            new_stream_event_sender(),
-            new_log_event_queue(),
+            DaemonTestRunDeps {
+                status_writer: status_writer.clone(),
+                state_store: new_state_store(),
+                pubsub_store: new_pubsub_store(),
+                launch_tx: new_launch_sender(),
+                session_registry: new_session_registry(),
+                dedup_store,
+                stream_state_store: new_stream_state_store(),
+                stream_event_sender: new_stream_event_sender(),
+                log_event_queue: new_log_event_queue(),
+            },
         )
         .await
     });
@@ -847,20 +1120,22 @@ async fn test_empty_registry_runs_successfully() {
     let daemon_lock = create_test_daemon_lock(&temp_dir);
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(
+        run_daemon_for_test(
             &mut registry,
             &ctx,
             daemon_lock,
             cancel_clone,
-            status_writer.clone(),
-            new_state_store(),
-            new_pubsub_store(),
-            new_launch_sender(),
-            new_session_registry(),
-            dedup_store,
-            new_stream_state_store(),
-            new_stream_event_sender(),
-            new_log_event_queue(),
+            DaemonTestRunDeps {
+                status_writer: status_writer.clone(),
+                state_store: new_state_store(),
+                pubsub_store: new_pubsub_store(),
+                launch_tx: new_launch_sender(),
+                session_registry: new_session_registry(),
+                dedup_store,
+                stream_state_store: new_stream_state_store(),
+                stream_event_sender: new_stream_event_sender(),
+                log_event_queue: new_log_event_queue(),
+            },
         )
         .await
     });
@@ -896,20 +1171,22 @@ async fn test_multiple_plugins_run_concurrently() {
     let daemon_lock = create_test_daemon_lock(&temp_dir);
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(
+        run_daemon_for_test(
             &mut registry,
             &ctx,
             daemon_lock,
             cancel_clone,
-            status_writer.clone(),
-            new_state_store(),
-            new_pubsub_store(),
-            new_launch_sender(),
-            new_session_registry(),
-            dedup_store,
-            new_stream_state_store(),
-            new_stream_event_sender(),
-            new_log_event_queue(),
+            DaemonTestRunDeps {
+                status_writer: status_writer.clone(),
+                state_store: new_state_store(),
+                pubsub_store: new_pubsub_store(),
+                launch_tx: new_launch_sender(),
+                session_registry: new_session_registry(),
+                dedup_store,
+                stream_state_store: new_stream_state_store(),
+                stream_event_sender: new_stream_event_sender(),
+                log_event_queue: new_log_event_queue(),
+            },
         )
         .await
     });
@@ -969,20 +1246,22 @@ async fn test_plugin_run_failure_isolated_from_sibling_plugins() {
     let daemon_lock = create_test_daemon_lock(&temp_dir);
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(
+        run_daemon_for_test(
             &mut registry,
             &ctx,
             daemon_lock,
             cancel_clone,
-            status_writer.clone(),
-            new_state_store(),
-            new_pubsub_store(),
-            new_launch_sender(),
-            new_session_registry(),
-            dedup_store,
-            new_stream_state_store(),
-            new_stream_event_sender(),
-            new_log_event_queue(),
+            DaemonTestRunDeps {
+                status_writer: status_writer.clone(),
+                state_store: new_state_store(),
+                pubsub_store: new_pubsub_store(),
+                launch_tx: new_launch_sender(),
+                session_registry: new_session_registry(),
+                dedup_store,
+                stream_state_store: new_stream_state_store(),
+                stream_event_sender: new_stream_event_sender(),
+                log_event_queue: new_log_event_queue(),
+            },
         )
         .await
     });
@@ -1022,6 +1301,65 @@ async fn test_plugin_run_failure_isolated_from_sibling_plugins() {
 
 #[test]
 #[serial]
+fn test_second_daemon_start_rejected_when_first_is_running() {
+    let temp_dir = TempDir::new().unwrap();
+    let bin = env!("CARGO_BIN_EXE_atm-daemon");
+
+    let mut first_cmd = std::process::Command::new(bin);
+    first_cmd
+        .env("ATM_HOME", temp_dir.path())
+        .env_remove("ATM_DAEMON_BIN")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let first_token = issue_isolated_test_launch_token(temp_dir.path(), "daemon_tests::first");
+    attach_launch_token(&mut first_cmd, &first_token).expect("encode first daemon token");
+    let first_child = first_cmd.spawn().expect("failed to spawn first daemon");
+    let mut first = daemon_process_guard::DaemonProcessGuard::from_child(
+        first_child,
+        Path::new(bin),
+        temp_dir.path(),
+    );
+
+    let daemon_running = wait_for_child_running_elapsed(first.child_mut(), 1_000)
+        .expect("first daemon should still be running");
+    assert!(
+        daemon_running <= Duration::from_secs(1),
+        "first daemon should still be running: elapsed={daemon_running:?}"
+    );
+    let lock_elapsed = wait_for_lock_file_acquired_elapsed(temp_dir.path(), 2_000)
+        .expect("first daemon should acquire daemon.lock");
+    assert!(
+        lock_elapsed <= Duration::from_secs(2),
+        "first daemon should acquire daemon.lock within 2s: elapsed={lock_elapsed:?}"
+    );
+    let lock_elapsed = wait_for_lock_file_acquired_elapsed(temp_dir.path(), 8_000)
+        .expect("first daemon should acquire daemon.lock within 8s");
+    assert!(
+        lock_elapsed <= Duration::from_secs(8),
+        "first daemon should acquire daemon.lock within 8s: elapsed={lock_elapsed:?}"
+    );
+
+    let mut second_cmd = std::process::Command::new(bin);
+    second_cmd.env("ATM_HOME", temp_dir.path());
+    let second_token = issue_isolated_test_launch_token(temp_dir.path(), "daemon_tests::second");
+    attach_launch_token(&mut second_cmd, &second_token).expect("encode second daemon token");
+    let second = second_cmd.output().expect("failed to spawn second daemon");
+
+    assert!(
+        !second.status.success(),
+        "second daemon start must fail while first holds lock"
+    );
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("already running") || stderr.contains("Refusing second instance"),
+        "second daemon error should indicate lock contention, got: {stderr}"
+    );
+    drop(first);
+}
+
+#[test]
+#[serial]
 fn test_daemon_start_requires_launch_token() {
     let temp_dir = TempDir::new().unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"))
@@ -1039,5 +1377,234 @@ fn test_daemon_start_requires_launch_token() {
         stderr.contains("\"rejection_reason\":\"missing_token\"")
             || stderr.contains("missing launch token"),
         "stderr should contain structured missing_token rejection, got: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_daemon_startup_emits_otlp_trace_with_daemon_service_name_and_session_id() {
+    let temp_dir = TempDir::new().unwrap();
+    let (endpoint, rx) = start_otel_trace_collector();
+    let session_id = "sess-az-1";
+    let daemon_bin = Path::new(env!("CARGO_BIN_EXE_atm-daemon"));
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"));
+    cmd.env("ATM_HOME", temp_dir.path())
+        .env("ATM_OTEL_ENABLED", "true")
+        .env("ATM_OTEL_ENDPOINT", &endpoint)
+        .env("CLAUDE_SESSION_ID", session_id)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let token = issue_isolated_test_launch_token_with_lease(
+        temp_dir.path(),
+        "daemon_tests::startup_trace",
+        "daemon_tests::startup_trace",
+        std::process::id(),
+        Duration::from_secs(30),
+    );
+    attach_launch_token(&mut cmd, &token).expect("encode startup trace token");
+    let child = cmd.spawn().expect("spawn daemon for startup trace");
+    let mut guard =
+        daemon_process_guard::DaemonProcessGuard::from_child(child, daemon_bin, temp_dir.path());
+
+    let daemon_running = wait_for_child_running_elapsed(guard.child_mut(), 1_000)
+        .expect("daemon should still be running");
+    assert!(
+        daemon_running <= Duration::from_secs(1),
+        "daemon should still be running: elapsed={daemon_running:?}"
+    );
+    let lock_elapsed = wait_for_lock_file_acquired_elapsed(temp_dir.path(), 8_000)
+        .expect("daemon should acquire daemon.lock");
+    assert!(
+        lock_elapsed <= Duration::from_secs(8),
+        "daemon should acquire daemon.lock within 8s: elapsed={lock_elapsed:?}"
+    );
+
+    let mut saw_trace = false;
+    for _ in 0..8 {
+        if let Ok((path, body)) = rx.recv_timeout(Duration::from_secs(5)) {
+            if path != "/v1/traces" {
+                continue;
+            }
+            let payload: serde_json::Value =
+                serde_json::from_str(&body).expect("valid collector payload");
+            let resource_attrs = payload["resourceSpans"][0]["resource"]["attributes"]
+                .as_array()
+                .expect("trace resource attributes");
+            assert!(
+                resource_attrs.iter().any(|item| {
+                    item["key"] == "service.name" && item["value"]["stringValue"] == "atm-daemon"
+                }),
+                "trace payload should set service.name=atm-daemon: {payload}"
+            );
+            assert!(
+                resource_attrs.iter().any(|item| {
+                    item["key"] == "session_id" && item["value"]["stringValue"] == session_id
+                }),
+                "trace resource should include inherited session_id: {payload}"
+            );
+            saw_trace = true;
+            break;
+        }
+    }
+
+    assert!(
+        saw_trace,
+        "collector should receive a daemon /v1/traces request"
+    );
+}
+
+#[test]
+#[serial]
+fn test_daemon_exits_when_isolated_test_owner_pid_is_dead() {
+    let temp_dir = TempDir::new().unwrap();
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"));
+    cmd.env("ATM_HOME", temp_dir.path());
+    let token = issue_isolated_test_launch_token_with_lease(
+        temp_dir.path(),
+        "daemon_tests::dead_owner",
+        "daemon_tests::dead_owner",
+        999_999,
+        Duration::from_secs(30),
+    );
+    attach_launch_token(&mut cmd, &token).expect("encode dead-owner token");
+    let output = cmd.output().expect("spawn daemon with dead owner pid");
+
+    assert!(
+        !output.status.success(),
+        "daemon should terminate non-zero when owner_pid is dead"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("\"event_name\":\"dead_owner_shutdown\"")
+            || stderr.contains("dead_owner_shutdown"),
+        "stderr should contain dead_owner_shutdown event, got: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_daemon_exits_when_isolated_test_ttl_expires() {
+    let temp_dir = TempDir::new().unwrap();
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"));
+    cmd.env("ATM_HOME", temp_dir.path());
+    let ttl = if cfg!(debug_assertions) {
+        Duration::from_secs(5)
+    } else {
+        Duration::from_secs(1)
+    };
+    let token = issue_isolated_test_launch_token_with_lease(
+        temp_dir.path(),
+        "daemon_tests::ttl_expiry",
+        "daemon_tests::ttl_expiry",
+        std::process::id(),
+        ttl,
+    );
+    attach_launch_token(&mut cmd, &token).expect("encode ttl-expiry token");
+    let output = cmd.output().expect("spawn daemon with short TTL");
+
+    assert!(
+        !output.status.success(),
+        "daemon should terminate non-zero when TTL expires"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("\"event_name\":\"ttl_expiry_shutdown\"")
+            || stderr.contains("ttl_expiry_shutdown"),
+        "stderr should contain ttl_expiry_shutdown event, got: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_isolated_test_clean_shutdown_emits_lifecycle_events() {
+    let temp_dir = TempDir::new().unwrap();
+    let isolated_log_file = temp_dir
+        .path()
+        .join(".config/atm/logs/atm-daemon/atm-daemon.log.jsonl");
+    let daemon_bin = Path::new(env!("CARGO_BIN_EXE_atm-daemon"));
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_atm-daemon"));
+    cmd.env("ATM_HOME", temp_dir.path())
+        .env("ATM_LOG_FILE", &isolated_log_file)
+        .env("ATM_OTEL_ENABLED", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let token = issue_isolated_test_launch_token_with_lease(
+        temp_dir.path(),
+        "daemon_tests::clean_shutdown",
+        "daemon_tests::clean_shutdown",
+        std::process::id(),
+        Duration::from_secs(30),
+    );
+    attach_launch_token(&mut cmd, &token).expect("encode clean-shutdown token");
+    let child = cmd.spawn().expect("spawn daemon for clean shutdown");
+    let mut guard =
+        daemon_process_guard::DaemonProcessGuard::from_child(child, daemon_bin, temp_dir.path());
+
+    let daemon_running = wait_for_child_running_elapsed(guard.child_mut(), 1_000)
+        .expect("daemon should still be running");
+    assert!(
+        daemon_running <= Duration::from_secs(1),
+        "daemon should still be running: elapsed={daemon_running:?}"
+    );
+    let lock_elapsed = wait_for_lock_file_acquired_elapsed(temp_dir.path(), 8_000)
+        .expect("daemon should acquire daemon.lock");
+    assert!(
+        lock_elapsed <= Duration::from_secs(8),
+        "daemon should acquire daemon.lock within 8s: elapsed={lock_elapsed:?}"
+    );
+    std::thread::sleep(Duration::from_millis(250));
+
+    #[cfg(unix)]
+    {
+        let signal_result = unsafe { libc::kill(guard.pid() as i32, libc::SIGTERM) };
+        assert_eq!(signal_result, 0, "SIGTERM should succeed");
+    }
+    #[cfg(windows)]
+    {
+        guard
+            .child_mut()
+            .kill()
+            .expect("terminate daemon on windows");
+    }
+
+    let output = guard
+        .wait_with_output()
+        .expect("wait for clean shutdown daemon output");
+    assert!(
+        output.status.success(),
+        "daemon should exit cleanly after SIGTERM: status={:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let spool = isolated_log_file.parent().unwrap().join("spool");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        let mut events = read_jsonl_events(&isolated_log_file);
+        events.extend(read_spool_events(&spool));
+        let saw_clean_shutdown = events.iter().any(|event| {
+            event.action == "clean_owner_shutdown"
+                && event
+                    .fields
+                    .get("event_name")
+                    .and_then(|value| value.as_str())
+                    == Some("clean_owner_shutdown")
+        });
+        if saw_clean_shutdown {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let mut events = read_jsonl_events(&isolated_log_file);
+    events.extend(read_spool_events(&spool));
+    panic!(
+        "expected clean_owner_shutdown event in persisted logs, got events: {:?}",
+        events
+            .iter()
+            .map(|event| (&event.action, event.fields.get("event_name")))
+            .collect::<Vec<_>>()
     );
 }
