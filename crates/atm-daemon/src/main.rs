@@ -198,16 +198,6 @@ async fn main() -> Result<()> {
             ),
         },
     )?;
-    agent_team_mail_core::daemon_client::write_daemon_lock_metadata(
-        &home_dir,
-        env!("CARGO_PKG_VERSION"),
-        &runtime_owner,
-    )
-    .context("Failed to write daemon lock metadata")?;
-    daemon::startup_auth::persist_runtime_metadata_from_token(&home_dir, &launch_token)
-        .context("Failed to persist launch lease metadata")?;
-    daemon::startup_auth::log_launch_accepted(&home_dir, &launch_token);
-
     // Resolve canonical log writer config once and reuse for startup merge + writer task.
     let log_writer_config = LogWriterConfig::from_env(&home_dir);
     let log_file = log_writer_config.log_path.clone();
@@ -318,17 +308,6 @@ async fn main() -> Result<()> {
     {
         registry.register(agent_team_mail_daemon::plugins::ci_monitor::CiMonitorPlugin::new());
         info!("Registered GH Monitor plugin");
-    }
-
-    // Register Issues plugin if configured
-    if let Some(issues_config) = plugin_ctx.plugin_config("issues")
-        && issues_config
-            .get("enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true)
-    {
-        registry.register(agent_team_mail_daemon::plugins::issues::IssuesPlugin::new());
-        info!("Registered Issues plugin");
     }
 
     // Create the shared agent state store.  When the worker adapter plugin is
@@ -474,6 +453,8 @@ async fn main() -> Result<()> {
         &mut registry,
         &plugin_ctx,
         daemon_lock,
+        runtime_owner.clone(),
+        launch_token.clone(),
         cancel_token,
         status_writer,
         state_store,
@@ -486,6 +467,7 @@ async fn main() -> Result<()> {
         log_event_queue,
     )
     .await;
+    agent_team_mail_core::daemon_client::cleanup_daemon_runtime_artifacts(&home_dir);
     if let Some(task) = lease_monitor_task {
         let _ = task.await;
     }

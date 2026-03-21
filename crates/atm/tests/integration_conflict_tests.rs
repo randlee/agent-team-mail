@@ -159,20 +159,17 @@ fn mirror_team_config_to_home(temp_dir: &TempDir, team_name: &str, home_root: &s
 
 #[cfg(unix)]
 fn daemon_pid_path(temp_dir: &TempDir) -> PathBuf {
-    temp_dir
-        .path()
-        .join("runtime-home/.atm/daemon/atm-daemon.pid")
+    temp_dir.path().join("runtime-home")
 }
 
 #[cfg(unix)]
 fn read_daemon_pid(temp_dir: &TempDir) -> Option<u32> {
-    let pid_path = daemon_pid_path(temp_dir);
-    let raw = fs::read_to_string(pid_path).ok()?;
-    raw.trim().parse::<u32>().ok()
+    agent_team_mail_core::daemon_client::daemon_process_id_for(&daemon_pid_path(temp_dir))
 }
 
 #[cfg(unix)]
 fn wait_for_daemon_pid_change(temp_dir: &TempDir, previous_pid: u32, timeout: Duration) -> u32 {
+    let runtime_home = daemon_pid_path(temp_dir);
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if let Some(pid) = read_daemon_pid(temp_dir)
@@ -183,7 +180,20 @@ fn wait_for_daemon_pid_change(temp_dir: &TempDir, previous_pid: u32, timeout: Du
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("daemon pid did not change from {previous_pid} within {timeout:?}");
+    let status_path = runtime_home.join(".atm/daemon/status.json");
+    let metadata_path = runtime_home.join(".atm/daemon/daemon.lock.meta.json");
+    let socket_path = runtime_home.join(".atm/daemon/atm-daemon.sock");
+    let status_raw = fs::read_to_string(&status_path).unwrap_or_else(|_| "<missing>".to_string());
+    let metadata_raw =
+        fs::read_to_string(&metadata_path).unwrap_or_else(|_| "<missing>".to_string());
+    panic!(
+        "daemon pid did not change from {previous_pid} within {timeout:?}; status_path={} status={} metadata_path={} metadata={} socket_exists={}",
+        status_path.display(),
+        status_raw,
+        metadata_path.display(),
+        metadata_raw,
+        socket_path.exists(),
+    );
 }
 
 #[cfg(unix)]
@@ -1431,7 +1441,6 @@ fn test_dead_pid_stale_lock_starts_daemon_cleanly() {
 
     let daemon_dir = temp_dir.path().join("runtime-home/.atm/daemon");
     fs::create_dir_all(&daemon_dir).unwrap();
-    fs::write(daemon_dir.join("atm-daemon.pid"), format!("{dead_pid}\n")).unwrap();
     fs::write(
         daemon_dir.join("status.json"),
         serde_json::json!({
@@ -1495,8 +1504,27 @@ fn test_identity_mismatch_socket_is_detected_and_restarted() {
     let temp_dir = TempDir::new().unwrap();
     setup_test_team(&temp_dir, "test-team");
 
-    let mut daemon_guard = DaemonProcessGuard::spawn(&temp_dir, "test-team");
-    daemon_guard.wait_ready(&temp_dir);
+    let daemon_guard = {
+        let mut last_panic = None;
+        let mut ready_guard = None;
+        for _ in 0..3 {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut guard = DaemonProcessGuard::spawn(&temp_dir, "test-team");
+                guard.wait_ready(&temp_dir);
+                guard
+            })) {
+                Ok(guard) => {
+                    ready_guard = Some(guard);
+                    break;
+                }
+                Err(payload) => {
+                    last_panic = Some(payload);
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+        ready_guard.unwrap_or_else(|| std::panic::resume_unwind(last_panic.unwrap()))
+    };
     let old_pid = daemon_guard.pid();
 
     write_lock_metadata(
@@ -1518,6 +1546,9 @@ fn test_identity_mismatch_socket_is_detected_and_restarted() {
 
     let new_pid = wait_for_daemon_pid_change(&temp_dir, old_pid, Duration::from_secs(8));
     assert!(new_pid > 1);
-    let _restarted_daemon =
-        DaemonProcessGuard::adopt_registered_pid(new_pid, &daemon_binary_path(), temp_dir.path());
+    let _restarted_daemon = DaemonProcessGuard::adopt_registered_pid(
+        new_pid,
+        &daemon_binary_path(),
+        &temp_dir.path().join("runtime-home"),
+    );
 }

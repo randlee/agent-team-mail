@@ -11,10 +11,10 @@
 //! ~/.config/atm/tui.toml
 //! ```
 //!
-//! Override the base directory with `ATM_HOME`:
+//! Override the base directory with `HOME`:
 //!
 //! ```text
-//! ATM_HOME=/custom/home atm-tui --team atm-dev
+//! HOME=/custom/home atm-tui --team atm-dev
 //! # loads: /custom/home/.config/atm/tui.toml
 //! ```
 //!
@@ -243,13 +243,14 @@ mod tests {
     #[serial]
     fn test_load_tui_config_missing_file_returns_defaults() {
         let dir = tempfile::TempDir::new().unwrap();
-        unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+        unsafe { std::env::set_var("HOME", dir.path()) };
+        unsafe { std::env::remove_var("ATM_HOME") };
 
         let cfg = load_tui_config();
         assert_eq!(cfg.interrupt_policy, InterruptPolicy::Confirm);
         assert!(cfg.follow_mode_default);
 
-        unsafe { std::env::remove_var("ATM_HOME") };
+        unsafe { std::env::remove_var("HOME") };
     }
 
     #[test]
@@ -264,13 +265,14 @@ mod tests {
         )
         .unwrap();
 
-        unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+        unsafe { std::env::set_var("HOME", dir.path()) };
+        unsafe { std::env::remove_var("ATM_HOME") };
 
         let cfg = load_tui_config();
         assert_eq!(cfg.interrupt_policy, InterruptPolicy::Never);
         assert!(!cfg.follow_mode_default);
 
-        unsafe { std::env::remove_var("ATM_HOME") };
+        unsafe { std::env::remove_var("HOME") };
     }
 
     #[test]
@@ -281,12 +283,13 @@ mod tests {
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(config_dir.join("tui.toml"), "this is not valid toml!!!").unwrap();
 
-        unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+        unsafe { std::env::set_var("HOME", dir.path()) };
+        unsafe { std::env::remove_var("ATM_HOME") };
 
         let cfg = load_tui_config();
         // Malformed file must silently fall back to defaults.
         assert_eq!(cfg.interrupt_policy, InterruptPolicy::Confirm);
 
-        unsafe { std::env::remove_var("ATM_HOME") };
+        unsafe { std::env::remove_var("HOME") };
     }
 }

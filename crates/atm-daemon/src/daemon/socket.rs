@@ -216,17 +216,15 @@ pub async fn start_socket_server(
 pub struct SocketServerHandle {
     /// Path to the socket file (removed on drop)
     socket_path: PathBuf,
-    /// Path to the PID file (removed on drop)
-    pid_path: PathBuf,
 }
 
 impl Drop for SocketServerHandle {
     fn drop(&mut self) {
-        cleanup_socket_files(&self.socket_path, &self.pid_path);
+        cleanup_socket_files(&self.socket_path);
     }
 }
 
-fn cleanup_socket_files(socket_path: &PathBuf, pid_path: &PathBuf) {
+fn cleanup_socket_files(socket_path: &PathBuf) {
     if socket_path.exists() {
         if let Err(e) = std::fs::remove_file(socket_path) {
             warn!(
@@ -235,13 +233,6 @@ fn cleanup_socket_files(socket_path: &PathBuf, pid_path: &PathBuf) {
             );
         } else {
             debug!("Removed socket file {}", socket_path.display());
-        }
-    }
-    if pid_path.exists() {
-        if let Err(e) = std::fs::remove_file(pid_path) {
-            warn!("Failed to remove PID file {}: {e}", pid_path.display());
-        } else {
-            debug!("Removed PID file {}", pid_path.display());
         }
     }
 }
@@ -368,7 +359,6 @@ async fn start_unix_socket_server(
 
     let daemon_dir = home_dir.join(".atm/daemon");
     let socket_path = daemon_dir.join("atm-daemon.sock");
-    let pid_path = daemon_dir.join("atm-daemon.pid");
 
     // Ensure the daemon directory exists
     std::fs::create_dir_all(&daemon_dir)?;
@@ -379,18 +369,12 @@ async fn start_unix_socket_server(
         std::fs::remove_file(&socket_path)?;
     }
 
-    // Write PID file
-    let pid = std::process::id();
-    std::fs::write(&pid_path, format!("{pid}\n"))?;
-    debug!("Wrote PID {pid} to {}", pid_path.display());
-
     // Bind the Unix listener
     let listener = UnixListener::bind(&socket_path)?;
     info!("Unix socket server listening on {}", socket_path.display());
 
     // Spawn the accept loop
     let accept_socket_path = socket_path.clone();
-    let accept_pid_path = pid_path.clone();
     tokio::spawn(async move {
         run_accept_loop(
             listener,
@@ -405,15 +389,11 @@ async fn start_unix_socket_server(
             log_event_queue,
             cancel,
             &accept_socket_path,
-            &accept_pid_path,
         )
         .await;
     });
 
-    Ok(SocketServerHandle {
-        socket_path,
-        pid_path,
-    })
+    Ok(SocketServerHandle { socket_path })
 }
 
 #[cfg(unix)]
@@ -434,7 +414,6 @@ async fn run_accept_loop(
     log_event_queue: LogEventQueue,
     cancel: tokio_util::sync::CancellationToken,
     socket_path: &std::path::Path,
-    _pid_path: &std::path::Path,
 ) {
     info!("Socket accept loop started");
 
@@ -6463,16 +6442,6 @@ mod tests {
         .await
         .unwrap()
         .expect("Expected socket server handle on unix");
-
-        let pid_path = home_dir.join(".atm/daemon/atm-daemon.pid");
-        assert!(
-            pid_path.exists(),
-            "PID file should exist after server start"
-        );
-
-        let pid_str = std::fs::read_to_string(&pid_path).unwrap();
-        let pid: u32 = pid_str.trim().parse().unwrap();
-        assert_eq!(pid, std::process::id());
 
         cancel.cancel();
     }

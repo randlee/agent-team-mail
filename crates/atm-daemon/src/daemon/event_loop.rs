@@ -357,6 +357,8 @@ pub async fn run(
     registry: &mut PluginRegistry,
     ctx: &PluginContext,
     daemon_lock: agent_team_mail_core::io::lock::FileLock,
+    runtime_owner: agent_team_mail_core::daemon_client::RuntimeOwnerMetadata,
+    launch_token: agent_team_mail_daemon_launch::DaemonLaunchToken,
     cancel: CancellationToken,
     status_writer: Arc<StatusWriter>,
     state_store: SharedStateStore,
@@ -494,10 +496,22 @@ pub async fn run(
             handle
         }
         Err(e) => {
-            warn!("Failed to start Unix socket server (daemon will continue without it): {e}");
-            None
+            return Err(e).context("failed to start daemon socket server");
         }
     };
+
+    agent_team_mail_core::daemon_client::write_daemon_lock_metadata(
+        &ctx.system.runtime_home,
+        env!("CARGO_PKG_VERSION"),
+        &runtime_owner,
+    )
+    .context("failed to write daemon lock metadata after socket readiness")?;
+    crate::daemon::startup_auth::persist_runtime_metadata_from_token(
+        &ctx.system.runtime_home,
+        &launch_token,
+    )
+    .context("failed to persist launch lease metadata after socket readiness")?;
+    crate::daemon::startup_auth::log_launch_accepted(&ctx.system.runtime_home, &launch_token);
 
     // Start spool drain loop
     let teams_root = ctx.mail.teams_root().clone();
@@ -1676,9 +1690,6 @@ async fn status_writer_loop(
         &build_daemon_health_metric_records(&logging, &otel),
         &otel_config_from_env(),
     );
-    if let Err(e) = status_writer.write_daemon_touch(&teams) {
-        error!("Failed to write daemon touch sidecar: {}", e);
-    }
     if let Err(e) =
         status_writer.write_status(plugin_statuses.clone(), teams.clone(), logging, otel)
     {

@@ -32,7 +32,6 @@
 //! are surfaced as `Err`.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -155,20 +154,6 @@ pub struct DaemonLockMetadata {
     /// RFC3339 UTC timestamp for metadata write.
     pub written_at: String,
 }
-
-/// Per-team daemon startup sidecar entry written under `${ATM_HOME}/.atm/daemon/`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DaemonTouchEntry {
-    /// Daemon PID that touched this team at startup.
-    pub pid: u32,
-    /// RFC3339 UTC daemon startup timestamp.
-    pub started_at: String,
-    /// Canonical daemon binary path used for the startup touch.
-    pub binary: String,
-}
-
-/// Snapshot of team -> daemon startup touch ownership.
-pub type DaemonTouchSnapshot = BTreeMap<String, DaemonTouchEntry>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RuntimePolicyInput {
@@ -501,17 +486,6 @@ pub fn daemon_socket_path() -> anyhow::Result<PathBuf> {
     Ok(daemon_runtime_dir()?.join("atm-daemon.sock"))
 }
 
-/// Compute the well-known PID file path for the ATM daemon.
-///
-/// The path is `${ATM_HOME}/.atm/daemon/atm-daemon.pid`.
-///
-/// # Errors
-///
-/// Returns an error only if home directory resolution fails.
-pub fn daemon_pid_path() -> anyhow::Result<PathBuf> {
-    Ok(daemon_runtime_dir()?.join("atm-daemon.pid"))
-}
-
 /// Compute the daemon status snapshot path.
 ///
 /// The path is `${ATM_HOME}/.atm/daemon/status.json`.
@@ -522,13 +496,6 @@ pub fn daemon_status_path() -> anyhow::Result<PathBuf> {
 /// Compute the daemon status snapshot path for an explicit ATM home.
 pub fn daemon_status_path_for(home: &std::path::Path) -> PathBuf {
     daemon_runtime_dir_for(home).join("status.json")
-}
-
-/// Compute the daemon startup touch sidecar path for an explicit ATM home.
-///
-/// The path is `${ATM_HOME}/.atm/daemon/daemon-touch.json`.
-pub fn daemon_touch_path_for(home: &std::path::Path) -> PathBuf {
-    daemon_runtime_dir_for(home).join("daemon-touch.json")
 }
 
 /// Compute the daemon singleton lock path.
@@ -592,6 +559,31 @@ pub fn daemon_runtime_metadata_path_for(home: &std::path::Path) -> PathBuf {
 /// Compute the runtime metadata write lock path for an explicit ATM home.
 pub fn daemon_runtime_metadata_write_lock_path_for(home: &std::path::Path) -> PathBuf {
     daemon_runtime_dir_for(home).join("runtime.lock")
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DaemonStatusPidSnapshot {
+    pid: u32,
+    version: String,
+}
+
+fn read_status_snapshot(home: &Path) -> Option<DaemonStatusPidSnapshot> {
+    let raw = std::fs::read_to_string(daemon_status_path_for(home)).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+pub fn daemon_process_id_for(home: &Path) -> Option<u32> {
+    read_daemon_lock_metadata(home)
+        .map(|metadata| metadata.pid)
+        .or_else(|| read_status_snapshot(home).map(|status| status.pid))
+}
+
+pub fn cleanup_daemon_runtime_artifacts(home: &Path) {
+    let daemon_dir = daemon_runtime_dir_for(home);
+    let _ = std::fs::remove_file(daemon_dir.join("atm-daemon.sock"));
+    let _ = std::fs::remove_file(daemon_dir.join("status.json"));
+    let _ = std::fs::remove_file(daemon_dir.join("daemon.lock.meta.json"));
+    let _ = std::fs::remove_file(daemon_dir.join("daemon.lock.meta.lock"));
 }
 
 fn canonicalize_lossy(path: &Path) -> PathBuf {
@@ -880,10 +872,7 @@ fn reap_expired_isolated_runtime_roots_with_base(base_root: &Path) -> anyhow::Re
             continue;
         }
 
-        let pid_path = daemon_runtime_dir_for(&home).join("atm-daemon.pid");
-        let runtime_pid = std::fs::read_to_string(&pid_path)
-            .ok()
-            .and_then(|raw| raw.trim().parse::<i32>().ok());
+        let runtime_pid = daemon_process_id_for(&home).map(|pid| pid as i32);
         #[cfg(unix)]
         let alive = runtime_pid.is_some_and(pid_alive);
         #[cfg(not(unix))]
@@ -984,16 +973,11 @@ pub fn write_daemon_lock_metadata(
 pub fn daemon_is_running() -> bool {
     #[cfg(unix)]
     {
-        let pid_path = match daemon_pid_path() {
-            Ok(p) => p,
+        let home = match crate::home::get_home_dir() {
+            Ok(home) => home,
             Err(_) => return false,
         };
-        if let Ok(content) = std::fs::read_to_string(&pid_path) {
-            if let Ok(pid) = content.trim().parse::<i32>() {
-                return pid_alive(pid);
-            }
-        }
-        false
+        daemon_socket_connectable(&home)
     }
 
     #[cfg(not(unix))]
@@ -2347,13 +2331,13 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
                 return Ok(());
             }
             let socket_path = daemon_socket_path()?;
-            let pid_path = daemon_pid_path()?;
+            let status_path = daemon_status_path()?;
             anyhow::bail!(
-                "daemon startup timed out after {}s; pid_file_exists={}, socket_exists={}, pid_path={}, socket_path={}",
+                "daemon startup timed out after {}s; status_exists={}, socket_exists={}, status_path={}, socket_path={}",
                 STARTUP_DEADLINE_SECS,
-                pid_path.exists(),
+                status_path.exists(),
                 socket_path.exists(),
-                pid_path.display(),
+                status_path.display(),
                 socket_path.display()
             );
         }
@@ -2484,13 +2468,13 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     let _ = std::fs::remove_file(&stderr_capture);
 
     let socket_path = daemon_socket_path()?;
-    let pid_path = daemon_pid_path()?;
+    let status_path = daemon_status_path()?;
     let timeout_error = format!(
-        "daemon startup timed out after {}s; pid_file_exists={}, socket_exists={}, pid_path={}, socket_path={}, stderr_capture={}",
+        "daemon startup timed out after {}s; status_exists={}, socket_exists={}, status_path={}, socket_path={}, stderr_capture={}",
         STARTUP_DEADLINE_SECS,
-        pid_path.exists(),
+        status_path.exists(),
         socket_path.exists(),
-        pid_path.display(),
+        status_path.display(),
         socket_path.display(),
         stderr_capture.display()
     );
@@ -2541,53 +2525,17 @@ fn wait_for_daemon_socket_ready(home: &std::path::Path, timeout: std::time::Dura
 #[cfg(unix)]
 fn cleanup_stale_daemon_runtime_files(home: &std::path::Path) {
     let socket_path = home.join(".atm/daemon/atm-daemon.sock");
-    let pid_path = home.join(".atm/daemon/atm-daemon.pid");
+    let live_pid = daemon_process_id_for(home)
+        .map(|pid| pid as i32)
+        .filter(|pid| pid_alive(*pid));
 
-    let pid_state = read_daemon_pid_state(&pid_path);
-    if matches!(
-        pid_state,
-        PidState::Dead | PidState::Missing | PidState::Malformed
-    ) {
-        let _ = std::fs::remove_file(&pid_path);
+    if live_pid.is_none() {
+        cleanup_daemon_runtime_artifacts(home);
+        return;
     }
 
-    // Remove stale socket only when daemon ownership is known-dead.
-    let ownership_known_dead = matches!(
-        pid_state,
-        PidState::Dead | PidState::Missing | PidState::Malformed
-    );
-    if socket_path.exists() && ownership_known_dead && !daemon_socket_connectable(home) {
+    if socket_path.exists() && !daemon_socket_connectable(home) {
         let _ = std::fs::remove_file(&socket_path);
-    }
-}
-
-#[cfg(unix)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PidState {
-    Missing,
-    Malformed,
-    Unreadable,
-    Dead,
-    Alive,
-}
-
-#[cfg(unix)]
-fn read_daemon_pid_state(pid_path: &std::path::Path) -> PidState {
-    if !pid_path.exists() {
-        return PidState::Missing;
-    }
-    let content = match std::fs::read_to_string(pid_path) {
-        Ok(s) => s,
-        Err(_) => return PidState::Unreadable,
-    };
-    let pid = match content.trim().parse::<i32>() {
-        Ok(pid) => pid,
-        Err(_) => return PidState::Malformed,
-    };
-    if pid_alive(pid) {
-        PidState::Alive
-    } else {
-        PidState::Dead
     }
 }
 
@@ -2677,30 +2625,22 @@ fn detect_daemon_identity_mismatch(
     home: &std::path::Path,
     socket_connectable: bool,
 ) -> Option<String> {
-    let pid_path = home.join(".atm/daemon/atm-daemon.pid");
     let status_path = daemon_status_path_for(home);
     let metadata_path = daemon_lock_metadata_path_for(home);
 
-    let pid_from_file = std::fs::read_to_string(&pid_path)
+    let status_snapshot = std::fs::read_to_string(&status_path)
         .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok());
-    let status_json = std::fs::read_to_string(&status_path)
-        .ok()
-        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok());
-    let pid_from_status = status_json
+        .and_then(|content| serde_json::from_str::<DaemonStatusPidSnapshot>(&content).ok());
+    let pid_from_status = status_snapshot.as_ref().map(|status| status.pid);
+    let version_from_status = status_snapshot
         .as_ref()
-        .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
-        .map(|pid| pid as u32);
-    let version_from_status = status_json
-        .as_ref()
-        .and_then(|json| json.get("version").and_then(serde_json::Value::as_str))
-        .map(std::string::ToString::to_string);
+        .map(|status| status.version.clone());
     let mut metadata = std::fs::read_to_string(&metadata_path)
         .ok()
         .and_then(|s| serde_json::from_str::<DaemonLockMetadata>(&s).ok());
 
     if metadata.is_none()
-        && let Some(candidate_pid) = pid_from_file.or(pid_from_status)
+        && let Some(candidate_pid) = pid_from_status
         && pid_alive(candidate_pid as i32)
     {
         std::thread::sleep(std::time::Duration::from_millis(DAEMON_METADATA_SETTLE_MS));
@@ -2718,7 +2658,7 @@ fn detect_daemon_identity_mismatch(
         .and_then(|candidates| candidates.into_iter().next())
         .map(|path| path.into_os_string());
     let snapshot = DaemonIdentitySnapshot {
-        pid_from_file,
+        pid_from_file: None,
         pid_from_status,
         version_from_status,
         metadata,
@@ -2787,10 +2727,7 @@ fn restart_mismatched_daemon(home: &std::path::Path, reason: &str) -> anyhow::Re
     use crate::event_log::{EventFields, emit_event_best_effort};
     use std::time::Duration;
 
-    let pid_path = home.join(".atm/daemon/atm-daemon.pid");
-    let pid = std::fs::read_to_string(&pid_path)
-        .ok()
-        .and_then(|s| s.trim().parse::<i32>().ok());
+    let pid = daemon_process_id_for(home).map(|pid| pid as i32);
 
     emit_event_best_effort(EventFields {
         level: "warn",
@@ -2848,10 +2785,7 @@ fn restart_mismatched_daemon(home: &std::path::Path, reason: &str) -> anyhow::Re
     // Replace runtime files aggressively for identity-mismatch recovery. This is
     // scope-local and avoids broad process sweeps while allowing a fresh daemon
     // to bind canonical paths.
-    let daemon_dir = home.join(".atm/daemon");
-    let _ = std::fs::remove_file(daemon_dir.join("atm-daemon.sock"));
-    let _ = std::fs::remove_file(daemon_dir.join("atm-daemon.pid"));
-    let _ = std::fs::remove_file(daemon_dir.join("status.json"));
+    cleanup_daemon_runtime_artifacts(home);
     cleanup_stale_daemon_runtime_files(home);
     Ok(())
 }
@@ -3250,7 +3184,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     #[serial]
-    fn test_cleanup_stale_runtime_files_removes_dead_pid_file() {
+    fn test_cleanup_stale_runtime_files_removes_dead_runtime_artifacts() {
         use std::fs;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3258,49 +3192,71 @@ mod tests {
         let daemon_dir = home.join(".atm/daemon");
         fs::create_dir_all(&daemon_dir).unwrap();
 
-        let pid_path = daemon_dir.join("atm-daemon.pid");
-        fs::write(&pid_path, "999999\n").unwrap();
-        assert!(pid_path.exists());
-
-        cleanup_stale_daemon_runtime_files(home);
-        assert!(
-            !pid_path.exists(),
-            "stale PID file should be removed when PID is not alive"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    #[serial]
-    fn test_cleanup_stale_runtime_files_handles_malformed_pid() {
-        use std::fs;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path();
-        let daemon_dir = home.join(".atm/daemon");
-        fs::create_dir_all(&daemon_dir).unwrap();
-
-        let pid_path = daemon_dir.join("atm-daemon.pid");
         let socket_path = daemon_dir.join("atm-daemon.sock");
-        fs::write(&pid_path, "not-a-pid\n").unwrap();
+        let status_path = daemon_dir.join("status.json");
+        let metadata_path = daemon_dir.join("daemon.lock.meta.json");
         fs::write(&socket_path, "stale").unwrap();
+        fs::write(
+            &status_path,
+            serde_json::json!({
+                "pid": 999999_u32,
+                "version": env!("CARGO_PKG_VERSION"),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            &metadata_path,
+            serde_json::json!({
+                "pid": 999999_u32,
+                "home_scope": home.to_string_lossy(),
+                "executable_path": "/tmp/fake-atm-daemon",
+                "build_profile": "debug",
+                "runtime_kind": "shared",
+                "version": env!("CARGO_PKG_VERSION"),
+                "written_at": "2026-01-01T00:00:00Z",
+            })
+            .to_string(),
+        )
+        .unwrap();
 
         cleanup_stale_daemon_runtime_files(home);
-
         assert!(
-            !pid_path.exists(),
-            "malformed PID file should be removed during cleanup"
-        );
-        assert!(
-            !socket_path.exists(),
-            "stale socket should be removed when PID ownership is known-dead"
+            !socket_path.exists() && !status_path.exists() && !metadata_path.exists(),
+            "stale runtime artifacts should be removed when recorded PID is not alive"
         );
     }
 
     #[cfg(unix)]
     #[test]
     #[serial]
-    fn test_cleanup_stale_runtime_files_unreadable_pid_does_not_remove_socket() {
+    fn test_cleanup_stale_runtime_files_handles_malformed_status_metadata() {
+        use std::fs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let daemon_dir = home.join(".atm/daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+
+        let socket_path = daemon_dir.join("atm-daemon.sock");
+        let status_path = daemon_dir.join("status.json");
+        let metadata_path = daemon_dir.join("daemon.lock.meta.json");
+        fs::write(&socket_path, "stale").unwrap();
+        fs::write(&status_path, "{not-json").unwrap();
+        fs::write(&metadata_path, "{not-json").unwrap();
+
+        cleanup_stale_daemon_runtime_files(home);
+
+        assert!(
+            !socket_path.exists() && !status_path.exists() && !metadata_path.exists(),
+            "malformed runtime artifacts should be removed during cleanup"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_cleanup_stale_runtime_files_unreadable_metadata_removes_socket() {
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
 
@@ -3309,24 +3265,39 @@ mod tests {
         let daemon_dir = home.join(".atm/daemon");
         fs::create_dir_all(&daemon_dir).unwrap();
 
-        let pid_path = daemon_dir.join("atm-daemon.pid");
         let socket_path = daemon_dir.join("atm-daemon.sock");
-        fs::write(&pid_path, "123\n").unwrap();
+        let metadata_path = daemon_dir.join("daemon.lock.meta.json");
         fs::write(&socket_path, "stale").unwrap();
-        let mut perms = fs::metadata(&pid_path).unwrap().permissions();
+        fs::write(
+            &metadata_path,
+            serde_json::json!({
+                "pid": 123_u32,
+                "home_scope": home.to_string_lossy(),
+                "executable_path": "/tmp/fake-atm-daemon",
+                "build_profile": "debug",
+                "runtime_kind": "shared",
+                "version": env!("CARGO_PKG_VERSION"),
+                "written_at": "2026-01-01T00:00:00Z",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&metadata_path).unwrap().permissions();
         perms.set_mode(0o000);
-        fs::set_permissions(&pid_path, perms).unwrap();
+        fs::set_permissions(&metadata_path, perms).unwrap();
 
         cleanup_stale_daemon_runtime_files(home);
         assert!(
-            socket_path.exists(),
-            "socket must not be removed when PID ownership cannot be read"
+            !socket_path.exists() && !metadata_path.exists(),
+            "unverifiable runtime ownership should be cleared aggressively"
         );
 
         // Restore permissions so tempdir cleanup succeeds.
-        let mut restore = fs::metadata(&pid_path).unwrap().permissions();
-        restore.set_mode(0o600);
-        fs::set_permissions(&pid_path, restore).unwrap();
+        if metadata_path.exists() {
+            let mut restore = fs::metadata(&metadata_path).unwrap().permissions();
+            restore.set_mode(0o600);
+            fs::set_permissions(&metadata_path, restore).unwrap();
+        }
     }
 
     #[cfg(unix)]
@@ -3395,8 +3366,8 @@ sleep 10
             "timeout error should include actionable timeout details: {msg}"
         );
         assert!(
-            msg.contains("pid_path="),
-            "timeout error should include pid path"
+            msg.contains("status_path="),
+            "timeout error should include status path"
         );
         assert!(
             msg.contains("socket_path="),
@@ -4076,13 +4047,6 @@ sleep 8
     fn test_daemon_socket_path_contains_expected_suffix() {
         let path = daemon_socket_path().unwrap();
         assert!(path.to_string_lossy().ends_with("atm-daemon.sock"));
-        assert!(path.to_string_lossy().contains(".atm/daemon"));
-    }
-
-    #[test]
-    fn test_daemon_pid_path_contains_expected_suffix() {
-        let path = daemon_pid_path().unwrap();
-        assert!(path.to_string_lossy().ends_with("atm-daemon.pid"));
         assert!(path.to_string_lossy().contains(".atm/daemon"));
     }
 
@@ -4902,23 +4866,6 @@ sleep 8
         assert!(
             s.contains(".atm") && s.contains("daemon"),
             "daemon_socket_path must contain '.atm/daemon' on Windows, got: {s}"
-        );
-    }
-
-    /// On Windows, `daemon_pid_path` must produce a path ending with the
-    /// expected suffix.
-    #[cfg(windows)]
-    #[test]
-    fn windows_daemon_pid_path_has_correct_suffix() {
-        let path = daemon_pid_path().unwrap();
-        let s = path.to_string_lossy();
-        assert!(
-            s.ends_with("atm-daemon.pid"),
-            "daemon_pid_path must end with 'atm-daemon.pid' on Windows, got: {s}"
-        );
-        assert!(
-            s.contains(".atm") && s.contains("daemon"),
-            "daemon_pid_path must contain '.atm/daemon' on Windows, got: {s}"
         );
     }
 

@@ -4808,7 +4808,11 @@ mod tests {
     #[serial_test::serial]
     async fn synthetic_tool_prefers_thread_bound_identity_over_args_identity() {
         let dir = tempfile::tempdir().unwrap();
-        let atm_home = dir.path().join("runtime-home").to_string_lossy().to_string();
+        let atm_home = dir
+            .path()
+            .join("runtime-home")
+            .to_string_lossy()
+            .to_string();
         // SAFETY: isolated tmp dir, no parallelism risk in serial test
         unsafe {
             std::env::set_var("HOME", dir.path());

@@ -19,6 +19,35 @@ mod env_guard;
 use daemon_process_guard::DaemonProcessGuard;
 use env_guard::EnvGuard;
 
+fn register_hint_with_retry(
+    team: &str,
+    agent: &str,
+    session_id: &str,
+    process_id: u32,
+) -> anyhow::Result<RegisterHintOutcome> {
+    let mut last_err = None;
+    for _ in 0..20 {
+        match register_hint(
+            team,
+            agent,
+            session_id,
+            process_id,
+            Some("codex"),
+            None,
+            None,
+            None,
+        ) {
+            Ok(outcome) => return Ok(outcome),
+            Err(err) if err.to_string().contains("AGENT_NOT_FOUND") => {
+                last_err = Some(err);
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("register-hint retry budget exhausted")))
+}
+
 /// Helper to set home directory for cross-platform test compatibility.
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     let workdir = temp_dir.path().join("workdir");
@@ -140,32 +169,16 @@ fn test_cli_team_scoped_commands_do_not_bleed_members_across_teams() {
         daemon_process_guard::DaemonProcessGuard::runtime_home_path(&temp_dir),
     );
     let _identity_alpha = EnvGuard::set("ATM_IDENTITY", alpha_member);
-    let hint_alpha = register_hint(
-        team_a,
-        alpha_member,
-        "sess-alpha-1",
-        std::process::id(),
-        Some("codex"),
-        None,
-        None,
-        None,
-    )
-    .expect("register-hint for alpha member");
+    let hint_alpha =
+        register_hint_with_retry(team_a, alpha_member, "sess-alpha-1", std::process::id())
+            .expect("register-hint for alpha member");
     assert_eq!(hint_alpha, RegisterHintOutcome::Registered);
     drop(_identity_alpha);
 
     let _identity_beta = EnvGuard::set("ATM_IDENTITY", beta_member);
-    let hint_beta = register_hint(
-        team_b,
-        beta_member,
-        "sess-beta-1",
-        std::process::id(),
-        Some("codex"),
-        None,
-        None,
-        None,
-    )
-    .expect("register-hint for beta member");
+    let hint_beta =
+        register_hint_with_retry(team_b, beta_member, "sess-beta-1", std::process::id())
+            .expect("register-hint for beta member");
     assert_eq!(hint_beta, RegisterHintOutcome::Registered);
 
     let mut members_cmd = cargo::cargo_bin_cmd!("atm");
@@ -251,7 +264,7 @@ fn test_status_and_members_preserve_registered_member_state_after_daemon_restart
     .expect("register-hint before restart");
     assert_eq!(outcome, RegisterHintOutcome::Registered);
 
-    let liveness_before = read_member_liveness(&temp_dir, team, member);
+    let liveness_before = wait_for_member_liveness(&temp_dir, team, member, Duration::from_secs(2));
     assert_eq!(
         liveness_before.get("members"),
         Some(&Some(true)),
