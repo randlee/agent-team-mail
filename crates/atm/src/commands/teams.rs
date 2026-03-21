@@ -3317,12 +3317,31 @@ mod tests {
         }
     }
 
-    fn home_env_key() -> &'static str {
-        if cfg!(windows) { "USERPROFILE" } else { "HOME" }
+    fn saved_home_env() -> (Option<OsString>, Option<OsString>) {
+        (std::env::var_os("HOME"), std::env::var_os("USERPROFILE"))
     }
 
-    fn saved_home_env() -> Option<OsString> {
-        std::env::var_os(home_env_key())
+    fn set_home_envs(value: &Path) {
+        // SAFETY: test-only env mutation; callers use #[serial].
+        unsafe {
+            std::env::set_var("HOME", value);
+            std::env::set_var("USERPROFILE", value);
+        }
+    }
+
+    fn restore_home_envs(original: (Option<OsString>, Option<OsString>)) {
+        let (home, userprofile) = original;
+        // SAFETY: test-only env mutation; callers use #[serial].
+        unsafe {
+            match home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match userprofile {
+                Some(v) => std::env::set_var("USERPROFILE", v),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+        }
     }
 
     fn create_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
@@ -3480,10 +3499,11 @@ mod tests {
         let team_dir = create_test_team(&temp_dir, "atm-dev");
 
         let original_home = std::env::var("ATM_HOME").ok();
+        let original_home_env = saved_home_env();
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         let result = add_member_internal(AddMemberArgs {
@@ -3513,6 +3533,7 @@ mod tests {
                 None => std::env::remove_var("ATM_HOME"),
             }
         }
+        restore_home_envs(original_home_env);
     }
 
     #[test]
@@ -3528,7 +3549,7 @@ mod tests {
         // SAFETY: test-only env mutation; tests using env vars must be serialized.
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
             std::env::set_var("ATM_IDENTITY", "team-lead");
         }
 
@@ -3572,12 +3593,13 @@ mod tests {
         create_test_team(&temp_dir, "atm-dev");
 
         let original_home = std::env::var("ATM_HOME").ok();
+        let original_home_env = saved_home_env();
         let original_id = std::env::var("ATM_IDENTITY").ok();
 
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
             std::env::set_var("ATM_IDENTITY", "arch-ctm"); // wrong caller
         }
 
@@ -3611,6 +3633,7 @@ mod tests {
                 None => std::env::remove_var("ATM_IDENTITY"),
             }
         }
+        restore_home_envs(original_home_env);
     }
 
     #[test]
@@ -3624,7 +3647,7 @@ mod tests {
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         let args = CleanupArgs {
@@ -3666,7 +3689,7 @@ mod tests {
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         let args = CleanupArgs {
@@ -3694,10 +3717,7 @@ mod tests {
                 Some(v) => std::env::set_var("ATM_HOME", v),
                 None => std::env::remove_var("ATM_HOME"),
             }
-            match original_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
+            restore_home_envs(original_home);
         }
         restore_autostart_env(original_autostart);
     }
@@ -3720,7 +3740,7 @@ mod tests {
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         let args = CleanupArgs {
@@ -3765,7 +3785,7 @@ mod tests {
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         let args = CleanupArgs {
@@ -3799,10 +3819,7 @@ mod tests {
                 Some(v) => std::env::set_var("ATM_HOME", v),
                 None => std::env::remove_var("ATM_HOME"),
             }
-            match original_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
+            restore_home_envs(original_home);
         }
         restore_autostart_env(original_autostart);
     }
@@ -3837,7 +3854,7 @@ mod tests {
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         let args = CleanupArgs {
@@ -3863,10 +3880,7 @@ mod tests {
                 Some(v) => std::env::set_var("ATM_HOME", v),
                 None => std::env::remove_var("ATM_HOME"),
             }
-            match original_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
+            restore_home_envs(original_home);
         }
         restore_autostart_env(original_autostart);
     }
@@ -3902,7 +3916,7 @@ mod tests {
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         let args = CleanupArgs {
@@ -3933,10 +3947,7 @@ mod tests {
                 Some(v) => std::env::set_var("ATM_HOME", v),
                 None => std::env::remove_var("ATM_HOME"),
             }
-            match original_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
+            restore_home_envs(original_home);
         }
         restore_autostart_env(original_autostart);
     }
@@ -3986,7 +3997,7 @@ mod tests {
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         let server = spawn_mock_session_query_team_server(
@@ -4039,13 +4050,14 @@ mod tests {
         let team_dir = create_test_team(&temp_dir, "atm-dev");
 
         let original_home = std::env::var("ATM_HOME").ok();
+        let original_home_env = saved_home_env();
         let original_id = std::env::var("ATM_IDENTITY").ok();
         let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
 
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
             std::env::set_var("ATM_IDENTITY", "team-lead");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
@@ -4083,6 +4095,7 @@ mod tests {
                 None => std::env::remove_var("CLAUDE_SESSION_ID"),
             }
         }
+        restore_home_envs(original_home_env);
     }
 
     // ---- backup / restore unit tests ----
@@ -4107,7 +4120,7 @@ mod tests {
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         let args = BackupArgs {
@@ -4163,7 +4176,7 @@ mod tests {
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         backup(BackupArgs {
@@ -4210,7 +4223,7 @@ mod tests {
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         let args = BackupArgs {
@@ -4251,7 +4264,7 @@ mod tests {
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         // Create a backup first
@@ -4336,7 +4349,7 @@ mod tests {
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         // Create backup
@@ -4408,7 +4421,7 @@ mod tests {
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         // Create a backup
@@ -4465,7 +4478,7 @@ mod tests {
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         // Backup (captures "old-session-id-1234" from create_test_team)
@@ -4609,13 +4622,14 @@ mod tests {
         create_test_team(&temp_dir, "atm-dev");
 
         let original_home = std::env::var("ATM_HOME").ok();
+        let original_home_env = saved_home_env();
         let original_id = std::env::var("ATM_IDENTITY").ok();
         let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
 
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
             std::env::set_var("ATM_IDENTITY", "team-lead");
             std::env::set_var("CLAUDE_SESSION_ID", "test-force-session-id");
         }
@@ -4650,6 +4664,7 @@ mod tests {
                 None => std::env::remove_var("CLAUDE_SESSION_ID"),
             }
         }
+        restore_home_envs(original_home_env);
     }
 
     #[test]
@@ -4668,7 +4683,7 @@ mod tests {
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         let args = CleanupArgs {
@@ -4738,7 +4753,7 @@ mod tests {
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         let args = CleanupArgs {
@@ -4778,10 +4793,7 @@ mod tests {
                 Some(v) => std::env::set_var("ATM_HOME", v),
                 None => std::env::remove_var("ATM_HOME"),
             }
-            match original_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
+            restore_home_envs(original_home);
         }
     }
 
@@ -4806,7 +4818,7 @@ mod tests {
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         // Cleanup a specific agent — daemon unreachable but --force removes anyway
@@ -4827,10 +4839,7 @@ mod tests {
                 Some(v) => std::env::set_var("ATM_HOME", v),
                 None => std::env::remove_var("ATM_HOME"),
             }
-            match original_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
+            restore_home_envs(original_home);
         }
         restore_autostart_env(original_autostart);
     }
@@ -4844,13 +4853,14 @@ mod tests {
         let team_dir = create_test_team(&temp_dir, "atm-dev");
 
         let original_home = std::env::var("ATM_HOME").ok();
+        let original_home_env = saved_home_env();
         let original_id = std::env::var("ATM_IDENTITY").ok();
         let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
 
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
             std::env::set_var("ATM_IDENTITY", "team-lead");
             std::env::set_var("CLAUDE_SESSION_ID", "test-inactive-session-id");
         }
@@ -4886,6 +4896,7 @@ mod tests {
                 None => std::env::remove_var("CLAUDE_SESSION_ID"),
             }
         }
+        restore_home_envs(original_home_env);
     }
 
     #[test]
@@ -4899,13 +4910,14 @@ mod tests {
         create_test_team(&temp_dir, "atm-dev");
 
         let original_home = std::env::var("ATM_HOME").ok();
+        let original_home_env = saved_home_env();
         let original_id = std::env::var("ATM_IDENTITY").ok();
         let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
 
         // SAFETY: test-only env mutation
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
             std::env::set_var("ATM_IDENTITY", "team-lead");
             std::env::set_var("CLAUDE_SESSION_ID", "test-identity-session-id");
         }
@@ -4938,6 +4950,7 @@ mod tests {
                 None => std::env::remove_var("CLAUDE_SESSION_ID"),
             }
         }
+        restore_home_envs(original_home_env);
     }
 
     #[test]
@@ -4950,13 +4963,14 @@ mod tests {
         let team_dir = create_test_team(&temp_dir, "atm-dev");
 
         let original_home = std::env::var("ATM_HOME").ok();
+        let original_home_env = saved_home_env();
         let original_id = std::env::var("ATM_IDENTITY").ok();
         let original_session = std::env::var("CLAUDE_SESSION_ID").ok();
 
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
             std::env::set_var("ATM_IDENTITY", "team-lead");
             std::env::remove_var("CLAUDE_SESSION_ID"); // ensure env var is absent
         }
@@ -4996,6 +5010,7 @@ mod tests {
                 None => std::env::remove_var("CLAUDE_SESSION_ID"),
             }
         }
+        restore_home_envs(original_home_env);
     }
 
     #[test]
@@ -5013,7 +5028,7 @@ mod tests {
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
             std::env::set_var("ATM_IDENTITY", "team-lead");
             std::env::remove_var("CLAUDE_SESSION_ID"); // ensure env var is absent
         }
@@ -5100,7 +5115,7 @@ mod tests {
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         let args = BackupArgs {
@@ -5152,7 +5167,7 @@ mod tests {
         let _original_home = saved_home_env();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         backup(BackupArgs {
@@ -5197,7 +5212,7 @@ mod tests {
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         // Create backup (includes tasks)
@@ -5256,7 +5271,7 @@ mod tests {
         let _original_home = saved_home_env();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         backup(BackupArgs {
@@ -5304,7 +5319,7 @@ mod tests {
         let _original_home = saved_home_env();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         backup(BackupArgs {
@@ -5345,7 +5360,7 @@ mod tests {
 
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
             std::env::set_var("ATM_IDENTITY", "team-lead");
             std::env::remove_var("CLAUDE_SESSION_ID");
         }
@@ -5401,7 +5416,7 @@ mod tests {
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         // Create backup (includes tasks)
@@ -5453,7 +5468,7 @@ mod tests {
         let _original_home = saved_home_env();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         backup(BackupArgs {
@@ -5499,7 +5514,7 @@ mod tests {
         let _original_home = saved_home_env();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         backup(BackupArgs {
@@ -5547,7 +5562,7 @@ mod tests {
         let _original_home = saved_home_env();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         backup(BackupArgs {
@@ -5591,7 +5606,7 @@ mod tests {
         let _original_home = saved_home_env();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         backup(BackupArgs {
@@ -5648,7 +5663,7 @@ mod tests {
         let original_autostart = set_autostart_disabled_for_test();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         remove_member(RemoveMemberArgs {
@@ -5694,7 +5709,7 @@ mod tests {
         let original_autostart = set_autostart_disabled_for_test();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         let err = remove_member(RemoveMemberArgs {
@@ -5739,7 +5754,7 @@ mod tests {
         let original_autostart = set_autostart_disabled_for_test();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         let err = remove_member(RemoveMemberArgs {
@@ -5771,7 +5786,7 @@ mod tests {
         let _original_home = saved_home_env();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         let err = remove_member(RemoveMemberArgs {
@@ -5802,7 +5817,7 @@ mod tests {
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         let backups_dir = temp_dir.path().join(".claude/teams/.backups/my-team");
@@ -6563,7 +6578,7 @@ spawn_policy = "any-member"
         let _original_home = saved_home_env();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         let launch_dir = temp_dir.path().join("repo");
@@ -6610,7 +6625,7 @@ spawn_policy = "any-member"
         let _original_home = saved_home_env();
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
-            std::env::set_var("HOME", &home_env);
+            set_home_envs(Path::new(&home_env));
         }
 
         ensure_spawn_member_metadata(

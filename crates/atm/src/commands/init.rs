@@ -1553,6 +1553,17 @@ mod tests {
 
             guard
         }
+
+        fn set_home_path(value: &Path) -> Vec<Self> {
+            let guards = vec![Self::set_path("HOME", value)];
+            #[cfg(windows)]
+            {
+                let mut guards = guards;
+                guards.push(Self::set_path("USERPROFILE", value));
+                return guards;
+            }
+            guards
+        }
     }
 
     impl Drop for EnvVarGuard {
@@ -1896,7 +1907,7 @@ mod tests {
     #[serial]
     fn test_resolve_settings_path_global_uses_os_home() {
         let dir = TempDir::new().expect("tempdir");
-        let _home_guard = EnvVarGuard::set_path("HOME", dir.path());
+        let _home_guards = EnvVarGuard::set_home_path(dir.path());
 
         let path = resolve_settings_path(true).expect("resolve global");
         assert_eq!(path, dir.path().join(".claude").join("settings.json"));
@@ -1958,7 +1969,7 @@ mod tests {
         let repo_dir = dir.path().join("repo");
         std::fs::create_dir_all(&repo_dir).expect("create repo");
         let original_dir = env::current_dir().expect("original cwd");
-        let _home_guard = EnvVarGuard::set_path("HOME", dir.path());
+        let _home_guards = EnvVarGuard::set_home_path(dir.path());
         let _atm_home_guard = EnvVarGuard::set_path("ATM_HOME", &dir.path().join("runtime-home"));
 
         env::set_current_dir(&repo_dir).expect("set cwd");

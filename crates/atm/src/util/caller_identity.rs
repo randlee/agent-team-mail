@@ -682,6 +682,20 @@ mod tests {
         std::env::temp_dir().join(format!("atm-hook-{ppid}.json"))
     }
 
+    fn set_home_envs(path: &std::path::Path) {
+        unsafe {
+            std::env::set_var("HOME", path);
+            std::env::set_var("USERPROFILE", path);
+        }
+    }
+
+    fn clear_home_envs() {
+        unsafe {
+            std::env::remove_var("HOME");
+            std::env::remove_var("USERPROFILE");
+        }
+    }
+
     fn write_session_file(home: &std::path::Path, team: &str, identity: &str, session_id: &str) {
         let sessions_dir = home
             .join(".claude")
@@ -826,7 +840,7 @@ mod tests {
         let hook_path = current_ppid_hook_path();
         let _ = std::fs::remove_file(&hook_path);
         unsafe {
-            std::env::set_var("HOME", temp.path());
+            set_home_envs(temp.path());
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::remove_var("ATM_RUNTIME");
@@ -843,7 +857,7 @@ mod tests {
         .expect_err("expected ambiguity");
 
         unsafe {
-            std::env::remove_var("HOME");
+            clear_home_envs();
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("ATM_RUNTIME");
@@ -862,7 +876,7 @@ mod tests {
         let hook_path = current_ppid_hook_path();
         let _ = std::fs::remove_file(&hook_path);
         unsafe {
-            std::env::set_var("HOME", temp.path());
+            set_home_envs(temp.path());
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::remove_var("ATM_RUNTIME");
@@ -876,7 +890,7 @@ mod tests {
             .expect_err("expected unresolved caller session");
 
         unsafe {
-            std::env::remove_var("HOME");
+            clear_home_envs();
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("ATM_RUNTIME");
@@ -900,7 +914,7 @@ mod tests {
         write_session_file(temp.path(), "atm-dev", "team-lead", "sid-b");
 
         unsafe {
-            std::env::set_var("HOME", temp.path());
+            set_home_envs(temp.path());
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::remove_var("ATM_RUNTIME");
@@ -913,7 +927,7 @@ mod tests {
             .expect_err("expected ambiguity");
 
         unsafe {
-            std::env::remove_var("HOME");
+            clear_home_envs();
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("ATM_RUNTIME");
