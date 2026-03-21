@@ -4808,9 +4808,12 @@ mod tests {
     #[serial_test::serial]
     async fn synthetic_tool_prefers_thread_bound_identity_over_args_identity() {
         let dir = tempfile::tempdir().unwrap();
-        let atm_home = dir.path().to_string_lossy().to_string();
+        let atm_home = dir.path().join("runtime-home").to_string_lossy().to_string();
         // SAFETY: isolated tmp dir, no parallelism risk in serial test
-        unsafe { std::env::set_var("ATM_HOME", &atm_home) };
+        unsafe {
+            std::env::set_var("HOME", dir.path());
+            std::env::set_var("ATM_HOME", &atm_home);
+        };
 
         let config = crate::config::AgentMcpConfig {
             identity: Some("config-identity".to_string()),
@@ -4879,7 +4882,10 @@ mod tests {
         assert_eq!(messages[0].from, "bound-identity");
 
         // SAFETY: restoring process env after isolated test
-        unsafe { std::env::remove_var("ATM_HOME") };
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("HOME");
+        };
     }
 
     /// FR-3.2: Persisted active sessions loaded on startup are marked stale.

@@ -915,16 +915,22 @@ mod tests {
     // Helper utilities
     // -----------------------------------------------------------------------
 
-    /// Set ATM_HOME to `dir` and return a cleanup guard.
+    /// Set canonical config/runtime roots for tests and return the runtime home.
     fn set_atm_home(dir: &TempDir) -> String {
-        let p = dir.path().to_string_lossy().to_string();
+        let p = dir.path().join("runtime-home").to_string_lossy().to_string();
         // SAFETY: single-threaded within a test function; serial attribute prevents races.
-        unsafe { std::env::set_var("ATM_HOME", &p) };
+        unsafe {
+            std::env::set_var("HOME", dir.path());
+            std::env::set_var("ATM_HOME", &p);
+        };
         p
     }
 
     fn unset_atm_home() {
-        unsafe { std::env::remove_var("ATM_HOME") };
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("HOME");
+        };
     }
 
     /// Write a minimal team config with the given member names.

@@ -430,11 +430,17 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn set_atm_home(dir: &TempDir) {
-        unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+        unsafe {
+            std::env::set_var("HOME", dir.path());
+            std::env::set_var("ATM_HOME", dir.path().join("runtime-home"));
+        };
     }
 
     fn unset_atm_home() {
-        unsafe { std::env::remove_var("ATM_HOME") };
+        unsafe {
+            std::env::remove_var("ATM_HOME");
+            std::env::remove_var("HOME");
+        };
     }
 
     fn make_msg(from: &str, text: &str, read: bool, id: Option<&str>) -> InboxMessage {
