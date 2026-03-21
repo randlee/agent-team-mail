@@ -201,8 +201,10 @@ fn daemon_socket_ready(socket_path: &Path) -> bool {
 }
 
 #[cfg(not(unix))]
-fn daemon_socket_ready(socket_path: &Path) -> bool {
-    socket_path.exists()
+fn daemon_socket_ready(_socket_path: &Path) -> bool {
+    // Windows daemons use named pipes, not Unix socket files.
+    // Readiness is determined by pid_matches alone on non-unix platforms.
+    true
 }
 
 impl Drop for DaemonProcessGuard {
