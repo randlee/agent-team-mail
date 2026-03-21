@@ -120,6 +120,32 @@ fn assert_member_presence_and_isolation(
     );
 }
 
+fn register_hint_until_registered(
+    team: &str,
+    agent: &str,
+    session_id: &str,
+    timeout: Duration,
+) -> RegisterHintOutcome {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let outcome = register_hint(
+            team,
+            agent,
+            session_id,
+            std::process::id(),
+            Some("codex"),
+            None,
+            None,
+            None,
+        )
+        .expect("register-hint should not error");
+        if outcome == RegisterHintOutcome::Registered || Instant::now() >= deadline {
+            return outcome;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 #[test]
 #[serial_test::serial]
 fn test_cli_team_scoped_commands_do_not_bleed_members_across_teams() {
@@ -140,32 +166,18 @@ fn test_cli_team_scoped_commands_do_not_bleed_members_across_teams() {
         daemon_process_guard::DaemonProcessGuard::runtime_home_path(&temp_dir),
     );
     let _identity_alpha = EnvGuard::set("ATM_IDENTITY", alpha_member);
-    let hint_alpha = register_hint(
+    let hint_alpha = register_hint_until_registered(
         team_a,
         alpha_member,
         "sess-alpha-1",
-        std::process::id(),
-        Some("codex"),
-        None,
-        None,
-        None,
-    )
-    .expect("register-hint for alpha member");
+        Duration::from_secs(2),
+    );
     assert_eq!(hint_alpha, RegisterHintOutcome::Registered);
     drop(_identity_alpha);
 
     let _identity_beta = EnvGuard::set("ATM_IDENTITY", beta_member);
-    let hint_beta = register_hint(
-        team_b,
-        beta_member,
-        "sess-beta-1",
-        std::process::id(),
-        Some("codex"),
-        None,
-        None,
-        None,
-    )
-    .expect("register-hint for beta member");
+    let hint_beta =
+        register_hint_until_registered(team_b, beta_member, "sess-beta-1", Duration::from_secs(2));
     assert_eq!(hint_beta, RegisterHintOutcome::Registered);
 
     let mut members_cmd = cargo::cargo_bin_cmd!("atm");
@@ -238,17 +250,8 @@ fn test_status_and_members_preserve_registered_member_state_after_daemon_restart
         daemon_process_guard::DaemonProcessGuard::runtime_home_path(&temp_dir),
     );
     let _identity = EnvGuard::set("ATM_IDENTITY", member);
-    let outcome = register_hint(
-        team,
-        member,
-        "persisted-session-1",
-        std::process::id(),
-        Some("codex"),
-        None,
-        None,
-        None,
-    )
-    .expect("register-hint before restart");
+    let outcome =
+        register_hint_until_registered(team, member, "persisted-session-1", Duration::from_secs(2));
     assert_eq!(outcome, RegisterHintOutcome::Registered);
 
     let liveness_before = read_member_liveness(&temp_dir, team, member);

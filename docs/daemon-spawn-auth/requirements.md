@@ -20,14 +20,14 @@ launch-token validation, isolated-test leases, and lifecycle logging.
   canonical launcher.
 - Missing, invalid, expired, replayed, or mismatched tokens MUST cause
   immediate exit with structured rejection logs.
-- Shared runtimes (`prod-shared`, `dev-shared`) MUST hard-fail duplicate starts.
+- Shared runtimes (`shared`) MUST hard-fail duplicate starts.
 
 ### Rejection Log Event Schema
 
 - `rejection_reason`
   - string describing which rejection condition triggered
 - `launch_class`
-  - string when known: `ProdShared`, `DevShared`, or `IsolatedTest`
+  - string when known: `shared` or `isolated-test`
 - `token_id`
   - string when available; the nonce / UUID from the presented token
 - `atm_home`
@@ -38,8 +38,7 @@ launch-token validation, isolated-test leases, and lifecycle logging.
 
 ## Launch Classes
 
-- `prod-shared`
-- `dev-shared`
+- `shared`
 - `isolated-test`
 
 Each launch class MUST bind:
@@ -51,13 +50,17 @@ Each launch class MUST bind:
 - expiry
 - nonce / token id
 
+The shared launch path is the only supported production daemon mode. The older
+`prod-shared` / `dev-shared` split is retired; those strings are accepted only
+as backward-compatible aliases when decoding pre-BB.2 tokens or metadata.
+
 ## Token Schema
 
 `DaemonLaunchToken` is the canonical cross-process launch contract. It is
 serialized with `serde` and currently represented as JSON-safe data.
 
 - `launch_class`
-  - enum: `prod-shared`, `dev-shared`, `isolated-test`
+  - enum: `shared`, `isolated-test`
   - selects singleton policy, lease rules, and startup validation behavior
 - `atm_home`
   - target `ATM_HOME` bound to this launch
@@ -77,6 +80,17 @@ serialized with `serde` and currently represented as JSON-safe data.
   - RFC3339 UTC timestamp after which startup MUST be rejected
 
 No other crate may define or issue a competing launch token schema.
+
+## Shared Runtime Admission Invariant
+
+- Shared daemon startup no longer depends on release-vs-dev runtime
+  classification or per-home ownership competition.
+- The only shared-runtime admission invariant is:
+  - one daemon per runtime root
+  - launched through the canonical launcher
+  - using a non-repo, non-worktree binary selection policy
+- `isolated-test` remains a test-only lease path and MUST NOT be used to model
+  competing production daemons.
 
 ## Bypass Annotation Convention
 
@@ -145,7 +159,7 @@ No other crate may define or issue a competing launch token schema.
   - `atm_home`
     - canonicalized runtime path for the accepted launch
   - `launch_class`
-    - `prod-shared`, `dev-shared`, or `isolated-test`
+    - `shared` or `isolated-test`
   - `token_id`
     - launch token nonce / UUID for the accepted daemon start
   - `ts` (top-level `LogEventV1` key)
@@ -156,8 +170,8 @@ No other crate may define or issue a competing launch token schema.
   - `atm_home`
     - canonicalized runtime path for the terminated daemon
   - `launch_class`
-    - emitted for all launch classes (`prod-shared`, `dev-shared`,
-      `isolated-test`); not restricted to test-owned daemons
+    - emitted for all launch classes (`shared`, `isolated-test`); not
+      restricted to test-owned daemons
   - `token_id`
     - launch token nonce / UUID when known
   - `ts` (top-level `LogEventV1` key)

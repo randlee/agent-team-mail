@@ -55,20 +55,24 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///
 /// This metadata is used by CLI autostart/health paths to validate daemon
 /// identity (PID/home scope/executable) before trusting a pre-existing process.
+///
+/// `shared` is the only production runtime class after BB.2. The `release`
+/// and `dev` serde aliases remain only to decode pre-BB.2 metadata safely
+/// during the migration window; new metadata must serialize as `shared` or
+/// `isolated`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeKind {
     #[default]
+    #[serde(alias = "release", alias = "dev")]
+    Shared,
     Isolated,
-    Release,
-    Dev,
 }
 
 impl RuntimeKind {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Release => "release",
-            Self::Dev => "dev",
+            Self::Shared => "shared",
             Self::Isolated => "isolated",
         }
     }
@@ -175,8 +179,6 @@ pub type DaemonTouchSnapshot = BTreeMap<String, DaemonTouchEntry>;
 struct RuntimePolicyInput {
     home_scope: PathBuf,
     daemon_bin: PathBuf,
-    os_home: PathBuf,
-    temp_root: PathBuf,
     build_profile: BuildProfile,
 }
 
@@ -601,37 +603,6 @@ fn canonicalize_lossy(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn default_dev_runtime_root_for(os_home: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        if let Some(local) = dirs::data_local_dir() {
-            return local.join("atm-dev");
-        }
-        os_home.join("AppData").join("Local").join("atm-dev")
-    }
-
-    #[cfg(not(windows))]
-    {
-        os_home.join(".local").join("atm-dev")
-    }
-}
-
-fn default_dev_runtime_home_for(os_home: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        default_dev_runtime_root_for(os_home).join("home")
-    }
-
-    #[cfg(not(windows))]
-    {
-        os_home
-            .join(".local")
-            .join("share")
-            .join("atm-dev")
-            .join("home")
-    }
-}
-
 fn looks_like_repo_or_worktree_binary(path: &Path) -> bool {
     if path
         .components()
@@ -651,26 +622,10 @@ fn looks_like_repo_or_worktree_binary(path: &Path) -> bool {
     false
 }
 
-fn is_approved_release_binary(path: &Path, input: &RuntimePolicyInput) -> bool {
-    let in_bin_dir = path.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("bin"));
-    in_bin_dir
-        && path.file_name() == Some(std::ffi::OsStr::new("atm-daemon"))
-        && !path.starts_with(default_dev_runtime_root_for(&input.os_home))
-        && !path.starts_with(&input.temp_root)
-        && !looks_like_repo_or_worktree_binary(path)
-}
-
-fn is_approved_dev_binary(path: &Path, input: &RuntimePolicyInput) -> bool {
-    path.file_name() == Some(std::ffi::OsStr::new("atm-daemon"))
-        && path.starts_with(default_dev_runtime_root_for(&input.os_home))
-        && !looks_like_repo_or_worktree_binary(path)
-}
-
 fn evaluate_runtime_owner_metadata(input: &RuntimePolicyInput) -> RuntimeOwnerMetadata {
     let home_scope = canonicalize_lossy(&input.home_scope);
     let daemon_bin = canonicalize_lossy(&input.daemon_bin);
-    let os_home = canonicalize_lossy(&input.os_home);
-    let runtime_kind = classify_runtime_kind_from_paths(&home_scope, &os_home);
+    let runtime_kind = classify_runtime_kind_from_home_scope(&home_scope);
 
     RuntimeOwnerMetadata {
         runtime_kind,
@@ -680,14 +635,66 @@ fn evaluate_runtime_owner_metadata(input: &RuntimePolicyInput) -> RuntimeOwnerMe
     }
 }
 
-fn classify_runtime_kind_from_paths(home_scope: &Path, os_home: &Path) -> RuntimeKind {
-    if home_scope == os_home {
-        RuntimeKind::Release
-    } else if home_scope == canonicalize_lossy(&default_dev_runtime_home_for(os_home)) {
-        RuntimeKind::Dev
-    } else {
+/// Used only for test isolation boundary checks. Not part of the production
+/// shared-daemon admission path after BB.2.
+/// The DevShared variant was removed in BB.2; only Shared (production) and
+/// Isolated (test-only) remain.
+fn classify_runtime_kind_from_home_scope(home_scope: &Path) -> RuntimeKind {
+    let canonical_temp_root = canonicalize_lossy(&std::env::temp_dir());
+    let is_isolated = read_runtime_metadata(home_scope)
+        .is_some_and(|metadata| metadata.runtime_kind == RuntimeKind::Isolated)
+        || home_scope.starts_with(isolated_runtime_root_dir(None))
+        // Treat temp-rooted ATM_HOME values as isolated test runtimes. The
+        // daemon integration harness and CLI conflict tests run under temp
+        // homes with debug binaries; classifying those as shared would
+        // incorrectly route them through the release-only shared admission
+        // path.
+        || home_scope.starts_with(&canonical_temp_root);
+    if is_isolated {
         RuntimeKind::Isolated
+    } else {
+        RuntimeKind::Shared
     }
+}
+
+fn canonical_shared_runtime_root() -> anyhow::Result<PathBuf> {
+    Ok(canonicalize_lossy(&crate::home::get_os_home_dir()?))
+}
+
+// Enforces BB.2 single-daemon invariant: one canonical runtime root, one
+// binary selection policy. See docs/daemon-spawn-auth/requirements.md.
+fn enforce_shared_runtime_invariant(
+    input: &RuntimePolicyInput,
+    owner: &RuntimeOwnerMetadata,
+) -> anyhow::Result<()> {
+    let expected_home = canonical_shared_runtime_root()?;
+    let actual_home = canonicalize_lossy(&input.home_scope);
+    if actual_home != expected_home {
+        anyhow::bail!(
+            "shared runtime must use canonical runtime root {}; refusing ATM_HOME={}",
+            expected_home.display(),
+            actual_home.display()
+        );
+    }
+
+    if owner.build_profile != BuildProfile::Release {
+        anyhow::bail!(
+            "shared runtime requires a release build; refusing daemon at {} (build_profile={})",
+            owner.executable_path,
+            owner.build_profile.as_str()
+        );
+    }
+
+    let daemon_bin = PathBuf::from(&owner.executable_path);
+    if looks_like_repo_or_worktree_binary(&daemon_bin) {
+        anyhow::bail!(
+            "shared runtime requires an approved daemon binary; refusing {} for ATM_HOME={}",
+            owner.executable_path,
+            owner.home_scope
+        );
+    }
+
+    Ok(())
 }
 
 fn validate_runtime_admission_input(
@@ -699,31 +706,7 @@ fn validate_runtime_admission_input(
         return Ok(owner);
     }
 
-    if owner.build_profile != BuildProfile::Release {
-        anyhow::bail!(
-            "shared {} runtime requires a release build; refusing daemon at {} (build_profile={})",
-            owner.runtime_kind.as_str(),
-            owner.executable_path,
-            owner.build_profile.as_str()
-        );
-    }
-
-    let daemon_bin = PathBuf::from(&owner.executable_path);
-    let approved = match owner.runtime_kind {
-        RuntimeKind::Release => is_approved_release_binary(&daemon_bin, input),
-        RuntimeKind::Dev => is_approved_dev_binary(&daemon_bin, input),
-        RuntimeKind::Isolated => true,
-    };
-
-    if !approved {
-        anyhow::bail!(
-            "shared {} runtime requires an approved installed daemon binary; refusing {} for ATM_HOME={}",
-            owner.runtime_kind.as_str(),
-            owner.executable_path,
-            owner.home_scope
-        );
-    }
-
+    enforce_shared_runtime_invariant(input, &owner)?;
     Ok(owner)
 }
 
@@ -731,17 +714,17 @@ pub fn validate_runtime_admission(
     home: &Path,
     daemon_bin: &Path,
 ) -> anyhow::Result<RuntimeOwnerMetadata> {
-    let os_home = crate::home::get_os_home_dir()?;
     let input = RuntimePolicyInput {
         home_scope: home.to_path_buf(),
         daemon_bin: daemon_bin.to_path_buf(),
-        os_home,
-        temp_root: std::env::temp_dir(),
         build_profile: BuildProfile::current(),
     };
     validate_runtime_admission_input(&input)
 }
 
+/// Validates that the current process may start or connect to the daemon under
+/// the BB.2 single-daemon invariant. See `enforce_shared_runtime_invariant()`
+/// for the canonical runtime-root and binary-selection policy.
 pub fn validate_runtime_admission_for_current_process(
     home: &Path,
 ) -> anyhow::Result<RuntimeOwnerMetadata> {
@@ -751,20 +734,14 @@ pub fn validate_runtime_admission_for_current_process(
 
 fn launch_class_for_runtime_kind(kind: &RuntimeKind) -> LaunchClass {
     match kind {
-        RuntimeKind::Release => LaunchClass::ProdShared,
-        RuntimeKind::Dev => LaunchClass::DevShared,
+        RuntimeKind::Shared => LaunchClass::Shared,
         RuntimeKind::Isolated => LaunchClass::IsolatedTest,
     }
 }
 
 pub fn runtime_kind_for_home(home: &Path) -> anyhow::Result<RuntimeKind> {
-    let os_home = crate::home::get_os_home_dir()?;
     let canonical_home = canonicalize_lossy(home);
-    let canonical_os_home = canonicalize_lossy(&os_home);
-    Ok(classify_runtime_kind_from_paths(
-        &canonical_home,
-        &canonical_os_home,
-    ))
+    Ok(classify_runtime_kind_from_home_scope(&canonical_home))
 }
 
 pub fn read_runtime_metadata(home: &Path) -> Option<RuntimeMetadata> {
@@ -2233,13 +2210,11 @@ fn daemon_autostart_enabled() -> bool {
 }
 
 #[cfg(unix)]
-fn resolve_daemon_binary_candidates() -> anyhow::Result<Vec<PathBuf>> {
-    let mut candidates = Vec::new();
-
+fn resolve_daemon_binary_path() -> anyhow::Result<PathBuf> {
     if let Some(override_bin) = std::env::var_os("ATM_DAEMON_BIN")
         && !override_bin.is_empty()
     {
-        candidates.push(PathBuf::from(override_bin));
+        return Ok(PathBuf::from(override_bin));
     }
 
     let name = std::ffi::OsString::from("atm-daemon");
@@ -2247,13 +2222,9 @@ fn resolve_daemon_binary_candidates() -> anyhow::Result<Vec<PathBuf>> {
         && let Some(dir) = current_exe.parent()
     {
         let sibling = dir.join(std::path::Path::new(&name));
-        if sibling.exists() && !candidates.iter().any(|candidate| candidate == &sibling) {
-            candidates.push(sibling);
+        if sibling.exists() {
+            return Ok(sibling);
         }
-    }
-
-    if !candidates.is_empty() {
-        return Ok(candidates);
     }
 
     anyhow::bail!(
@@ -2263,39 +2234,9 @@ fn resolve_daemon_binary_candidates() -> anyhow::Result<Vec<PathBuf>> {
 
 #[cfg(unix)]
 fn resolve_daemon_binary_for_home(home: &Path) -> anyhow::Result<(PathBuf, RuntimeOwnerMetadata)> {
-    // Shells may export a dev-channel ATM_DAEMON_BIN globally while commands
-    // target the default shared ATM_HOME. Prefer a compatible sibling daemon
-    // binary for the resolved runtime instead of letting a cross-channel
-    // override strand release-runtime diagnostics at autostart time.
-    let mut candidates = resolve_daemon_binary_candidates()?;
-    let override_was_explicit =
-        std::env::var_os("ATM_DAEMON_BIN").is_some_and(|value| !value.is_empty());
-    let mut first_error = None;
-
-    while let Some(candidate) = candidates.first().cloned() {
-        candidates.remove(0);
-        match validate_runtime_admission(home, &candidate) {
-            Ok(owner) => return Ok((candidate, owner)),
-            Err(err) => {
-                let can_fallback = override_was_explicit
-                    && candidate.exists()
-                    && !candidates.is_empty()
-                    && err.to_string().contains("approved installed daemon binary");
-                if can_fallback {
-                    first_error.get_or_insert(err);
-                    continue;
-                }
-                return Err(err);
-            }
-        }
-    }
-
-    Err(first_error.unwrap_or_else(|| {
-        anyhow::anyhow!(
-            "failed to resolve a daemon binary candidate for {}",
-            home.display()
-        )
-    }))
+    let daemon_bin = resolve_daemon_binary_path()?;
+    let owner = validate_runtime_admission(home, &daemon_bin)?;
+    Ok((daemon_bin, owner))
 }
 
 #[cfg(unix)]
@@ -2761,9 +2702,8 @@ fn detect_daemon_identity_mismatch(
         .unwrap_or_else(|_| home.to_path_buf())
         .to_string_lossy()
         .to_string();
-    let expected_bin = resolve_daemon_binary_candidates()
+    let expected_bin = resolve_daemon_binary_path()
         .ok()
-        .and_then(|candidates| candidates.into_iter().next())
         .map(|path| path.into_os_string());
     let snapshot = DaemonIdentitySnapshot {
         pid_from_file,
@@ -3024,6 +2964,22 @@ fn pid_alive(pid: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::home::get_os_home_dir;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn non_temp_shared_home() -> tempfile::TempDir {
+        let base = std::env::current_dir().expect("current dir");
+        tempfile::Builder::new()
+            .prefix("bb2-shared-home-")
+            .tempdir_in(base)
+            .expect("shared home tempdir")
+    }
+
     struct EnvGuard {
         key: &'static str,
         old: Option<String>,
@@ -3290,8 +3246,8 @@ mod tests {
         let custom = tmp.path().join("custom-atm-daemon");
         std::fs::write(&custom, "#!/bin/sh\nexit 0\n").unwrap();
         let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", custom.to_str().unwrap());
-        let candidates = resolve_daemon_binary_candidates().expect("override should resolve");
-        assert_eq!(candidates.first(), Some(&custom));
+        let resolved = resolve_daemon_binary_path().expect("override should resolve");
+        assert_eq!(resolved, custom);
     }
 
     #[cfg(unix)]
@@ -3537,59 +3493,84 @@ sleep 10
 
     #[cfg(unix)]
     #[test]
-    fn test_validate_runtime_admission_accepts_shared_dev_install() {
-        let root = tempfile::tempdir().unwrap();
-        let os_home = root.path().join("home");
+    fn test_validate_runtime_admission_accepts_shared_override_binary() {
+        let _lock = env_lock().lock().unwrap();
+        let shared_home_dir = non_temp_shared_home();
+        let _home_guard = EnvGuard::set("HOME", shared_home_dir.path().to_str().unwrap());
+        let _user_guard = EnvGuard::set("USERPROFILE", shared_home_dir.path().to_str().unwrap());
+        let _atm_guard = EnvGuard::unset("ATM_HOME");
+        let shared_home = get_os_home_dir().unwrap();
         let input = RuntimePolicyInput {
-            home_scope: default_dev_runtime_home_for(&os_home),
-            daemon_bin: default_dev_runtime_root_for(&os_home)
-                .join("current")
-                .join("bin")
-                .join("atm-daemon"),
-            os_home: os_home.clone(),
-            temp_root: root.path().join("tmp"),
+            home_scope: shared_home,
+            daemon_bin: PathBuf::from("/bin/sh"),
             build_profile: BuildProfile::Release,
         };
 
-        let owner = validate_runtime_admission_input(&input).expect("dev install should be valid");
-        assert_eq!(owner.runtime_kind, RuntimeKind::Dev);
+        let owner =
+            validate_runtime_admission_input(&input).expect("shared override should be valid");
+        assert_eq!(owner.runtime_kind, RuntimeKind::Shared);
         assert_eq!(owner.build_profile, BuildProfile::Release);
     }
 
     #[cfg(unix)]
     #[test]
-    fn test_validate_runtime_admission_rejects_repo_binary_for_shared_dev_runtime() {
+    fn test_validate_runtime_admission_rejects_repo_binary_for_shared_runtime() {
+        let _lock = env_lock().lock().unwrap();
+        let shared_home_dir = non_temp_shared_home();
+        let _home_guard = EnvGuard::set("HOME", shared_home_dir.path().to_str().unwrap());
+        let _user_guard = EnvGuard::set("USERPROFILE", shared_home_dir.path().to_str().unwrap());
+        let _atm_guard = EnvGuard::unset("ATM_HOME");
         let root = tempfile::tempdir().unwrap();
-        let os_home = root.path().join("home");
         let repo = root.path().join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let shared_home = get_os_home_dir().unwrap();
         let input = RuntimePolicyInput {
-            home_scope: default_dev_runtime_home_for(&os_home),
+            home_scope: shared_home,
             daemon_bin: repo.join("target").join("release").join("atm-daemon"),
-            os_home,
-            temp_root: root.path().join("tmp"),
             build_profile: BuildProfile::Release,
         };
 
         let err = validate_runtime_admission_input(&input).expect_err("repo binary must be denied");
-        assert!(err.to_string().contains("approved installed daemon binary"));
+        assert!(err.to_string().contains("approved daemon binary"));
     }
 
     #[cfg(unix)]
     #[test]
     fn test_validate_runtime_admission_rejects_debug_build_for_shared_release_runtime() {
-        let root = tempfile::tempdir().unwrap();
-        let os_home = root.path().join("home");
+        let _lock = env_lock().lock().unwrap();
+        let shared_home_dir = non_temp_shared_home();
+        let _home_guard = EnvGuard::set("HOME", shared_home_dir.path().to_str().unwrap());
+        let _user_guard = EnvGuard::set("USERPROFILE", shared_home_dir.path().to_str().unwrap());
+        let _atm_guard = EnvGuard::unset("ATM_HOME");
+        let shared_home = get_os_home_dir().unwrap();
         let input = RuntimePolicyInput {
-            home_scope: os_home.clone(),
+            home_scope: shared_home,
             daemon_bin: PathBuf::from("/opt/homebrew/bin/atm-daemon"),
-            os_home,
-            temp_root: root.path().join("tmp"),
             build_profile: BuildProfile::Debug,
         };
 
         let err = validate_runtime_admission_input(&input).expect_err("debug build must be denied");
         assert!(err.to_string().contains("requires a release build"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_runtime_admission_rejects_noncanonical_shared_home() {
+        let _lock = env_lock().lock().unwrap();
+        let shared_home_dir = non_temp_shared_home();
+        let _home_guard = EnvGuard::set("HOME", shared_home_dir.path().to_str().unwrap());
+        let _user_guard = EnvGuard::set("USERPROFILE", shared_home_dir.path().to_str().unwrap());
+        let _atm_guard = EnvGuard::unset("ATM_HOME");
+        let shared_home = get_os_home_dir().unwrap().join(".atm-alt-runtime-home");
+        let input = RuntimePolicyInput {
+            home_scope: shared_home,
+            daemon_bin: PathBuf::from("/bin/sh"),
+            build_profile: BuildProfile::Release,
+        };
+
+        let err = validate_runtime_admission_input(&input)
+            .expect_err("noncanonical shared runtime home must be denied");
+        assert!(err.to_string().contains("canonical runtime root"));
     }
 
     #[cfg(unix)]
@@ -3634,7 +3615,7 @@ sleep 10
     fn test_write_runtime_metadata_overwrites_existing_contents() {
         let home = tempfile::tempdir().unwrap();
         let original = RuntimeMetadata {
-            runtime_kind: RuntimeKind::Dev,
+            runtime_kind: RuntimeKind::Shared,
             created_at: "2026-03-14T00:00:00Z".to_string(),
             expires_at: None,
             test_identifier: None,
