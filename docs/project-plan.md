@@ -2702,18 +2702,20 @@ the current daemon test model with a simpler single-daemon strategy.
 
 | Sprint | Name | Goal | Branch |
 |--------|------|------|--------|
+| BB.0 | Dead Code Cleanup | Remove obviously dead atm-core / daemon code before the structural reset so later sprints do not preserve obsolete surfaces | `feature/pBB-s0-dead-code-cleanup` |
 | BB.1 | Path Separation | Stop resolving team config from `ATM_HOME`; introduce explicit config-root vs runtime-root APIs and migrate callers | `feature/pBB-s1-path-separation` |
 | BB.2 | Single-Daemon Model Collapse | Remove multi-daemon ownership/runtime-mode support and simplify daemon admission/ownership to one system daemon model | `feature/pBB-s2-single-daemon` |
-| BB.3 | Artifact Collapse + Transactional Startup | Remove redundant daemon artifacts, make startup publish state only after readiness, and make restart/cleanup symmetric | `feature/pBB-s3-artifact-collapse` |
+| BB.3 | Artifact Collapse + Transactional Startup | Remove redundant daemon artifacts, remove production-dead daemon plugin surfaces, make startup publish state only after readiness, and make restart/cleanup symmetric | `feature/pBB-s3-artifact-collapse` |
 | BB.4 | Test Model Rewrite + Final Deletion | Rewrite daemon tests for serialized/shared-fixture execution and delete obsolete multi-daemon code/docs/env paths | `feature/pBB-s4-test-rewrite-cleanup` |
 
 **Acceptance criteria**:
 1. Team config no longer resolves from `ATM_HOME`.
 2. Multi-daemon support is removed from active daemon requirements and implementation.
-3. Daemon startup failure leaves no misleading live-daemon state behind.
-4. Stop/restart removes all daemon-owned runtime artifacts deterministically.
-5. Dogfood daemon start/restart/stop passes repeatedly under the simplified model.
-6. Net phase outcome is deletion-heavy: daemon complexity and documentation are materially smaller than before Phase BB.
+3. Dead-code cleanup identified in BB.0 is complete and obsolete surfaces are not carried into later sprints.
+4. Daemon startup failure leaves no misleading live-daemon state behind.
+5. Stop/restart removes all daemon-owned runtime artifacts deterministically.
+6. Dogfood daemon start/restart/stop passes repeatedly under the simplified model.
+7. Net phase outcome is deletion-heavy: daemon complexity and documentation are materially smaller than before Phase BB.
 
 ## Communication
 
