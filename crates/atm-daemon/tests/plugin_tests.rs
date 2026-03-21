@@ -117,6 +117,10 @@ fn create_test_context(teams_root: std::path::PathBuf) -> PluginContext {
         "test-host".to_string(),
         agent_team_mail_core::context::Platform::Linux,
         claude_root,
+        teams_root
+            .parent()
+            .unwrap_or(teams_root.as_path())
+            .to_path_buf(),
         "2.1.39".to_string(),
         "test-team".to_string(),
     ));

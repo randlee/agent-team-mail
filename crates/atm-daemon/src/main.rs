@@ -276,7 +276,7 @@ async fn main() -> Result<()> {
     }
 
     // Build system context
-    let claude_root = agent_team_mail_core::home::claude_root_dir_for(&home_dir);
+    let claude_root = agent_team_mail_core::home::config_claude_root_dir_for(&config_home);
 
     let system_ctx = agent_team_mail_core::context::SystemContext::new(
         hostname::get()
@@ -285,6 +285,7 @@ async fn main() -> Result<()> {
             .to_string(),
         agent_team_mail_core::context::Platform::detect(),
         claude_root.clone(),
+        home_dir.clone(),
         env!("CARGO_PKG_VERSION").to_string(),
         config.core.default_team.clone(),
     );

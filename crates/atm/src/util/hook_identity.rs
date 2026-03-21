@@ -17,7 +17,7 @@ use serde::Deserialize;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::util::settings::{get_home_dir, teams_root_dir_for};
+use crate::util::settings::{config_team_dir_for, get_os_home_dir};
 use agent_team_mail_core::consts::SESSION_FILE_TTL_SECS;
 
 /// Maximum age in seconds before a hook file is considered stale.
@@ -174,8 +174,8 @@ fn session_file_owned_by_current_user(path: &Path) -> bool {
 /// - `Err(e)` — ambiguous (>1 active match); error message instructs the user to
 ///   set `CLAUDE_SESSION_ID` explicitly.
 pub fn read_session_file(team: &str, identity: &str) -> Result<Option<String>> {
-    let home = get_home_dir()?;
-    let sessions_dir = teams_root_dir_for(&home).join(team).join("sessions");
+    let home = get_os_home_dir()?;
+    let sessions_dir = config_team_dir_for(&home, team).join("sessions");
     if !sessions_dir.is_dir() {
         return Ok(None);
     }
@@ -444,11 +444,13 @@ mod tests {
     fn test_read_session_file_missing_directory_returns_none() {
         let home = tempfile::TempDir::new().unwrap();
         unsafe {
+            std::env::set_var("HOME", home.path());
             std::env::set_var("ATM_HOME", home.path());
         }
 
         let result = read_session_file("no-team", "agent");
         unsafe {
+            std::env::remove_var("HOME");
             std::env::remove_var("ATM_HOME");
         }
 
@@ -464,6 +466,7 @@ mod tests {
     fn test_read_session_file_single_match_returns_session_id() {
         let home = tempfile::TempDir::new().unwrap();
         unsafe {
+            std::env::set_var("HOME", home.path());
             std::env::set_var("ATM_HOME", home.path());
         }
 
@@ -482,6 +485,7 @@ mod tests {
 
         let result = read_session_file("atm-dev", "team-lead");
         unsafe {
+            std::env::remove_var("HOME");
             std::env::remove_var("ATM_HOME");
         }
 
@@ -494,6 +498,7 @@ mod tests {
     fn test_read_session_file_stale_file_returns_none() {
         let home = tempfile::TempDir::new().unwrap();
         unsafe {
+            std::env::set_var("HOME", home.path());
             std::env::set_var("ATM_HOME", home.path());
         }
 
@@ -514,6 +519,7 @@ mod tests {
 
         let result = read_session_file("atm-dev", "team-lead");
         unsafe {
+            std::env::remove_var("HOME");
             std::env::remove_var("ATM_HOME");
         }
 
@@ -526,6 +532,7 @@ mod tests {
     fn test_read_session_file_updated_at_refreshes_ttl() {
         let home = tempfile::TempDir::new().unwrap();
         unsafe {
+            std::env::set_var("HOME", home.path());
             std::env::set_var("ATM_HOME", home.path());
         }
 
@@ -546,6 +553,7 @@ mod tests {
 
         let result = read_session_file("atm-dev", "team-lead");
         unsafe {
+            std::env::remove_var("HOME");
             std::env::remove_var("ATM_HOME");
         }
 
@@ -558,6 +566,7 @@ mod tests {
     fn test_read_session_file_ambiguous_returns_err() {
         let home = tempfile::TempDir::new().unwrap();
         unsafe {
+            std::env::set_var("HOME", home.path());
             std::env::set_var("ATM_HOME", home.path());
         }
 
@@ -584,6 +593,7 @@ mod tests {
 
         let result = read_session_file("atm-dev", "team-lead");
         unsafe {
+            std::env::remove_var("HOME");
             std::env::remove_var("ATM_HOME");
         }
 
@@ -604,6 +614,7 @@ mod tests {
     fn test_read_session_file_wrong_identity_returns_none() {
         let home = tempfile::TempDir::new().unwrap();
         unsafe {
+            std::env::set_var("HOME", home.path());
             std::env::set_var("ATM_HOME", home.path());
         }
 
@@ -622,6 +633,7 @@ mod tests {
 
         let result = read_session_file("atm-dev", "team-lead");
         unsafe {
+            std::env::remove_var("HOME");
             std::env::remove_var("ATM_HOME");
         }
 

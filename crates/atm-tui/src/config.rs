@@ -30,7 +30,7 @@
 
 use serde::Deserialize;
 
-use agent_team_mail_core::home::get_home_dir;
+use agent_team_mail_core::home::get_os_home_dir;
 
 /// TUI runtime preferences.
 ///
@@ -132,7 +132,7 @@ pub enum InterruptPolicy {
 /// Parse errors are printed to stderr so users can diagnose formatting
 /// mistakes without crashing the TUI.
 pub fn load_tui_config() -> TuiConfig {
-    let home = match get_home_dir() {
+    let home = match get_os_home_dir() {
         Ok(h) => h,
         Err(_) => return TuiConfig::default(),
     };

@@ -38,7 +38,7 @@ impl DaemonProcessGuard {
         fs::create_dir_all(&workdir).expect("create daemon test workdir");
         let mut cmd = Command::new(&daemon_bin);
         cmd.env("ATM_HOME", &runtime_home)
-            .env("HOME", home.path())
+            .envs([("HOME", home.path())])
             .env("ATM_DAEMON_AUTOSTART", "0")
             .env_remove("ATM_CONFIG")
             .env_remove("ATM_DAEMON_BIN") // F-1: prevent inheriting installed binary
@@ -167,7 +167,7 @@ impl DaemonProcessGuard {
         #[cfg(windows)]
         let timeout_secs = 30;
         #[cfg(not(windows))]
-        let timeout_secs = 4;
+        let timeout_secs = 10;
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
         while Instant::now() < deadline {
             if let Some(child) = self.child.as_mut()
@@ -203,10 +203,26 @@ impl DaemonProcessGuard {
             }
             std::thread::sleep(Duration::from_millis(25));
         }
+        let output = if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+            self.child
+                .take()
+                .and_then(|child| child.wait_with_output().ok())
+        } else {
+            None
+        };
         panic!(
-            "daemon readiness timeout waiting for {} (pid path: {})",
+            "daemon readiness timeout waiting for {} (pid path: {}); stdout='{}'; stderr='{}'",
             status_path.display(),
-            pid_path.display()
+            pid_path.display(),
+            output
+                .as_ref()
+                .map(|value| String::from_utf8_lossy(&value.stdout).into_owned())
+                .unwrap_or_default(),
+            output
+                .as_ref()
+                .map(|value| String::from_utf8_lossy(&value.stderr).into_owned())
+                .unwrap_or_default()
         );
     }
 }

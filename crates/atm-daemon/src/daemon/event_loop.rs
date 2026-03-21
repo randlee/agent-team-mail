@@ -462,25 +462,15 @@ pub async fn run(
 
     // Start the Unix socket server (CLI↔daemon IPC).
     //
-    // The socket path is ${ATM_HOME}/.atm/daemon/atm-daemon.sock.
-    // ctx.system.claude_root is ${ATM_HOME}/.claude, so the home_dir is its
-    // parent. We fall back to get_home_dir() if the parent cannot be determined
-    // (e.g., claude_root is the filesystem root, which should never happen in
-    // practice).
+    // The socket path is ${ATM_HOME}/.atm/daemon/atm-daemon.sock, so it must
+    // always use the explicit runtime home rather than deriving from config
+    // paths under ~/.claude.
     //
     // `state_store` is the same Arc that the WorkerAdapterPlugin was given at
     // construction time, so the socket server reads live agent state. When the
     // worker adapter is not enabled the caller passes a fresh empty store; the
     // socket server still accepts connections but returns AGENT_NOT_FOUND.
-    let socket_home_dir = ctx
-        .system
-        .claude_root
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| {
-            agent_team_mail_core::home::get_home_dir()
-                .unwrap_or_else(|_| ctx.system.claude_root.clone())
-        });
+    let socket_home_dir = ctx.system.runtime_home.clone();
     let socket_cancel = cancel.clone();
     let _socket_server_handle = match start_socket_server(
         socket_home_dir,
@@ -1735,12 +1725,7 @@ async fn build_logging_health(
     let dropped_counter = queue.dropped();
     drop(queue);
 
-    let home_dir = ctx
-        .system
-        .claude_root
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
+    let home_dir = ctx.system.runtime_home.clone();
     build_logging_health_snapshot(&home_dir, dropped_counter, logging_disabled_by_env())
 }
 
@@ -1784,12 +1769,7 @@ fn build_logging_health_snapshot(
 }
 
 fn build_otel_health(ctx: &PluginContext) -> OtelHealth {
-    let home_dir = ctx
-        .system
-        .claude_root
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
+    let home_dir = ctx.system.runtime_home.clone();
     let canonical_log_path = agent_team_mail_core::logging_event::configured_log_path(&home_dir);
     crate::daemon::observability::current_otel_health(&canonical_log_path)
 }
@@ -1926,7 +1906,7 @@ async fn build_plugin_statuses(
 fn gh_monitor_plugin_status_projection(
     ctx: &PluginContext,
 ) -> Option<(PluginStatusKind, Option<String>, Option<String>)> {
-    let home_dir = ctx.system.claude_root.parent()?.to_path_buf();
+    let home_dir = ctx.system.runtime_home.clone();
     let path = agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(&home_dir);
     let raw = std::fs::read_to_string(path).ok()?;
     let value = serde_json::from_str::<Value>(&raw).ok()?;

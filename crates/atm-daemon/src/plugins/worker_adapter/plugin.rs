@@ -1487,6 +1487,7 @@ mod tests {
     use agent_team_mail_core::config::Config;
     use agent_team_mail_core::context::{Platform, SystemContext};
     use agent_team_mail_core::schema::{AgentMember, TeamConfig};
+    use serial_test::serial;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -1503,6 +1504,7 @@ mod tests {
             "test-host".to_string(),
             Platform::Linux,
             claude_root,
+            root.to_path_buf(),
             "0.1.0".to_string(),
             "atm-dev".to_string(),
         );
@@ -1584,6 +1586,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_idle_pubsub_notifications_replace_prior_idle_for_same_sender() {
         let temp = TempDir::new().unwrap();
         let _home_guard = EnvGuard::set("HOME", temp.path().to_str().unwrap());
@@ -1622,6 +1625,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_notify_routing_issue_routes_cross_team_warning_to_sender_team() {
         let temp = TempDir::new().unwrap();
         let runtime_home = runtime_home(temp.path());
@@ -1674,6 +1678,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_process_message_routes_cross_team_response_to_sender_team() {
         let temp = TempDir::new().unwrap();
         let runtime_home = runtime_home(temp.path());

@@ -32,7 +32,7 @@ use crate::commands::logging_health::{
 };
 use crate::util::caller_identity::resolve_caller_session_id_optional;
 use crate::util::member_labels::UNREGISTERED_MARKER;
-use crate::util::settings::{claude_root_dir_for, get_home_dir, teams_root_dir_for};
+use crate::util::settings::{claude_root_dir_for, config_team_dir, get_home_dir, get_os_home_dir};
 
 #[derive(Args, Debug)]
 pub struct DoctorArgs {
@@ -190,6 +190,7 @@ pub fn execute(args: DoctorArgs) -> Result<()> {
 
     let current_dir = std::env::current_dir()?;
     let home_dir = get_home_dir()?;
+    let config_home = get_os_home_dir()?;
 
     let config = resolve_config(
         &ConfigOverrides {
@@ -197,7 +198,7 @@ pub fn execute(args: DoctorArgs) -> Result<()> {
             ..Default::default()
         },
         &current_dir,
-        &home_dir,
+        &config_home,
     )?;
     let team = config.core.default_team.clone();
     let caller_session_id =
@@ -261,8 +262,7 @@ pub(crate) fn monitor_report_json(home_dir: &Path, team: &str) -> Result<serde_j
 
 fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<DoctorReport> {
     let now = Utc::now();
-    let team_dir = agent_team_mail_core::home::config_team_dir(team)
-        .unwrap_or_else(|_| teams_root_dir_for(home_dir).join(team));
+    let team_dir = config_team_dir(team)?;
     let config_path = team_dir.join("config.json");
 
     let mut findings: Vec<Finding> = Vec::new();

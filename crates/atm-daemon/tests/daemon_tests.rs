@@ -308,6 +308,7 @@ fn create_test_context() -> (PluginContext, TempDir, env_guard::EnvGuard) {
         "test-host".to_string(),
         agent_team_mail_core::context::Platform::detect(),
         claude_root,
+        temp_dir.path().to_path_buf(),
         "test-version".to_string(),
         "test-team".to_string(),
     );
@@ -344,6 +345,7 @@ fn create_reconcile_test_context() -> (PluginContext, TempDir, env_guard::EnvGua
         "test-host".to_string(),
         agent_team_mail_core::context::Platform::detect(),
         claude_root.clone(),
+        temp_dir.path().to_path_buf(),
         "test-version".to_string(),
         "test-team".to_string(),
     );

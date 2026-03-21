@@ -15,6 +15,8 @@ pub struct SystemContext {
     pub platform: Platform,
     /// Path to Claude root directory (~/.claude/)
     pub claude_root: PathBuf,
+    /// Path to ATM runtime home (ATM_HOME)
+    pub runtime_home: PathBuf,
     /// Claude Code version string
     pub claude_version: String,
     /// Repository context (if running in a git repository)
@@ -32,6 +34,7 @@ impl SystemContext {
         hostname: String,
         platform: Platform,
         claude_root: PathBuf,
+        runtime_home: PathBuf,
         claude_version: String,
         default_team: String,
     ) -> Self {
@@ -39,6 +42,7 @@ impl SystemContext {
             hostname,
             platform,
             claude_root,
+            runtime_home,
             claude_version,
             repo: None,
             default_team,
@@ -62,6 +66,7 @@ mod tests {
             "test-host".to_string(),
             Platform::Linux,
             PathBuf::from("/home/user/.claude"),
+            PathBuf::from("/home/user"),
             "2.1.39".to_string(),
             "default-team".to_string(),
         );
@@ -69,6 +74,7 @@ mod tests {
         assert_eq!(ctx.hostname, "test-host");
         assert_eq!(ctx.platform, Platform::Linux);
         assert_eq!(ctx.claude_root, PathBuf::from("/home/user/.claude"));
+        assert_eq!(ctx.runtime_home, PathBuf::from("/home/user"));
         assert_eq!(ctx.claude_version, "2.1.39");
         assert_eq!(ctx.default_team, "default-team");
         assert!(ctx.repo.is_none());
@@ -82,6 +88,7 @@ mod tests {
             "test-host".to_string(),
             Platform::Linux,
             PathBuf::from("/home/user/.claude"),
+            PathBuf::from("/home/user"),
             "2.1.39".to_string(),
             "default-team".to_string(),
         )

@@ -33,6 +33,7 @@ fn create_test_context(
         "test-host".to_string(),
         Platform::Linux,
         claude_root.clone(),
+        temp_dir.path().to_path_buf(),
         "2.0.0".to_string(),
         "test-team".to_string(),
     );
