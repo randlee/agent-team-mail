@@ -24,7 +24,7 @@ pub struct RetentionResult {
 
 impl RetentionResult {
     /// Create a new retention result
-    pub fn new(kept: usize, removed: usize, archived: usize) -> Self {
+    pub(crate) fn new(kept: usize, removed: usize, archived: usize) -> Self {
         Self {
             kept,
             removed,
@@ -269,7 +269,7 @@ pub struct CleanReportResult {
 
 impl CleanReportResult {
     /// Create a new clean report result
-    pub fn new(deleted_count: usize, skipped_count: usize) -> Self {
+    pub(crate) fn new(deleted_count: usize, skipped_count: usize) -> Self {
         Self {
             deleted_count,
             skipped_count,
