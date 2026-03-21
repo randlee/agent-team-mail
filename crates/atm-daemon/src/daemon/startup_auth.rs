@@ -87,16 +87,13 @@ fn termination_reason(event_name: &'static str) -> Option<&'static str> {
     }
 }
 
-fn emit_lifecycle_event(
+fn build_lifecycle_event_fields(
     level: &'static str,
     event_name: &'static str,
     token: Option<&DaemonLaunchToken>,
     atm_home: &Path,
     detail: Option<&str>,
-) {
-    #[cfg(test)]
-    note_test_lifecycle_event(event_name);
-
+) -> EventFields {
     let token_id = token.map(|value| value.token_id.clone());
     let test_identifier = token.and_then(|value| value.test_identifier.clone());
     let owner_pid = token.and_then(|value| value.owner_pid);
@@ -153,7 +150,7 @@ fn emit_lifecycle_event(
         );
     }
 
-    emit_event_best_effort(EventFields {
+    EventFields {
         level,
         source: "atm-daemon",
         action: event_name,
@@ -165,9 +162,7 @@ fn emit_lifecycle_event(
         error: detail.map(str::to_string),
         extra_fields: extra,
         ..Default::default()
-    });
-
-    export_lifecycle_trace(level, event_name, token, atm_home, detail);
+    }
 }
 
 fn export_lifecycle_trace(
@@ -242,7 +237,16 @@ fn export_lifecycle_trace(
 }
 
 pub fn log_launch_accepted(home: &Path, token: &DaemonLaunchToken) {
-    emit_lifecycle_event(
+    #[cfg(test)]
+    note_test_lifecycle_event("launch_accepted");
+    emit_event_best_effort(build_lifecycle_event_fields(
+        "info",
+        "launch_accepted",
+        Some(token),
+        home,
+        Some("daemon launch token accepted and runtime lease persisted"),
+    ));
+    export_lifecycle_trace(
         "info",
         "launch_accepted",
         Some(token),
@@ -328,12 +332,12 @@ pub fn log_clean_owner_shutdown(home: &Path, token: &DaemonLaunchToken) {
     );
 }
 
-fn emit_startup_rejection(
+fn build_startup_rejection_fields(
     reason: StartupRejectionReason,
     token: Option<&DaemonLaunchToken>,
     atm_home: &Path,
     detail: Option<&str>,
-) {
+) -> EventFields {
     let token_id = token.map(|token| token.token_id.clone());
     let atm_home_text = canonicalize_lossy(atm_home).display().to_string();
     let request_id = token_id
@@ -364,7 +368,7 @@ fn emit_startup_rejection(
         serde_json::Value::String(atm_home_text.clone()),
     );
 
-    emit_event_best_effort(EventFields {
+    EventFields {
         level: "error",
         source: "atm-daemon",
         action: "daemon_start_rejected",
@@ -376,7 +380,7 @@ fn emit_startup_rejection(
         error: detail.map(str::to_string),
         extra_fields: extra,
         ..Default::default()
-    });
+    }
 }
 
 fn validate_token_inner(
@@ -447,19 +451,24 @@ pub fn validate_startup_token(home: &Path) -> Result<DaemonLaunchToken> {
                 }
             };
             let parsed = raw.as_deref().and_then(|raw| decode_launch_token(raw).ok());
-            emit_startup_rejection(reason, parsed.as_ref(), home, Some(&err.to_string()));
+            emit_event_best_effort(build_startup_rejection_fields(
+                reason,
+                parsed.as_ref(),
+                home,
+                Some(&err.to_string()),
+            ));
             Err(err.into())
         }
     }
 }
 
 pub fn log_shared_runtime_rejection(home: &Path, token: &DaemonLaunchToken, detail: &str) {
-    emit_startup_rejection(
+    emit_event_best_effort(build_startup_rejection_fields(
         StartupRejectionReason::SharedRuntimeAlreadyRunning,
         Some(token),
         home,
         Some(detail),
-    );
+    ));
 }
 
 pub fn persist_runtime_metadata_from_token(home: &Path, token: &DaemonLaunchToken) -> Result<()> {
@@ -490,7 +499,16 @@ pub fn persist_runtime_metadata_from_token(home: &Path, token: &DaemonLaunchToke
 pub fn sweep_stale_isolated_runtimes() -> Result<Vec<PathBuf>> {
     let reaped = agent_team_mail_core::daemon_client::reap_expired_isolated_runtime_roots()?;
     for home in &reaped {
-        emit_lifecycle_event(
+        #[cfg(test)]
+        note_test_lifecycle_event("janitor_reap");
+        emit_event_best_effort(build_lifecycle_event_fields(
+            "warn",
+            "janitor_reap",
+            None,
+            home,
+            Some("reaped stale isolated runtime after TTL expiry and dead owner"),
+        ));
+        export_lifecycle_trace(
             "warn",
             "janitor_reap",
             None,
@@ -524,7 +542,16 @@ pub fn spawn_isolated_test_lease_monitor(
                     if let Ok(expires_at) = chrono::DateTime::parse_from_rfc3339(&token.expires_at)
                         && expires_at.with_timezone(&Utc) <= Utc::now()
                     {
-                        emit_lifecycle_event(
+                        #[cfg(test)]
+                        note_test_lifecycle_event("ttl_expiry_shutdown");
+                        emit_event_best_effort(build_lifecycle_event_fields(
+                            "warn",
+                            "ttl_expiry_shutdown",
+                            Some(&token),
+                            &home,
+                            Some("isolated-test daemon reached lease expiry"),
+                        ));
+                        export_lifecycle_trace(
                             "warn",
                             "ttl_expiry_shutdown",
                             Some(&token),
@@ -544,7 +571,16 @@ pub fn spawn_isolated_test_lease_monitor(
                     if let Some(owner_pid) = token.owner_pid
                         && !crate::daemon::is_pid_alive(owner_pid)
                     {
-                        emit_lifecycle_event(
+                        #[cfg(test)]
+                        note_test_lifecycle_event("dead_owner_shutdown");
+                        emit_event_best_effort(build_lifecycle_event_fields(
+                            "warn",
+                            "dead_owner_shutdown",
+                            Some(&token),
+                            &home,
+                            Some("isolated-test daemon owner process is no longer alive"),
+                        ));
+                        export_lifecycle_trace(
                             "warn",
                             "dead_owner_shutdown",
                             Some(&token),

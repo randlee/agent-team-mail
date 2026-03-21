@@ -45,15 +45,15 @@ fn new_reconcile_cycle_state() -> SharedCycleState {
     Arc::new(std::sync::Mutex::new(ReconcileCycleState::default()))
 }
 
-fn emit_plugin_lifecycle_event(
+fn plugin_lifecycle_event_fields(
     action: &'static str,
     plugin_name: &str,
     result: &'static str,
     error: Option<String>,
-) {
+) -> EventFields {
     let request_id = format!("plugin-lifecycle-{plugin_name}-{action}");
     let trace_id = agent_team_mail_core::event_log::trace_id_for_request("atm-daemon", &request_id);
-    emit_event_best_effort(EventFields {
+    EventFields {
         level: if error.is_some() { "error" } else { "info" },
         source: "atm-daemon",
         action,
@@ -78,7 +78,7 @@ fn emit_plugin_lifecycle_event(
         },
         error,
         ..Default::default()
-    });
+    }
 }
 
 fn env_nonempty(key: &str) -> Option<String> {
@@ -380,12 +380,12 @@ pub async fn run(
     let _ = registry.init_all(ctx).await;
     let init_failed_plugins = registry.failed_init_plugins();
     for failed in &init_failed_plugins {
-        emit_plugin_lifecycle_event(
+        emit_event_best_effort(plugin_lifecycle_event_fields(
             "plugin_init",
             &failed.name,
             "error",
             Some(failed.error.clone()),
-        );
+        ));
         warn!(
             plugin = %failed.name,
             error = %failed.error,
@@ -434,26 +434,41 @@ pub async fn run(
 
     for (metadata, plugin_arc) in plugins.clone() {
         let plugin_name = metadata.name.to_string();
-        emit_plugin_lifecycle_event("plugin_init", &plugin_name, "ok", None);
+        emit_event_best_effort(plugin_lifecycle_event_fields(
+            "plugin_init",
+            &plugin_name,
+            "ok",
+            None,
+        ));
         let cancel_clone = cancel.clone();
 
         let task = tokio::spawn(async move {
-            emit_plugin_lifecycle_event("plugin_run_start", &plugin_name, "starting", None);
+            emit_event_best_effort(plugin_lifecycle_event_fields(
+                "plugin_run_start",
+                &plugin_name,
+                "starting",
+                None,
+            ));
             info!("Plugin {} run() starting", plugin_name);
             let mut plugin = plugin_arc.lock().await;
 
             match plugin.run(cancel_clone).await {
                 Ok(()) => {
-                    emit_plugin_lifecycle_event("plugin_run_complete", &plugin_name, "ok", None);
+                    emit_event_best_effort(plugin_lifecycle_event_fields(
+                        "plugin_run_complete",
+                        &plugin_name,
+                        "ok",
+                        None,
+                    ));
                     info!("Plugin {} run() completed", plugin_name);
                 }
                 Err(e) => {
-                    emit_plugin_lifecycle_event(
+                    emit_event_best_effort(plugin_lifecycle_event_fields(
                         "plugin_run_complete",
                         &plugin_name,
                         "error",
                         Some(e.to_string()),
-                    );
+                    ));
                     error!("Plugin {} run() failed: {}", plugin_name, e);
                 }
             }
@@ -532,15 +547,11 @@ pub async fn run(
     let (event_tx, mut event_rx) = mpsc::channel::<InboxEvent>(EVENT_CHANNEL_CAPACITY);
 
     // Extract hostname registry from bridge config (if available)
-    let hostname_registry = extract_hostname_registry(&ctx.config);
-
     // Start file system watcher
     let watcher_root = ctx.mail.teams_root().clone();
     let watcher_cancel = cancel.clone();
     let watcher_task = tokio::spawn(async move {
-        if let Err(e) =
-            watch_inboxes(watcher_root, event_tx, hostname_registry, watcher_cancel).await
-        {
+        if let Err(e) = watch_inboxes(watcher_root, event_tx, None, watcher_cancel).await {
             error!("Inbox watcher failed: {}", e);
         }
     });
@@ -841,14 +852,24 @@ pub async fn run(
     .await;
 
     for (metadata, _) in &plugins {
-        emit_plugin_lifecycle_event("plugin_shutdown", metadata.name, "starting", None);
+        emit_event_best_effort(plugin_lifecycle_event_fields(
+            "plugin_shutdown",
+            metadata.name,
+            "starting",
+            None,
+        ));
     }
     // Graceful shutdown of all plugins
     graceful_shutdown(plugins, Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS))
         .await
         .context("Plugin shutdown encountered errors")?;
     for (plugin_name, _) in &plugin_tasks {
-        emit_plugin_lifecycle_event("plugin_shutdown", plugin_name, "ok", None);
+        emit_event_best_effort(plugin_lifecycle_event_fields(
+            "plugin_shutdown",
+            plugin_name,
+            "ok",
+            None,
+        ));
     }
 
     // Wait for plugin tasks to complete
@@ -1334,42 +1355,6 @@ async fn read_new_inbox_messages(
     cursor.last_index = inbox_msgs.len();
     cursor.last_message_id = inbox_msgs.last().and_then(|m| m.message_id.clone());
     Ok(new_msgs)
-}
-
-/// Extract hostname registry from bridge plugin config
-///
-/// Returns None if bridge plugin is not configured or not enabled.
-fn extract_hostname_registry(
-    config: &agent_team_mail_core::config::Config,
-) -> Option<std::sync::Arc<agent_team_mail_core::config::HostnameRegistry>> {
-    use agent_team_mail_core::config::BridgeConfig;
-
-    // Check if bridge plugin config exists
-    let bridge_table = config.plugins.get("bridge")?;
-
-    // Parse bridge config
-    let bridge_config: BridgeConfig = match bridge_table.clone().try_into() {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            warn!("Failed to parse bridge config: {}", e);
-            return None;
-        }
-    };
-
-    // Check if bridge is enabled
-    if !bridge_config.enabled {
-        return None;
-    }
-
-    // Build hostname registry from remotes
-    let mut registry = agent_team_mail_core::config::HostnameRegistry::new();
-    for remote in bridge_config.remotes {
-        if let Err(e) = registry.register(remote) {
-            warn!("Failed to register remote in hostname registry: {}", e);
-        }
-    }
-
-    Some(std::sync::Arc::new(registry))
 }
 
 /// Periodic retention task

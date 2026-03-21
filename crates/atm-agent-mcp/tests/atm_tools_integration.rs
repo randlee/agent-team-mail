@@ -5,8 +5,8 @@
 //! duplex streams.  This verifies that the proxy correctly routes ATM tool names
 //! to the real handlers implemented in `atm_tools.rs`.
 //!
-//! All tests use split config/runtime roots and are serialized with `#[serial]`
-//! to prevent env-var races.
+//! All tests use `ATM_HOME` to redirect inbox I/O to a temporary directory and
+//! are serialized with `#[serial]` to prevent env-var races.
 
 use atm_agent_mcp::config::AgentMcpConfig;
 use atm_agent_mcp::proxy::{ERR_IDENTITY_REQUIRED, ProxyServer};
@@ -22,6 +22,14 @@ use env_guard::EnvGuard;
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
+
+fn set_test_roots(dir: &TempDir) -> [EnvGuard; 3] {
+    [
+        EnvGuard::set("HOME", dir.path()),
+        EnvGuard::set("USERPROFILE", dir.path()),
+        EnvGuard::set("ATM_HOME", dir.path()),
+    ]
+}
 
 /// Create a `ProxyServer` with an explicit identity and team for ATM tests.
 fn make_proxy(identity: Option<&str>, team: &str) -> ProxyServer {
@@ -155,15 +163,6 @@ fn write_team_config(home: &std::path::Path, team: &str, member_names: &[&str]) 
     .unwrap();
 }
 
-fn set_test_roots(dir: &TempDir) -> (EnvGuard, EnvGuard) {
-    let runtime_home = dir.path().join("runtime-home");
-    std::fs::create_dir_all(&runtime_home).unwrap();
-    (
-        EnvGuard::set("HOME", dir.path()),
-        EnvGuard::set("ATM_HOME", &runtime_home),
-    )
-}
-
 // ---------------------------------------------------------------------------
 // Integration tests
 // ---------------------------------------------------------------------------
@@ -173,8 +172,7 @@ fn set_test_roots(dir: &TempDir) -> (EnvGuard, EnvGuard) {
 #[serial]
 async fn integration_atm_send_with_config_identity() {
     let dir = TempDir::new().unwrap();
-    let (_home, _atm_home) = set_test_roots(&dir);
-    write_team_config(dir.path(), "atm-dev", &["team-lead", "arch-ctm"]);
+    let _env = set_test_roots(&dir);
 
     let mut proxy = make_proxy(Some("team-lead"), "atm-dev");
 
@@ -231,8 +229,7 @@ async fn integration_atm_send_with_config_identity() {
 #[serial]
 async fn integration_atm_send_explicit_identity_override() {
     let dir = TempDir::new().unwrap();
-    let (_home, _atm_home) = set_test_roots(&dir);
-    write_team_config(dir.path(), "team", &["config-agent", "recip"]);
+    let _env = set_test_roots(&dir);
 
     let mut proxy = make_proxy(Some("config-agent"), "team");
 
@@ -278,7 +275,7 @@ async fn integration_atm_send_explicit_identity_override() {
 #[serial]
 async fn integration_atm_send_no_identity_returns_error() {
     let dir = TempDir::new().unwrap();
-    let (_home, _atm_home) = set_test_roots(&dir);
+    let _env = set_test_roots(&dir);
 
     let mut proxy = make_proxy(None, "team");
 
@@ -310,7 +307,7 @@ async fn integration_atm_send_no_identity_returns_error() {
 #[serial]
 async fn integration_atm_read_empty_inbox() {
     let dir = TempDir::new().unwrap();
-    let (_home, _atm_home) = set_test_roots(&dir);
+    let _env = set_test_roots(&dir);
 
     let mut proxy = make_proxy(Some("my-agent"), "team");
 
@@ -348,7 +345,7 @@ async fn integration_atm_read_empty_inbox() {
 #[serial]
 async fn integration_atm_pending_count_no_inbox() {
     let dir = TempDir::new().unwrap();
-    let (_home, _atm_home) = set_test_roots(&dir);
+    let _env = set_test_roots(&dir);
 
     let mut proxy = make_proxy(Some("nobody"), "team");
 
@@ -388,7 +385,7 @@ async fn integration_atm_pending_count_no_inbox() {
 #[serial]
 async fn integration_agent_sessions_returns_list() {
     let dir = TempDir::new().unwrap();
-    let (_home, _atm_home) = set_test_roots(&dir);
+    let _env = set_test_roots(&dir);
 
     let mut proxy = make_proxy(Some("team-lead"), "team");
 
@@ -432,7 +429,7 @@ async fn integration_agent_sessions_returns_list() {
 #[serial]
 async fn integration_agent_status_returns_object() {
     let dir = TempDir::new().unwrap();
-    let (_home, _atm_home) = set_test_roots(&dir);
+    let _env = set_test_roots(&dir);
 
     let mut proxy = make_proxy(Some("team-lead"), "myteam");
 
@@ -489,7 +486,7 @@ async fn integration_agent_status_returns_object() {
 #[serial]
 async fn integration_atm_read_no_identity_returns_error() {
     let dir = TempDir::new().unwrap();
-    let (_home, _atm_home) = set_test_roots(&dir);
+    let _env = set_test_roots(&dir);
 
     let mut proxy = make_proxy(None, "team");
 
@@ -518,7 +515,7 @@ async fn integration_atm_read_no_identity_returns_error() {
 #[serial]
 async fn integration_atm_broadcast_no_identity_returns_error() {
     let dir = TempDir::new().unwrap();
-    let (_home, _atm_home) = set_test_roots(&dir);
+    let _env = set_test_roots(&dir);
 
     let mut proxy = make_proxy(None, "team");
 
@@ -547,7 +544,7 @@ async fn integration_atm_broadcast_no_identity_returns_error() {
 #[serial]
 async fn integration_atm_broadcast_delivers_to_members() {
     let dir = TempDir::new().unwrap();
-    let (_home, _atm_home) = set_test_roots(&dir);
+    let _env = set_test_roots(&dir);
 
     write_team_config(
         dir.path(),
