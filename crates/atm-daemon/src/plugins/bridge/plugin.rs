@@ -292,6 +292,7 @@ mod tests {
             "test-hostname".to_string(),
             Platform::Linux,
             std::env::temp_dir().join(".claude"),
+            std::env::temp_dir(),
             "0.1.0".to_string(),
             "test-team".to_string(),
         );

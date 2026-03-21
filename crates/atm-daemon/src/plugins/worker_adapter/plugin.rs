@@ -1504,6 +1504,7 @@ mod tests {
             "test-host".to_string(),
             Platform::Linux,
             claude_root,
+            root.to_path_buf(),
             "0.1.0".to_string(),
             "atm-dev".to_string(),
         );

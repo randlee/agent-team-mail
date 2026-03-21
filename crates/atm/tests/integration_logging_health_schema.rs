@@ -137,7 +137,7 @@ fn status_json_includes_extended_logging_fields() {
 
     let output = Command::new(cargo::cargo_bin!("atm"))
         .env("ATM_HOME", &runtime_home)
-        .env("HOME", temp_dir.path())
+        .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("status")
         .arg("--team")
@@ -178,7 +178,7 @@ fn doctor_json_includes_extended_logging_fields() {
 
     let output = Command::new(cargo::cargo_bin!("atm"))
         .env("ATM_HOME", &runtime_home)
-        .env("HOME", temp_dir.path())
+        .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("doctor")
         .arg("--team")
@@ -212,7 +212,7 @@ fn daemon_status_json_includes_extended_logging_fields() {
 
     let output = Command::new(cargo::cargo_bin!("atm"))
         .env("ATM_HOME", &runtime_home)
-        .env("HOME", temp_dir.path())
+        .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("daemon")
         .arg("status")
@@ -252,7 +252,7 @@ fn doctor_and_status_logging_health_schema_parity() {
 
     let status_output = Command::new(cargo::cargo_bin!("atm"))
         .env("ATM_HOME", &runtime_home)
-        .env("HOME", temp_dir.path())
+        .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("status")
         .arg("--team")
@@ -266,7 +266,7 @@ fn doctor_and_status_logging_health_schema_parity() {
 
     let doctor_output = Command::new(cargo::cargo_bin!("atm"))
         .env("ATM_HOME", &runtime_home)
-        .env("HOME", temp_dir.path())
+        .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("doctor")
         .arg("--team")
@@ -284,7 +284,7 @@ fn doctor_and_status_logging_health_schema_parity() {
 
     let daemon_output = Command::new(cargo::cargo_bin!("atm"))
         .env("ATM_HOME", &runtime_home)
-        .env("HOME", temp_dir.path())
+        .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("daemon")
         .arg("status")

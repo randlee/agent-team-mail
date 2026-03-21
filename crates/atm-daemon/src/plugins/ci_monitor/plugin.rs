@@ -761,14 +761,7 @@ impl CiMonitorPlugin {
     }
 
     fn gh_monitor_state_path(ctx: &PluginContext) -> PathBuf {
-        let Some(home_dir) = ctx.system.claude_root.parent() else {
-            return ctx
-                .system
-                .claude_root
-                .join("daemon")
-                .join("gh-monitor-state.json");
-        };
-        agent_team_mail_core::daemon_client::daemon_runtime_dir_for(home_dir)
+        agent_team_mail_core::daemon_client::daemon_runtime_dir_for(&ctx.system.runtime_home)
             .join("gh-monitor-state.json")
     }
 
@@ -829,10 +822,7 @@ impl CiMonitorPlugin {
         availability_state: &str,
         message: &str,
     ) {
-        let Some(home_dir) = ctx.system.claude_root.parent() else {
-            warn!("CI Monitor: failed to derive ATM home for health file");
-            return;
-        };
+        let home_dir = &ctx.system.runtime_home;
         let path = agent_team_mail_core::daemon_client::daemon_gh_monitor_health_path_for(home_dir);
         let mut file = match std::fs::read_to_string(&path) {
             Ok(raw) => match serde_json::from_str::<GhMonitorHealthFile>(&raw) {
@@ -1038,6 +1028,9 @@ impl Plugin for CiMonitorPlugin {
         // Provider creation depends on unix-only registry infrastructure.
         #[cfg(unix)]
         {
+            // Provider registry remains runtime-root relative on purpose: it
+            // stores executable/provider wiring under the active ATM runtime,
+            // not under the canonical team config tree.
             let atm_home = match agent_team_mail_core::home::get_home_dir() {
                 Ok(home_dir) => home_dir.join(".config/atm"),
                 Err(e) => {
@@ -2025,6 +2018,7 @@ notify_target = "team-lead"
             "test-host".to_string(),
             Platform::Linux,
             teams_root.join(".claude"),
+            teams_root.to_path_buf(),
             "2.1.39".to_string(),
             "default-team".to_string(),
         );

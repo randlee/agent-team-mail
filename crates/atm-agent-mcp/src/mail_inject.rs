@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use agent_team_mail_core::InboxMessage;
-use agent_team_mail_core::home::{get_home_dir, teams_root_dir_for};
+use agent_team_mail_core::home::{config_team_dir_for, get_os_home_dir};
 use agent_team_mail_core::io::inbox_update;
 use agent_team_mail_core::text::truncate_chars;
 use serde::{Deserialize, Serialize};
@@ -263,8 +263,7 @@ impl MailPoller {
 ///
 /// Path: `<teams_root>/<team>/inboxes/<identity>.json`
 fn inbox_path(home: &std::path::Path, team: &str, identity: &str) -> PathBuf {
-    teams_root_dir_for(home)
-        .join(team)
+    config_team_dir_for(home, team)
         .join("inboxes")
         .join(format!("{identity}.json"))
 }
@@ -294,7 +293,7 @@ pub fn fetch_unread_mail(
     max_messages: usize,
     max_message_length: usize,
 ) -> Vec<MailEnvelope> {
-    let home = match get_home_dir() {
+    let home = match get_os_home_dir() {
         Ok(h) => h,
         Err(e) => {
             tracing::warn!("fetch_unread_mail: cannot resolve home dir: {e}");
@@ -383,7 +382,7 @@ pub fn mark_messages_read(identity: &str, team: &str, message_ids: &[String]) {
         return;
     }
 
-    let home = match get_home_dir() {
+    let home = match get_os_home_dir() {
         Ok(h) => h,
         Err(e) => {
             tracing::warn!("mark_messages_read: cannot resolve home dir: {e}");

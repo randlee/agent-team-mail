@@ -13,7 +13,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs;
 
 use crate::util::member_labels::{GHOST_SUFFIX, UNREGISTERED_MARKER};
-use crate::util::settings::{get_home_dir, teams_root_dir_for};
+use crate::util::settings::{config_team_dir, get_os_home_dir};
 
 /// List agents in a team
 #[derive(Args, Debug)]
@@ -110,7 +110,7 @@ pub fn execute(args: MembersArgs) -> Result<()> {
     // Prime daemon connectivity so daemon-backed liveness can be queried.
     let _ = query_list_agents();
 
-    let home_dir = get_home_dir()?;
+    let config_home = get_os_home_dir()?;
     let current_dir = std::env::current_dir()?;
 
     // Resolve configuration to get default team
@@ -118,12 +118,11 @@ pub fn execute(args: MembersArgs) -> Result<()> {
         team: args.team.clone(),
         ..Default::default()
     };
-    let config = resolve_config(&overrides, &current_dir, &home_dir)?;
+    let config = resolve_config(&overrides, &current_dir, &config_home)?;
     let team_name = &config.core.default_team;
 
     // Load team config
-    let team_dir = agent_team_mail_core::home::config_team_dir(team_name)
-        .unwrap_or_else(|_| teams_root_dir_for(&home_dir).join(team_name));
+    let team_dir = config_team_dir(team_name)?;
     if !team_dir.exists() {
         anyhow::bail!("Team '{team_name}' not found (directory {team_dir:?} doesn't exist)");
     }

@@ -89,7 +89,7 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir, team: &str, w
         write_repo_gh_monitor_config(&workdir, team);
     }
     cmd.env("ATM_HOME", &runtime_home)
-        .env("HOME", temp_dir.path())
+        .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_DAEMON_BIN", &fake_daemon_bin)
         .env_remove("ATM_TEAM")

@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::NamedTempFile;
 
-use crate::util::settings::{get_home_dir, teams_root_dir_for};
+use crate::util::settings::{config_team_dir_for, config_teams_root_dir_for, get_os_home_dir};
 
 /// GitHub CI monitor commands.
 #[derive(Args, Debug)]
@@ -331,7 +331,7 @@ struct GhPrInitReportSummary {
 const GH_MONITOR_DEFAULT_TEMPLATE_FILENAME: &str = "gh-monitor-report-template.j2";
 
 pub fn execute(args: GhArgs) -> Result<()> {
-    let home_dir = get_home_dir()?;
+    let home_dir = get_os_home_dir()?;
     let current_dir = std::env::current_dir()?;
     let config = resolve_config(
         &ConfigOverrides {
@@ -1810,8 +1810,8 @@ fn notify_team_lead_of_monitor_control(
     action_word: &str,
     reason: &str,
 ) -> Result<()> {
-    let teams_root = teams_root_dir_for(home_dir);
-    let team_dir = teams_root.join(target_team);
+    let teams_root = config_teams_root_dir_for(home_dir);
+    let team_dir = config_team_dir_for(home_dir, target_team);
     let lead_agent = TeamConfigStore::open(&team_dir)
         .read()
         .ok()

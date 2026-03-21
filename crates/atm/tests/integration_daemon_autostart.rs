@@ -235,7 +235,7 @@ fn test_status_autostarts_daemon_when_absent() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     let output = cmd
         .env("ATM_HOME", &runtime_home)
-        .env("HOME", home)
+        .envs([("HOME", home)])
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", &script)
         .arg("status")
@@ -276,7 +276,7 @@ fn test_status_noops_when_daemon_already_healthy() {
     let script = write_fake_daemon_script(home);
     let daemon = Command::new(&script)
         .env("ATM_HOME", &runtime_home)
-        .env("HOME", home)
+        .envs([("HOME", home)])
         .spawn()
         .unwrap();
     let _daemon_guard = daemon_process_guard::DaemonProcessGuard::from_child(
@@ -290,7 +290,7 @@ fn test_status_noops_when_daemon_already_healthy() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     let output = cmd
         .env("ATM_HOME", &runtime_home)
-        .env("HOME", home)
+        .envs([("HOME", home)])
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", &script)
         .arg("status")
@@ -325,7 +325,7 @@ fn test_concurrent_multi_team_status_uses_single_daemon_instance() {
     let script = write_fake_daemon_script(home);
     let daemon = Command::new(&script)
         .env("ATM_HOME", &runtime_home)
-        .env("HOME", home)
+        .envs([("HOME", home)])
         .spawn()
         .unwrap();
     let _daemon_guard = daemon_process_guard::DaemonProcessGuard::from_child(
@@ -345,7 +345,7 @@ fn test_concurrent_multi_team_status_uses_single_daemon_instance() {
             let mut cmd = cargo::cargo_bin_cmd!("atm");
             let output = cmd
                 .env("ATM_HOME", &runtime_home)
-                .env("HOME", &home)
+                .envs([("HOME", &home)])
                 .env("ATM_TEAM", team)
                 .env("ATM_DAEMON_BIN", &script)
                 .env("ATM_DAEMON_AUTOSTART", "0")
@@ -384,7 +384,7 @@ fn test_status_reports_actionable_error_when_autostart_binary_missing() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     let output = cmd
         .env("ATM_HOME", &runtime_home)
-        .env("HOME", home)
+        .envs([("HOME", home)])
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", "/definitely-missing-atm-daemon-binary")
         .arg("status")
@@ -417,7 +417,7 @@ fn test_daemon_kill_autostarts_daemon_when_absent() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     let output = cmd
         .env("ATM_HOME", &runtime_home)
-        .env("HOME", home)
+        .envs([("HOME", home)])
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", &script)
         .env("ATM_FAKE_SESSION_ALIVE", "false")
@@ -461,7 +461,7 @@ fn test_cleanup_agent_autostarts_daemon_when_absent() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     let output = cmd
         .env("ATM_HOME", &runtime_home)
-        .env("HOME", home)
+        .envs([("HOME", home)])
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", &script)
         .arg("cleanup")
@@ -506,7 +506,7 @@ fn test_doctor_no_daemon_not_running_after_status_autostart() {
     let mut status_cmd = cargo::cargo_bin_cmd!("atm");
     status_cmd
         .env("ATM_HOME", &runtime_home)
-        .env("HOME", home)
+        .envs([("HOME", home)])
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", &script)
         .env("ATM_FAKE_SESSION_ALIVE", "true")
@@ -533,7 +533,7 @@ fn test_doctor_no_daemon_not_running_after_status_autostart() {
     let mut doctor_cmd = cargo::cargo_bin_cmd!("atm");
     let output = doctor_cmd
         .env("ATM_HOME", &runtime_home)
-        .env("HOME", home)
+        .envs([("HOME", home)])
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", &script)
         .env("ATM_FAKE_SESSION_ALIVE", "true")
@@ -572,7 +572,7 @@ fn test_doctor_distinguishes_absent_daemon_from_pid_verification_failure() {
     let mut absent_cmd = cargo::cargo_bin_cmd!("atm");
     let absent_output = absent_cmd
         .env("ATM_HOME", &absent_runtime_home)
-        .env("HOME", absent_home.path())
+        .envs([("HOME", absent_home.path())])
         .env("ATM_TEAM", "team-absent")
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("doctor")
@@ -590,7 +590,7 @@ fn test_doctor_distinguishes_absent_daemon_from_pid_verification_failure() {
     let mut absent_json_cmd = cargo::cargo_bin_cmd!("atm");
     let absent_json_output = absent_json_cmd
         .env("ATM_HOME", &absent_runtime_home)
-        .env("HOME", absent_home.path())
+        .envs([("HOME", absent_home.path())])
         .env("ATM_TEAM", "team-absent")
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("doctor")
@@ -628,7 +628,7 @@ fn test_doctor_distinguishes_absent_daemon_from_pid_verification_failure() {
     let mut stale_cmd = cargo::cargo_bin_cmd!("atm");
     let stale_output = stale_cmd
         .env("ATM_HOME", &stale_runtime_home)
-        .env("HOME", stale_home.path())
+        .envs([("HOME", stale_home.path())])
         .env("ATM_TEAM", "team-stale")
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("doctor")
@@ -645,7 +645,7 @@ fn test_doctor_distinguishes_absent_daemon_from_pid_verification_failure() {
     let mut stale_json_cmd = cargo::cargo_bin_cmd!("atm");
     let stale_json_output = stale_json_cmd
         .env("ATM_HOME", &stale_runtime_home)
-        .env("HOME", stale_home.path())
+        .envs([("HOME", stale_home.path())])
         .env("ATM_TEAM", "team-stale")
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("doctor")
@@ -678,7 +678,7 @@ fn test_members_reports_status_session_and_pid_after_daemon_autostart() {
     let mut members_cmd = cargo::cargo_bin_cmd!("atm");
     let output = members_cmd
         .env("ATM_HOME", &runtime_home)
-        .env("HOME", home)
+        .envs([("HOME", home)])
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", &script)
         .env(
@@ -732,7 +732,7 @@ fn test_status_autostart_recovers_after_stale_restart_cycle() {
     let mut first_status = cargo::cargo_bin_cmd!("atm");
     first_status
         .env("ATM_HOME", &runtime_home)
-        .env("HOME", home)
+        .envs([("HOME", home)])
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", &script)
         .arg("status")
@@ -752,7 +752,7 @@ fn test_status_autostart_recovers_after_stale_restart_cycle() {
     let mut second_status = cargo::cargo_bin_cmd!("atm");
     second_status
         .env("ATM_HOME", &runtime_home)
-        .env("HOME", home)
+        .envs([("HOME", home)])
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", &script)
         .arg("status")

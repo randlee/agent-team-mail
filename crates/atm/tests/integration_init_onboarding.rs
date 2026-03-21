@@ -7,6 +7,7 @@ use tempfile::TempDir;
 fn init_cmd<'a>(home: &'a TempDir, repo: &'a Path) -> assert_cmd::Command {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", home.path())
+        .envs([("HOME", home.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_HOOK_PYTHON", "python3")
         .env_remove("ATM_TEAM")
