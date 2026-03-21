@@ -6,11 +6,12 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
+use agent_team_mail_core::home::{config_teams_root_dir_for, get_os_home_dir};
 use agent_team_mail_core::io::inbox::inbox_append;
 use agent_team_mail_core::schema::InboxMessage;
 
 use crate::commands::doctor::monitor_report_json;
-use crate::util::settings::{get_home_dir, teams_root_dir_for};
+use crate::util::settings::get_home_dir;
 
 #[derive(Args, Debug)]
 pub struct MonitorArgs {
@@ -72,7 +73,8 @@ impl AlertTracker {
 }
 
 pub fn execute(args: MonitorArgs) -> Result<()> {
-    let home_dir = get_home_dir()?;
+    let runtime_home = get_home_dir()?;
+    let config_home = get_os_home_dir()?;
     let current_dir = std::env::current_dir()?;
     let config = resolve_config(
         &ConfigOverrides {
@@ -80,7 +82,7 @@ pub fn execute(args: MonitorArgs) -> Result<()> {
             ..Default::default()
         },
         &current_dir,
-        &home_dir,
+        &config_home,
     )?;
     let team = config.core.default_team;
     let recipients: Vec<String> = args
@@ -98,7 +100,7 @@ pub fn execute(args: MonitorArgs) -> Result<()> {
     loop {
         iterations += 1;
 
-        let report_json = monitor_report_json(&home_dir, &team);
+        let report_json = monitor_report_json(&runtime_home, &team);
         let critical_findings = extract_critical_findings(&report_json);
         let now = Instant::now();
         let current_keys: HashSet<FindingKey> =
@@ -106,7 +108,7 @@ pub fn execute(args: MonitorArgs) -> Result<()> {
 
         for finding in &critical_findings {
             if tracker.should_emit(&finding.key, cooldown, now) {
-                send_alerts(&home_dir, &team, &recipients, finding)?;
+                send_alerts(&config_home, &team, &recipients, finding)?;
                 tracker.last_sent.insert(finding.key.clone(), now);
             }
         }
@@ -174,7 +176,7 @@ fn extract_critical_findings(report_json: &Result<serde_json::Value>) -> Vec<Mon
 }
 
 fn send_alerts(
-    home_dir: &std::path::Path,
+    config_home: &std::path::Path,
     team: &str,
     recipients: &[String],
     finding: &MonitorFinding,
@@ -203,7 +205,7 @@ fn send_alerts(
     );
 
     for recipient in recipients {
-        let inbox = teams_root_dir_for(home_dir)
+        let inbox = config_teams_root_dir_for(config_home)
             .join(team)
             .join("inboxes")
             .join(format!("{recipient}.json"));

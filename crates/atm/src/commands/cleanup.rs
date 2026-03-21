@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::commands::teams;
-use crate::util::settings::{get_home_dir, teams_root_dir_for};
+use crate::util::settings::get_home_dir;
 
 /// Apply retention policies to clean up old messages
 #[derive(Args, Debug)]
@@ -49,6 +49,7 @@ pub struct CleanupArgs {
 /// Execute the cleanup command
 pub fn execute(args: CleanupArgs) -> Result<()> {
     let home_dir = get_home_dir()?;
+    let config_home = agent_team_mail_core::home::get_os_home_dir()?;
     let current_dir = std::env::current_dir()?;
 
     let overrides = ConfigOverrides {
@@ -56,7 +57,7 @@ pub fn execute(args: CleanupArgs) -> Result<()> {
         ..Default::default()
     };
 
-    let config = resolve_config(&overrides, &current_dir, &home_dir)?;
+    let config = resolve_config(&overrides, &current_dir, &config_home)?;
 
     // Agent cleanup compatibility mode:
     // `atm cleanup --agent <name> [--team <team>] [--force]`
@@ -73,6 +74,7 @@ pub fn execute(args: CleanupArgs) -> Result<()> {
         }
         return execute_agent_cleanup(
             &home_dir,
+            &config_home,
             &team_name,
             agent,
             args.force,
@@ -81,7 +83,7 @@ pub fn execute(args: CleanupArgs) -> Result<()> {
         );
     }
 
-    let teams_dir = teams_root_dir_for(&home_dir);
+    let teams_dir = agent_team_mail_core::home::config_teams_root_dir_for(&config_home);
     if !teams_dir.exists() {
         let display = teams_dir.display();
         anyhow::bail!("Teams directory not found at {display}");
@@ -117,19 +119,20 @@ pub fn execute(args: CleanupArgs) -> Result<()> {
         team_names.sort();
 
         for team_name in team_names {
-            cleanup_team(&home_dir, &team_name, &config.retention, args.dry_run)?;
+            cleanup_team(&config_home, &team_name, &config.retention, args.dry_run)?;
         }
     } else {
         // Apply to single team
         let team_name = &config.core.default_team;
-        cleanup_team(&home_dir, team_name, &config.retention, args.dry_run)?;
+        cleanup_team(&config_home, team_name, &config.retention, args.dry_run)?;
     }
 
     Ok(())
 }
 
 fn execute_agent_cleanup(
-    home_dir: &Path,
+    _home_dir: &Path,
+    config_home: &Path,
     team_name: &str,
     agent_name: &str,
     force: bool,
@@ -164,7 +167,7 @@ fn execute_agent_cleanup(
                         agent_name
                     );
                 }
-                send_shutdown_request(home_dir, team_name, agent_name)?;
+                send_shutdown_request(config_home, team_name, agent_name)?;
 
                 if !wait_for_session_dead(team_name, agent_name, timeout_secs) {
                     #[cfg(unix)]
@@ -290,8 +293,7 @@ fn send_shutdown_request(home_dir: &Path, team_name: &str, agent_name: &str) -> 
         unknown_fields: HashMap::new(),
     };
 
-    let inbox_path = teams_root_dir_for(home_dir)
-        .join(team_name)
+    let inbox_path = agent_team_mail_core::home::config_team_dir_for(home_dir, team_name)
         .join("inboxes")
         .join(format!("{agent_name}.json"));
     inbox_append(&inbox_path, &msg, team_name, "atm")?;
@@ -355,7 +357,7 @@ fn cleanup_team(
     retention_config: &agent_team_mail_core::config::RetentionConfig,
     dry_run: bool,
 ) -> Result<()> {
-    let team_dir = teams_root_dir_for(home_dir).join(team_name);
+    let team_dir = agent_team_mail_core::home::config_team_dir_for(home_dir, team_name);
 
     if !team_dir.exists() {
         println!("Team '{team_name}' not found, skipping");
@@ -491,6 +493,10 @@ mod tests {
     use serial_test::serial;
     use tempfile::TempDir;
 
+    fn saved_home_env() -> Option<std::ffi::OsString> {
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+    }
+
     fn set_autostart_disabled_for_test() -> Option<String> {
         let original = std::env::var("ATM_DAEMON_AUTOSTART").ok();
         // SAFETY: test-only env mutation, callers use #[serial].
@@ -573,8 +579,15 @@ mod tests {
             query_error: None,
         });
 
-        let result =
-            execute_agent_cleanup(temp_dir.path(), "atm-dev", "publisher", false, false, 1);
+        let result = execute_agent_cleanup(
+            temp_dir.path(),
+            temp_dir.path(),
+            "atm-dev",
+            "publisher",
+            false,
+            false,
+            1,
+        );
         test_daemon_state::clear();
 
         assert!(result.is_err());
@@ -599,8 +612,15 @@ mod tests {
             query_result: None,
             query_error: None,
         });
-        let result =
-            execute_agent_cleanup(temp_dir.path(), "atm-dev", "publisher", false, false, 1);
+        let result = execute_agent_cleanup(
+            temp_dir.path(),
+            temp_dir.path(),
+            "atm-dev",
+            "publisher",
+            false,
+            false,
+            1,
+        );
         test_daemon_state::clear();
         restore_autostart_env(original_autostart);
 
@@ -620,11 +640,13 @@ mod tests {
         let inbox = team_dir.join("inboxes/publisher.json");
         std::fs::write(&inbox, "[]").unwrap();
         let home_env = temp_dir.path().to_string_lossy().to_string();
-        let original_home = std::env::var("ATM_HOME").ok();
+        let original_atm_home = std::env::var("ATM_HOME").ok();
+        let original_home = saved_home_env();
         let original_autostart = set_autostart_disabled_for_test();
         // SAFETY: test-only env mutation; serialized via #[serial].
         unsafe {
             std::env::set_var("ATM_HOME", &home_env);
+            std::env::set_var("HOME", &home_env);
         }
 
         test_daemon_state::set(test_daemon_state::State {
@@ -632,13 +654,25 @@ mod tests {
             query_result: None,
             query_error: None,
         });
-        let result = execute_agent_cleanup(temp_dir.path(), "atm-dev", "publisher", true, false, 1);
+        let result = execute_agent_cleanup(
+            temp_dir.path(),
+            temp_dir.path(),
+            "atm-dev",
+            "publisher",
+            true,
+            false,
+            1,
+        );
         test_daemon_state::clear();
         // SAFETY: test-only cleanup.
         unsafe {
-            match original_home {
+            match original_atm_home {
                 Some(v) => std::env::set_var("ATM_HOME", v),
                 None => std::env::remove_var("ATM_HOME"),
+            }
+            match original_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
             }
         }
         restore_autostart_env(original_autostart);

@@ -19,17 +19,20 @@ use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
-/// Helper to set home directory for cross-platform test compatibility.
-/// Uses `ATM_HOME` which is checked first by `get_home_dir()`, avoiding
-/// platform-specific differences in how `dirs::home_dir()` resolves
-/// (HOME on Unix, Windows API on Windows).
+/// Set separate config-root and runtime-root env vars on a command.
+///
+/// `HOME` provides the canonical config root (`~/.claude`), while `ATM_HOME`
+/// is runtime-only for daemon state.
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     // Use a subdirectory as CWD to avoid:
     // 1. .atm.toml config leak from the repo root
     // 2. auto-identity CWD matching against team member CWD (temp_dir root)
     let workdir = temp_dir.path().join("workdir");
+    let runtime_home = temp_dir.path().join("runtime-home");
     std::fs::create_dir_all(&workdir).ok();
-    cmd.env("ATM_HOME", temp_dir.path())
+    std::fs::create_dir_all(&runtime_home).ok();
+    cmd.env("ATM_HOME", &runtime_home)
+        .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
         .env_remove("ATM_CONFIG")
@@ -135,8 +138,13 @@ finally:
 }
 
 #[cfg(unix)]
+fn runtime_home(home: &Path) -> PathBuf {
+    home.join("runtime-home")
+}
+
+#[cfg(unix)]
 fn wait_for_daemon_socket(home: &Path) {
-    let socket = home.join(".atm/daemon/atm-daemon.sock");
+    let socket = runtime_home(home).join(".atm/daemon/atm-daemon.sock");
     let deadline = Instant::now() + Duration::from_secs(WAIT_FOR_DAEMON_SOCKET_SECS);
     while Instant::now() < deadline {
         if socket.exists() {
@@ -153,9 +161,12 @@ fn wait_for_daemon_socket(home: &Path) {
 #[cfg(unix)]
 fn spawn_python_script(script: &Path, home: &Path) -> Child {
     let python = std::env::var("PYTHON").unwrap_or_else(|_| "python3".to_string());
+    let runtime_home = runtime_home(home);
+    fs::create_dir_all(&runtime_home).unwrap();
     Command::new(python)
         .arg(script)
-        .env("ATM_HOME", home)
+        .env("ATM_HOME", &runtime_home)
+        .envs([("HOME", home)])
         .spawn()
         .unwrap()
 }
@@ -387,7 +398,7 @@ fn start_fake_request_logging_daemon(home: &Path) -> (Child, PathBuf) {
     let script = write_fake_request_logging_daemon_script(home);
     let child = spawn_python_script(&script, home);
     wait_for_daemon_socket(home);
-    (child, home.join(".atm/daemon/requests.jsonl"))
+    (child, runtime_home(home).join(".atm/daemon/requests.jsonl"))
 }
 
 #[cfg(unix)]
@@ -521,7 +532,7 @@ fn test_send_alias_with_team_suffix_resolves_end_to_end() {
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
 
-    // Configure alias in global ATM config under ATM_HOME so send command
+    // Configure alias in the canonical HOME-backed ATM config so send command
     // resolves arch-atm -> team-lead while preserving explicit @team suffix.
     let global_cfg_dir = temp_dir.path().join(".config/atm");
     fs::create_dir_all(&global_cfg_dir).unwrap();
@@ -596,7 +607,7 @@ fn test_send_role_with_team_suffix_resolves_end_to_end() {
     )
     .unwrap();
 
-    // Configure role in global ATM config under ATM_HOME so send command
+    // Configure role in the canonical HOME-backed ATM config so send command
     // resolves team-lead -> arch-atm while preserving explicit @team suffix.
     let global_cfg_dir = temp_dir.path().join(".config/atm");
     fs::create_dir_all(&global_cfg_dir).unwrap();

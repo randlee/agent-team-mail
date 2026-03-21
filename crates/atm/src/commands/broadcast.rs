@@ -2,6 +2,7 @@
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::home::{config_team_dir_for, get_os_home_dir};
 use agent_team_mail_core::io::inbox::{WriteOutcome, inbox_append};
 use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
 use anyhow::Result;
@@ -15,7 +16,7 @@ use agent_team_mail_core::text::{
 };
 
 use crate::consts::MESSAGE_MAX_LEN;
-use crate::util::settings::{get_home_dir, teams_root_dir_for};
+use crate::util::settings::get_home_dir;
 
 /// Broadcast a message to all agents in a team
 #[derive(Args, Debug)]
@@ -58,7 +59,8 @@ struct DeliveryStatus {
 /// Execute the broadcast command
 pub fn execute(args: BroadcastArgs) -> Result<()> {
     // Resolve configuration
-    let home_dir = get_home_dir()?;
+    let _runtime_home = get_home_dir()?;
+    let config_home = get_os_home_dir()?;
     let current_dir = std::env::current_dir()?;
 
     let overrides = ConfigOverrides {
@@ -66,7 +68,7 @@ pub fn execute(args: BroadcastArgs) -> Result<()> {
         ..Default::default()
     };
 
-    let mut config = resolve_config(&overrides, &current_dir, &home_dir)?;
+    let mut config = resolve_config(&overrides, &current_dir, &config_home)?;
 
     // Override sender identity if --from provided
     if let Some(ref from) = args.from {
@@ -77,7 +79,7 @@ pub fn execute(args: BroadcastArgs) -> Result<()> {
     let team_name = args.team.as_ref().unwrap_or(&config.core.default_team);
 
     // Resolve team directory
-    let team_dir = teams_root_dir_for(&home_dir).join(team_name);
+    let team_dir = config_team_dir_for(&config_home, team_name);
     if !team_dir.exists() {
         anyhow::bail!("Team '{team_name}' not found (directory {team_dir:?} doesn't exist)");
     }

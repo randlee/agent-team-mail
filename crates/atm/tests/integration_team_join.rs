@@ -6,8 +6,11 @@ use tempfile::TempDir;
 
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     let workdir = temp_dir.path().join("workdir");
+    let runtime_home = temp_dir.path().join("runtime-home");
     fs::create_dir_all(&workdir).unwrap();
-    cmd.env("ATM_HOME", temp_dir.path())
+    fs::create_dir_all(&runtime_home).unwrap();
+    cmd.env("ATM_HOME", &runtime_home)
+        .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_CONFIG")
         .env_remove("CLAUDE_SESSION_ID")

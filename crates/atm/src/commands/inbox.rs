@@ -1,6 +1,7 @@
 //! Inbox command implementation - show inbox summaries and targeted cleanup
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
+use agent_team_mail_core::home::{config_team_dir_for, config_teams_root_dir_for, get_os_home_dir};
 use agent_team_mail_core::retention::parse_duration;
 use agent_team_mail_core::schema::InboxMessage;
 use agent_team_mail_core::schema::TeamConfig;
@@ -10,7 +11,7 @@ use clap::{ArgAction, Args, Subcommand};
 use serde::Serialize;
 use std::path::Path;
 
-use crate::util::settings::{get_home_dir, teams_root_dir_for};
+use crate::util::settings::get_home_dir;
 use crate::util::state::{get_last_seen, load_seen_state};
 
 /// Show inbox summary for team members
@@ -102,7 +103,8 @@ pub fn execute(args: InboxArgs) -> Result<()> {
         return execute_clear(clear_args);
     }
 
-    let home_dir = get_home_dir()?;
+    let _runtime_home = get_home_dir()?;
+    let config_home = get_os_home_dir()?;
     let current_dir = std::env::current_dir()?;
 
     let overrides = ConfigOverrides {
@@ -110,9 +112,9 @@ pub fn execute(args: InboxArgs) -> Result<()> {
         ..Default::default()
     };
 
-    let config = resolve_config(&overrides, &current_dir, &home_dir)?;
+    let config = resolve_config(&overrides, &current_dir, &config_home)?;
 
-    let teams_dir = teams_root_dir_for(&home_dir);
+    let teams_dir = config_teams_root_dir_for(&config_home);
     if !teams_dir.exists() {
         anyhow::bail!("Teams directory not found at {teams_dir:?}");
     }
@@ -121,7 +123,7 @@ pub fn execute(args: InboxArgs) -> Result<()> {
 
     if args.watch {
         watch_inboxes(
-            &home_dir,
+            &config_home,
             &config.core.default_team,
             args.all_teams,
             args.interval_ms,
@@ -147,26 +149,27 @@ pub fn execute(args: InboxArgs) -> Result<()> {
         team_names.sort();
 
         for team_name in team_names {
-            show_team_summary(&home_dir, &team_name, use_since_last_seen)?;
+            show_team_summary(&config_home, &team_name, use_since_last_seen)?;
             println!();
         }
     } else {
         // Show summary for single team
         let team_name = &config.core.default_team;
-        show_team_summary(&home_dir, team_name, use_since_last_seen)?;
+        show_team_summary(&config_home, team_name, use_since_last_seen)?;
     }
 
     Ok(())
 }
 
 fn execute_clear(args: ClearArgs) -> Result<()> {
-    let home_dir = get_home_dir()?;
+    let _runtime_home = get_home_dir()?;
+    let config_home = get_os_home_dir()?;
     let current_dir = std::env::current_dir()?;
     let overrides = ConfigOverrides {
         team: args.team.clone(),
         ..Default::default()
     };
-    let config = resolve_config(&overrides, &current_dir, &home_dir)?;
+    let config = resolve_config(&overrides, &current_dir, &config_home)?;
     let team_name = args
         .team
         .clone()
@@ -175,8 +178,7 @@ fn execute_clear(args: ClearArgs) -> Result<()> {
         .agent
         .clone()
         .unwrap_or_else(|| config.core.identity.clone());
-    let inbox_path = teams_root_dir_for(&home_dir)
-        .join(&team_name)
+    let inbox_path = config_team_dir_for(&config_home, &team_name)
         .join("inboxes")
         .join(format!("{agent_name}.json"));
 
@@ -211,8 +213,8 @@ fn print_clear_counts(result: &InboxClearResult) {
 }
 
 /// Show inbox summary for a single team
-fn show_team_summary(home_dir: &Path, team_name: &str, use_since_last_seen: bool) -> Result<()> {
-    let team_dir = teams_root_dir_for(home_dir).join(team_name);
+fn show_team_summary(config_home: &Path, team_name: &str, use_since_last_seen: bool) -> Result<()> {
+    let team_dir = config_team_dir_for(config_home, team_name);
 
     if !team_dir.exists() {
         println!("Team: {team_name} (not found)");
@@ -233,7 +235,7 @@ fn show_team_summary(home_dir: &Path, team_name: &str, use_since_last_seen: bool
     let config = agent_team_mail_core::config::resolve_config(
         &agent_team_mail_core::config::ConfigOverrides::default(),
         &std::env::current_dir()?,
-        home_dir,
+        config_home,
     )?;
     let hostname_registry = extract_hostname_registry(&config);
 
@@ -397,7 +399,7 @@ struct MessageState {
 }
 
 fn watch_inboxes(
-    home_dir: &Path,
+    config_home: &Path,
     default_team: &str,
     all_teams: bool,
     interval_ms: u64,
@@ -411,13 +413,13 @@ fn watch_inboxes(
     let config = agent_team_mail_core::config::resolve_config(
         &agent_team_mail_core::config::ConfigOverrides::default(),
         &std::env::current_dir()?,
-        home_dir,
+        config_home,
     )?;
     let hostname_registry = extract_hostname_registry(&config);
 
     loop {
         let team_names = if all_teams {
-            let entries = std::fs::read_dir(teams_root_dir_for(home_dir))?;
+            let entries = std::fs::read_dir(config_teams_root_dir_for(config_home))?;
             let mut names = Vec::new();
             for entry in entries {
                 let entry = entry?;
@@ -434,7 +436,7 @@ fn watch_inboxes(
         };
 
         for team_name in team_names {
-            let team_dir = teams_root_dir_for(home_dir).join(&team_name);
+            let team_dir = config_team_dir_for(config_home, &team_name);
             let team_config_path = team_dir.join("config.json");
             if !team_config_path.exists() {
                 continue;

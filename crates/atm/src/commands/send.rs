@@ -3,6 +3,7 @@
 use agent_team_mail_core::config::{Config, ConfigOverrides, resolve_config, resolve_identity};
 use agent_team_mail_core::daemon_client::{RegisterHintOutcome, SessionQueryResult};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::home::{config_team_dir_for, get_os_home_dir};
 use agent_team_mail_core::io::inbox::{WriteOutcome, inbox_append};
 use agent_team_mail_core::schema::{AgentMember, BackendType, InboxMessage, TeamConfig};
 use anyhow::Result;
@@ -22,7 +23,7 @@ use crate::util::addressing::parse_address;
 use crate::util::caller_identity::resolve_caller_session_id_optional;
 use crate::util::file_policy::check_file_reference;
 use crate::util::hook_identity::{read_hook_file, read_hook_file_identity};
-use crate::util::settings::{get_home_dir, teams_root_dir_for};
+use crate::util::settings::get_home_dir;
 
 /// Send a message to a specific agent
 #[derive(Args, Debug)]
@@ -71,8 +72,9 @@ pub fn execute(args: SendArgs) -> Result<()> {
     debug!("send command start");
     // Resolve configuration
     let home_dir = get_home_dir()?;
+    let config_home = get_os_home_dir()?;
     let current_dir = std::env::current_dir()?;
-    let sender_config = resolve_config(&ConfigOverrides::default(), &current_dir, &home_dir)?;
+    let sender_config = resolve_config(&ConfigOverrides::default(), &current_dir, &config_home)?;
     let sender_team = sender_config.core.default_team.clone();
 
     let overrides = ConfigOverrides {
@@ -80,7 +82,7 @@ pub fn execute(args: SendArgs) -> Result<()> {
         ..Default::default()
     };
 
-    let mut config = resolve_config(&overrides, &current_dir, &home_dir)?;
+    let mut config = resolve_config(&overrides, &current_dir, &config_home)?;
 
     // Override sender identity if --from provided; otherwise resolve via hook file.
     if let Some(ref from) = args.from {
@@ -122,7 +124,7 @@ pub fn execute(args: SendArgs) -> Result<()> {
     }
 
     // Resolve team directory
-    let team_dir = teams_root_dir_for(&home_dir).join(&team_name);
+    let team_dir = config_team_dir_for(&config_home, &team_name);
     if !team_dir.exists() {
         anyhow::bail!("Team '{team_name}' not found (directory {team_dir:?} doesn't exist)");
     }
@@ -1145,6 +1147,7 @@ mod tests {
         write_session_file(temp.path(), "atm-dev", "team-lead", "sid-from-session");
 
         unsafe {
+            std::env::set_var("HOME", temp.path());
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::set_var("ATM_RUNTIME", "claude");
@@ -1157,6 +1160,7 @@ mod tests {
             resolve_sender_session_id_with_context(Some("atm-dev"), Some("team-lead")).unwrap();
 
         unsafe {
+            std::env::remove_var("HOME");
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("ATM_RUNTIME");
@@ -1179,6 +1183,7 @@ mod tests {
         write_session_file(temp.path(), "atm-dev", "team-lead", "sid-from-session");
 
         unsafe {
+            std::env::set_var("HOME", temp.path());
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::set_var("ATM_RUNTIME", "claude");
@@ -1190,6 +1195,7 @@ mod tests {
             resolve_sender_session_id_with_context(Some("atm-dev"), Some("team-lead")).unwrap();
 
         unsafe {
+            std::env::remove_var("HOME");
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("ATM_RUNTIME");
@@ -1210,6 +1216,7 @@ mod tests {
         write_session_file(temp.path(), "atm-dev", "team-lead", "sid-from-session");
 
         unsafe {
+            std::env::set_var("HOME", temp.path());
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::set_var("ATM_RUNTIME", "claude");
@@ -1221,6 +1228,7 @@ mod tests {
             resolve_sender_session_id_with_context(Some("atm-dev"), Some("team-lead")).unwrap();
 
         unsafe {
+            std::env::remove_var("HOME");
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("ATM_RUNTIME");
@@ -1239,6 +1247,7 @@ mod tests {
         let _ = std::fs::remove_file(&hook_path);
 
         unsafe {
+            std::env::set_var("HOME", temp.path());
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::set_var("ATM_RUNTIME", "claude");
@@ -1250,6 +1259,7 @@ mod tests {
             resolve_sender_session_id_with_context(Some("atm-dev"), Some("team-lead")).unwrap();
 
         unsafe {
+            std::env::remove_var("HOME");
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("ATM_RUNTIME");
@@ -1271,6 +1281,7 @@ mod tests {
         write_session_file(temp.path(), "atm-dev", "team-lead", "sid-b");
 
         unsafe {
+            std::env::set_var("HOME", temp.path());
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::set_var("ATM_RUNTIME", "claude");
@@ -1282,6 +1293,7 @@ mod tests {
             .expect_err("ambiguous session files should error");
 
         unsafe {
+            std::env::remove_var("HOME");
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("ATM_RUNTIME");

@@ -121,7 +121,9 @@ async fn main() -> Result<()> {
 
     // Determine home directory early for lock/log path resolution.
     let home_dir =
-        agent_team_mail_core::home::get_home_dir().context("Failed to determine home directory")?;
+        agent_team_mail_core::home::get_home_dir().context("Failed to determine runtime home")?;
+    let config_home =
+        agent_team_mail_core::home::get_os_home_dir().context("Failed to determine config home")?;
     daemon::observability::install_lifecycle_trace_hook(Arc::new(
         export_lifecycle_trace_from_entrypoint,
     ));
@@ -253,7 +255,7 @@ async fn main() -> Result<()> {
     };
 
     let config =
-        agent_team_mail_core::config::resolve_config(&config_overrides, &current_dir, &home_dir)
+        agent_team_mail_core::config::resolve_config(&config_overrides, &current_dir, &config_home)
             .context("Failed to resolve configuration")?;
     emit_event_best_effort(EventFields {
         level: "info",
@@ -274,7 +276,7 @@ async fn main() -> Result<()> {
     }
 
     // Build system context
-    let claude_root = agent_team_mail_core::home::claude_root_dir_for(&home_dir);
+    let claude_root = agent_team_mail_core::home::config_claude_root_dir_for(&config_home);
 
     let system_ctx = agent_team_mail_core::context::SystemContext::new(
         hostname::get()
@@ -283,11 +285,12 @@ async fn main() -> Result<()> {
             .to_string(),
         agent_team_mail_core::context::Platform::detect(),
         claude_root.clone(),
+        home_dir.clone(),
         env!("CARGO_PKG_VERSION").to_string(),
         config.core.default_team.clone(),
     );
 
-    let teams_root = agent_team_mail_core::home::teams_root_dir_for(&home_dir);
+    let teams_root = agent_team_mail_core::home::config_teams_root_dir_for(&config_home);
 
     info!("Teams root: {}", teams_root.display());
 

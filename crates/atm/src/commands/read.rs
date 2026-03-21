@@ -2,6 +2,7 @@
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config, resolve_identity};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::home::{config_team_dir_for, get_os_home_dir};
 use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -10,7 +11,7 @@ use clap::{ArgAction, Args};
 use crate::util::addressing::parse_address;
 use crate::util::caller_identity::resolve_caller_session_id_optional;
 use crate::util::hook_identity::read_hook_file_identity;
-use crate::util::settings::{get_home_dir, teams_root_dir_for};
+use crate::util::settings::get_home_dir;
 use crate::util::state::{get_last_seen, load_seen_state, save_seen_state, update_last_seen};
 
 use super::wait::{WaitResult, wait_for_message};
@@ -88,7 +89,8 @@ pub struct ReadArgs {
 
 /// Execute the read command
 pub fn execute(args: ReadArgs) -> Result<()> {
-    let home_dir = get_home_dir()?;
+    let _runtime_home = get_home_dir()?;
+    let config_home = get_os_home_dir()?;
     let current_dir = std::env::current_dir()?;
 
     let overrides = ConfigOverrides {
@@ -96,7 +98,7 @@ pub fn execute(args: ReadArgs) -> Result<()> {
         ..Default::default()
     };
 
-    let mut config = resolve_config(&overrides, &current_dir, &home_dir)?;
+    let mut config = resolve_config(&overrides, &current_dir, &config_home)?;
 
     if let Some(ref name) = args.reader_as {
         config.core.identity = name.clone();
@@ -146,7 +148,7 @@ pub fn execute(args: ReadArgs) -> Result<()> {
             .ok()
             .flatten();
 
-    let team_dir = teams_root_dir_for(&home_dir).join(&team_name);
+    let team_dir = config_team_dir_for(&config_home, &team_name);
     if !team_dir.exists() {
         anyhow::bail!("Team '{team_name}' not found (directory {team_dir:?} doesn't exist)");
     }

@@ -6,14 +6,17 @@ use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
-/// Set ATM_HOME so all commands use the temp directory.
+/// Set separate config-root and runtime-root env vars on a command.
 ///
-/// Uses `ATM_HOME` (not `HOME` or `USERPROFILE`) for cross-platform compatibility.
-/// Also removes ATM_IDENTITY and sets a clean working directory.
+/// `HOME` provides the canonical config root (`~/.claude`), while `ATM_HOME`
+/// is runtime-only for daemon state.
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     let workdir = temp_dir.path().join("workdir");
+    let runtime_home = temp_dir.path().join("runtime-home");
     std::fs::create_dir_all(&workdir).ok();
-    cmd.env("ATM_HOME", temp_dir.path())
+    std::fs::create_dir_all(&runtime_home).ok();
+    cmd.env("ATM_HOME", &runtime_home)
+        .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
         .env_remove("ATM_IDENTITY")

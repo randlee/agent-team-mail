@@ -67,6 +67,14 @@ fn setup_team() -> (TempDir, PathBuf) {
     (temp_dir, team_dir)
 }
 
+fn set_split_home(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
+    let runtime_home = temp_dir.path().join("runtime-home");
+    fs::create_dir_all(&runtime_home).unwrap();
+    cmd.env("ATM_HOME", &runtime_home)
+        .envs([("HOME", temp_dir.path())])
+        .env("ATM_DAEMON_AUTOSTART", "0");
+}
+
 #[test]
 fn test_send_defaults_to_human_when_no_identity() {
     let (temp_dir, _team_dir) = setup_team();
@@ -74,9 +82,8 @@ fn test_send_defaults_to_human_when_no_identity() {
     // Send without ATM_IDENTITY or --from and without a hook file must be
     // rejected with a clear error message (new design: no silent fallback).
     let mut cmd = cargo::cargo_bin_cmd!("atm");
-    cmd.env("ATM_HOME", temp_dir.path())
-        .env("ATM_DAEMON_AUTOSTART", "0")
-        .env("ATM_TEAM", "test-team")
+    set_split_home(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
         .env_remove("ATM_IDENTITY") // Ensure no identity env var
         .current_dir(temp_dir.path().join("workdir")) // Avoid .atm.toml in repo root
         .arg("send")
@@ -94,9 +101,8 @@ fn test_send_with_atm_identity_env() {
 
     // Send with ATM_IDENTITY env var
     let mut cmd = cargo::cargo_bin_cmd!("atm");
-    cmd.env("ATM_HOME", temp_dir.path())
-        .env("ATM_DAEMON_AUTOSTART", "0")
-        .env("ATM_TEAM", "test-team")
+    set_split_home(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
         .env("ATM_IDENTITY", "alice")
         .arg("send")
         .arg("bob")
@@ -120,9 +126,8 @@ fn test_send_with_from_flag_overrides_env() {
 
     // Send with --from flag should override ATM_IDENTITY
     let mut cmd = cargo::cargo_bin_cmd!("atm");
-    cmd.env("ATM_HOME", temp_dir.path())
-        .env("ATM_DAEMON_AUTOSTART", "0")
-        .env("ATM_TEAM", "test-team")
+    set_split_home(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
         .env("ATM_IDENTITY", "alice")
         .arg("send")
         .arg("bob")
@@ -182,9 +187,8 @@ fn test_send_without_team_context_defaults_to_human() {
 
     // Send without ATM_IDENTITY or hook file must be rejected (new design: no silent fallback).
     let mut cmd = cargo::cargo_bin_cmd!("atm");
-    cmd.env("ATM_HOME", temp_dir.path())
-        .env("ATM_DAEMON_AUTOSTART", "0")
-        .env("ATM_TEAM", "external-team")
+    set_split_home(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "external-team")
         .env_remove("ATM_IDENTITY")
         .current_dir(temp_dir.path().join("workdir")) // Avoid .atm.toml in repo root
         .arg("send")
@@ -202,9 +206,8 @@ fn test_send_custom_identity_not_in_team() {
 
     // Send with custom identity via --from (not in team members)
     let mut cmd = cargo::cargo_bin_cmd!("atm");
-    cmd.env("ATM_HOME", temp_dir.path())
-        .env("ATM_DAEMON_AUTOSTART", "0")
-        .env("ATM_TEAM", "test-team")
+    set_split_home(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
         .env_remove("ATM_IDENTITY")
         .arg("send")
         .arg("alice")

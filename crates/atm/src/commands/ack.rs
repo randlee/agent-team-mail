@@ -1,5 +1,6 @@
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::home::{config_teams_root_dir_for, get_os_home_dir};
 use agent_team_mail_core::io::atomic::atomic_swap;
 use agent_team_mail_core::io::error::InboxError;
 use agent_team_mail_core::io::lock::acquire_lock;
@@ -17,7 +18,7 @@ use uuid::Uuid;
 use crate::commands::send::generate_summary;
 use crate::util::addressing::parse_address;
 use crate::util::hook_identity::read_hook_file_identity;
-use crate::util::settings::{get_home_dir, teams_root_dir_for};
+use crate::util::settings::get_home_dir;
 
 /// Acknowledge a single ATM task message and send a visible reply atomically.
 #[derive(Args, Debug)]
@@ -48,13 +49,14 @@ pub fn execute(args: AckArgs) -> Result<()> {
     validate_message_text(&args.reply, DEFAULT_MAX_MESSAGE_BYTES)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let home_dir = get_home_dir()?;
+    let _runtime_home = get_home_dir()?;
+    let config_home = get_os_home_dir()?;
     let current_dir = std::env::current_dir()?;
     let overrides = ConfigOverrides {
         team: args.team.clone(),
         ..Default::default()
     };
-    let mut config = resolve_config(&overrides, &current_dir, &home_dir)?;
+    let mut config = resolve_config(&overrides, &current_dir, &config_home)?;
 
     if let Some(ref name) = args.reader_as {
         config.core.identity = name.clone();
@@ -76,7 +78,7 @@ pub fn execute(args: AckArgs) -> Result<()> {
 
     let team_name = config.core.default_team.clone();
     let agent_name = config.core.identity.clone();
-    let teams_root = teams_root_dir_for(&home_dir);
+    let teams_root = config_teams_root_dir_for(&config_home);
     let team_dir = teams_root.join(&team_name);
     let source_states = load_source_inbox_states(&team_dir, &agent_name, &args.message_id)
         .with_context(|| format!("load merged inbox surface for {agent_name}@{team_name}"))?;

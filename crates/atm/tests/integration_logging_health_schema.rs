@@ -5,6 +5,12 @@ use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
 
+fn runtime_home(temp_dir: &TempDir) -> std::path::PathBuf {
+    let runtime_home = temp_dir.path().join("runtime-home");
+    fs::create_dir_all(&runtime_home).expect("create runtime home");
+    runtime_home
+}
+
 fn setup_team(home: &Path, team: &str) {
     let team_dir = home.join(".claude/teams").join(team);
     fs::create_dir_all(team_dir.join("inboxes")).expect("create team dirs");
@@ -125,11 +131,13 @@ fn assert_canonical_logging_health(logging_health: &Value) {
 #[test]
 fn status_json_includes_extended_logging_fields() {
     let temp_dir = TempDir::new().expect("temp dir");
+    let runtime_home = runtime_home(&temp_dir);
     setup_team(temp_dir.path(), "atm-dev");
-    setup_daemon_status(temp_dir.path());
+    setup_daemon_status(&runtime_home);
 
     let output = Command::new(cargo::cargo_bin!("atm"))
-        .env("ATM_HOME", temp_dir.path())
+        .env("ATM_HOME", &runtime_home)
+        .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("status")
         .arg("--team")
@@ -164,11 +172,13 @@ fn status_json_includes_extended_logging_fields() {
 #[test]
 fn doctor_json_includes_extended_logging_fields() {
     let temp_dir = TempDir::new().expect("temp dir");
+    let runtime_home = runtime_home(&temp_dir);
     setup_team(temp_dir.path(), "atm-dev");
-    setup_daemon_status(temp_dir.path());
+    setup_daemon_status(&runtime_home);
 
     let output = Command::new(cargo::cargo_bin!("atm"))
-        .env("ATM_HOME", temp_dir.path())
+        .env("ATM_HOME", &runtime_home)
+        .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("doctor")
         .arg("--team")
@@ -197,10 +207,12 @@ fn doctor_json_includes_extended_logging_fields() {
 #[test]
 fn daemon_status_json_includes_extended_logging_fields() {
     let temp_dir = TempDir::new().expect("temp dir");
-    setup_daemon_status(temp_dir.path());
+    let runtime_home = runtime_home(&temp_dir);
+    setup_daemon_status(&runtime_home);
 
     let output = Command::new(cargo::cargo_bin!("atm"))
-        .env("ATM_HOME", temp_dir.path())
+        .env("ATM_HOME", &runtime_home)
+        .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("daemon")
         .arg("status")
@@ -234,11 +246,13 @@ fn daemon_status_json_includes_extended_logging_fields() {
 #[test]
 fn doctor_and_status_logging_health_schema_parity() {
     let temp_dir = TempDir::new().expect("temp dir");
+    let runtime_home = runtime_home(&temp_dir);
     setup_team(temp_dir.path(), "atm-dev");
-    setup_daemon_status(temp_dir.path());
+    setup_daemon_status(&runtime_home);
 
     let status_output = Command::new(cargo::cargo_bin!("atm"))
-        .env("ATM_HOME", temp_dir.path())
+        .env("ATM_HOME", &runtime_home)
+        .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("status")
         .arg("--team")
@@ -251,7 +265,8 @@ fn doctor_and_status_logging_health_schema_parity() {
         serde_json::from_slice(&status_output.stdout).expect("status output JSON");
 
     let doctor_output = Command::new(cargo::cargo_bin!("atm"))
-        .env("ATM_HOME", temp_dir.path())
+        .env("ATM_HOME", &runtime_home)
+        .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("doctor")
         .arg("--team")
@@ -268,7 +283,8 @@ fn doctor_and_status_logging_health_schema_parity() {
         serde_json::from_slice(&doctor_output.stdout).expect("doctor output JSON");
 
     let daemon_output = Command::new(cargo::cargo_bin!("atm"))
-        .env("ATM_HOME", temp_dir.path())
+        .env("ATM_HOME", &runtime_home)
+        .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("daemon")
         .arg("status")

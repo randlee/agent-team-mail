@@ -185,9 +185,14 @@ fn daemon_pid_path(home: &Path) -> PathBuf {
 }
 
 #[cfg(unix)]
-fn read_daemon_pid(temp_dir: &TempDir) -> Option<u32> {
-    let raw = fs::read_to_string(daemon_pid_path(temp_dir.path())).ok()?;
+fn read_daemon_pid(home: &Path) -> Option<u32> {
+    let raw = fs::read_to_string(daemon_pid_path(home)).ok()?;
     raw.trim().parse::<u32>().ok()
+}
+
+#[cfg(unix)]
+fn runtime_home(temp: &TempDir) -> PathBuf {
+    temp.path().join("runtime-home")
 }
 
 #[cfg(unix)]
@@ -223,12 +228,14 @@ fn fake_member_states_json(agent: &str, process_id: u32) -> String {
 fn test_status_autostarts_daemon_when_absent() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
+    let runtime_home = runtime_home(&temp);
     let team = "team-a";
     write_team_config(home, team);
     let script = write_fake_daemon_script(home);
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     let output = cmd
-        .env("ATM_HOME", home)
+        .env("ATM_HOME", &runtime_home)
+        .envs([("HOME", home)])
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", &script)
         .arg("status")
@@ -243,12 +250,16 @@ fn test_status_autostarts_daemon_when_absent() {
         "status command should succeed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    wait_for_daemon_socket(home);
-    let daemon_pid = read_daemon_pid(&temp).expect("status autostart should write daemon pid");
-    let _daemon_guard =
-        daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(daemon_pid, &script, home);
+    wait_for_daemon_socket(&runtime_home);
+    let daemon_pid =
+        read_daemon_pid(&runtime_home).expect("status autostart should write daemon pid");
+    let _daemon_guard = daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(
+        daemon_pid,
+        &script,
+        &runtime_home,
+    );
     assert_eq!(
-        spawn_count(home),
+        spawn_count(&runtime_home),
         1,
         "daemon should auto-start exactly once when absent"
     );
@@ -259,21 +270,27 @@ fn test_status_autostarts_daemon_when_absent() {
 fn test_status_noops_when_daemon_already_healthy() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
+    let runtime_home = runtime_home(&temp);
     let team = "team-b";
     write_team_config(home, team);
     let script = write_fake_daemon_script(home);
-    let daemon = Command::new(&script).env("ATM_HOME", home).spawn().unwrap();
+    let daemon = Command::new(&script)
+        .env("ATM_HOME", &runtime_home)
+        .envs([("HOME", home)])
+        .spawn()
+        .unwrap();
     let _daemon_guard = daemon_process_guard::DaemonProcessGuard::from_child(
         daemon,
         std::path::Path::new(&script),
-        home,
+        &runtime_home,
     );
-    wait_for_daemon_socket(home);
-    assert_eq!(spawn_count(home), 1);
+    wait_for_daemon_socket(&runtime_home);
+    assert_eq!(spawn_count(&runtime_home), 1);
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     let output = cmd
-        .env("ATM_HOME", home)
+        .env("ATM_HOME", &runtime_home)
+        .envs([("HOME", home)])
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", &script)
         .arg("status")
@@ -289,7 +306,7 @@ fn test_status_noops_when_daemon_already_healthy() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        spawn_count(home),
+        spawn_count(&runtime_home),
         1,
         "healthy daemon should not be re-spawned"
     );
@@ -300,28 +317,35 @@ fn test_status_noops_when_daemon_already_healthy() {
 fn test_concurrent_multi_team_status_uses_single_daemon_instance() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
+    let runtime_home = runtime_home(&temp);
     let teams = ["team-c1", "team-c2", "team-c3", "team-c4", "team-c5"];
     for team in teams {
         write_team_config(home, team);
     }
     let script = write_fake_daemon_script(home);
-    let daemon = Command::new(&script).env("ATM_HOME", home).spawn().unwrap();
+    let daemon = Command::new(&script)
+        .env("ATM_HOME", &runtime_home)
+        .envs([("HOME", home)])
+        .spawn()
+        .unwrap();
     let _daemon_guard = daemon_process_guard::DaemonProcessGuard::from_child(
         daemon,
         std::path::Path::new(&script),
-        home,
+        &runtime_home,
     );
-    wait_for_daemon_socket(home);
-    assert_eq!(spawn_count(home), 1);
+    wait_for_daemon_socket(&runtime_home);
+    assert_eq!(spawn_count(&runtime_home), 1);
 
     let mut threads = Vec::new();
     for team in teams {
         let home = home.to_path_buf();
+        let runtime_home = runtime_home.clone();
         let script = script.clone();
         threads.push(std::thread::spawn(move || {
             let mut cmd = cargo::cargo_bin_cmd!("atm");
             let output = cmd
-                .env("ATM_HOME", &home)
+                .env("ATM_HOME", &runtime_home)
+                .envs([("HOME", &home)])
                 .env("ATM_TEAM", team)
                 .env("ATM_DAEMON_BIN", &script)
                 .env("ATM_DAEMON_AUTOSTART", "0")
@@ -343,7 +367,7 @@ fn test_concurrent_multi_team_status_uses_single_daemon_instance() {
     }
 
     assert_eq!(
-        spawn_count(home),
+        spawn_count(&runtime_home),
         1,
         "concurrent daemon-backed commands across teams must share one daemon"
     );
@@ -354,11 +378,13 @@ fn test_concurrent_multi_team_status_uses_single_daemon_instance() {
 fn test_status_reports_actionable_error_when_autostart_binary_missing() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
+    let runtime_home = runtime_home(&temp);
     let team = "team-missing-bin";
     write_team_config(home, team);
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     let output = cmd
-        .env("ATM_HOME", home)
+        .env("ATM_HOME", &runtime_home)
+        .envs([("HOME", home)])
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", "/definitely-missing-atm-daemon-binary")
         .arg("status")
@@ -384,12 +410,14 @@ fn test_status_reports_actionable_error_when_autostart_binary_missing() {
 fn test_daemon_kill_autostarts_daemon_when_absent() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
+    let runtime_home = runtime_home(&temp);
     let team = "team-kill";
     write_team_config(home, team);
     let script = write_fake_daemon_script(home);
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     let output = cmd
-        .env("ATM_HOME", home)
+        .env("ATM_HOME", &runtime_home)
+        .envs([("HOME", home)])
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", &script)
         .env("ATM_FAKE_SESSION_ALIVE", "false")
@@ -406,12 +434,19 @@ fn test_daemon_kill_autostarts_daemon_when_absent() {
         "daemon --kill should succeed with autostart: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    wait_for_daemon_socket(home);
+    wait_for_daemon_socket(&runtime_home);
     let daemon_pid =
-        read_daemon_pid(&temp).expect("daemon --kill autostart should write daemon pid");
-    let _daemon_guard =
-        daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(daemon_pid, &script, home);
-    assert_eq!(spawn_count(home), 1, "daemon should autostart for --kill");
+        read_daemon_pid(&runtime_home).expect("daemon --kill autostart should write daemon pid");
+    let _daemon_guard = daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(
+        daemon_pid,
+        &script,
+        &runtime_home,
+    );
+    assert_eq!(
+        spawn_count(&runtime_home),
+        1,
+        "daemon should autostart for --kill"
+    );
 }
 
 #[test]
@@ -419,12 +454,14 @@ fn test_daemon_kill_autostarts_daemon_when_absent() {
 fn test_cleanup_agent_autostarts_daemon_when_absent() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
+    let runtime_home = runtime_home(&temp);
     let team = "team-cleanup";
     write_team_config(home, team);
     let script = write_fake_daemon_script(home);
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     let output = cmd
-        .env("ATM_HOME", home)
+        .env("ATM_HOME", &runtime_home)
+        .envs([("HOME", home)])
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", &script)
         .arg("cleanup")
@@ -441,12 +478,19 @@ fn test_cleanup_agent_autostarts_daemon_when_absent() {
         "cleanup --agent should succeed with autostart: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    wait_for_daemon_socket(home);
+    wait_for_daemon_socket(&runtime_home);
     let daemon_pid =
-        read_daemon_pid(&temp).expect("cleanup --agent autostart should write daemon pid");
-    let _daemon_guard =
-        daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(daemon_pid, &script, home);
-    assert_eq!(spawn_count(home), 1, "daemon should autostart for cleanup");
+        read_daemon_pid(&runtime_home).expect("cleanup --agent autostart should write daemon pid");
+    let _daemon_guard = daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(
+        daemon_pid,
+        &script,
+        &runtime_home,
+    );
+    assert_eq!(
+        spawn_count(&runtime_home),
+        1,
+        "daemon should autostart for cleanup"
+    );
 }
 
 #[test]
@@ -454,13 +498,15 @@ fn test_cleanup_agent_autostarts_daemon_when_absent() {
 fn test_doctor_no_daemon_not_running_after_status_autostart() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
+    let runtime_home = runtime_home(&temp);
     let team = "team-doctor";
     write_team_config(home, team);
     let script = write_fake_daemon_script(home);
 
     let mut status_cmd = cargo::cargo_bin_cmd!("atm");
     status_cmd
-        .env("ATM_HOME", home)
+        .env("ATM_HOME", &runtime_home)
+        .envs([("HOME", home)])
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", &script)
         .env("ATM_FAKE_SESSION_ALIVE", "true")
@@ -470,20 +516,24 @@ fn test_doctor_no_daemon_not_running_after_status_autostart() {
         .arg("--json")
         .assert()
         .success();
-    wait_for_daemon_socket(home);
-    let daemon_pid =
-        read_daemon_pid(&temp).expect("status autostart should write daemon pid for doctor");
-    let _daemon_guard =
-        daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(daemon_pid, &script, home);
+    wait_for_daemon_socket(&runtime_home);
+    let daemon_pid = read_daemon_pid(&runtime_home)
+        .expect("status autostart should write daemon pid for doctor");
+    let _daemon_guard = daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(
+        daemon_pid,
+        &script,
+        &runtime_home,
+    );
     assert_eq!(
-        spawn_count(home),
+        spawn_count(&runtime_home),
         1,
         "status should auto-start exactly one daemon"
     );
 
     let mut doctor_cmd = cargo::cargo_bin_cmd!("atm");
     let output = doctor_cmd
-        .env("ATM_HOME", home)
+        .env("ATM_HOME", &runtime_home)
+        .envs([("HOME", home)])
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", &script)
         .env("ATM_FAKE_SESSION_ALIVE", "true")
@@ -516,11 +566,13 @@ fn test_doctor_no_daemon_not_running_after_status_autostart() {
 #[cfg(unix)]
 fn test_doctor_distinguishes_absent_daemon_from_pid_verification_failure() {
     let absent_home = TempDir::new().unwrap();
+    let absent_runtime_home = runtime_home(&absent_home);
     write_team_config(absent_home.path(), "team-absent");
 
     let mut absent_cmd = cargo::cargo_bin_cmd!("atm");
     let absent_output = absent_cmd
-        .env("ATM_HOME", absent_home.path())
+        .env("ATM_HOME", &absent_runtime_home)
+        .envs([("HOME", absent_home.path())])
         .env("ATM_TEAM", "team-absent")
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("doctor")
@@ -537,7 +589,8 @@ fn test_doctor_distinguishes_absent_daemon_from_pid_verification_failure() {
     );
     let mut absent_json_cmd = cargo::cargo_bin_cmd!("atm");
     let absent_json_output = absent_json_cmd
-        .env("ATM_HOME", absent_home.path())
+        .env("ATM_HOME", &absent_runtime_home)
+        .envs([("HOME", absent_home.path())])
         .env("ATM_TEAM", "team-absent")
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("doctor")
@@ -558,8 +611,9 @@ fn test_doctor_distinguishes_absent_daemon_from_pid_verification_failure() {
     assert!(!absent_codes.contains(&"DAEMON_PID_UNVERIFIABLE"));
 
     let stale_home = TempDir::new().unwrap();
+    let stale_runtime_home = runtime_home(&stale_home);
     write_team_config(stale_home.path(), "team-stale");
-    let daemon_dir = stale_home.path().join(".atm/daemon");
+    let daemon_dir = stale_runtime_home.join(".atm/daemon");
     fs::create_dir_all(&daemon_dir).unwrap();
     fs::write(
         daemon_dir.join("status.json"),
@@ -573,7 +627,8 @@ fn test_doctor_distinguishes_absent_daemon_from_pid_verification_failure() {
 
     let mut stale_cmd = cargo::cargo_bin_cmd!("atm");
     let stale_output = stale_cmd
-        .env("ATM_HOME", stale_home.path())
+        .env("ATM_HOME", &stale_runtime_home)
+        .envs([("HOME", stale_home.path())])
         .env("ATM_TEAM", "team-stale")
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("doctor")
@@ -589,7 +644,8 @@ fn test_doctor_distinguishes_absent_daemon_from_pid_verification_failure() {
     );
     let mut stale_json_cmd = cargo::cargo_bin_cmd!("atm");
     let stale_json_output = stale_json_cmd
-        .env("ATM_HOME", stale_home.path())
+        .env("ATM_HOME", &stale_runtime_home)
+        .envs([("HOME", stale_home.path())])
         .env("ATM_TEAM", "team-stale")
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("doctor")
@@ -614,13 +670,15 @@ fn test_doctor_distinguishes_absent_daemon_from_pid_verification_failure() {
 fn test_members_reports_status_session_and_pid_after_daemon_autostart() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
+    let runtime_home = runtime_home(&temp);
     let team = "team-members";
     write_team_config(home, team);
     let script = write_fake_daemon_script(home);
 
     let mut members_cmd = cargo::cargo_bin_cmd!("atm");
     let output = members_cmd
-        .env("ATM_HOME", home)
+        .env("ATM_HOME", &runtime_home)
+        .envs([("HOME", home)])
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", &script)
         .env(
@@ -638,10 +696,14 @@ fn test_members_reports_status_session_and_pid_after_daemon_autostart() {
         "members should succeed after daemon autostart: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    wait_for_daemon_socket(home);
-    let daemon_pid = read_daemon_pid(&temp).expect("members autostart should write daemon pid");
-    let _daemon_guard =
-        daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(daemon_pid, &script, home);
+    wait_for_daemon_socket(&runtime_home);
+    let daemon_pid =
+        read_daemon_pid(&runtime_home).expect("members autostart should write daemon pid");
+    let _daemon_guard = daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(
+        daemon_pid,
+        &script,
+        &runtime_home,
+    );
 
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let member = value["members"]
@@ -662,13 +724,15 @@ fn test_members_reports_status_session_and_pid_after_daemon_autostart() {
 fn test_status_autostart_recovers_after_stale_restart_cycle() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
+    let runtime_home = runtime_home(&temp);
     let team = "team-restart";
     write_team_config(home, team);
     let script = write_fake_daemon_script(home);
 
     let mut first_status = cargo::cargo_bin_cmd!("atm");
     first_status
-        .env("ATM_HOME", home)
+        .env("ATM_HOME", &runtime_home)
+        .envs([("HOME", home)])
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", &script)
         .arg("status")
@@ -677,8 +741,8 @@ fn test_status_autostart_recovers_after_stale_restart_cycle() {
         .arg("--json")
         .assert()
         .success();
-    wait_for_daemon_socket(home);
-    let first_pid = read_daemon_pid(&temp).expect("initial daemon pid");
+    wait_for_daemon_socket(&runtime_home);
+    let first_pid = read_daemon_pid(&runtime_home).expect("initial daemon pid");
     Command::new("kill")
         .args(["-9", &first_pid.to_string()])
         .status()
@@ -687,7 +751,8 @@ fn test_status_autostart_recovers_after_stale_restart_cycle() {
 
     let mut second_status = cargo::cargo_bin_cmd!("atm");
     second_status
-        .env("ATM_HOME", home)
+        .env("ATM_HOME", &runtime_home)
+        .envs([("HOME", home)])
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", &script)
         .arg("status")
@@ -696,14 +761,17 @@ fn test_status_autostart_recovers_after_stale_restart_cycle() {
         .arg("--json")
         .assert()
         .success();
-    wait_for_daemon_socket(home);
-    let second_pid = read_daemon_pid(&temp).expect("restarted daemon pid");
+    wait_for_daemon_socket(&runtime_home);
+    let second_pid = read_daemon_pid(&runtime_home).expect("restarted daemon pid");
     assert_ne!(
         second_pid, first_pid,
         "autostart should replace the stale daemon pid"
     );
-    let _daemon_guard =
-        daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(second_pid, &script, home);
+    let _daemon_guard = daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(
+        second_pid,
+        &script,
+        &runtime_home,
+    );
 }
 
 #[test]

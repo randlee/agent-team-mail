@@ -50,7 +50,7 @@ use agent_team_mail_core::{
     control::{CONTROL_SCHEMA_VERSION, ControlAck, ControlAction, ControlRequest, ControlResult},
     daemon_client::{AgentSummary, query_agent_stream_state, query_list_agents, send_control},
     event_log::{EventFields, emit_event_best_effort},
-    home::get_home_dir,
+    home::{get_home_dir, get_os_home_dir},
     logging,
 };
 
@@ -194,7 +194,7 @@ async fn run_app<B: ratatui::backend::Backend>(
     let mut last_daemon_refresh = Instant::now() - DAEMON_REFRESH; // trigger immediately
 
     // Resolve ATM home once for inbox reads.
-    let home: PathBuf = get_home_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let config_home: PathBuf = get_os_home_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let mut tick = interval(Duration::from_millis(100));
     let mut codex_adapter = CodexAdapter::new();
@@ -208,8 +208,8 @@ async fn run_app<B: ratatui::backend::Backend>(
             last_daemon_refresh = Instant::now();
 
             let agent_list = refresh_agent_list();
-            let configured_members = read_team_members(&home, &team);
-            let members = build_member_rows(&agent_list, &configured_members, &home, &team);
+            let configured_members = read_team_members(&config_home, &team);
+            let members = build_member_rows(&agent_list, &configured_members, &config_home, &team);
 
             // Detect if the currently streaming agent has changed identity.
             if let Some(ref name) = app.streaming_agent.clone()
@@ -230,11 +230,11 @@ async fn run_app<B: ratatui::backend::Backend>(
 
             app.inbox_preview = app
                 .selected_agent()
-                .map(|agent| read_inbox_preview(&home, &team, agent, 5))
+                .map(|agent| read_inbox_preview(&config_home, &team, agent, 5))
                 .unwrap_or_default();
             app.inbox_messages = app
                 .selected_agent()
-                .map(|agent| read_inbox_messages(&home, &team, agent, 100))
+                .map(|agent| read_inbox_messages(&config_home, &team, agent, 100))
                 .unwrap_or_default();
             if app.inbox_messages.is_empty() {
                 app.selected_message_index = 0;
@@ -405,7 +405,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                     from,
                     timestamp,
                 } => match mark_inbox_message_read(
-                    &home,
+                    &config_home,
                     &team,
                     &agent,
                     message_id.as_deref(),
@@ -413,7 +413,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                     &timestamp,
                 ) {
                     Ok(true) => {
-                        app.inbox_messages = read_inbox_messages(&home, &team, &agent, 100);
+                        app.inbox_messages = read_inbox_messages(&config_home, &team, &agent, 100);
                         if app.selected_message_index >= app.inbox_messages.len()
                             && !app.inbox_messages.is_empty()
                         {
@@ -461,7 +461,7 @@ fn refresh_agent_list() -> Vec<AgentSummary> {
 fn build_member_rows(
     daemon_agents: &[AgentSummary],
     configured_members: &[String],
-    home: &std::path::Path,
+    config_home: &std::path::Path,
     team: &str,
 ) -> Vec<MemberRow> {
     let mut states_by_agent: BTreeMap<String, String> = daemon_agents
@@ -479,7 +479,7 @@ fn build_member_rows(
     states_by_agent
         .into_iter()
         .map(|(agent, state)| MemberRow {
-            inbox_count: get_inbox_count(home, team, &agent),
+            inbox_count: get_inbox_count(config_home, team, &agent),
             agent,
             state,
         })
