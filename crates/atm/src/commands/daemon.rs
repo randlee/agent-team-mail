@@ -19,7 +19,8 @@ use crate::commands::logging_health::{
 };
 use crate::util::settings::get_home_dir;
 use agent_team_mail_core::daemon_client::{
-    create_isolated_runtime_root, daemon_status_path_for, reap_expired_isolated_runtime_roots,
+    create_isolated_runtime_root, daemon_lock_metadata_path_for, daemon_runtime_metadata_path_for,
+    daemon_status_path_for, read_daemon_lock_metadata, reap_expired_isolated_runtime_roots,
 };
 use std::path::{Path, PathBuf};
 
@@ -458,7 +459,7 @@ fn daemon_runtime_paths() -> Result<DaemonRuntimePaths> {
 
 #[cfg(unix)]
 fn read_daemon_pid(paths: &DaemonRuntimePaths) -> Result<i32> {
-    let pid: i32 = agent_team_mail_core::daemon_client::daemon_process_id_for(&paths.home_dir)
+    let pid: i32 = daemon_pid_from_runtime_artifacts(&paths.home_dir)
         .map(|pid| pid as i32)
         .ok_or_else(|| {
             anyhow::anyhow!("failed to determine daemon pid from status/lock metadata")
@@ -634,7 +635,25 @@ where
 
 #[cfg(unix)]
 fn cleanup_runtime_files(paths: &DaemonRuntimePaths) {
-    agent_team_mail_core::daemon_client::cleanup_daemon_runtime_artifacts(&paths.home_dir);
+    let _ = std::fs::remove_file(&paths.socket_path);
+    let _ = std::fs::remove_file(&paths.status_path);
+    let _ = std::fs::remove_file(&paths.metadata_path);
+    let _ = std::fs::remove_file(daemon_runtime_metadata_path_for(&paths.home_dir));
+    let _ = std::fs::remove_file(daemon_lock_metadata_path_for(&paths.home_dir));
+}
+
+#[cfg(unix)]
+fn daemon_pid_from_runtime_artifacts(home: &Path) -> Option<u32> {
+    read_daemon_lock_metadata(home)
+        .map(|metadata| metadata.pid)
+        .or_else(|| {
+            let status_path = daemon_status_path_for(home);
+            std::fs::read_to_string(status_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
+                .map(|pid| pid as u32)
+        })
 }
 
 #[cfg(unix)]
@@ -735,7 +754,7 @@ where
     FEnsure: Fn() -> Result<()>,
     FDaemonRunning: Fn() -> bool,
 {
-    if agent_team_mail_core::daemon_client::daemon_process_id_for(&runtime.home_dir).is_some() {
+    if daemon_pid_from_runtime_artifacts(&runtime.home_dir).is_some() {
         match stop_daemon_with(
             runtime,
             timeout_secs,
@@ -1399,7 +1418,7 @@ mod tests {
 
         assert_eq!(*signals.lock().unwrap(), vec![(4242, libc::SIGTERM)]);
         assert_eq!(
-            agent_team_mail_core::daemon_client::daemon_process_id_for(&runtime.home_dir),
+            daemon_pid_from_runtime_artifacts(&runtime.home_dir),
             Some(5252),
             "restart should leave the new daemon metadata in place"
         );

@@ -86,6 +86,20 @@ fn export_lifecycle_trace_from_entrypoint(
         });
 }
 
+fn cleanup_daemon_runtime_artifacts(home_dir: &std::path::Path) {
+    let runtime_dir = agent_team_mail_core::daemon_client::daemon_runtime_dir_for(home_dir);
+    let _ = std::fs::remove_file(runtime_dir.join("atm-daemon.sock"));
+    let _ = std::fs::remove_file(agent_team_mail_core::daemon_client::daemon_status_path_for(
+        home_dir,
+    ));
+    let _ = std::fs::remove_file(
+        agent_team_mail_core::daemon_client::daemon_lock_metadata_path_for(home_dir),
+    );
+    let _ = std::fs::remove_file(
+        agent_team_mail_core::daemon_client::daemon_runtime_metadata_path_for(home_dir),
+    );
+}
+
 /// ATM Daemon - Background service for agent team mail plugins
 #[derive(Parser, Debug)]
 #[command(name = "atm-daemon")]
@@ -467,7 +481,7 @@ async fn main() -> Result<()> {
         log_event_queue,
     )
     .await;
-    agent_team_mail_core::daemon_client::cleanup_daemon_runtime_artifacts(&home_dir);
+    cleanup_daemon_runtime_artifacts(&home_dir);
     if let Some(task) = lease_monitor_task {
         let _ = task.await;
     }

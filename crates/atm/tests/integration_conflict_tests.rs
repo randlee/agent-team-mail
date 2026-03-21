@@ -159,9 +159,18 @@ fn mirror_team_config_to_home(temp_dir: &TempDir, team_name: &str, home_root: &s
 
 #[cfg(unix)]
 fn read_daemon_pid(temp_dir: &TempDir) -> Option<u32> {
-    agent_team_mail_core::daemon_client::daemon_process_id_for(
-        &temp_dir.path().join("runtime-home"),
-    )
+    let runtime_home = temp_dir.path().join("runtime-home");
+    agent_team_mail_core::daemon_client::read_daemon_lock_metadata(&runtime_home)
+        .map(|metadata| metadata.pid)
+        .or_else(|| {
+            let status_path =
+                agent_team_mail_core::daemon_client::daemon_status_path_for(&runtime_home);
+            fs::read_to_string(status_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
+                .map(|pid| pid as u32)
+        })
 }
 
 #[cfg(unix)]

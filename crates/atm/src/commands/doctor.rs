@@ -913,7 +913,15 @@ fn daemon_health_failure(home_dir: &Path, socket_path: &Path) -> (&'static str, 
     let has_runtime_artifacts = socket_path.exists()
         || status_path.exists()
         || read_daemon_lock_metadata(home_dir).is_some();
-    let daemon_pid = agent_team_mail_core::daemon_client::daemon_process_id_for(home_dir);
+    let daemon_pid = read_daemon_lock_metadata(home_dir)
+        .map(|metadata| metadata.pid)
+        .or_else(|| {
+            fs::read_to_string(&status_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
+                .map(|pid| pid as u32)
+        });
 
     if daemon_pid.is_none() {
         if has_runtime_artifacts {

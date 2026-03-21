@@ -1474,7 +1474,11 @@ fn execute_init(
     repo_override: Option<&str>,
     json: bool,
 ) -> Result<()> {
-    let prereqs = fetch_gh_cli_prereqs(team)?;
+    let prereqs = if args.dry_run {
+        local_gh_cli_prereqs()
+    } else {
+        fetch_gh_cli_prereqs(team)?
+    };
 
     let detected = detect_github_remote(current_dir);
     let (owner, repo) = resolve_repo_coordinates(repo_override, detected.as_ref())?;
@@ -1609,6 +1613,24 @@ fn fetch_gh_cli_prereqs(team: &str) -> Result<GhCliPrereqStatus> {
         bail!("GitHub CLI is not authenticated. Run `gh auth login` first.");
     }
     Ok(status)
+}
+
+fn local_gh_cli_prereqs() -> GhCliPrereqStatus {
+    let gh_installed = Command::new("gh")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    let gh_authenticated = gh_installed
+        && Command::new("gh")
+            .args(["auth", "status"])
+            .output()
+            .is_ok_and(|output| output.status.success());
+
+    GhCliPrereqStatus {
+        gh_installed,
+        gh_authenticated,
+        error: None,
+    }
 }
 
 fn detect_github_remote(current_dir: &Path) -> Option<(String, String)> {
