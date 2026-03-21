@@ -2123,7 +2123,7 @@ dependency where `sc-observability` currently imports `LogEventV1` from `atm-cor
 
 **Prerequisites**: Phase BC complete (BC.2 removes sc-composer's atm-core dep)
 
-**Detail plan**: `docs/phase-bc-sc-observability-extraction.md` (BD.1 section)
+**Detail plan**: `docs/phase-bd-sc-compose-extraction.md`
 
 ### Sprint Map
 | Sprint | Focus | Branch | Status |
