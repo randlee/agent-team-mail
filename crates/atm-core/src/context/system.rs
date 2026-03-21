@@ -17,10 +17,6 @@ pub struct SystemContext {
     pub claude_root: PathBuf,
     /// Claude Code version string
     pub claude_version: String,
-    /// Schema version (from Sprint 1.2)
-    ///
-    /// TODO: Replace Option with actual SchemaVersion when Sprint 1.2 completes
-    pub schema_version: Option<()>,
     /// Repository context (if running in a git repository)
     pub repo: Option<RepoContext>,
     /// Default team name
@@ -44,7 +40,6 @@ impl SystemContext {
             platform,
             claude_root,
             claude_version,
-            schema_version: None, // TODO: Populate when Sprint 1.2 completes
             repo: None,
             default_team,
         }
@@ -53,12 +48,6 @@ impl SystemContext {
     /// Set the repository context
     pub fn with_repo(mut self, repo: RepoContext) -> Self {
         self.repo = Some(repo);
-        self
-    }
-
-    /// Set the schema version (placeholder for Sprint 1.2)
-    pub fn with_schema_version(mut self, _version: ()) -> Self {
-        self.schema_version = Some(());
         self
     }
 }
@@ -83,7 +72,6 @@ mod tests {
         assert_eq!(ctx.claude_version, "2.1.39");
         assert_eq!(ctx.default_team, "default-team");
         assert!(ctx.repo.is_none());
-        assert!(ctx.schema_version.is_none());
     }
 
     #[test]

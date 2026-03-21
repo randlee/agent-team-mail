@@ -1,9 +1,6 @@
 //! Shared logging initialization for ATM binaries.
 //!
-//! This module provides two logging initialization paths:
-//!
-//! - [`init`] — legacy human-readable stderr (deprecated; preserved for backwards compat).
-//! - [`init_unified`] — unified fan-in logging for the daemon-centric architecture.
+//! This module provides unified logging initialization paths for ATM binaries.
 //!
 //! # Unified Architecture
 //!
@@ -44,20 +41,6 @@ fn parse_level() -> tracing::Level {
         "error" => tracing::Level::ERROR,
         _ => tracing::Level::INFO,
     }
-}
-
-/// Initialize process-level tracing output from `ATM_LOG`.
-///
-/// This is safe to call multiple times; only the first call initializes the
-/// subscriber. It is intentionally best-effort and never returns an error.
-///
-/// # Deprecation
-///
-/// Prefer [`init_unified`] for new binaries. This function is preserved for
-/// backwards compatibility and is used as the `StderrOnly` fallback path.
-#[deprecated(since = "0.17.0", note = "Use init_unified() instead")]
-pub fn init() {
-    _init_stderr();
 }
 
 /// Internal (non-deprecated) stderr init used as fallback.
