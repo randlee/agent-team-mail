@@ -20,10 +20,17 @@ This primary requirements document registers secondary source-of-truth documents
 - CI monitoring architecture: `docs/ci-monitoring/architecture.md`
 - CI monitoring ADR index: `docs/ci-monitoring/adr.md`
 - Daemon spawn authorization requirements: `docs/daemon-spawn-auth/requirements.md`
+- Daemon reset requirements: `docs/daemon/requirements.md`
+- Daemon reset architecture: `docs/daemon/architecture.md`
 
 All logging/OpenTelemetry requirements for ATM and companion tools are defined
 in the observability documents above. This file references that contract and
 must not duplicate or drift from it.
+
+Active daemon simplification and multi-daemon removal requirements are defined
+in `docs/daemon/requirements.md` and `docs/daemon/architecture.md`. Those
+documents supersede older multi-daemon assumptions in this primary document
+until the daemon sections here are fully consolidated.
 
 ---
 

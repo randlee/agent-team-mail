@@ -187,6 +187,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AV | OTel Collector Logs Rollout | Ship OTLP HTTP logs export, dogfood it against a Grafana-compatible receiver, and preserve fail-open local logging | COMPLETE |
 | AW | OTel Traces + Metrics Expansion | Add native traces and metrics, Grafana dashboards/smoke, and external repo rollout on top of AV | PLANNED |
 | BA | CLI Message Management + Plugin Boundary | Fix inbox lifecycle noise, add atomic queue/ack semantics, and remove current `atm -> daemon plugin` command coupling | PLANNED |
+| BB | Daemon Reset | Remove multi-daemon support, separate config root from runtime root, collapse daemon artifacts, and rewrite daemon testing around a single-daemon model | PLANNED |
 
 ---
 
@@ -2685,6 +2686,34 @@ You are the Scrum Master for the agent-team-mail (atm) project.
 - Project Plan: docs/project-plan.md
 - Agent Team API: docs/agent-team-api.md
 - Rust Guidelines: .claude/skills/rust-development/guidelines.txt
+
+---
+
+## Phase BB: Daemon Reset — PLANNED
+
+**Goal**: remove multi-daemon support, separate config root from runtime root,
+collapse daemon runtime artifacts to a minimal authoritative set, and replace
+the current daemon test model with a simpler single-daemon strategy.
+
+**Design references**:
+- `docs/daemon/requirements.md`
+- `docs/daemon/architecture.md`
+- `docs/phase-bb-daemon-reset.md`
+
+| Sprint | Name | Goal | Branch |
+|--------|------|------|--------|
+| BB.1 | Path Separation | Stop resolving team config from `ATM_HOME`; introduce explicit config-root vs runtime-root APIs and migrate callers | `feature/pBB-s1-path-separation` |
+| BB.2 | Single-Daemon Model Collapse | Remove multi-daemon ownership/runtime-mode support and simplify daemon admission/ownership to one system daemon model | `feature/pBB-s2-single-daemon` |
+| BB.3 | Artifact Collapse + Transactional Startup | Remove redundant daemon artifacts, make startup publish state only after readiness, and make restart/cleanup symmetric | `feature/pBB-s3-artifact-collapse` |
+| BB.4 | Test Model Rewrite + Final Deletion | Rewrite daemon tests for serialized/shared-fixture execution and delete obsolete multi-daemon code/docs/env paths | `feature/pBB-s4-test-rewrite-cleanup` |
+
+**Acceptance criteria**:
+1. Team config no longer resolves from `ATM_HOME`.
+2. Multi-daemon support is removed from active daemon requirements and implementation.
+3. Daemon startup failure leaves no misleading live-daemon state behind.
+4. Stop/restart removes all daemon-owned runtime artifacts deterministically.
+5. Dogfood daemon start/restart/stop passes repeatedly under the simplified model.
+6. Net phase outcome is deletion-heavy: daemon complexity and documentation are materially smaller than before Phase BB.
 
 ## Communication
 
