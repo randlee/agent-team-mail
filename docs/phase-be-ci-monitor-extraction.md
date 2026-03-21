@@ -5,7 +5,7 @@
 **Status**: PLANNED
 **Integration branch**: `integrate/phase-BE`
 **Prerequisites**: `develop` at Phase BB completion or later
-**Dependency graph**: `BE.1 -> BE.2 -> BE.3 -> BE.4` (serial, BE.2 + BE.3 parallelizable)
+**Dependency graph**: `BE.1 -> BE.2 -> BE.3 -> BE.4` (fully serial)
 **Planning worktree**: `planning/sc-observability-extraction`
 
 ## Goal
@@ -225,6 +225,13 @@ monitoring types and traits.
 ---
 
 ## Sprint BE.3 — Plugin Command Extension Protocol
+
+**Prerequisites**: BE.2 complete. Additionally, Phase BC must be merged to
+`develop` before BE.3 begins. Both BE.3 and BC.1 modify `atm-core` (BE.3
+adds `DaemonRequest::ListPluginCommands` to `atm-core/src/schema/`; BC.1
+migrates `LogEventV1`/`OtelHealthSnapshot` out of `atm-core`). Executing
+them concurrently on separate branches will produce merge conflicts. Enforce
+sequencing: BC merged to `develop` → then BE.3 can start.
 
 **Goal**: Define and implement a plugin command registration protocol so that
 the atm CLI can discover and proxy commands advertised by loaded plugins. The

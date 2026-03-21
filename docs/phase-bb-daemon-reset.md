@@ -163,6 +163,14 @@ Primary deletion candidates:
   completed), and `github.rs` imports directly from
   `plugins::ci_monitor::run_attributed_gh_command_with_ids` — will not compile
   after ci_monitor is removed in Phase BE. Delete rather than carry forward.
+- `crates/atm-daemon/src/main.rs:321-327`: `IssuesPlugin::new()` registration
+  block — must be deleted alongside the module or the crate will not compile:
+  ```rust
+  if let Some(issues_config) = plugin_ctx.plugin_config("issues")
+      && issues_config
+      ...
+      registry.register(agent_team_mail_daemon::plugins::issues::IssuesPlugin::new())
+  ```
 - Documentation references to the issues plugin:
   - `docs/requirements.md` lines ~2812 (`GhIssuesPlugin` factory example) and
     ~2843 (`[plugins.issues]` config block) — remove or replace with a note
