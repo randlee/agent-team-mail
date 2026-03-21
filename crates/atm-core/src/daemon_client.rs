@@ -637,6 +637,8 @@ fn evaluate_runtime_owner_metadata(input: &RuntimePolicyInput) -> RuntimeOwnerMe
 
 /// Used only for test isolation boundary checks. Not part of the production
 /// shared-daemon admission path after BB.2.
+/// The DevShared variant was removed in BB.2; only Shared (production) and
+/// Isolated (test-only) remain.
 fn classify_runtime_kind_from_home_scope(home_scope: &Path) -> RuntimeKind {
     let canonical_temp_root = canonicalize_lossy(&std::env::temp_dir());
     let is_isolated = read_runtime_metadata(home_scope)
@@ -720,6 +722,9 @@ pub fn validate_runtime_admission(
     validate_runtime_admission_input(&input)
 }
 
+/// Validates that the current process may start or connect to the daemon under
+/// the BB.2 single-daemon invariant. See `enforce_shared_runtime_invariant()`
+/// for the canonical runtime-root and binary-selection policy.
 pub fn validate_runtime_admission_for_current_process(
     home: &Path,
 ) -> anyhow::Result<RuntimeOwnerMetadata> {

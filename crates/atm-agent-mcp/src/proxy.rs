@@ -4826,15 +4826,7 @@ mod tests {
     #[serial_test::serial]
     async fn synthetic_tool_prefers_thread_bound_identity_over_args_identity() {
         let dir = tempfile::tempdir().unwrap();
-        let atm_home = dir
-            .path()
-            .join("runtime-home")
-            .to_string_lossy()
-            .to_string();
         set_test_home_env(dir.path());
-        unsafe {
-            std::env::set_var("ATM_HOME", &atm_home);
-        }
 
         let config = crate::config::AgentMcpConfig {
             identity: Some("config-identity".to_string()),

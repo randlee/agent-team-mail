@@ -432,9 +432,8 @@ mod tests {
     fn set_atm_home(dir: &TempDir) {
         unsafe {
             std::env::set_var("HOME", dir.path());
-            std::env::set_var("ATM_HOME", dir.path().join("runtime-home"));
             std::env::set_var("USERPROFILE", dir.path());
-            std::env::set_var("ATM_HOME", dir.path().join("runtime-home"));
+            std::env::set_var("ATM_HOME", dir.path());
         };
     }
 
