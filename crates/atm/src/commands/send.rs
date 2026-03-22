@@ -1091,20 +1091,6 @@ mod tests {
         std::env::temp_dir().join(format!("atm-hook-{ppid}.json"))
     }
 
-    fn set_home_envs(path: &std::path::Path) {
-        unsafe {
-            std::env::set_var("HOME", path);
-            std::env::set_var("USERPROFILE", path);
-        }
-    }
-
-    fn clear_home_envs() {
-        unsafe {
-            std::env::remove_var("HOME");
-            std::env::remove_var("USERPROFILE");
-        }
-    }
-
     fn write_fresh_hook_file(session_id: &str) {
         let ppid = crate::util::hook_identity::get_parent_pid();
         let now = SystemTime::now()
@@ -1161,7 +1147,6 @@ mod tests {
         write_session_file(temp.path(), "atm-dev", "team-lead", "sid-from-session");
 
         unsafe {
-            set_home_envs(temp.path());
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::set_var("ATM_RUNTIME", "claude");
@@ -1174,7 +1159,6 @@ mod tests {
             resolve_sender_session_id_with_context(Some("atm-dev"), Some("team-lead")).unwrap();
 
         unsafe {
-            clear_home_envs();
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("ATM_RUNTIME");
@@ -1197,7 +1181,6 @@ mod tests {
         write_session_file(temp.path(), "atm-dev", "team-lead", "sid-from-session");
 
         unsafe {
-            set_home_envs(temp.path());
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::set_var("ATM_RUNTIME", "claude");
@@ -1209,7 +1192,6 @@ mod tests {
             resolve_sender_session_id_with_context(Some("atm-dev"), Some("team-lead")).unwrap();
 
         unsafe {
-            clear_home_envs();
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("ATM_RUNTIME");
@@ -1230,7 +1212,6 @@ mod tests {
         write_session_file(temp.path(), "atm-dev", "team-lead", "sid-from-session");
 
         unsafe {
-            set_home_envs(temp.path());
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::set_var("ATM_RUNTIME", "claude");
@@ -1242,7 +1223,6 @@ mod tests {
             resolve_sender_session_id_with_context(Some("atm-dev"), Some("team-lead")).unwrap();
 
         unsafe {
-            clear_home_envs();
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("ATM_RUNTIME");
@@ -1261,7 +1241,6 @@ mod tests {
         let _ = std::fs::remove_file(&hook_path);
 
         unsafe {
-            set_home_envs(temp.path());
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::set_var("ATM_RUNTIME", "claude");
@@ -1273,7 +1252,6 @@ mod tests {
             resolve_sender_session_id_with_context(Some("atm-dev"), Some("team-lead")).unwrap();
 
         unsafe {
-            clear_home_envs();
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("ATM_RUNTIME");
@@ -1295,7 +1273,6 @@ mod tests {
         write_session_file(temp.path(), "atm-dev", "team-lead", "sid-b");
 
         unsafe {
-            set_home_envs(temp.path());
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::set_var("ATM_RUNTIME", "claude");
@@ -1307,7 +1284,6 @@ mod tests {
             .expect_err("ambiguous session files should error");
 
         unsafe {
-            clear_home_envs();
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("ATM_RUNTIME");

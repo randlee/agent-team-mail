@@ -6,7 +6,7 @@ use agent_team_mail_core::daemon_client::{
     query_list_agents, query_session_for_team, query_team_member_states, register_hint,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
-use agent_team_mail_core::home::{config_team_dir_for, config_teams_root_dir_for, get_os_home_dir};
+use agent_team_mail_core::home::{config_team_dir_for, config_teams_root_dir_for};
 use agent_team_mail_core::io::inbox::inbox_update;
 use agent_team_mail_core::model_registry::ModelId;
 use agent_team_mail_core::schema::{BackendType, TeamConfig};
@@ -395,7 +395,7 @@ pub fn execute(args: TeamsArgs) -> Result<()> {
         };
     }
 
-    let config_home = get_os_home_dir()?;
+    let config_home = get_home_dir()?;
     let teams_dir = config_teams_root_dir_for(&config_home);
 
     // Check if teams directory exists
@@ -892,7 +892,7 @@ fn ensure_spawn_member_metadata(
     model_override: Option<&str>,
     launch_dir: &Path,
 ) -> Result<()> {
-    let config_home = get_os_home_dir()?;
+    let config_home = get_home_dir()?;
     let team_dir = config_team_dir_for(&config_home, team);
     let config_path = team_dir.join("config.json");
     if !config_path.exists() {
@@ -1382,7 +1382,7 @@ fn resolve_caller_team_context(home_dir: &Path, current_dir: &Path) -> Result<Op
 }
 
 fn join_member(args: JoinArgs) -> Result<()> {
-    let config_home = get_os_home_dir()?;
+    let config_home = get_home_dir()?;
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let caller_team = resolve_caller_team_context(&config_home, &current_dir)?;
 
@@ -1520,7 +1520,7 @@ fn effective_add_member_agent_type(agent_type: &str, backend_type: Option<&Backe
 }
 
 fn add_member_internal(args: AddMemberArgs) -> Result<AddMemberOutcome> {
-    let config_home = get_os_home_dir()?;
+    let config_home = get_home_dir()?;
     let team_dir = config_team_dir_for(&config_home, &args.team);
     if !team_dir.exists() {
         anyhow::bail!(
@@ -1813,7 +1813,7 @@ fn sync_member_session_hint(
 /// corresponding flag is `Some` are modified; omitted flags leave the current
 /// value unchanged.
 fn update_member(args: UpdateMemberArgs) -> Result<()> {
-    let config_home = get_os_home_dir()?;
+    let config_home = get_home_dir()?;
     let team_dir = config_team_dir_for(&config_home, &args.team);
     let config_path = team_dir.join("config.json");
 
@@ -1930,7 +1930,7 @@ fn update_member(args: UpdateMemberArgs) -> Result<()> {
 }
 
 fn remove_member(args: RemoveMemberArgs) -> Result<()> {
-    let config_home = get_os_home_dir()?;
+    let config_home = get_home_dir()?;
     let team_dir = config_team_dir_for(&config_home, &args.team);
     let config_path = team_dir.join("config.json");
 
@@ -2059,7 +2059,7 @@ fn remove_member(args: RemoveMemberArgs) -> Result<()> {
 /// - For inactive/no session: creates a flat backup snapshot and removes the
 ///   active team directory, prompting the caller to re-establish via TeamCreate.
 fn resume(args: ResumeArgs) -> Result<()> {
-    let config_home = get_os_home_dir()?;
+    let config_home = get_home_dir()?;
     let team_dir = config_team_dir_for(&config_home, &args.team);
 
     // Check team exists
@@ -2337,7 +2337,7 @@ fn external_agent_missing_state_is_stale(
 /// (or for which no daemon session record exists), deletes their inbox files,
 /// and writes the updated `config.json`.
 fn cleanup(args: CleanupArgs) -> Result<()> {
-    let config_home = agent_team_mail_core::home::get_os_home_dir()?;
+    let config_home = agent_team_mail_core::home::get_home_dir()?;
     let team_dir = agent_team_mail_core::home::config_team_dir_for(&config_home, &args.team);
     let config_path = team_dir.join("config.json");
 
@@ -2975,7 +2975,7 @@ fn do_backup(home_dir: &Path, team: &str, project: Option<&str>, json: bool) -> 
 /// and the tasks directory under `~/.claude/teams/.backups/<team>/<timestamp>/`.
 /// Automatically prunes old backups keeping only the last 5.
 fn backup(args: BackupArgs) -> Result<()> {
-    let home_dir = get_os_home_dir()?;
+    let home_dir = get_home_dir()?;
     do_backup(&home_dir, &args.team, args.project.as_deref(), args.json)?;
     prune_old_backups(&home_dir, &args.team, BACKUP_RETENTION_COUNT)?;
     Ok(())
@@ -3015,7 +3015,7 @@ fn prune_old_backups(home_dir: &Path, team: &str, keep: usize) -> Result<()> {
 /// Restores non-team-lead members and their inbox files from a backup snapshot.
 /// The current `leadSessionId` is never overwritten.
 fn restore(args: RestoreArgs) -> Result<()> {
-    let home_dir = get_os_home_dir()?;
+    let home_dir = get_home_dir()?;
     let team_dir = config_team_dir_for(&home_dir, &args.team);
     let config_path = team_dir.join("config.json");
 
@@ -3321,27 +3321,14 @@ mod tests {
         (std::env::var_os("HOME"), std::env::var_os("USERPROFILE"))
     }
 
-    fn set_home_envs(value: &Path) {
-        // SAFETY: test-only env mutation; callers use #[serial].
-        unsafe {
-            std::env::set_var("HOME", value);
-            std::env::set_var("USERPROFILE", value);
-        }
+    fn set_home_envs(_value: &Path) {
+        // Windows ignores HOME/USERPROFILE for dirs::home_dir(); ATM tests isolate
+        // through ATM_HOME instead. Keep this helper as a no-op so older fixtures
+        // still compile while the branch converges on ATM_HOME-only isolation.
     }
 
-    fn restore_home_envs(original: (Option<OsString>, Option<OsString>)) {
-        let (home, userprofile) = original;
-        // SAFETY: test-only env mutation; callers use #[serial].
-        unsafe {
-            match home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-            match userprofile {
-                Some(v) => std::env::set_var("USERPROFILE", v),
-                None => std::env::remove_var("USERPROFILE"),
-            }
-        }
+    fn restore_home_envs(_original: (Option<OsString>, Option<OsString>)) {
+        // See set_home_envs(): ATM_HOME owns test isolation for these fixtures.
     }
 
     fn create_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {

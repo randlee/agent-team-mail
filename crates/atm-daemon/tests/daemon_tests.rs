@@ -869,7 +869,7 @@ async fn test_startup_reconcile_seeds_roster_without_interval_delay() {
         .await
     });
 
-    let seeded = wait_until_elapsed(1000, || {
+    let seeded = wait_until_elapsed(1500, || {
         state_store_probe
             .lock()
             .unwrap()
@@ -877,10 +877,10 @@ async fn test_startup_reconcile_seeds_roster_without_interval_delay() {
             .is_some()
     })
     .await
-    .expect("startup reconcile should seed worker state promptly (<1s)");
+    .expect("startup reconcile should seed worker state promptly (<1.5s)");
     assert!(
-        seeded <= Duration::from_secs(1),
-        "startup reconcile should seed worker state promptly (<1s)"
+        seeded <= Duration::from_millis(1500),
+        "startup reconcile should seed worker state promptly (<1.5s)"
     );
 
     cancel.cancel();

@@ -6,16 +6,14 @@ use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
-/// Set separate config-root and runtime-root env vars on a command.
+/// Set home env vars on a command for backup/restore integration tests.
 ///
-/// `HOME` provides the canonical config root (`~/.claude`), while `ATM_HOME`
-/// is runtime-only for daemon state.
+/// These flows now resolve through `get_home_dir()`, so tests must drive the
+/// effective home via `ATM_HOME` for consistent cross-platform behavior.
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     let workdir = temp_dir.path().join("workdir");
-    let runtime_home = temp_dir.path().join("runtime-home");
     std::fs::create_dir_all(&workdir).ok();
-    std::fs::create_dir_all(&runtime_home).ok();
-    cmd.env("ATM_HOME", &runtime_home)
+    cmd.env("ATM_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")

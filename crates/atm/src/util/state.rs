@@ -56,7 +56,7 @@ pub fn update_last_seen(state: &mut SeenState, team: &str, agent: &str, timestam
 }
 
 pub fn state_path() -> Result<PathBuf> {
-    let config_home = agent_team_mail_core::home::get_os_home_dir()?;
+    let config_home = agent_team_mail_core::home::get_home_dir()?;
     Ok(config_home.join(".config/atm/state.json"))
 }
 
