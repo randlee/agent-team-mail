@@ -1,5 +1,7 @@
 use agent_team_mail_daemon_launch::{attach_launch_token, issue_isolated_test_launch_token};
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -172,16 +174,12 @@ impl DaemonProcessGuard {
                 .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
                 .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
                 .map(|pid| pid as u32);
-            if status_pid == Some(self.pid) {
-                return;
-            }
-            if let Ok(content) = fs::read_to_string(&pid_path)
-                && let Ok(pid) = content.trim().parse::<u32>()
-                && pid == self.pid
-            {
-                return;
-            }
-            if socket_path.exists() {
+            let pid_from_file = fs::read_to_string(&pid_path)
+                .ok()
+                .and_then(|content| content.trim().parse::<u32>().ok())
+                == Some(self.pid);
+            let pid_matches = status_pid == Some(self.pid) || pid_from_file;
+            if pid_matches && daemon_socket_ready(&socket_path) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(25));
@@ -192,6 +190,21 @@ impl DaemonProcessGuard {
             pid_path.display()
         );
     }
+}
+
+#[cfg(unix)]
+fn daemon_socket_ready(socket_path: &Path) -> bool {
+    if !socket_path.exists() {
+        return false;
+    }
+    UnixStream::connect(socket_path).is_ok()
+}
+
+#[cfg(not(unix))]
+fn daemon_socket_ready(_socket_path: &Path) -> bool {
+    // Windows daemons use named pipes, not Unix socket files.
+    // Readiness is determined by pid_matches alone on non-unix platforms.
+    true
 }
 
 impl Drop for DaemonProcessGuard {

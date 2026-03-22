@@ -1,12 +1,5 @@
 //! `atm doctor` — daemon/team health diagnostics.
 
-use agent_team_mail_ci_monitor::{
-    GhCliObserverContext, RateLimitUpdate, emit_gh_info_denied, emit_gh_info_live_refresh,
-    emit_gh_info_requested, emit_gh_info_served_from_cache, gh_repo_state_cache_age_secs,
-    new_gh_execution_call_id, new_gh_info_request_id, read_gh_repo_state,
-    update_gh_repo_state_rate_limit,
-};
-use agent_team_mail_daemon::plugins::ci_monitor::run_attributed_gh_command_with_ids;
 use anyhow::{Context, Result};
 use clap::Args;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -17,10 +10,11 @@ use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
     AgentSummary, CanonicalMemberState, DaemonTouchSnapshot, SessionQueryResult, daemon_is_running,
     daemon_lock_path, daemon_pid_path, daemon_socket_path, daemon_status_path_for,
-    daemon_touch_path_for, query_list_agents, query_list_agents_for_team, query_session_for_team,
-    query_team_member_states, read_daemon_lock_metadata,
+    daemon_touch_path_for, gh_rate_limit_audit, query_list_agents, query_list_agents_for_team,
+    query_session_for_team, query_team_member_states, read_daemon_lock_metadata,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::gh_command::{GhRateLimitAudit, GhRateLimitAuditRequest};
 use agent_team_mail_core::log_reader::{LogFilter, LogReader};
 use agent_team_mail_core::pid::is_pid_alive;
 use agent_team_mail_core::schema::TeamConfig;
@@ -164,39 +158,6 @@ struct MemberSnapshot {
 struct DoctorState {
     // RFC3339 timestamp of last doctor invocation per team.
     last_call_by_team: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct GhRateLimitAudit {
-    live_remaining: u64,
-    live_limit: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    live_reset_at: Option<String>,
-    cached_used_in_window: u64,
-    repos_observed: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cached_rate_limit_remaining: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cached_rate_limit_limit: Option<u64>,
-    delta_consumed_vs_cached: i64,
-}
-
-#[derive(Debug, Deserialize)]
-struct GhRateLimitResponse {
-    resources: GhRateLimitResources,
-}
-
-#[derive(Debug, Deserialize)]
-struct GhRateLimitResources {
-    core: GhCoreRateLimit,
-}
-
-#[derive(Debug, Deserialize)]
-struct GhCoreRateLimit {
-    limit: u64,
-    remaining: u64,
-    #[serde(default)]
-    reset: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -412,119 +373,11 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
 }
 
 fn build_gh_rate_limit_audit(home_dir: &Path, team: &str) -> Result<Option<GhRateLimitAudit>> {
-    let state = read_gh_repo_state(home_dir)?;
-    let team_records: Vec<_> = state
-        .records
-        .into_iter()
-        .filter(|record| record.team == team)
-        .collect();
-    if team_records.is_empty() {
-        return Ok(None);
-    }
-
-    let repo_scope = &team_records[0].repo;
-    if !repo_scope.contains('/') {
-        anyhow::bail!("invalid owner/repo scope in gh repo-state: {repo_scope}");
-    }
-    let observer_ctx = GhCliObserverContext::new(
-        home_dir.to_path_buf(),
-        team.to_string(),
-        repo_scope.to_string(),
-        "atm".to_string(),
-    );
-    let request_id = new_gh_info_request_id();
-    let call_id = new_gh_execution_call_id();
-    emit_gh_info_requested(&observer_ctx, &request_id, "gh_api_rate_limit", None, None);
-    if let Some(cached_rate_limit) = team_records
-        .iter()
-        .filter_map(|record| record.rate_limit.as_ref().map(|_| record))
-        .max_by_key(|record| record.updated_at.clone())
-    {
-        emit_gh_info_served_from_cache(
-            &observer_ctx,
-            &request_id,
-            "gh_api_rate_limit",
-            gh_repo_state_cache_age_secs(cached_rate_limit),
-            None,
-            None,
-        );
-    }
-    let output = match run_attributed_gh_command_with_ids(
-        &observer_ctx,
-        "gh_api_rate_limit",
-        &["api", "rate_limit"],
-        None,
-        None,
-        request_id.clone(),
-        call_id.clone(),
-    ) {
-        Ok(output) => {
-            emit_gh_info_live_refresh(
-                &observer_ctx,
-                &request_id,
-                "gh_api_rate_limit",
-                &call_id,
-                None,
-                None,
-            );
-            output
-        }
-        Err(err) => {
-            emit_gh_info_denied(
-                &observer_ctx,
-                &request_id,
-                "gh_api_rate_limit",
-                &err.to_string(),
-                None,
-                None,
-            );
-            return Err(err).context("gh api rate_limit failed via attributed provider path");
-        }
-    };
-
-    let live: GhRateLimitResponse =
-        serde_json::from_str(&output).context("failed to parse gh api rate_limit response")?;
-    let live_reset_at = live
-        .resources
-        .core
-        .reset
-        .and_then(|epoch| DateTime::<Utc>::from_timestamp(epoch, 0))
-        .map(|ts| ts.to_rfc3339());
-    let _ = update_gh_repo_state_rate_limit(
-        home_dir,
-        team,
-        repo_scope,
-        RateLimitUpdate {
-            runtime: "atm".to_string(),
-            remaining: live.resources.core.remaining,
-            limit: live.resources.core.limit,
-            reset_at: live_reset_at.clone(),
-            source: "atm_doctor",
-        },
-    );
-    let cached_used_in_window: u64 = team_records
-        .iter()
-        .map(|record| record.budget_used_in_window)
-        .sum();
-    let cached_rate_limit = team_records
-        .iter()
-        .filter_map(|record| record.rate_limit.as_ref())
-        .max_by_key(|rate| rate.updated_at.clone());
-    let consumed_live = live
-        .resources
-        .core
-        .limit
-        .saturating_sub(live.resources.core.remaining);
-    Ok(Some(GhRateLimitAudit {
-        live_remaining: live.resources.core.remaining,
-        live_limit: live.resources.core.limit,
-        live_reset_at,
-        cached_used_in_window,
-        repos_observed: team_records.len(),
-        cached_rate_limit_remaining: cached_rate_limit.map(|rate| rate.remaining),
-        cached_rate_limit_limit: cached_rate_limit.map(|rate| rate.limit),
-        delta_consumed_vs_cached: consumed_live as i64 - cached_used_in_window as i64,
-    }))
+    let _ = home_dir;
+    gh_rate_limit_audit(&GhRateLimitAuditRequest {
+        team: team.to_string(),
+    })?
+    .ok_or_else(|| anyhow::anyhow!("ATM daemon unavailable for gh rate-limit audit"))
 }
 
 fn build_member_snapshot(
@@ -1054,6 +907,66 @@ fn codex_notify_matches_expected(array: &[toml::Value], expected_script: &str) -
     python_name_matches && script.replace('\\', "/") == expected_script
 }
 
+fn daemon_health_failure(
+    home_dir: &Path,
+    pid_path: &Path,
+    socket_path: &Path,
+) -> (&'static str, String) {
+    let status_path = daemon_status_path_for(home_dir);
+    let has_runtime_artifacts = pid_path.exists()
+        || socket_path.exists()
+        || status_path.exists()
+        || read_daemon_lock_metadata(home_dir).is_some();
+
+    if !pid_path.exists() {
+        if has_runtime_artifacts {
+            return (
+                "DAEMON_PID_UNVERIFIABLE",
+                format!(
+                    "Daemon state exists but PID cannot be verified: PID file missing at {}",
+                    pid_path.display()
+                ),
+            );
+        }
+        return (
+            "DAEMON_NOT_RUNNING",
+            format!(
+                "Daemon is not running: no live daemon PID file or socket was found under {}",
+                home_dir.join(".atm/daemon").display()
+            ),
+        );
+    }
+
+    match fs::read_to_string(pid_path) {
+        Ok(raw) => (
+            "DAEMON_PID_UNVERIFIABLE",
+            match raw.trim().parse::<u32>() {
+                Ok(pid) if is_pid_alive(pid) => format!(
+                    "Daemon PID file is present but the daemon socket is not reachable: pid={} path={}",
+                    pid,
+                    pid_path.display()
+                ),
+                Ok(pid) => format!(
+                    "Daemon state exists but PID cannot be verified: pid {} from {} is not alive",
+                    pid,
+                    pid_path.display()
+                ),
+                Err(_) => format!(
+                    "Daemon state exists but PID cannot be verified: invalid pid file contents at {}",
+                    pid_path.display()
+                ),
+            },
+        ),
+        Err(err) => (
+            "DAEMON_PID_UNVERIFIABLE",
+            format!(
+                "Daemon state exists but PID cannot be verified: failed to read {} ({err})",
+                pid_path.display()
+            ),
+        ),
+    }
+}
+
 fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
     let mut findings = Vec::new();
 
@@ -1066,12 +979,8 @@ fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
     let status_path = daemon_status_path_for(home_dir);
 
     if !running {
-        findings.push(finding(
-            Severity::Critical,
-            "daemon_health",
-            "DAEMON_NOT_RUNNING",
-            "Daemon is not running or PID cannot be verified".to_string(),
-        ));
+        let (code, message) = daemon_health_failure(home_dir, &pid_path, &socket_path);
+        findings.push(finding(Severity::Critical, "daemon_health", code, message));
     }
 
     if socket_path.exists() && !running {
@@ -1779,6 +1688,14 @@ fn build_recommendations(
         });
     }
 
+    if has("DAEMON_PID_UNVERIFIABLE") {
+        recs.push(Recommendation {
+            command: "atm daemon restart".to_string(),
+            reason:
+                "Daemon artifacts exist but the PID cannot be verified. Clear stale runtime state and restart the daemon.".to_string(),
+        });
+    }
+
     if has("ORPHAN_MAILBOX") || has("TERMINAL_MEMBER_NOT_CLEANED") || has("PARTIAL_TEARDOWN") {
         recs.push(Recommendation {
             command: format!("atm teams cleanup {team}"),
@@ -2278,6 +2195,19 @@ mod tests {
         )];
         let recs = build_recommendations("atm-dev", &findings, true);
         assert!(recs.iter().any(|r| r.command == "atm-daemon"));
+    }
+
+    #[test]
+    fn build_recommendations_distinguishes_pid_unverifiable_from_absent() {
+        let findings = vec![finding(
+            Severity::Critical,
+            "daemon_health",
+            "DAEMON_PID_UNVERIFIABLE",
+            "x".to_string(),
+        )];
+        let recs = build_recommendations("atm-dev", &findings, true);
+        assert!(recs.iter().any(|r| r.command == "atm daemon restart"));
+        assert!(!recs.iter().any(|r| r.command == "atm-daemon"));
     }
 
     #[test]
@@ -3045,6 +2975,62 @@ mod tests {
             findings
                 .iter()
                 .any(|finding| finding.code == "COMPETING_DAEMON_DETECTED")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn check_daemon_health_distinguishes_absent_daemon() {
+        let _guard = EnvGuard::isolate(OVERRIDE_ENV_KEYS);
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+
+        let findings = check_daemon_health(tmp.path());
+        let daemon = findings
+            .iter()
+            .find(|finding| finding.code == "DAEMON_NOT_RUNNING")
+            .expect("daemon finding");
+        assert!(
+            daemon
+                .message
+                .contains("Daemon is not running: no live daemon PID file or socket was found"),
+            "unexpected absent-daemon message: {}",
+            daemon.message
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn check_daemon_health_distinguishes_pid_verification_failure() {
+        let _guard = EnvGuard::isolate(OVERRIDE_ENV_KEYS);
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon_dir = tmp.path().join(".atm/daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+        fs::write(
+            daemon_dir.join("status.json"),
+            serde_json::json!({
+                "pid": 999_991_u32,
+                "version": "0.46.1",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
+
+        let findings = check_daemon_health(tmp.path());
+        let daemon = findings
+            .iter()
+            .find(|finding| finding.code == "DAEMON_PID_UNVERIFIABLE")
+            .expect("daemon finding");
+        assert!(
+            daemon.message.contains("PID cannot be verified"),
+            "unexpected pid-verification message: {}",
+            daemon.message
+        );
+        assert!(
+            daemon.message.contains("PID file missing"),
+            "pid-verification message should explain the missing pid file: {}",
+            daemon.message
         );
     }
 

@@ -37,6 +37,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::event_log::EventFields;
+use crate::gh_command::{
+    GhCliPrereqRequest, GhCliPrereqStatus, GhPrListRequest, GhPrListSummary, GhPrReportRequest,
+    GhPrReportSummary, GhRateLimitAudit, GhRateLimitAuditRequest,
+};
 use agent_team_mail_daemon_launch::{LaunchClass, SpawnDaemonRequest, spawn_daemon_process};
 
 use crate::consts::{
@@ -1177,6 +1181,31 @@ pub fn subscribe_to_agent(
     query_daemon(&request)
 }
 
+/// Emit a best-effort non-Claude teammate idle lifecycle event to the daemon.
+///
+/// This is used by CLI sender paths that already know the caller runtime session
+/// and need to restore the sender to `idle` after a successful command. The
+/// call is silent when the daemon is unavailable.
+pub fn emit_teammate_idle_best_effort(
+    team: &str,
+    agent: &str,
+    session_id: &str,
+) -> anyhow::Result<Option<SocketResponse>> {
+    let request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "hook-event".to_string(),
+        payload: serde_json::json!({
+            "event": "teammate_idle",
+            "agent": agent,
+            "team": team,
+            "session_id": session_id,
+            "source": LifecycleSource::new(LifecycleSourceKind::AgentHook),
+        }),
+    };
+    query_daemon(&request)
+}
+
 /// Send an unsubscribe request to the daemon.
 ///
 /// Removes the subscription for `(subscriber, agent)`. This is a best-effort
@@ -1906,6 +1935,66 @@ pub fn gh_monitor_health_with_context(
     decode_gh_monitor_health_response(response).map(Some)
 }
 
+pub fn gh_pr_list(request: &GhPrListRequest) -> anyhow::Result<Option<GhPrListSummary>> {
+    let socket_request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "gh-pr-list".to_string(),
+        payload: serde_json::to_value(request)?,
+    };
+    let response = match query_daemon_with_timeout(&socket_request, Duration::from_secs(120))? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    decode_gh_command_response(response, "gh-pr-list").map(Some)
+}
+
+pub fn gh_pr_report(request: &GhPrReportRequest) -> anyhow::Result<Option<GhPrReportSummary>> {
+    let socket_request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "gh-pr-report".to_string(),
+        payload: serde_json::to_value(request)?,
+    };
+    let response = match query_daemon_with_timeout(&socket_request, Duration::from_secs(120))? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    decode_gh_command_response(response, "gh-pr-report").map(Some)
+}
+
+pub fn gh_cli_prerequisites(
+    request: &GhCliPrereqRequest,
+) -> anyhow::Result<Option<GhCliPrereqStatus>> {
+    let socket_request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "gh-cli-prereqs".to_string(),
+        payload: serde_json::to_value(request)?,
+    };
+    let response = match query_daemon(&socket_request)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    decode_gh_command_response(response, "gh-cli-prereqs").map(Some)
+}
+
+pub fn gh_rate_limit_audit(
+    request: &GhRateLimitAuditRequest,
+) -> anyhow::Result<Option<Option<GhRateLimitAudit>>> {
+    let socket_request = SocketRequest {
+        version: PROTOCOL_VERSION,
+        request_id: new_request_id(),
+        command: "gh-rate-limit-audit".to_string(),
+        payload: serde_json::to_value(request)?,
+    };
+    let response = match query_daemon(&socket_request)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    decode_gh_command_response(response, "gh-rate-limit-audit").map(Some)
+}
+
 fn decode_gh_monitor_response(response: SocketResponse) -> anyhow::Result<GhMonitorStatus> {
     if !response.is_ok() {
         let Some(err) = response.error else {
@@ -1946,6 +2035,31 @@ fn decode_gh_monitor_health_response(response: SocketResponse) -> anyhow::Result
 
     serde_json::from_value::<GhMonitorHealth>(payload)
         .map_err(|e| anyhow::anyhow!("Failed to parse GhMonitorHealth from daemon response: {e}"))
+}
+
+fn decode_gh_command_response<T: serde::de::DeserializeOwned>(
+    response: SocketResponse,
+    command_name: &str,
+) -> anyhow::Result<T> {
+    if !response.is_ok() {
+        let Some(err) = response.error else {
+            anyhow::bail!("Daemon returned {command_name} error status without error payload");
+        };
+        anyhow::bail!(
+            "Daemon returned error for {} command: {}: {}",
+            response.request_id,
+            err.code,
+            err.message
+        );
+    }
+
+    let payload = response
+        .payload
+        .ok_or_else(|| anyhow::anyhow!("Daemon returned ok status but no payload"))?;
+
+    serde_json::from_value::<T>(payload).map_err(|e| {
+        anyhow::anyhow!("Failed to parse {command_name} payload from daemon response: {e}")
+    })
 }
 
 fn decode_register_hint_response(response: SocketResponse) -> anyhow::Result<RegisterHintOutcome> {
@@ -2119,31 +2233,69 @@ fn daemon_autostart_enabled() -> bool {
 }
 
 #[cfg(unix)]
-fn resolve_daemon_binary() -> anyhow::Result<std::ffi::OsString> {
+fn resolve_daemon_binary_candidates() -> anyhow::Result<Vec<PathBuf>> {
+    let mut candidates = Vec::new();
+
     if let Some(override_bin) = std::env::var_os("ATM_DAEMON_BIN")
         && !override_bin.is_empty()
     {
-        return Ok(override_bin);
+        candidates.push(PathBuf::from(override_bin));
     }
 
     let name = std::ffi::OsString::from("atm-daemon");
-
     if let Ok(current_exe) = std::env::current_exe()
         && let Some(dir) = current_exe.parent()
     {
         let sibling = dir.join(std::path::Path::new(&name));
-        if sibling.exists() {
-            return Ok(sibling.into_os_string());
+        if sibling.exists() && !candidates.iter().any(|candidate| candidate == &sibling) {
+            candidates.push(sibling);
         }
-        anyhow::bail!(
-            "failed to resolve atm-daemon binary: ATM_DAEMON_BIN is unset and sibling binary '{}' is missing",
-            sibling.display()
-        );
+    }
+
+    if !candidates.is_empty() {
+        return Ok(candidates);
     }
 
     anyhow::bail!(
-        "failed to resolve atm-daemon binary: ATM_DAEMON_BIN is unset and current executable path is unavailable"
+        "failed to resolve atm-daemon binary: ATM_DAEMON_BIN is unset and no sibling atm-daemon binary was found next to the current executable"
     )
+}
+
+#[cfg(unix)]
+fn resolve_daemon_binary_for_home(home: &Path) -> anyhow::Result<(PathBuf, RuntimeOwnerMetadata)> {
+    // Shells may export a dev-channel ATM_DAEMON_BIN globally while commands
+    // target the default shared ATM_HOME. Prefer a compatible sibling daemon
+    // binary for the resolved runtime instead of letting a cross-channel
+    // override strand release-runtime diagnostics at autostart time.
+    let mut candidates = resolve_daemon_binary_candidates()?;
+    let override_was_explicit =
+        std::env::var_os("ATM_DAEMON_BIN").is_some_and(|value| !value.is_empty());
+    let mut first_error = None;
+
+    while let Some(candidate) = candidates.first().cloned() {
+        candidates.remove(0);
+        match validate_runtime_admission(home, &candidate) {
+            Ok(owner) => return Ok((candidate, owner)),
+            Err(err) => {
+                let can_fallback = override_was_explicit
+                    && candidate.exists()
+                    && !candidates.is_empty()
+                    && err.to_string().contains("approved installed daemon binary");
+                if can_fallback {
+                    first_error.get_or_insert(err);
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    }
+
+    Err(first_error.unwrap_or_else(|| {
+        anyhow::anyhow!(
+            "failed to resolve a daemon binary candidate for {}",
+            home.display()
+        )
+    }))
 }
 
 #[cfg(unix)]
@@ -2255,7 +2407,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         }
     }
 
-    let daemon_bin = resolve_daemon_binary().map_err(|e| {
+    let (daemon_bin_path, runtime_owner) = resolve_daemon_binary_for_home(&home).map_err(|e| {
         let error = e.to_string();
         emit_event_best_effort(daemon_autostart_event(
             &autostart_request_id,
@@ -2263,19 +2415,6 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
             "daemon_autostart_failure",
             "binary_resolution_error",
             None,
-            Some(error.clone()),
-        ));
-        anyhow::anyhow!("{error}")
-    })?;
-    let daemon_bin_path = PathBuf::from(&daemon_bin);
-    let runtime_owner = validate_runtime_admission(&home, &daemon_bin_path).map_err(|e| {
-        let error = e.to_string();
-        emit_event_best_effort(daemon_autostart_event(
-            &autostart_request_id,
-            &autostart_trace_id,
-            "daemon_autostart_failure",
-            "runtime_admission_denied",
-            Some(daemon_bin_path.display().to_string()),
             Some(error.clone()),
         ));
         anyhow::anyhow!("{error}")
@@ -2300,7 +2439,7 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to prepare daemon stderr capture: {e}"))?;
 
     let mut child = match spawn_daemon_process(SpawnDaemonRequest {
-        daemon_bin: daemon_bin.as_os_str(),
+        daemon_bin: daemon_bin_path.as_os_str(),
         atm_home: &home,
         launch_class: launch_class_for_runtime_kind(&runtime_owner.runtime_kind),
         issuer: "agent-team-mail-core::daemon_client::ensure_daemon_running_unix",
@@ -2313,13 +2452,15 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
         Err(e) => {
             let error = if e.kind() == ErrorKind::NotFound {
                 format!(
-                    "failed to auto-start daemon: binary '{}' is missing or not executable",
-                    std::path::PathBuf::from(&daemon_bin).display()
+                    "failed to auto-start daemon: binary '{}' is missing or not executable (stderr_capture={})",
+                    daemon_bin_path.display(),
+                    stderr_capture.display()
                 )
             } else {
                 format!(
-                    "failed to auto-start daemon via '{}': {e}",
-                    std::path::PathBuf::from(&daemon_bin).display()
+                    "failed to auto-start daemon via '{}': {e} (stderr_capture={})",
+                    daemon_bin_path.display(),
+                    stderr_capture.display()
                 )
             };
             emit_event_best_effort(daemon_autostart_event(
@@ -2367,10 +2508,14 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
             let error = match stderr_tail {
                 Some(tail) => {
                     format!(
-                        "daemon process exited during startup with status {status}; stderr_tail={tail}"
+                        "daemon process exited during startup with status {status}; stderr_capture={}; stderr_tail={tail}",
+                        stderr_capture.display()
                     )
                 }
-                None => format!("daemon process exited during startup with status {status}"),
+                None => format!(
+                    "daemon process exited during startup with status {status}; stderr_capture={}",
+                    stderr_capture.display()
+                ),
             };
             emit_event_best_effort(daemon_autostart_event(
                 &autostart_request_id,
@@ -2380,7 +2525,6 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
                 Some(daemon_bin_path.display().to_string()),
                 Some(error.clone()),
             ));
-            let _ = std::fs::remove_file(&stderr_capture);
             anyhow::bail!("{error}");
         }
         std::thread::sleep(Duration::from_millis(RETRY_SLEEP_MS));
@@ -2390,12 +2534,13 @@ fn ensure_daemon_running_unix() -> anyhow::Result<()> {
     let socket_path = daemon_socket_path()?;
     let pid_path = daemon_pid_path()?;
     let timeout_error = format!(
-        "daemon startup timed out after {}s; pid_file_exists={}, socket_exists={}, pid_path={}, socket_path={}",
+        "daemon startup timed out after {}s; pid_file_exists={}, socket_exists={}, pid_path={}, socket_path={}, stderr_capture={}",
         STARTUP_DEADLINE_SECS,
         pid_path.exists(),
         socket_path.exists(),
         pid_path.display(),
-        socket_path.display()
+        socket_path.display(),
+        stderr_capture.display()
     );
     let mut timeout_event = daemon_autostart_event(
         &autostart_request_id,
@@ -2616,7 +2761,10 @@ fn detect_daemon_identity_mismatch(
         .unwrap_or_else(|_| home.to_path_buf())
         .to_string_lossy()
         .to_string();
-    let expected_bin = resolve_daemon_binary().ok();
+    let expected_bin = resolve_daemon_binary_candidates()
+        .ok()
+        .and_then(|candidates| candidates.into_iter().next())
+        .map(|path| path.into_os_string());
     let snapshot = DaemonIdentitySnapshot {
         pid_from_file,
         pid_from_status,
@@ -3142,8 +3290,8 @@ mod tests {
         let custom = tmp.path().join("custom-atm-daemon");
         std::fs::write(&custom, "#!/bin/sh\nexit 0\n").unwrap();
         let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", custom.to_str().unwrap());
-        let resolved = resolve_daemon_binary().expect("override should resolve");
-        assert_eq!(std::path::PathBuf::from(resolved), custom);
+        let candidates = resolve_daemon_binary_candidates().expect("override should resolve");
+        assert_eq!(candidates.first(), Some(&custom));
     }
 
     #[cfg(unix)]
@@ -3257,6 +3405,10 @@ exit 42
         assert!(
             msg.contains("daemon process exited during startup with status"),
             "startup exit must still be reported clearly: {msg}"
+        );
+        assert!(
+            msg.contains("stderr_capture="),
+            "startup exit should report the stderr capture path: {msg}"
         );
     }
 

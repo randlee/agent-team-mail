@@ -381,5 +381,8 @@ fn test_read_timeout_with_explicit_agent_overrides_default_identity() {
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("message for explicit target"))
-        .stdout(predicate::str::contains("Messages for arch-ctm@test-team"));
+        .stdout(predicate::str::contains("Queue for arch-ctm@test-team"))
+        .stdout(predicate::str::contains(
+            "Unread: 1 | Pending Ack: 0 | History: 0",
+        ));
 }

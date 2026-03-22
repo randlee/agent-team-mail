@@ -1,6 +1,6 @@
 # CLI Requirements
 
-**Status**: Planned (Phase BA)
+**Status**: Implemented (Phase BA, 2026-03-20)
 **Scope**: `atm` CLI, CLI-facing shared contracts in `atm-core`, inbox/message-management UX
 **See also**:
 - `docs/cli/architecture.md`
@@ -40,12 +40,17 @@ daemon-spawn, and plugin-specific subsystem contracts.
 - If the plugin is present but not enabled, only bootstrap/management commands
   may appear.
 - If the plugin is present and enabled, the full namespace may appear.
+- Plugin root/status UX must surface the effective namespace state explicitly.
 
 For the GitHub monitor stack specifically:
 
 - the gh plugin/provider layer owns GitHub command semantics
 - the CLI may route `atm gh ...` but must not directly depend on daemon plugin
   implementation modules to do so
+- the CLI-advertised namespace states are:
+  - `absent`
+  - `present_disabled`
+  - `present_enabled`
 
 ### 2.3 CLI Boundary Rules
 
@@ -136,21 +141,37 @@ For the GitHub monitor stack specifically:
 
 ## 5. Current Boundary Findings Driving Phase BA
 
-The current codebase still contains CLI/plugin coupling that Phase BA must
-remove:
+Phase AT closed the GitHub-behavior boundary (raw `gh` execution ownership).
+Phase BA addresses the remaining CLI boundary gap.
 
-- `crates/atm/Cargo.toml` has non-dev dependencies on
-  `agent-team-mail-ci-monitor` and `agent-team-mail-daemon`
-- `crates/atm/src/commands/gh.rs` imports
-  `agent_team_mail_daemon::plugins::ci_monitor::*`
-- `crates/atm/src/commands/doctor.rs` imports the daemon-plugin-owned helper
-  `run_attributed_gh_command_with_ids`
+- BA.3 removed direct non-dev CLI dependencies on
+  `agent-team-mail-daemon` and `agent-team-mail-ci-monitor`.
+- BA.3 removed direct CLI imports of daemon plugin implementation helpers and
+  moved the GH contract plus teardown hook behind `atm-core::gh_command`.
+- BA.4 must keep that cleanup enforced so the CLI cannot regress back to daemon
+  plugin implementation imports or forbidden manifest dependencies.
+- `agent-team-mail-daemon-launch` remains a permitted CLI dependency for
+  canonical launcher lifecycle ownership. Its allowed status must stay explicit
+  in docs and manifest comments rather than becoming an implicit exception.
 
-These are boundary violations against the target command-ownership model above.
+These are enforcement requirements against the target command-ownership model
+above.
 
 ## 6. Phase BA Implementation Targets
 
 - BA.1: idle dedupe/suppression + explicit inbox-clear behavior
 - BA.2: queue-style `atm read` + atomic acknowledgement workflow
-- BA.3: CLI/plugin command-boundary extraction
-- BA.4: CLI boundary enforcement + plugin availability UX
+- BA.3: CLI/plugin command-boundary extraction via a neutral `atm-core`
+  contract module (for example `atm_core::plugin_contract` or
+  `atm_core::gh_command`) that owns:
+  - plugin capability descriptors
+  - `gh` namespace command request/response contracts
+  - any permitted CLI teardown lifecycle hook such as ledger flush
+- BA.4: CLI boundary enforcement + plugin availability UX, with:
+  - primary enforcement by keeping `agent-team-mail-daemon` and
+    `agent-team-mail-ci-monitor` absent from non-dev `crates/atm/Cargo.toml`
+  - secondary CI grep/lint forbidding new CLI imports from daemon plugin
+    implementation modules
+  - explicit treatment of `agent-team-mail-daemon-launch` as a permitted CLI
+    lifecycle dependency for canonical launcher ownership; BA may not leave its
+    status implicit

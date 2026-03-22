@@ -1,6 +1,6 @@
 # CLI Architecture
 
-**Status**: Planned (Phase BA)
+**Status**: Implemented (Phase BA, 2026-03-20)
 **Primary crate**: `atm`
 **See also**:
 - `docs/cli/requirements.md`
@@ -105,6 +105,8 @@ For `atm gh` specifically:
   appear
 - if it is enabled, the CLI may present the full namespace while still routing
   execution through neutral plugin contracts
+- the CLI root/status surface should expose the effective namespace state
+  explicitly as `absent`, `present_disabled`, or `present_enabled`
 
 ## 5. Inbox and Task-Queue Architecture
 
@@ -143,42 +145,66 @@ Target flow:
 2. CLI performs one atomic `ack + reply`
 3. shared inbox state and visible conversation remain in sync
 
-## 6. Current Violations
+## 6. Current Boundary Status
 
-The current codebase does not yet meet the target architecture:
+BA.3 removed the direct CLI coupling that originally motivated Phase BA:
 
-### 6.1 CLI -> Plugin Coupling
+- `crates/atm/src/commands/gh.rs` no longer imports daemon plugin
+  implementation helpers directly
+- `crates/atm/src/commands/doctor.rs` no longer imports direct
+  `agent_team_mail_ci_monitor` GH helper blocks
+- `crates/atm/src/main.rs` now uses the neutral `atm-core` teardown hook
+- `crates/atm/Cargo.toml` no longer carries non-dev dependencies on
+  `agent-team-mail-daemon` or `agent-team-mail-ci-monitor`
 
-- `crates/atm/src/commands/gh.rs` imports daemon plugin implementation helpers
-  directly from `agent_team_mail_daemon::plugins::ci_monitor`
-- `crates/atm/src/commands/doctor.rs` imports a daemon-plugin-owned helper for
-  GitHub execution
+BA.4 is therefore an enforcement/UX sprint rather than another extraction
+sprint.
 
-### 6.2 Crate Dependency Coupling
+### 6.1 Remaining Explicit Exception
 
-`crates/atm/Cargo.toml` currently carries non-dev dependencies on:
+`crates/atm/Cargo.toml` still carries:
 
-- `agent-team-mail-ci-monitor`
-- `agent-team-mail-daemon`
+- `agent-team-mail-daemon-launch`
 
-That means the CLI crate is compiled against plugin-host and plugin-specific
-implementation crates rather than purely neutral contracts.
+This is the one permitted CLI/product dependency for canonical launcher
+lifecycle ownership. BA.4 must keep that classification explicit in both docs
+and manifest comments.
+
+### 6.2 Enforcement Gap
+
+Without a dedicated CLI boundary gate, the CLI could still regress by:
+
+- reintroducing `agent_team_mail_daemon::plugins::*` imports
+- reintroducing `agent_team_mail_ci_monitor::*` imports
+- re-adding forbidden runtime dependencies to `crates/atm/Cargo.toml`
 
 ## 7. Recommended Boundary Repair
 
-Phase BA should repair the CLI boundary in two sprints:
+Phase BA repairs the boundary in two sprints:
 
 ### BA.3 — Command Boundary Extraction
 
-- extract neutral plugin capability and command contracts
+- extract neutral plugin capability and command contracts into `atm-core`
+  (recommended module family: `atm_core::plugin_contract` or
+  `atm_core::gh_command`)
 - remove direct daemon-plugin imports from the CLI
 - move CLI-needed plugin data shaping behind neutral shared contracts
+- move the current `doctor.rs` GH observer/ledger imports behind the same
+  neutral contract surface
+- resolve the `main.rs` shutdown flush path either by moving it behind an
+  `atm-core` lifecycle hook or explicitly documenting a narrow permitted
+  teardown exception
 - stop treating `atm gh` as a CLI-owned implementation surface
 
 ### BA.4 — Boundary Enforcement and UX
 
+- keep `agent-team-mail-daemon` and `agent-team-mail-ci-monitor` absent from
+  non-dev `crates/atm/Cargo.toml`
 - wire plugin namespace availability from capability descriptors
 - add CI checks that forbid new CLI imports from daemon plugin modules
+- keep a secondary grep/lint gate as belt-and-suspenders after dep demotion
+- explicitly classify `agent-team-mail-daemon-launch` as a permitted CLI
+  dependency for canonical launcher lifecycle wiring
 - document the absent/present/enabled plugin command states
 
 ## 8. Architectural Direction for Cross-Team Commands

@@ -2,7 +2,7 @@
 
 **Version**: 0.7
 **Date**: 2026-03-10
-**Status**: Phases through AV complete (v0.45.0). Phase AW traces/metrics planning updated.
+**Status**: Phases through BA complete on the current integration branches; released phases through AV are complete (v0.45.0). Phase AW traces/metrics planning updated.
 
 ---
 
@@ -182,11 +182,12 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AK | Mandatory OTel Rollout | Superseded by Phase AV (logs rollout) and Phase AW (traces + metrics expansion) | SUPERSEDED |
 | AQ | Codebase Cleanup + Rogue Daemon Spawn Elimination | Remove cleanup debt from AN/AO/AP reviews, consolidate constants/dead code, and eliminate non-canonical test daemon spawn paths | COMPLETE |
 | AR | Smoke Follow-Up + Lifecycle Timing Corrections | Fix daemon harness flake, drain timeout regression, and EnvGuard::unset gap identified during smoke testing | COMPLETE (PR #795) |
-| AS | Backlog Gap-Filling + GH API Governance | 14 backlog bug/gap fixes + GH API hard firewall, ledgers, and explicit GitHub ownership requirements | ACTIVE |
-| AT | GitHub Boundary Elimination | Remove all remaining audited GitHub-boundary violations so only the gh plugin/provider layer owns GitHub behavior | PLANNED |
+| AS | Backlog Gap-Filling + GH API Governance | 14 backlog bug/gap fixes + GH API hard firewall, ledgers, and explicit GitHub ownership requirements | COMPLETE |
+| AT | GitHub Boundary Elimination | Remove all remaining audited GitHub-boundary violations so only the gh plugin/provider layer owns GitHub behavior | COMPLETE |
 | AV | OTel Collector Logs Rollout | Ship OTLP HTTP logs export, dogfood it against a Grafana-compatible receiver, and preserve fail-open local logging | COMPLETE |
 | AW | OTel Traces + Metrics Expansion | Add native traces and metrics, Grafana dashboards/smoke, and external repo rollout on top of AV | PLANNED |
 | BA | CLI Message Management + Plugin Boundary | Fix inbox lifecycle noise, add atomic queue/ack semantics, and remove current `atm -> daemon plugin` command coupling | PLANNED |
+| BB | Daemon Reset | Remove multi-daemon support, separate config root from runtime root, collapse daemon artifacts, and rewrite daemon testing around a single-daemon model | PLANNED |
 
 ---
 
@@ -1487,6 +1488,39 @@ the current tranche focused on onboarding contract closure.
 | | AG.2 | Resolver + Include Expansion Hardening | COMPLETE | [#551](https://github.com/randlee/agent-team-mail/pull/551) |
 | | AG.3 | `sc-compose` Binary + Logging Baseline | COMPLETE | [#552](https://github.com/randlee/agent-team-mail/pull/552) |
 | | AG.4 | ATM Spawn Integration (`--system-prompt .j2`) | COMPLETE | [#553](https://github.com/randlee/agent-team-mail/pull/553) |
+
+## 17.16 Phase BA: CLI Message Management + Plugin Boundary — COMPLETE
+
+**Goal**: stabilize ATM inbox/task UX for long-running agent workflows and
+close the remaining CLI/plugin boundary gaps after the GitHub-behavior
+separation work.
+
+**Planning doc**: `docs/phase-ba-cli-message-boundary-planning.md`
+**Requirements doc**: `docs/cli/requirements.md`
+**Architecture doc**: `docs/cli/architecture.md`
+**Integration branch**: `integrate/phase-BA`
+**Integration PR**: [#941](https://github.com/randlee/agent-team-mail/pull/941)
+
+### Planned Sprint Map
+| Sprint | Focus | Status | PR |
+|---|---|---|---|
+| BA.1 | Idle lifecycle hygiene + inbox clear defaults | COMPLETE | [#936](https://github.com/randlee/agent-team-mail/pull/936) |
+| BA.2 | Queue-style `atm read` + explicit atomic `atm ack <message-id> \"reply\"` | COMPLETE | [#937](https://github.com/randlee/agent-team-mail/pull/937) |
+| BA.3 | CLI/plugin command-boundary extraction via neutral `atm-core` GH contracts | COMPLETE | [#938](https://github.com/randlee/agent-team-mail/pull/938) |
+| BA.4 | Boundary enforcement + plugin namespace availability UX | COMPLETE | [#939](https://github.com/randlee/agent-team-mail/pull/939) |
+
+### Exit Criteria
+- Inbox idle-notification churn is suppressed and explicit inbox clear behavior
+  is available.
+- `atm read` surfaces unread and pending-ack work ahead of history by default.
+- `atm ack <message-id> \"reply\"` is the canonical explicit task-ack path.
+- The CLI no longer imports daemon plugin implementation helpers for GH command
+  behavior.
+- CI gates enforce the CLI/plugin boundary and the GH execution boundary.
+
+### Version Note
+Phase BA is post-`v0.45.0` queue/boundary work prepared on
+`integrate/phase-BA` for the next `develop` landing after PR `#941`.
 
 **Completed**: 133+ sprints across 29 phases (CI green)
 **Current version**: v0.45.0
@@ -2814,6 +2848,45 @@ You are the Scrum Master for the agent-team-mail (atm) project.
 - Project Plan: docs/project-plan.md
 - Agent Team API: docs/agent-team-api.md
 - Rust Guidelines: .claude/skills/rust-development/guidelines.txt
+
+---
+
+## Phase BB: Daemon Reset — PLANNED
+
+**Goal**: remove multi-daemon support, separate config root from runtime root,
+collapse daemon runtime artifacts to a minimal authoritative set, and replace
+the current daemon test model with a simpler single-daemon strategy.
+
+**Integration branch**: `integrate/phase-BB`
+
+**Prerequisites**: `develop` at `103bd127` or later, with Phases through BA
+merged to `develop`.
+
+**Dependency graph**: `BB.0 -> BB.1 -> BB.2 -> BB.3 -> BB.4` (serial). `BB.3`
+must not land on the phase branch unless the BB.4 compatibility/test changes
+required by PID-file removal are present on the same integration head.
+
+**Design references**:
+- `docs/daemon/requirements.md`
+- `docs/daemon/architecture.md`
+- `docs/phase-bb-daemon-reset.md`
+
+| Sprint | Name | Goal | Branch |
+|--------|------|------|--------|
+| BB.0 | Dead Code Cleanup | Remove obviously dead atm-core / daemon code before the structural reset so later sprints do not preserve obsolete surfaces | `feature/pBB-s0-dead-code-cleanup` |
+| BB.1 | Path Separation | Stop resolving team config from `ATM_HOME`; introduce explicit config-root vs runtime-root APIs and migrate callers | `feature/pBB-s1-path-separation` |
+| BB.2 | Single-Daemon Model Collapse | Remove multi-daemon ownership/runtime-mode support and simplify daemon admission/ownership to one system daemon model | `feature/pBB-s2-single-daemon` |
+| BB.3 | Artifact Collapse + Transactional Startup | Remove redundant daemon artifacts, remove production-dead daemon plugin surfaces, make startup publish state only after readiness, and make restart/cleanup symmetric | `feature/pBB-s3-artifact-collapse` |
+| BB.4 | Test Model Rewrite + Final Deletion | Rewrite daemon tests for serialized/shared-fixture execution and delete obsolete multi-daemon code/docs/env paths | `feature/pBB-s4-test-rewrite-cleanup` |
+
+**Acceptance criteria**:
+1. Team config no longer resolves from `ATM_HOME`.
+2. Multi-daemon support is removed from active daemon requirements and implementation.
+3. Dead-code cleanup identified in BB.0 is complete and obsolete surfaces are not carried into later sprints.
+4. Daemon startup failure leaves no misleading live-daemon state behind.
+5. Stop/restart removes all daemon-owned runtime artifacts deterministically.
+6. Dogfood daemon start/restart/stop passes repeatedly on a clean machine/home under the simplified model and follows the canonical Phase AR smoke protocol.
+7. Net phase outcome is deletion-heavy: daemon complexity and documentation are materially smaller than before Phase BB.
 
 ## Communication
 

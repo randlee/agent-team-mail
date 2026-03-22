@@ -20,16 +20,23 @@ This primary requirements document registers secondary source-of-truth documents
 - CI monitoring architecture: `docs/ci-monitoring/architecture.md`
 - CI monitoring ADR index: `docs/ci-monitoring/adr.md`
 - Daemon spawn authorization requirements: `docs/daemon-spawn-auth/requirements.md`
+- Daemon reset requirements: `docs/daemon/requirements.md`
+- Daemon reset architecture: `docs/daemon/architecture.md`
 
 All logging/OpenTelemetry requirements for ATM and companion tools are defined
 in the observability documents above. This file references that contract and
 must not duplicate or drift from it.
 
+Active daemon simplification and multi-daemon removal requirements are defined
+in `docs/daemon/requirements.md` and `docs/daemon/architecture.md`. Those
+documents supersede older multi-daemon assumptions in this primary document
+until the daemon sections here are fully consolidated.
+
 ---
 
 ## 1. Project Summary
 
-`atm` is a Rust workspace that provides mail-like messaging for Claude agent teams. It consists of a CLI for interactive use, a shared library for safe file I/O against the `~/.claude/teams/` file structure, and (post-MVP) an always-on daemon that hosts plugins for CI monitoring, cross-machine bridging, issue tracking, and human chat interfaces.
+`atm` is a Rust workspace that provides mail-like messaging for Claude agent teams. It consists of a CLI for interactive use, a shared library for safe file I/O against the `~/.claude/teams/` file structure, and a daemon/runtime subsystem whose active simplification requirements are defined in `docs/daemon/requirements.md` and `docs/daemon/architecture.md`.
 
 ### Goals
 
@@ -40,7 +47,6 @@ must not duplicate or drift from it.
 
 ### Non-Goals (MVP)
 
-- Daemon / background process mode (post-MVP)
 - Team or agent lifecycle management (create/delete teams, spawn agents)
 - Cross-machine networking in core (plugin responsibility)
 - GUI or TUI interface
@@ -69,7 +75,7 @@ agent-team-mail/
 │   │   └── src/
 │   │       ├── main.rs
 │   │       └── commands/       # send, read, broadcast, inbox, teams, etc.
-│   └── atm-daemon/             # daemon binary (post-MVP)
+│   └── atm-daemon/             # daemon binary
 │       ├── Cargo.toml
 │       └── src/
 │           ├── main.rs
