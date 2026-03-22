@@ -46,8 +46,8 @@ pub struct ReadArgs {
     #[arg(long, conflicts_with_all = ["unread_only", "pending_ack_only"])]
     history: bool,
 
-    /// Show messages since last seen (default: true)
-    #[arg(long, default_value_t = true)]
+    /// Show only messages newer than the last-seen watermark
+    #[arg(long)]
     since_last_seen: bool,
 
     /// Disable since-last-seen filtering and watermark updates
@@ -173,9 +173,9 @@ pub fn execute(args: ReadArgs) -> Result<()> {
         hostname_registry.as_ref(),
     )?;
 
-    // `--no-since-last-seen` is the real opt-out. The positive flag exists for
-    // compatibility, but the default behavior is to keep the watermark active.
-    let use_since_last_seen = !args.no_since_last_seen;
+    // Queue-state filtering is the default. The watermark is only consulted
+    // when the caller explicitly opts in via `--since-last-seen`.
+    let use_since_last_seen = args.since_last_seen && !args.no_since_last_seen;
     let last_seen = if use_since_last_seen {
         let state = load_seen_state().unwrap_or_default();
         get_last_seen(&state, &team_name, &agent_name)
@@ -196,6 +196,14 @@ pub fn execute(args: ReadArgs) -> Result<()> {
             } else {
                 false
             }
+        });
+    }
+
+    if let Some(last_seen_dt) = last_seen {
+        filtered_messages.retain(|m| {
+            DateTime::parse_from_rfc3339(&m.timestamp)
+                .map(|dt| dt.with_timezone(&Utc) > last_seen_dt)
+                .unwrap_or(false)
         });
     }
 
@@ -396,8 +404,6 @@ pub fn execute(args: ReadArgs) -> Result<()> {
 
         println!("Total displayed: {} message(s)", displayed_messages.len());
     }
-
-    let _ = last_seen;
     Ok(())
 }
 

@@ -813,7 +813,7 @@ fn test_read_json_output() {
 }
 
 #[test]
-fn test_read_since_last_seen_default() {
+fn test_read_default_queue_view_does_not_use_last_seen() {
     let temp_dir = TempDir::new().unwrap();
     let team_dir = setup_test_team(&temp_dir, "test-team");
 
@@ -866,7 +866,7 @@ fn test_read_since_last_seen_default() {
 }
 
 #[test]
-fn test_read_since_last_seen_still_shows_older_unread_messages() {
+fn test_read_default_view_still_shows_older_unread_messages() {
     let temp_dir = TempDir::new().unwrap();
     let team_dir = setup_test_team(&temp_dir, "test-team");
 
@@ -912,7 +912,7 @@ fn test_read_since_last_seen_still_shows_older_unread_messages() {
 }
 
 #[test]
-fn test_read_since_last_seen_first_run_shows_only_pending_action_messages() {
+fn test_read_first_run_shows_only_pending_action_messages() {
     let temp_dir = TempDir::new().unwrap();
     let team_dir = setup_test_team(&temp_dir, "test-team");
 
@@ -1003,7 +1003,7 @@ fn test_read_all_ignores_last_seen_filter() {
 }
 
 #[test]
-fn test_read_no_update_seen() {
+fn test_read_no_update_seen_with_explicit_since_last_seen() {
     let temp_dir = TempDir::new().unwrap();
     let team_dir = setup_test_team(&temp_dir, "test-team");
 
@@ -1033,6 +1033,7 @@ fn test_read_no_update_seen() {
     cmd.env("ATM_TEAM", "test-team")
         .arg("read")
         .arg("test-agent")
+        .arg("--since-last-seen")
         .arg("--history")
         .arg("--no-update-seen")
         .assert()
@@ -1049,7 +1050,7 @@ fn test_read_no_update_seen() {
 }
 
 #[test]
-fn test_read_updates_last_seen_from_displayed_messages_only() {
+fn test_read_since_last_seen_updates_last_seen_from_displayed_messages_only() {
     let temp_dir = TempDir::new().unwrap();
     let team_dir = setup_test_team(&temp_dir, "test-team");
 
@@ -1089,6 +1090,7 @@ fn test_read_updates_last_seen_from_displayed_messages_only() {
     cmd.env("ATM_TEAM", "test-team")
         .arg("read")
         .arg("test-agent")
+        .arg("--since-last-seen")
         .arg("--history")
         .arg("--from")
         .arg("team-lead")
@@ -1104,6 +1106,52 @@ fn test_read_updates_last_seen_from_displayed_messages_only() {
         .as_str()
         .unwrap();
     assert!(ts.starts_with("2026-02-11T11:00:00"));
+}
+
+#[test]
+fn test_read_since_last_seen_explicit_filter_only_shows_newer_messages() {
+    let temp_dir = TempDir::new().unwrap();
+    let team_dir = setup_test_team(&temp_dir, "test-team");
+
+    let messages = vec![
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Older pending message",
+            "timestamp": "2026-02-11T10:00:00Z",
+            "read": false,
+            "message_id": "msg-400"
+        }),
+        serde_json::json!({
+            "from": "team-lead",
+            "text": "Newer pending message",
+            "timestamp": "2026-02-11T12:00:00Z",
+            "read": false,
+            "message_id": "msg-401"
+        }),
+    ];
+    create_test_inbox(&team_dir, "test-agent", messages);
+
+    let state_path = state_path(&temp_dir);
+    fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+    let state = serde_json::json!({
+        "last_seen": {
+            "test-team": {
+                "test-agent": "2026-02-11T11:00:00Z"
+            }
+        }
+    });
+    fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("read")
+        .arg("test-agent")
+        .arg("--since-last-seen")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Newer pending message"))
+        .stdout(predicates::str::contains("Older pending message").not());
 }
 
 /// Test: `atm read` (own inbox) with no identity sources → must reject

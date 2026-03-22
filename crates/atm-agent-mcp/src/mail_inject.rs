@@ -20,9 +20,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use agent_team_mail_core::InboxMessage;
-use agent_team_mail_core::home::{config_team_dir_for, get_os_home_dir};
+use agent_team_mail_core::home::{config_team_dir_for, get_home_dir};
 use agent_team_mail_core::io::inbox_update;
 use agent_team_mail_core::text::truncate_chars;
+use agent_team_mail_core::util::state::SeenState;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::config::AgentMcpConfig;
@@ -42,7 +44,7 @@ pub struct MailEnvelope {
     pub sender: String,
     /// ISO 8601 timestamp of when the message was sent.
     pub timestamp: String,
-    /// Unique message ID (used for deduplication and mark-read).
+    /// Unique message ID used for deduplication and watermark advancement.
     pub message_id: String,
     /// Message body, possibly truncated.
     pub text: String,
@@ -133,7 +135,7 @@ pub fn build_mail_envelopes(
 
     messages
         .iter()
-        .filter(|m| !m.read && m.message_id.is_some())
+        .filter(|m| m.message_id.is_some())
         .take(max_messages)
         .map(|m| {
             let text = truncate_chars(&m.text, max_message_length, TRUNCATION_SUFFIX);
@@ -152,11 +154,11 @@ pub fn build_mail_envelopes(
 // ---------------------------------------------------------------------------
 
 /// Tracks message IDs that have been dispatched to a transport but whose
-/// `mark-read` acknowledgement has not yet been confirmed.
+/// delivery has not yet been confirmed.
 ///
 /// Used during the idle-poll cycle to skip messages that are already
 /// in-flight, preventing double-injection on retry when a poll fires before
-/// the previous dispatch is acknowledged.
+/// the previous dispatch outcome is known.
 ///
 /// Each agent/thread pair should maintain its own `InflightMailSet`; the
 /// set is not shared across agents.
@@ -272,14 +274,15 @@ fn inbox_path(home: &std::path::Path, team: &str, identity: &str) -> PathBuf {
 // fetch_unread_mail
 // ---------------------------------------------------------------------------
 
-/// Fetch unread messages for `identity` in `team`, returning formatted envelopes.
+/// Fetch messages newer than the MCP `last_seen` watermark for `identity` in
+/// `team`, returning formatted envelopes.
 ///
-/// Messages are NOT marked as read here — call [`mark_messages_read`] only
-/// after the codex-reply has been successfully written to the child's stdin
-/// and the request ID recorded (FR-8.12).
+/// The legacy function name remains for compatibility, but the selection model
+/// is watermark-based rather than read-state-based. Message read state is not
+/// mutated here.
 ///
-/// Returns an empty `Vec` when the inbox does not exist or no unread messages
-/// are present.
+/// Returns an empty `Vec` when the inbox does not exist or no messages newer
+/// than the watermark are present.
 ///
 /// # Parameters
 ///
@@ -293,7 +296,7 @@ pub fn fetch_unread_mail(
     max_messages: usize,
     max_message_length: usize,
 ) -> Vec<MailEnvelope> {
-    let home = match get_os_home_dir() {
+    let home = match get_home_dir() {
         Ok(h) => h,
         Err(e) => {
             tracing::warn!("fetch_unread_mail: cannot resolve home dir: {e}");
@@ -329,8 +332,18 @@ pub fn fetch_unread_mail(
     };
 
     let current_session = std::env::var("CLAUDE_SESSION_ID").ok();
+    let last_seen = load_last_seen(team, identity);
     let filtered: Vec<InboxMessage> = messages
         .into_iter()
+        .filter(|m| {
+            if let Some(last_seen_dt) = last_seen {
+                DateTime::parse_from_rfc3339(&m.timestamp)
+                    .map(|dt| dt.with_timezone(&Utc) > last_seen_dt)
+                    .unwrap_or(false)
+            } else {
+                true
+            }
+        })
         .filter(|m| message_matches_current_session(m, current_session.as_deref()))
         .collect();
 
@@ -371,9 +384,9 @@ fn message_matches_current_session(msg: &InboxMessage, current_session: Option<&
 /// Mark the specified message IDs as read in `identity`'s inbox in `team`.
 ///
 /// This is a best-effort operation: failures are logged as warnings but do
-/// not propagate. Callers should invoke this only **after** the codex-reply
-/// has been written to the child stdin and the request ID has been recorded
-/// (FR-8.12).
+/// not propagate. MCP auto-mail delivery now uses watermark advancement
+/// instead; this helper remains for other ATM paths that still want explicit
+/// read-state mutation.
 ///
 /// Messages whose `message_id` is `None` are never matched, consistent with
 /// how [`build_mail_envelopes`] skips them.
@@ -382,7 +395,7 @@ pub fn mark_messages_read(identity: &str, team: &str, message_ids: &[String]) {
         return;
     }
 
-    let home = match get_os_home_dir() {
+    let home = match get_home_dir() {
         Ok(h) => h,
         Err(e) => {
             tracing::warn!("mark_messages_read: cannot resolve home dir: {e}");
@@ -410,6 +423,71 @@ pub fn mark_messages_read(identity: &str, team: &str, message_ids: &[String]) {
             identity
         );
     }
+}
+
+pub fn update_last_seen_for_messages(identity: &str, team: &str, messages: &[MailEnvelope]) {
+    let Some(latest) = messages
+        .iter()
+        .filter_map(|env| DateTime::parse_from_rfc3339(&env.timestamp).ok())
+        .max()
+    else {
+        return;
+    };
+
+    let home = match get_home_dir() {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!("update_last_seen_for_messages: cannot resolve home dir: {e}");
+            return;
+        }
+    };
+
+    let path = state_path(&home);
+    let mut state = load_seen_state_from(&path);
+    state
+        .last_seen
+        .entry(team.to_string())
+        .or_default()
+        .insert(identity.to_string(), latest.to_rfc3339());
+
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        tracing::warn!("update_last_seen_for_messages: cannot create state dir: {e}");
+        return;
+    }
+
+    if let Err(e) = std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&state).unwrap_or_else(|_| "{}".to_string()),
+    ) {
+        tracing::warn!("update_last_seen_for_messages: cannot write state file: {e}");
+    }
+}
+
+fn state_path(home: &std::path::Path) -> PathBuf {
+    home.join(".config/atm/state.json")
+}
+
+fn load_seen_state_from(path: &std::path::Path) -> SeenState {
+    if !path.exists() {
+        return SeenState::default();
+    }
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+fn load_last_seen(team: &str, identity: &str) -> Option<DateTime<Utc>> {
+    let home = get_home_dir().ok()?;
+    let state = load_seen_state_from(&state_path(&home));
+    state
+        .last_seen
+        .get(team)
+        .and_then(|agents| agents.get(identity))
+        .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
+        .map(|dt| dt.with_timezone(&Utc))
 }
 
 // ---------------------------------------------------------------------------
@@ -480,6 +558,19 @@ mod tests {
         serde_json::from_str(&content).unwrap()
     }
 
+    fn write_last_seen(home: &std::path::Path, team: &str, agent: &str, timestamp: &str) {
+        let path = home.join(".config").join("atm").join("state.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let state = serde_json::json!({
+            "last_seen": {
+                team: {
+                    agent: timestamp
+                }
+            }
+        });
+        fs::write(path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+    }
+
     // -----------------------------------------------------------------------
     // format_mail_turn_content
     // -----------------------------------------------------------------------
@@ -520,14 +611,15 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn build_envelopes_skips_read_messages() {
+    fn build_envelopes_includes_read_messages_when_selected_by_watermark() {
         let messages = vec![
             make_msg("a", "unread", false, Some("id-1")),
             make_msg("b", "already read", true, Some("id-2")),
         ];
         let envelopes = build_mail_envelopes(&messages, 10, 4096);
-        assert_eq!(envelopes.len(), 1);
+        assert_eq!(envelopes.len(), 2);
         assert_eq!(envelopes[0].message_id, "id-1");
+        assert_eq!(envelopes[1].message_id, "id-2");
     }
 
     #[test]
@@ -635,26 +727,49 @@ mod tests {
 
     #[test]
     #[serial]
-    fn fetch_returns_unread_envelopes() {
+    fn fetch_returns_messages_after_last_seen_even_if_read() {
         let dir = TempDir::new().unwrap();
         set_atm_home(&dir);
 
-        seed_inbox(
-            dir.path(),
-            "team",
-            "agent",
-            &[
-                make_msg("alice", "hello", false, Some("id-1")),
-                make_msg("bob", "already read", true, Some("id-2")),
-            ],
-        );
+        write_last_seen(dir.path(), "team", "agent", "2026-02-19T09:30:00Z");
+
+        let mut unread = make_msg("alice", "hello", false, Some("id-1"));
+        unread.timestamp = "2026-02-19T10:00:00Z".to_string();
+        let mut read = make_msg("bob", "already read", true, Some("id-2"));
+        read.timestamp = "2026-02-19T10:30:00Z".to_string();
+
+        seed_inbox(dir.path(), "team", "agent", &[unread, read]);
+
+        let envelopes = fetch_unread_mail("agent", "team", 10, 4096);
+        unset_atm_home();
+
+        assert_eq!(envelopes.len(), 2);
+        assert_eq!(envelopes[0].sender, "alice");
+        assert_eq!(envelopes[0].message_id, "id-1");
+        assert_eq!(envelopes[1].sender, "bob");
+        assert_eq!(envelopes[1].message_id, "id-2");
+    }
+
+    #[test]
+    #[serial]
+    fn fetch_uses_last_seen_watermark() {
+        let dir = TempDir::new().unwrap();
+        set_atm_home(&dir);
+
+        write_last_seen(dir.path(), "team", "agent", "2026-02-19T10:15:00Z");
+
+        let mut older = make_msg("alice", "older", false, Some("id-1"));
+        older.timestamp = "2026-02-19T10:00:00Z".to_string();
+        let mut newer = make_msg("bob", "newer", false, Some("id-2"));
+        newer.timestamp = "2026-02-19T10:30:00Z".to_string();
+
+        seed_inbox(dir.path(), "team", "agent", &[older, newer]);
 
         let envelopes = fetch_unread_mail("agent", "team", 10, 4096);
         unset_atm_home();
 
         assert_eq!(envelopes.len(), 1);
-        assert_eq!(envelopes[0].sender, "alice");
-        assert_eq!(envelopes[0].message_id, "id-1");
+        assert_eq!(envelopes[0].message_id, "id-2");
     }
 
     #[test]
@@ -747,6 +862,50 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn update_last_seen_tracks_latest_dispatched_message_without_marking_read() {
+        let dir = TempDir::new().unwrap();
+        set_atm_home(&dir);
+
+        let mut older = make_msg("alice", "older", false, Some("id-1"));
+        older.timestamp = "2026-02-19T10:00:00Z".to_string();
+        let mut newer = make_msg("bob", "newer", false, Some("id-2"));
+        newer.timestamp = "2026-02-19T11:00:00Z".to_string();
+        seed_inbox(dir.path(), "team", "agent", &[older, newer]);
+
+        let envelopes = vec![
+            MailEnvelope {
+                sender: "alice".into(),
+                timestamp: "2026-02-19T10:00:00Z".into(),
+                message_id: "id-1".into(),
+                text: "older".into(),
+            },
+            MailEnvelope {
+                sender: "bob".into(),
+                timestamp: "2026-02-19T11:00:00Z".into(),
+                message_id: "id-2".into(),
+                text: "newer".into(),
+            },
+        ];
+
+        update_last_seen_for_messages("agent", "team", &envelopes);
+
+        let state_path = dir.path().join(".config").join("atm").join("state.json");
+        let state: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(state_path).unwrap()).unwrap();
+        assert_eq!(
+            state["last_seen"]["team"]["agent"].as_str(),
+            Some("2026-02-19T11:00:00+00:00")
+        );
+
+        let messages = read_inbox_file(dir.path(), "team", "agent");
+        assert!(!messages[0].read);
+        assert!(!messages[1].read);
+
+        unset_atm_home();
+    }
+
+    #[test]
     fn session_filter_rejects_stale_session_scoped_messages() {
         let mut msg = make_msg(
             "sender",
@@ -763,12 +922,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Delivery sequencing: fetch → format → dispatch → mark-read
+    // Delivery sequencing: fetch → format → optional read-state mutation
     // -----------------------------------------------------------------------
 
     #[test]
     #[serial]
-    fn full_injection_sequence_marks_read_only_after_delivery() {
+    fn full_injection_sequence_can_mark_read_after_delivery_when_needed() {
         let dir = TempDir::new().unwrap();
         set_atm_home(&dir);
 

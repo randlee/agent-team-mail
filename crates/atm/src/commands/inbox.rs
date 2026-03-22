@@ -25,8 +25,8 @@ pub struct InboxArgs {
     #[arg(long)]
     all_teams: bool,
 
-    /// Show counts since last seen (default: true)
-    #[arg(long, default_value_t = true)]
+    /// Show counts newer than the last-seen watermark
+    #[arg(long)]
     since_last_seen: bool,
 
     /// Disable since-last-seen filtering
@@ -248,7 +248,7 @@ fn show_team_summary(config_home: &Path, team_name: &str, use_since_last_seen: b
     } else {
         println!(
             "  {:<20} {:>8} {:>8} {:>12}",
-            "Agent", "Pending", "Total", "Latest"
+            "Agent", "Unread", "Total", "Latest"
         );
     }
     println!("  {}", "─".repeat(52));
@@ -271,16 +271,15 @@ fn show_team_summary(config_home: &Path, team_name: &str, use_since_last_seen: b
                     Some(last_seen_dt) => messages
                         .iter()
                         .filter(|m| {
-                            m.is_pending_action()
-                                || DateTime::parse_from_rfc3339(&m.timestamp)
-                                    .map(|dt| dt > last_seen_dt)
-                                    .unwrap_or(false)
+                            DateTime::parse_from_rfc3339(&m.timestamp)
+                                .map(|dt| dt.with_timezone(&Utc) > last_seen_dt)
+                                .unwrap_or(false)
                         })
                         .count(),
-                    None => messages.iter().filter(|m| m.is_pending_action()).count(),
+                    None => messages.len(),
                 }
             } else {
-                messages.iter().filter(|m| m.is_pending_action()).count()
+                messages.iter().filter(|m| !m.read).count()
             };
             let total_count = messages.len();
             let latest_time = messages
