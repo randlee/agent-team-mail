@@ -40,7 +40,8 @@ use crate::inject::{build_session_context, inject_developer_instructions};
 use crate::lifecycle::{ThreadCommand, ThreadCommandQueue};
 use crate::lock::{acquire_lock, check_lock, release_lock};
 use crate::mail_inject::{
-    InflightMailSet, MailPoller, fetch_unread_mail, format_mail_turn_content, mark_messages_read,
+    InflightMailSet, MailPoller, fetch_unread_mail, format_mail_turn_content,
+    update_last_seen_for_messages,
 };
 use crate::session::{RegistryError, SessionRegistry, SessionStatus, ThreadState};
 use crate::tools::synthetic_tools;
@@ -575,7 +576,8 @@ impl ProxyServer {
 
                         // Fix 5: Delegate directly to dispatch_auto_mail_if_available
                         // which handles priority checking (ClaudeReply > AutoMailInject),
-                        // single-flight guard, write, pending registration, and mark-read.
+                        // single-flight guard, write, pending registration, and
+                        // watermark advancement.
                         // This avoids the previous push_auto_mail + inline dispatch
                         // inconsistency where a queue entry was never popped.
                         dispatch_auto_mail_if_available(
@@ -1614,7 +1616,7 @@ Session ending. Write a concise summary of:\n\
                     // Post-turn mail check (FR-8.1): after a turn completes,
                     // delegate to the unified dispatch function which handles
                     // priority checking, single-flight guard, write, pending map
-                    // registration, and mark-read.
+                    // registration, and watermark advancement.
                     if mail_enabled_for_task {
                         if let (Some(agent_id), Some(identity), Some(thread_id)) = (
                             &completed_agent_id,
@@ -3300,13 +3302,14 @@ async fn drain_elicitation_queue_for_agents(
     }
 }
 
-/// Dispatch an auto-mail codex-reply to the child if unread mail is available.
+/// Dispatch an auto-mail codex-reply to the child if inbox messages are
+/// available past the MCP watermark.
 ///
 /// This is the shared logic used by both the post-turn path (in the response
 /// handler spawned task) and the auto-mail response chaining path (in the child
-/// stdout reader).  It fetches unread mail, builds and writes the codex-reply
-/// message to the child, registers the request-id in the pending map, and marks
-/// messages read only after successful dispatch (FR-8.12).
+/// stdout reader). It fetches mail selected by the MCP watermark, builds and
+/// writes the codex-reply message to the child, registers the request-id in
+/// the pending map, and advances the watermark only after successful dispatch.
 ///
 /// Also satisfies Defect 3: after a turn completes (Busy -> Idle), this
 /// function first checks the command queue for a pending `ClaudeReply`.  If one
@@ -3411,8 +3414,8 @@ async fn dispatch_auto_mail_if_available(
     }
 
     // Route to the app-server path when the transport uses turn/start or
-    // turn/steer instead of codex-reply.  The app-server dispatcher manages
-    // the single-flight reservation and mark-read boundary itself.
+    // turn/steer instead of codex-reply. The app-server dispatcher manages
+    // the single-flight reservation and watermark advancement boundary itself.
     if let Some(transport) = transport_ref {
         if transport.uses_app_server_injection() {
             // The single-flight guard must still be taken before we call the
@@ -3522,9 +3525,9 @@ async fn dispatch_auto_mail_if_available(
             );
             p.set_last_agent_source(agent_id.to_string(), source);
         }
-        // FR-8.12: mark read only after successful dispatch.
-        let ids: Vec<String> = envelopes.iter().map(|e| e.message_id.clone()).collect();
-        mark_messages_read(identity, team, &ids);
+        // Watermark advances only after successful injection; message read
+        // state remains independent from MCP delivery.
+        update_last_seen_for_messages(identity, team, &envelopes);
         tracing::info!(
             agent_id = %agent_id,
             req_id = auto_req_id,
@@ -3554,11 +3557,11 @@ async fn dispatch_auto_mail_if_available(
 ///   turn in progress (`active_turn_id` is `Some(id)`).  Requires
 ///   `expectedTurnId` to match the active turn.
 ///
-/// FR-8.12 semantics are preserved: [`mark_messages_read`] is only called
-/// **after** the write to child stdin succeeds.  If the write fails, the
-/// registry thread state is restored to `Idle` so the next poll can retry.
+/// Watermark semantics are preserved: `last_seen` is only advanced after the
+/// write to child stdin succeeds. If the write fails, the registry thread
+/// state is restored to `Idle` so the next poll can retry.
 ///
-/// The `inflight` set is updated before `mark_messages_read` to prevent
+/// The `inflight` set is updated before dispatch to prevent
 /// the next poll cycle from re-injecting the same messages while the current
 /// dispatch is in-progress.  On write failure the in-flight IDs are cleared
 /// so they become eligible for retry.
@@ -3688,8 +3691,8 @@ async fn dispatch_auto_mail_app_server(
             p.mark_request_source(serde_json::Value::Number(req_id.into()), source.clone());
             p.set_last_agent_source(agent_id.to_string(), source);
         }
-        // FR-8.12: mark-read only after successful dispatch.
-        mark_messages_read(identity, team, &dispatched_ids);
+        // Advance the injection watermark only after successful dispatch.
+        update_last_seen_for_messages(identity, team, &envelopes);
         tracing::info!(
             agent_id = %agent_id,
             req_id = req_id,
@@ -3697,8 +3700,8 @@ async fn dispatch_auto_mail_app_server(
             method = if active_turn_id.is_some() { "turn/steer" } else { "turn/start" },
             "app-server auto-mail dispatched (FR-8.1)"
         );
-        // After successful mark-read the messages are no longer unread, so
-        // clear them from the in-flight set to keep it compact.
+        // After successful watermark advancement the same messages should no
+        // longer be re-selected, so clear them from the in-flight set.
         inflight.lock().await.clear_inflight(&dispatched_ids);
     } else {
         // Write failed — restore thread to Idle and clear in-flight so the
@@ -5313,22 +5316,22 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // dispatch_auto_mail_app_server — FR-8.12 mark-read boundary test
+    // dispatch_auto_mail_app_server — watermark advancement boundary test
     // -----------------------------------------------------------------------
 
-    /// Verify that `dispatch_auto_mail_app_server` does NOT call
-    /// `mark_messages_read` when the write to child stdin fails.
+    /// Verify that `dispatch_auto_mail_app_server` does NOT advance the
+    /// injection watermark when the write to child stdin fails.
     ///
-    /// FR-8.12: mark-read must only happen after the request is accepted by
-    /// the child stdin.  If the write fails, messages must remain unread so
-    /// the next poll cycle can retry.
+    /// Watermark advancement must only happen after the request is accepted by
+    /// the child stdin. If the write fails, the messages must remain eligible
+    /// for retry on the next poll cycle.
     ///
     /// Implementation note: we simulate a write failure by dropping the read
     /// half of a duplex stream before writing, which causes `write_all` to
     /// return a broken-pipe error on the write half.
     #[tokio::test]
     #[serial_test::serial]
-    async fn mark_read_only_after_successful_dispatch() {
+    async fn watermark_only_advances_after_successful_dispatch() {
         use std::collections::HashMap;
         use tempfile::TempDir;
 
@@ -5394,7 +5397,8 @@ mod tests {
         // Reserve the thread (Idle -> Busy) as dispatch_auto_mail_app_server expects.
         assert!(try_reserve_thread_for_auto_mail(&agent_id, &registry).await);
 
-        // Call the app-server dispatcher — this should fail to write and NOT mark read.
+        // Call the app-server dispatcher — this should fail to write and NOT
+        // advance the watermark.
         dispatch_auto_mail_app_server(
             &agent_id,
             identity,
@@ -5411,13 +5415,19 @@ mod tests {
         )
         .await;
 
-        // Verify: the message must still be unread (mark-read was not called).
+        // Verify: the inbox read state is unchanged when dispatch fails.
         let content = std::fs::read_to_string(&inbox_path).unwrap();
         let messages: Vec<agent_team_mail_core::InboxMessage> =
             serde_json::from_str(&content).unwrap();
         assert!(
             !messages[0].read,
-            "message must remain unread when dispatch write fails (FR-8.12)"
+            "message read state must remain unchanged when dispatch write fails"
+        );
+
+        let state_path = dir.path().join(".config").join("atm").join("state.json");
+        assert!(
+            !state_path.exists(),
+            "watermark state must not be written when dispatch fails"
         );
 
         // Verify: in-flight set was cleared on failure (retry eligible).
