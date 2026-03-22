@@ -29,6 +29,7 @@ pub mod schema;
 pub mod spawn;
 pub mod team_config_store;
 pub mod text;
+pub mod util;
 
 pub use schema::{
     AgentMember, InboxMessage, Permissions, SettingsJson, TaskItem, TaskStatus, TeamConfig,

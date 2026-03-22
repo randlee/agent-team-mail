@@ -23,6 +23,7 @@ use agent_team_mail_core::InboxMessage;
 use agent_team_mail_core::home::{config_team_dir_for, get_home_dir};
 use agent_team_mail_core::io::inbox_update;
 use agent_team_mail_core::text::truncate_chars;
+use agent_team_mail_core::util::state::SeenState;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -462,12 +463,6 @@ pub fn update_last_seen_for_messages(identity: &str, team: &str, messages: &[Mai
     ) {
         tracing::warn!("update_last_seen_for_messages: cannot write state file: {e}");
     }
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct SeenState {
-    #[serde(default)]
-    last_seen: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
 }
 
 fn state_path(home: &std::path::Path) -> PathBuf {

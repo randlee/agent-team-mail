@@ -1,17 +1,9 @@
 //! Local state management for ATM CLI (seen tracking).
 
+pub use agent_team_mail_core::util::state::SeenState;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::PathBuf;
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct SeenState {
-    /// Map of team -> agent -> last_seen ISO timestamp
-    #[serde(default)]
-    pub last_seen: HashMap<String, HashMap<String, String>>,
-}
 
 pub fn load_seen_state() -> Result<SeenState> {
     let path = state_path()?;
