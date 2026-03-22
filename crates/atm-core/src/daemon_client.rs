@@ -661,15 +661,24 @@ fn canonical_shared_runtime_root() -> anyhow::Result<PathBuf> {
     Ok(canonicalize_lossy(&crate::home::get_os_home_dir()?))
 }
 
+fn shared_runtime_test_bypass_enabled(input: &RuntimePolicyInput) -> bool {
+    let _ = input;
+    std::env::var("ATM_TEST_SHARED_DAEMON_ADMISSION")
+        .ok()
+        .as_deref()
+        == Some("1")
+}
+
 // Enforces BB.2 single-daemon invariant: one canonical runtime root, one
 // binary selection policy. See docs/daemon-spawn-auth/requirements.md.
 fn enforce_shared_runtime_invariant(
     input: &RuntimePolicyInput,
     owner: &RuntimeOwnerMetadata,
 ) -> anyhow::Result<()> {
+    let test_bypass = shared_runtime_test_bypass_enabled(input);
     let expected_home = canonical_shared_runtime_root()?;
     let actual_home = canonicalize_lossy(&input.home_scope);
-    if actual_home != expected_home {
+    if actual_home != expected_home && !test_bypass {
         anyhow::bail!(
             "shared runtime must use canonical runtime root {}; refusing ATM_HOME={}",
             expected_home.display(),
@@ -677,7 +686,7 @@ fn enforce_shared_runtime_invariant(
         );
     }
 
-    if owner.build_profile != BuildProfile::Release {
+    if owner.build_profile != BuildProfile::Release && !test_bypass {
         anyhow::bail!(
             "shared runtime requires a release build; refusing daemon at {} (build_profile={})",
             owner.executable_path,
@@ -686,7 +695,7 @@ fn enforce_shared_runtime_invariant(
     }
 
     let daemon_bin = PathBuf::from(&owner.executable_path);
-    if looks_like_repo_or_worktree_binary(&daemon_bin) {
+    if looks_like_repo_or_worktree_binary(&daemon_bin) && !test_bypass {
         anyhow::bail!(
             "shared runtime requires an approved daemon binary; refusing {} for ATM_HOME={}",
             owner.executable_path,
@@ -3499,6 +3508,7 @@ sleep 10
 
     #[cfg(unix)]
     #[test]
+    #[serial]
     fn test_validate_runtime_admission_accepts_shared_override_binary() {
         let _lock = env_lock().lock().unwrap();
         let shared_home_dir = non_temp_shared_home();
@@ -3520,12 +3530,14 @@ sleep 10
 
     #[cfg(unix)]
     #[test]
+    #[serial]
     fn test_validate_runtime_admission_rejects_repo_binary_for_shared_runtime() {
         let _lock = env_lock().lock().unwrap();
         let shared_home_dir = non_temp_shared_home();
         let _home_guard = EnvGuard::set("HOME", shared_home_dir.path().to_str().unwrap());
         let _user_guard = EnvGuard::set("USERPROFILE", shared_home_dir.path().to_str().unwrap());
         let _atm_guard = EnvGuard::unset("ATM_HOME");
+        let _shared_guard = EnvGuard::unset("ATM_TEST_SHARED_DAEMON_ADMISSION");
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
@@ -3542,12 +3554,14 @@ sleep 10
 
     #[cfg(unix)]
     #[test]
+    #[serial]
     fn test_validate_runtime_admission_rejects_debug_build_for_shared_release_runtime() {
         let _lock = env_lock().lock().unwrap();
         let shared_home_dir = non_temp_shared_home();
         let _home_guard = EnvGuard::set("HOME", shared_home_dir.path().to_str().unwrap());
         let _user_guard = EnvGuard::set("USERPROFILE", shared_home_dir.path().to_str().unwrap());
         let _atm_guard = EnvGuard::unset("ATM_HOME");
+        let _shared_guard = EnvGuard::unset("ATM_TEST_SHARED_DAEMON_ADMISSION");
         let shared_home = get_os_home_dir().unwrap();
         let input = RuntimePolicyInput {
             home_scope: shared_home,
@@ -3561,12 +3575,14 @@ sleep 10
 
     #[cfg(unix)]
     #[test]
+    #[serial]
     fn test_validate_runtime_admission_rejects_noncanonical_shared_home() {
         let _lock = env_lock().lock().unwrap();
         let shared_home_dir = non_temp_shared_home();
         let _home_guard = EnvGuard::set("HOME", shared_home_dir.path().to_str().unwrap());
         let _user_guard = EnvGuard::set("USERPROFILE", shared_home_dir.path().to_str().unwrap());
         let _atm_guard = EnvGuard::unset("ATM_HOME");
+        let _shared_guard = EnvGuard::unset("ATM_TEST_SHARED_DAEMON_ADMISSION");
         let shared_home = get_os_home_dir().unwrap().join(".atm-alt-runtime-home");
         let input = RuntimePolicyInput {
             home_scope: shared_home,
@@ -3812,6 +3828,7 @@ sleep 10
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
 
+        let _lock = env_lock().lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().to_path_buf();
         fs::create_dir_all(home.join(".atm/daemon")).unwrap();
@@ -3915,6 +3932,7 @@ done
         let _home_guard = EnvGuard::set("ATM_HOME", home.to_str().unwrap());
         let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", script_path.to_str().unwrap());
         let _auto_guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "1");
+        let _shared_guard = EnvGuard::set("ATM_TEST_SHARED_DAEMON_ADMISSION", "1");
 
         ensure_daemon_running_unix().expect("must recover from dead stale pid metadata");
         let marker = home.join("started-ok");

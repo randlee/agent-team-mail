@@ -19,6 +19,7 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     std::fs::create_dir_all(&workdir).ok();
     std::fs::create_dir_all(&runtime_home).ok();
     cmd.env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
@@ -26,6 +27,15 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
         .env_remove("CLAUDE_SESSION_ID")
         .env("ATM_IDENTITY", "team-lead") // default identity; individual tests can override
         .current_dir(&workdir);
+}
+
+fn state_path(temp_dir: &TempDir) -> PathBuf {
+    temp_dir
+        .path()
+        .join("runtime-home")
+        .join(".config")
+        .join("atm")
+        .join("state.json")
 }
 
 /// Create a test team structure
@@ -86,7 +96,6 @@ fn create_test_inbox(team_dir: &Path, agent_name: &str, messages: Vec<serde_json
     )
     .unwrap();
 }
-
 #[test]
 fn test_read_unread_messages() {
     let temp_dir = TempDir::new().unwrap();
@@ -827,9 +836,8 @@ fn test_read_since_last_seen_default() {
     create_test_inbox(&team_dir, "test-agent", messages);
 
     // Seed last-seen state at 10:30
-    let state_dir = temp_dir.path().join(".config").join("atm");
-    fs::create_dir_all(&state_dir).unwrap();
-    let state_path = state_dir.join("state.json");
+    let state_path = state_path(&temp_dir);
+    fs::create_dir_all(state_path.parent().unwrap()).unwrap();
     let state = serde_json::json!({
         "last_seen": {
             "test-team": {
@@ -881,9 +889,8 @@ fn test_read_since_last_seen_still_shows_older_unread_messages() {
     create_test_inbox(&team_dir, "test-agent", messages);
 
     // Seed last-seen after both messages so timestamp filtering alone would hide everything.
-    let state_dir = temp_dir.path().join(".config").join("atm");
-    fs::create_dir_all(&state_dir).unwrap();
-    let state_path = state_dir.join("state.json");
+    let state_path = state_path(&temp_dir);
+    fs::create_dir_all(state_path.parent().unwrap()).unwrap();
     let state = serde_json::json!({
         "last_seen": {
             "test-team": {
@@ -972,9 +979,8 @@ fn test_read_all_ignores_last_seen_filter() {
     create_test_inbox(&team_dir, "test-agent", messages);
 
     // Seed last-seen after both messages; --all should still show both.
-    let state_dir = temp_dir.path().join(".config").join("atm");
-    fs::create_dir_all(&state_dir).unwrap();
-    let state_path = state_dir.join("state.json");
+    let state_path = state_path(&temp_dir);
+    fs::create_dir_all(state_path.parent().unwrap()).unwrap();
     let state = serde_json::json!({
         "last_seen": {
             "test-team": {
@@ -1011,9 +1017,8 @@ fn test_read_no_update_seen() {
     create_test_inbox(&team_dir, "test-agent", messages);
 
     // Seed last-seen state at 10:00
-    let state_dir = temp_dir.path().join(".config").join("atm");
-    fs::create_dir_all(&state_dir).unwrap();
-    let state_path = state_dir.join("state.json");
+    let state_path = state_path(&temp_dir);
+    fs::create_dir_all(state_path.parent().unwrap()).unwrap();
     let state = serde_json::json!({
         "last_seen": {
             "test-team": {
@@ -1067,9 +1072,8 @@ fn test_read_updates_last_seen_from_displayed_messages_only() {
     create_test_inbox(&team_dir, "test-agent", messages);
 
     // Seed last-seen before both messages.
-    let state_dir = temp_dir.path().join(".config").join("atm");
-    fs::create_dir_all(&state_dir).unwrap();
-    let state_path = state_dir.join("state.json");
+    let state_path = state_path(&temp_dir);
+    fs::create_dir_all(state_path.parent().unwrap()).unwrap();
     let state = serde_json::json!({
         "last_seen": {
             "test-team": {
@@ -1115,6 +1119,7 @@ fn test_read_own_inbox_no_identity_rejects() {
     let runtime_home = temp_dir.path().join("runtime-home");
     std::fs::create_dir_all(&runtime_home).unwrap();
     cmd.env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_TEAM", "test-team")
@@ -1152,6 +1157,7 @@ fn test_read_own_inbox_with_as_flag_succeeds() {
     let runtime_home = temp_dir.path().join("runtime-home");
     std::fs::create_dir_all(&runtime_home).unwrap();
     cmd.env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_TEAM", "test-team")

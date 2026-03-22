@@ -173,7 +173,9 @@ pub fn execute(args: ReadArgs) -> Result<()> {
         hostname_registry.as_ref(),
     )?;
 
-    let use_since_last_seen = args.since_last_seen && !args.no_since_last_seen;
+    // `--no-since-last-seen` is the real opt-out. The positive flag exists for
+    // compatibility, but the default behavior is to keep the watermark active.
+    let use_since_last_seen = !args.no_since_last_seen;
     let last_seen = if use_since_last_seen {
         let state = load_seen_state().unwrap_or_default();
         get_last_seen(&state, &team_name, &agent_name)

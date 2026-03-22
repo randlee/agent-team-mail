@@ -127,7 +127,6 @@ fn assert_canonical_logging_health(logging_health: &Value) {
             || logging_health["last_error"]["at"].is_null()
     );
 }
-
 #[test]
 fn status_json_includes_extended_logging_fields() {
     let temp_dir = TempDir::new().expect("temp dir");
@@ -137,6 +136,7 @@ fn status_json_includes_extended_logging_fields() {
 
     let output = Command::new(cargo::cargo_bin!("atm"))
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("status")
@@ -178,6 +178,7 @@ fn doctor_json_includes_extended_logging_fields() {
 
     let output = Command::new(cargo::cargo_bin!("atm"))
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("doctor")
@@ -212,6 +213,7 @@ fn daemon_status_json_includes_extended_logging_fields() {
 
     let output = Command::new(cargo::cargo_bin!("atm"))
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("daemon")
@@ -252,6 +254,7 @@ fn doctor_and_status_logging_health_schema_parity() {
 
     let status_output = Command::new(cargo::cargo_bin!("atm"))
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("status")
@@ -266,6 +269,7 @@ fn doctor_and_status_logging_health_schema_parity() {
 
     let doctor_output = Command::new(cargo::cargo_bin!("atm"))
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("doctor")
@@ -284,6 +288,7 @@ fn doctor_and_status_logging_health_schema_parity() {
 
     let daemon_output = Command::new(cargo::cargo_bin!("atm"))
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("daemon")

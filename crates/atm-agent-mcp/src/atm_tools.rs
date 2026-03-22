@@ -29,9 +29,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_team_mail_core::InboxMessage;
-use agent_team_mail_core::home::{
-    config_team_config_path_for, config_team_dir_for, get_os_home_dir,
-};
+use agent_team_mail_core::home::{config_team_config_path_for, config_team_dir_for, get_home_dir};
 use agent_team_mail_core::io::{inbox_append, inbox_update};
 use agent_team_mail_core::text::{truncate_chars, truncate_chars_slice};
 use serde_json::{Value, json};
@@ -254,7 +252,7 @@ pub fn handle_atm_send(id: &Value, args: &Value, identity: &str, team: &str) -> 
 
     let msg = build_message(identity, message_text, summary);
 
-    let home = match get_os_home_dir() {
+    let home = match get_home_dir() {
         Ok(h) => h,
         Err(e) => {
             return make_mcp_error_result(id, &format!("atm_send: cannot resolve home dir: {e}"));
@@ -297,7 +295,7 @@ pub fn handle_atm_send(id: &Value, args: &Value, identity: &str, team: &str) -> 
 ///
 /// MCP result whose text is a JSON array of `{from, text, timestamp, message_id}` objects.
 pub fn handle_atm_read(id: &Value, args: &Value, identity: &str, team: &str) -> Value {
-    let home = match get_os_home_dir() {
+    let home = match get_home_dir() {
         Ok(h) => h,
         Err(e) => {
             return make_mcp_error_result(id, &format!("atm_read: cannot resolve home dir: {e}"));
@@ -457,7 +455,7 @@ pub fn handle_atm_broadcast(id: &Value, args: &Value, identity: &str, team: &str
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let home = match get_os_home_dir() {
+    let home = match get_home_dir() {
         Ok(h) => h,
         Err(e) => {
             return make_mcp_error_result(
@@ -535,7 +533,7 @@ pub fn handle_atm_broadcast(id: &Value, args: &Value, identity: &str, team: &str
 ///
 /// MCP result whose text is `{"unread": N}`.
 pub fn handle_atm_pending_count(id: &Value, _args: &Value, identity: &str, team: &str) -> Value {
-    let home = match get_os_home_dir() {
+    let home = match get_home_dir() {
         Ok(h) => h,
         Err(e) => {
             return make_mcp_error_result(

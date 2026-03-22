@@ -7,6 +7,7 @@ use tempfile::TempDir;
 fn init_cmd<'a>(home: &'a TempDir, repo: &'a Path) -> assert_cmd::Command {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", home.path())
+        .env("ATM_CONFIG_HOME", home.path())
         .envs([("HOME", home.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_HOOK_PYTHON", "python3")
@@ -128,7 +129,6 @@ fn normalize_runtime_path(path: &str) -> String {
         path.to_string()
     }
 }
-
 #[test]
 fn test_init_fresh_repo_creates_atm_toml_team_and_global_hooks() {
     let home = TempDir::new().unwrap();

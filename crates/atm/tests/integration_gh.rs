@@ -75,7 +75,7 @@ poll_interval_secs = 60
 
 #[cfg(unix)]
 fn runtime_home_path(home: &Path) -> PathBuf {
-    home.join("runtime-home")
+    home.to_path_buf()
 }
 
 #[cfg(unix)]
@@ -89,7 +89,9 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir, team: &str, w
         write_repo_gh_monitor_config(&workdir, team);
     }
     cmd.env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
+        .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_DAEMON_BIN", &fake_daemon_bin)
         .env_remove("ATM_TEAM")
@@ -101,7 +103,8 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir, team: &str, w
 
 #[cfg(unix)]
 fn enable_daemon_autostart(cmd: &mut assert_cmd::Command) {
-    cmd.env("ATM_DAEMON_AUTOSTART", "1");
+    cmd.env("ATM_DAEMON_AUTOSTART", "1")
+        .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1");
 }
 
 fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
@@ -663,6 +666,7 @@ fn start_fake_gh_daemon_with_mode_and_delays(
         loop {
             let mut cmd = Command::new(&script);
             cmd.env("ATM_HOME", &runtime_home)
+                .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
                 .env("ATM_FAKE_GH_CONFIGURED", if configured { "1" } else { "0" })
                 .env("ATM_FAKE_GH_ENABLED", if enabled { "1" } else { "0" })
                 .env("ATM_FAKE_GH_MONITOR_DELAY_MS", monitor_delay_ms.to_string())
@@ -847,7 +851,6 @@ sys.exit(1)
     fs::set_permissions(&script, perms).unwrap();
     bin_dir
 }
-
 #[test]
 #[cfg(unix)]
 fn test_gh_monitor_and_control_allow_daemon_responses_over_500ms() {
@@ -1875,7 +1878,6 @@ fn test_gh_pr_list_writes_budget_state_under_overridden_atm_home() {
 
     let state_path = temp_dir
         .path()
-        .join("runtime-home")
         .join(".atm/daemon/gh-monitor-repo-state.json");
     assert!(
         state_path.exists(),

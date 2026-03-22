@@ -11,9 +11,10 @@
 //!
 //! # Platform Behavior
 //!
-//! - **Linux/macOS**: `dirs::home_dir()` uses `$HOME` environment variable
-//! - **Windows**: `dirs::home_dir()` uses Windows API (`SHGetKnownFolderPath`), which ignores
-//!   both `HOME` and `USERPROFILE` environment variables
+//! - **Linux/macOS**: `get_os_home_dir()` honors `ATM_CONFIG_HOME`, then `$HOME`
+//! - **Windows**: `get_os_home_dir()` honors `ATM_CONFIG_HOME`, then falls back to the
+//!   Windows API (`SHGetKnownFolderPath`) via `dirs::home_dir()`, which ignores both
+//!   `HOME` and `USERPROFILE`
 //!
 //! # Precedence
 //!
@@ -103,21 +104,27 @@ pub fn get_home_dir() -> Result<PathBuf> {
     dirs::home_dir().context("Could not determine home directory")
 }
 
-/// Get the OS-level home directory, always bypassing `ATM_HOME`.
+/// Get the canonical config-root home directory, bypassing `ATM_HOME`.
 ///
-/// Unlike [`get_home_dir`], this function ignores the `ATM_HOME` environment
-/// variable and returns the platform default home directory directly.
+/// Unlike [`get_home_dir`], this function ignores the `ATM_HOME` runtime-root
+/// override. Tests may override the canonical config root with
+/// `ATM_CONFIG_HOME`; otherwise this falls back to the OS-level home directory.
 ///
 /// This is intentionally distinct from [`get_home_dir`] and is reserved for
-/// locations that must be stable regardless of `ATM_HOME` — specifically the
-/// daemon socket pointer file at `~/.config/atm/daemon-socket.path`, which
-/// needs to be reachable by any CLI invocation even when `ATM_HOME` points to
-/// a different directory.
+/// locations that must remain config-root relative even when `ATM_HOME` points
+/// at a separate runtime directory.
 ///
 /// # Errors
 ///
 /// Returns an error if the platform cannot determine a home directory.
 pub fn get_os_home_dir() -> Result<PathBuf> {
+    if let Ok(home) = std::env::var("ATM_CONFIG_HOME") {
+        let trimmed = home.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+
     #[cfg(not(windows))]
     if let Ok(home) = std::env::var("HOME") {
         let trimmed = home.trim();
@@ -525,7 +532,9 @@ mod tests {
     #[test]
     #[serial]
     fn test_get_os_home_dir_honors_home_env() {
+        let original_config_home = env::var("ATM_CONFIG_HOME").ok();
         let original_home = env::var("HOME").ok();
+        unsafe { env::remove_var("ATM_CONFIG_HOME") };
         unsafe { env::set_var("HOME", "/tmp/config-home") };
 
         assert_eq!(
@@ -534,6 +543,39 @@ mod tests {
         );
 
         unsafe {
+            match original_config_home {
+                Some(v) => env::set_var("ATM_CONFIG_HOME", v),
+                None => env::remove_var("ATM_CONFIG_HOME"),
+            }
+            match original_home {
+                Some(v) => env::set_var("HOME", v),
+                None => env::remove_var("HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_get_os_home_dir_honors_atm_config_home() {
+        let original_config_home = env::var("ATM_CONFIG_HOME").ok();
+        let original_home = env::var("HOME").ok();
+        unsafe { env::set_var("ATM_CONFIG_HOME", "/tmp/atm-config-home") };
+        #[cfg(not(windows))]
+        unsafe {
+            env::set_var("HOME", "/tmp/ignored-home");
+        }
+
+        assert_eq!(
+            get_os_home_dir().unwrap(),
+            PathBuf::from("/tmp/atm-config-home")
+        );
+
+        unsafe {
+            match original_config_home {
+                Some(v) => env::set_var("ATM_CONFIG_HOME", v),
+                None => env::remove_var("ATM_CONFIG_HOME"),
+            }
+            #[cfg(not(windows))]
             match original_home {
                 Some(v) => env::set_var("HOME", v),
                 None => env::remove_var("HOME"),

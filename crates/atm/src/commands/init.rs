@@ -217,7 +217,7 @@ pub fn execute(args: InitArgs) -> Result<()> {
         .unwrap_or_else(|| "team-lead".to_string());
     let current_dir = std::env::current_dir().context("Cannot determine current directory")?;
     let atm_toml_path = current_dir.join(".atm.toml");
-    let home_dir = crate::util::settings::get_os_home_dir()?;
+    let home_dir = crate::util::settings::get_home_dir()?;
     let config_home = home_dir.clone();
     let settings_path = resolve_settings_path(install_global)?;
 
@@ -937,7 +937,7 @@ fn materialize_scripts(scripts_dir: &Path) -> Result<()> {
 /// cannot be determined.
 fn resolve_settings_path(global: bool) -> Result<PathBuf> {
     if global {
-        let home = crate::util::settings::get_os_home_dir()
+        let home = crate::util::settings::get_home_dir()
             .context("Cannot resolve home directory for global settings")?;
         Ok(crate::util::settings::config_claude_root_dir_for(&home).join("settings.json"))
     } else {
@@ -1891,12 +1891,12 @@ mod tests {
         assert_eq!(path, cwd.join(".claude").join("settings.json"));
     }
 
-    /// Global path resolution must use the canonical OS home, not `ATM_HOME`.
+    /// Global path resolution must honor `ATM_HOME` when present.
     #[test]
     #[serial]
     fn test_resolve_settings_path_global_uses_os_home() {
         let dir = TempDir::new().expect("tempdir");
-        let _home_guard = EnvVarGuard::set_path("HOME", dir.path());
+        let _atm_home_guard = EnvVarGuard::set_path("ATM_HOME", dir.path());
 
         let path = resolve_settings_path(true).expect("resolve global");
         assert_eq!(path, dir.path().join(".claude").join("settings.json"));
@@ -1958,8 +1958,7 @@ mod tests {
         let repo_dir = dir.path().join("repo");
         std::fs::create_dir_all(&repo_dir).expect("create repo");
         let original_dir = env::current_dir().expect("original cwd");
-        let _home_guard = EnvVarGuard::set_path("HOME", dir.path());
-        let _atm_home_guard = EnvVarGuard::set_path("ATM_HOME", &dir.path().join("runtime-home"));
+        let _atm_home_guard = EnvVarGuard::set_path("ATM_HOME", dir.path());
 
         env::set_current_dir(&repo_dir).expect("set cwd");
 

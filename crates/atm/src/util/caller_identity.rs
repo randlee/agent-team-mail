@@ -826,7 +826,6 @@ mod tests {
         let hook_path = current_ppid_hook_path();
         let _ = std::fs::remove_file(&hook_path);
         unsafe {
-            std::env::set_var("HOME", temp.path());
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::remove_var("ATM_RUNTIME");
@@ -843,7 +842,6 @@ mod tests {
         .expect_err("expected ambiguity");
 
         unsafe {
-            std::env::remove_var("HOME");
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("ATM_RUNTIME");
@@ -862,7 +860,6 @@ mod tests {
         let hook_path = current_ppid_hook_path();
         let _ = std::fs::remove_file(&hook_path);
         unsafe {
-            std::env::set_var("HOME", temp.path());
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::remove_var("ATM_RUNTIME");
@@ -876,7 +873,6 @@ mod tests {
             .expect_err("expected unresolved caller session");
 
         unsafe {
-            std::env::remove_var("HOME");
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("ATM_RUNTIME");
@@ -900,7 +896,6 @@ mod tests {
         write_session_file(temp.path(), "atm-dev", "team-lead", "sid-b");
 
         unsafe {
-            std::env::set_var("HOME", temp.path());
             std::env::set_var("ATM_HOME", temp.path());
             std::env::set_var("ATM_TEST_HOME", temp.path());
             std::env::remove_var("ATM_RUNTIME");
@@ -913,7 +908,6 @@ mod tests {
             .expect_err("expected ambiguity");
 
         unsafe {
-            std::env::remove_var("HOME");
             std::env::remove_var("ATM_HOME");
             std::env::remove_var("ATM_TEST_HOME");
             std::env::remove_var("ATM_RUNTIME");

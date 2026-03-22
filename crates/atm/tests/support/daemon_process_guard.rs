@@ -1,9 +1,10 @@
-use agent_team_mail_daemon_launch::{attach_launch_token, issue_isolated_test_launch_token};
+use agent_team_mail_daemon_launch::{LaunchClass, attach_launch_token, issue_launch_token};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -20,7 +21,7 @@ pub struct DaemonProcessGuard {
 
 impl DaemonProcessGuard {
     pub fn runtime_home_path(home: &TempDir) -> PathBuf {
-        home.path().join("runtime-home")
+        home.path().to_path_buf()
     }
 
     pub fn spawn(home: &TempDir, team: &str) -> Self {
@@ -38,7 +39,9 @@ impl DaemonProcessGuard {
         fs::create_dir_all(&workdir).expect("create daemon test workdir");
         let mut cmd = Command::new(&daemon_bin);
         cmd.env("ATM_HOME", &runtime_home)
+            .env("ATM_CONFIG_HOME", home.path())
             .envs([("HOME", home.path())])
+            .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
             .env("ATM_DAEMON_AUTOSTART", "0")
             .env_remove("ATM_CONFIG")
             .env_remove("ATM_DAEMON_BIN") // F-1: prevent inheriting installed binary
@@ -49,16 +52,11 @@ impl DaemonProcessGuard {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let launch_token = issue_isolated_test_launch_token(
+        let launch_token = issue_launch_token(
+            LaunchClass::Shared,
             &runtime_home,
             daemon_bin.display().to_string(),
             "DaemonProcessGuard::spawn",
-            format!(
-                "DaemonProcessGuard::spawn:{}:{}",
-                team,
-                runtime_home.display()
-            ),
-            std::process::id(),
             Duration::from_secs(600),
         );
         attach_launch_token(&mut cmd, &launch_token).expect("encode daemon launch token");
@@ -353,9 +351,6 @@ fn send_signal(_pid: i32, _sig: i32) {}
 fn waitpid_until_reaped_or_echild(_pid: i32, _timeout: Duration) {}
 
 pub(crate) fn daemon_binary_path() -> PathBuf {
-    // Locate the build output directory from the current test binary path.
-    // For integration tests, `current_exe()` is in `target/<profile>/deps/`.
-    // The daemon binary lives one level up in `target/<profile>/`.
     let exe = std::env::current_exe().expect("current_exe");
     let deps_dir = exe.parent().expect("parent of test binary");
     let target_dir = if deps_dir.ends_with("deps") {
@@ -363,6 +358,37 @@ pub(crate) fn daemon_binary_path() -> PathBuf {
     } else {
         deps_dir
     };
+    let build_release = target_dir.file_name().and_then(|name| name.to_str()) == Some("release");
+
+    static BUILT: OnceLock<()> = OnceLock::new();
+    BUILT.get_or_init(|| {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|path| path.parent())
+            .expect("workspace root from crates/atm")
+            .to_path_buf();
+        let mut command = Command::new("cargo");
+        command
+            .arg("build")
+            .arg("-p")
+            .arg("agent-team-mail-daemon")
+            .arg("--bin")
+            .arg("atm-daemon");
+        if build_release {
+            command.arg("--release");
+        }
+        let status = command
+            .current_dir(&workspace_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("build atm-daemon binary for integration tests");
+        assert!(
+            status.success(),
+            "cargo build -p agent-team-mail-daemon --bin atm-daemon failed"
+        );
+    });
     #[cfg(windows)]
     let name = "atm-daemon.exe";
     #[cfg(not(windows))]

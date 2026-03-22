@@ -21,6 +21,7 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     std::fs::create_dir_all(&workdir).ok();
     std::fs::create_dir_all(&runtime_home).ok();
     cmd.env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
@@ -112,7 +113,6 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
 // ============================================================================
 // Category 1: Send → Read → Verify Workflow
 // ============================================================================
-
 #[test]
 fn test_send_read_verify_basic() {
     let temp_dir = TempDir::new().unwrap();

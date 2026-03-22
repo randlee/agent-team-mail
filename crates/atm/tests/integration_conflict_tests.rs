@@ -36,6 +36,7 @@ fn set_home_env_path(cmd: &mut assert_cmd::Command, home: &std::path::Path) {
     std::fs::create_dir_all(&workdir).ok();
     std::fs::create_dir_all(&runtime_home).ok();
     cmd.env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", home)
         .envs([("HOME", home)])
         // Prevent opportunistic daemon autostart from changing expected
         // offline/online label behavior in deterministic integration tests.
@@ -258,7 +259,8 @@ async fn test_concurrent_sends_no_data_loss() {
                     attempts += 1;
                     let mut cmd = tokio::process::Command::new(&atm_bin_path);
                     cmd.env("ATM_HOME", &runtime_home)
-                        .envs([("HOME", &temp_path)])
+                        .env("ATM_CONFIG_HOME", &temp_path)
+        .envs([("HOME", &temp_path)])
                         .env("ATM_DAEMON_AUTOSTART", "0")
                         .env_remove("ATM_CONFIG")
                         .env_remove("CLAUDE_SESSION_ID")
@@ -388,7 +390,6 @@ async fn test_concurrent_sends_no_data_loss() {
         "No duplicate message_ids should exist"
     );
 }
-
 #[test]
 #[serial]
 fn test_concurrent_cli_and_direct_write_no_loss() {
@@ -1468,6 +1469,7 @@ fn test_dead_pid_stale_lock_starts_daemon_cleanly() {
     fs::create_dir_all(&runtime_home).unwrap();
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", &config_home)
         .envs([("HOME", &config_home)])
         .env("ATM_DAEMON_AUTOSTART", "1")
         .env("ATM_TEAM", "test-team")
