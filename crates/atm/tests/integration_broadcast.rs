@@ -107,6 +107,10 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows: get_os_home_dir() uses the registry home, so HOME cannot redirect team config for isolated fixture setup; broadcast logic is covered on non-Windows"
+)]
 fn test_broadcast_basic_message() {
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
@@ -143,6 +147,10 @@ fn test_broadcast_basic_message() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows: get_os_home_dir() uses the registry home, so HOME cannot redirect team config for isolated fixture setup; broadcast logic is covered on non-Windows"
+)]
 fn test_broadcast_with_team_flag() {
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "override-team");
@@ -167,6 +175,10 @@ fn test_broadcast_with_team_flag() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows: get_os_home_dir() uses the registry home, so HOME cannot redirect team config for isolated fixture setup; broadcast logic is covered on non-Windows"
+)]
 fn test_broadcast_with_stdin() {
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
@@ -192,6 +204,10 @@ fn test_broadcast_with_stdin() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows: get_os_home_dir() uses the registry home, so HOME cannot redirect team config for isolated fixture setup; broadcast logic is covered on non-Windows"
+)]
 fn test_broadcast_with_summary() {
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
@@ -218,6 +234,10 @@ fn test_broadcast_with_summary() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows: get_os_home_dir() uses the registry home, so HOME cannot redirect team config for isolated fixture setup; broadcast logic is covered on non-Windows"
+)]
 fn test_broadcast_json_output() {
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
@@ -236,6 +256,10 @@ fn test_broadcast_json_output() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows: get_os_home_dir() uses the registry home, so HOME cannot redirect team config for isolated fixture setup; broadcast logic is covered on non-Windows"
+)]
 fn test_broadcast_dry_run() {
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
@@ -259,6 +283,10 @@ fn test_broadcast_dry_run() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows: get_os_home_dir() uses the registry home, so HOME cannot redirect team config for isolated fixture setup; broadcast logic is covered on non-Windows"
+)]
 fn test_broadcast_multiple_times_append() {
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");
@@ -346,6 +374,10 @@ fn test_broadcast_empty_team() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows: get_os_home_dir() uses the registry home, so HOME cannot redirect team config for isolated fixture setup; broadcast logic is covered on non-Windows"
+)]
 fn test_broadcast_cross_team() {
     let temp_dir = TempDir::new().unwrap();
     let _team_dir1 = setup_test_team(&temp_dir, "team-a");
