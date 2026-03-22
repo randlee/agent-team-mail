@@ -1590,6 +1590,9 @@ mod tests {
     fn test_idle_pubsub_notifications_replace_prior_idle_for_same_sender() {
         let temp = TempDir::new().unwrap();
         let _home_guard = EnvGuard::set("HOME", temp.path().to_str().unwrap());
+        // Windows: dirs::home_dir() ignores HOME; set ATM_CONFIG_HOME so get_os_home_dir()
+        // resolves the config root to our temp dir on all platforms.
+        let _config_home_guard = EnvGuard::set("ATM_CONFIG_HOME", temp.path().to_str().unwrap());
         write_test_team(temp.path(), "atm-dev", &["team-lead", "arch-ctm"]);
         std::fs::write(
             temp.path()
@@ -1632,6 +1635,9 @@ mod tests {
         std::fs::create_dir_all(&runtime_home).unwrap();
         let _home_guard = EnvGuard::set("HOME", temp.path().to_str().unwrap());
         let _atm_home_guard = EnvGuard::set("ATM_HOME", runtime_home.to_str().unwrap());
+        // Windows: dirs::home_dir() ignores HOME; set ATM_CONFIG_HOME so get_os_home_dir()
+        // resolves the config root to our temp dir on all platforms.
+        let _config_home_guard = EnvGuard::set("ATM_CONFIG_HOME", temp.path().to_str().unwrap());
         write_test_team(temp.path(), "atm-dev", &["team-lead", "arch-ctm"]);
         write_test_team(temp.path(), "src-dev", &["team-lead"]);
 
@@ -1685,6 +1691,9 @@ mod tests {
         std::fs::create_dir_all(&runtime_home).unwrap();
         let _home_guard = EnvGuard::set("HOME", temp.path().to_str().unwrap());
         let _atm_home_guard = EnvGuard::set("ATM_HOME", runtime_home.to_str().unwrap());
+        // Windows: dirs::home_dir() ignores HOME; set ATM_CONFIG_HOME so get_os_home_dir()
+        // resolves the config root to our temp dir on all platforms.
+        let _config_home_guard = EnvGuard::set("ATM_CONFIG_HOME", temp.path().to_str().unwrap());
         write_test_team(temp.path(), "atm-dev", &["team-lead", "arch-ctm"]);
         write_test_team(temp.path(), "src-dev", &["team-lead"]);
 
