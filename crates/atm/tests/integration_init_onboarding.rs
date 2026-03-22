@@ -7,6 +7,7 @@ use tempfile::TempDir;
 fn init_cmd<'a>(home: &'a TempDir, repo: &'a Path) -> assert_cmd::Command {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", home.path())
+        .env("ATM_CONFIG_HOME", home.path())
         .envs([("HOME", home.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_HOOK_PYTHON", "python3")
@@ -128,14 +129,6 @@ fn normalize_runtime_path(path: &str) -> String {
         path.to_string()
     }
 }
-
-// Windows: dirs::home_dir() uses the registry profile path, not the HOME
-// env var, so HOME-based team-config isolation does not work on Windows.
-// The tested logic is platform-independent; only the test setup is not.
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_init_fresh_repo_creates_atm_toml_team_and_global_hooks() {
     let home = TempDir::new().unwrap();
@@ -163,10 +156,6 @@ fn test_init_fresh_repo_creates_atm_toml_team_and_global_hooks() {
     );
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_init_is_idempotent_on_rerun() {
     let home = TempDir::new().unwrap();
@@ -234,10 +223,6 @@ fn test_init_is_idempotent_on_rerun() {
     );
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_init_local_writes_project_settings_only() {
     let home = TempDir::new().unwrap();
@@ -257,10 +242,6 @@ fn test_init_local_writes_project_settings_only() {
     );
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_init_skip_team_does_not_create_team_config() {
     let home = TempDir::new().unwrap();
@@ -284,10 +265,6 @@ fn test_init_skip_team_does_not_create_team_config() {
 
 /// Partial-state case: .atm.toml already present, hooks not installed.
 /// init should install hooks and create team without touching .atm.toml.
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_init_with_existing_atm_toml_installs_hooks_and_team() {
     let home = TempDir::new().unwrap();
@@ -324,10 +301,6 @@ fn test_init_with_existing_atm_toml_installs_hooks_and_team() {
 
 /// Partial-state case: hooks already installed, .atm.toml missing.
 /// init should create .atm.toml and team without duplicating hooks.
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_init_with_existing_hooks_creates_atm_toml_without_duplicating_hooks() {
     let home = TempDir::new().unwrap();
@@ -385,10 +358,6 @@ fn test_init_with_existing_hooks_creates_atm_toml_without_duplicating_hooks() {
     );
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_init_session_hooks_use_nested_schema_only() {
     let home = TempDir::new().unwrap();
@@ -422,10 +391,6 @@ fn test_init_session_hooks_use_nested_schema_only() {
     }
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_init_identity_flag_writes_identity_to_atm_toml() {
     let home = TempDir::new().unwrap();
@@ -442,10 +407,6 @@ fn test_init_identity_flag_writes_identity_to_atm_toml() {
     assert!(atm_toml.contains("identity = \"arch-ctm\""));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_init_global_relay_hook_paths_are_absolute() {
     let home = TempDir::new().unwrap();
@@ -508,10 +469,6 @@ fn test_init_global_relay_hook_paths_are_absolute() {
     );
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_init_local_relay_hook_paths_use_claude_project_dir() {
     let home = TempDir::new().unwrap();
@@ -557,10 +514,6 @@ fn test_init_local_relay_hook_paths_use_claude_project_dir() {
     );
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_init_preserves_existing_non_atm_hooks_integration() {
     let home = TempDir::new().unwrap();
@@ -613,10 +566,6 @@ fn test_init_preserves_existing_non_atm_hooks_integration() {
     assert!(preserved, "existing non-ATM hook should be preserved");
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_init_installs_codex_notify_when_detected_by_config() {
     let home = TempDir::new().unwrap();
@@ -652,10 +601,6 @@ fn test_init_installs_codex_notify_when_detected_by_config() {
     );
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_init_reports_codex_already_configured_on_second_run() {
     let home = TempDir::new().unwrap();
@@ -678,10 +623,6 @@ fn test_init_reports_codex_already_configured_on_second_run() {
         .stdout(predicate::str::contains("codex: already-configured"));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_init_dry_run_shows_planned_actions_without_writes() {
     let home = TempDir::new().unwrap();
@@ -724,10 +665,6 @@ fn test_init_dry_run_shows_planned_actions_without_writes() {
     );
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_init_reports_codex_notify_conflict_without_failing_command() {
     let home = TempDir::new().unwrap();
@@ -751,10 +688,6 @@ fn test_init_reports_codex_notify_conflict_without_failing_command() {
         ));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_init_installs_gemini_hooks_when_detected_by_config_dir() {
     let home = TempDir::new().unwrap();
@@ -808,10 +741,6 @@ fn test_init_installs_gemini_hooks_when_detected_by_config_dir() {
     );
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_init_gemini_hook_install_is_idempotent() {
     let home = TempDir::new().unwrap();

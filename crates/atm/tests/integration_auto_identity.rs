@@ -71,6 +71,7 @@ fn set_split_home(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     let runtime_home = temp_dir.path().join("runtime-home");
     fs::create_dir_all(&runtime_home).unwrap();
     cmd.env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0");
 }
@@ -96,10 +97,6 @@ fn test_send_defaults_to_human_when_no_identity() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Windows: get_os_home_dir() uses the registry home, so HOME cannot redirect team config for isolated fixture setup; identity logic is covered on non-Windows"
-)]
 fn test_send_with_atm_identity_env() {
     let (temp_dir, _team_dir) = setup_team();
 
@@ -125,10 +122,6 @@ fn test_send_with_atm_identity_env() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Windows: get_os_home_dir() uses the registry home, so HOME cannot redirect team config for isolated fixture setup; identity logic is covered on non-Windows"
-)]
 fn test_send_with_from_flag_overrides_env() {
     let (temp_dir, _team_dir) = setup_team();
 
@@ -209,10 +202,6 @@ fn test_send_without_team_context_defaults_to_human() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Windows: get_os_home_dir() uses the registry home, so HOME cannot redirect team config for isolated fixture setup; identity logic is covered on non-Windows"
-)]
 fn test_send_custom_identity_not_in_team() {
     let (temp_dir, _team_dir) = setup_team();
 

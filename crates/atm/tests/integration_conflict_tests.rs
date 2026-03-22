@@ -36,6 +36,7 @@ fn set_home_env_path(cmd: &mut assert_cmd::Command, home: &std::path::Path) {
     std::fs::create_dir_all(&workdir).ok();
     std::fs::create_dir_all(&runtime_home).ok();
     cmd.env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", home)
         .envs([("HOME", home)])
         // Prevent opportunistic daemon autostart from changing expected
         // offline/online label behavior in deterministic integration tests.
@@ -258,7 +259,8 @@ async fn test_concurrent_sends_no_data_loss() {
                     attempts += 1;
                     let mut cmd = tokio::process::Command::new(&atm_bin_path);
                     cmd.env("ATM_HOME", &runtime_home)
-                        .envs([("HOME", &temp_path)])
+                        .env("ATM_CONFIG_HOME", &temp_path)
+        .envs([("HOME", &temp_path)])
                         .env("ATM_DAEMON_AUTOSTART", "0")
                         .env_remove("ATM_CONFIG")
                         .env_remove("CLAUDE_SESSION_ID")
@@ -388,14 +390,6 @@ async fn test_concurrent_sends_no_data_loss() {
         "No duplicate message_ids should exist"
     );
 }
-
-// Windows: dirs::home_dir() uses the registry profile path, not the HOME
-// env var, so HOME-based team-config isolation does not work on Windows.
-// The tested logic is platform-independent; only the test setup is not.
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 #[serial]
 fn test_concurrent_cli_and_direct_write_no_loss() {
@@ -478,10 +472,6 @@ fn test_concurrent_cli_and_direct_write_no_loss() {
 // Category 2: Lock Contention Tests
 // ============================================================================
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_lock_contention_queues_to_spool() {
     // When the lock can't be acquired, messages should be spooled
@@ -524,10 +514,6 @@ fn test_lock_contention_queues_to_spool() {
 // Category 3: Spool → Drain → Delivery Cycle
 // ============================================================================
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 #[serial]
 fn test_spool_drain_delivery_cycle() {
@@ -609,10 +595,6 @@ fn test_spool_drain_delivery_cycle() {
 // Category 4: Malformed JSON Recovery
 // ============================================================================
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_malformed_inbox_json_graceful_failure() {
     // Write corrupt JSON to inbox, then try to send - should fail gracefully
@@ -636,10 +618,6 @@ fn test_malformed_inbox_json_graceful_failure() {
         .failure();
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_empty_json_array_inbox_ok() {
     // Empty JSON array is valid - send should succeed
@@ -666,10 +644,6 @@ fn test_empty_json_array_inbox_ok() {
     assert_eq!(messages.len(), 1);
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_malformed_inbox_read_graceful() {
     // Read command on malformed inbox should handle error gracefully
@@ -693,10 +667,6 @@ fn test_malformed_inbox_read_graceful() {
         .failure();
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_skips_malformed_records_and_legacy_content_alias() {
     let temp_dir = TempDir::new().unwrap();
@@ -745,10 +715,6 @@ fn test_read_skips_malformed_records_and_legacy_content_alias() {
 // Category 5: Large Inbox Performance
 // ============================================================================
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_large_inbox_10k_messages() {
     // Verify no degradation with 10K+ messages in inbox
@@ -824,10 +790,6 @@ fn test_large_inbox_10k_messages() {
 // Category 6: Missing / Empty File Handling
 // ============================================================================
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_send_to_nonexistent_inbox_creates_file() {
     // First send to an agent with no existing inbox file
@@ -859,10 +821,6 @@ fn test_send_to_nonexistent_inbox_creates_file() {
     assert_eq!(messages[0]["text"], "First message to new inbox");
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_nonexistent_inbox_graceful() {
     // Reading an agent's inbox when no inbox file exists
@@ -883,10 +841,6 @@ fn test_read_nonexistent_inbox_graceful() {
     // Should succeed with no messages shown
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_empty_inbox_file_read() {
     // Empty file (not valid JSON) should fail gracefully
@@ -911,10 +865,6 @@ fn test_empty_inbox_file_read() {
     let _output = cmd.output().expect("Command should not panic");
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_status_with_missing_inboxes_dir() {
     // Status command when inboxes directory doesn't exist
@@ -962,10 +912,6 @@ fn test_status_with_missing_inboxes_dir() {
 // ============================================================================
 
 #[cfg(unix)]
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_permission_denied_lock_file_creation() {
     // Make lock file a directory so exclusive lock acquisition fails
@@ -998,10 +944,6 @@ fn test_permission_denied_lock_file_creation() {
 }
 
 #[cfg(unix)]
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 #[serial]
 fn test_permission_denied_inboxes_dir() {
@@ -1047,10 +989,6 @@ fn test_permission_denied_inboxes_dir() {
 // Category 8: Message Deduplication Under Concurrency
 // ============================================================================
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 #[serial]
 fn test_no_duplicate_message_ids_under_concurrent_sends() {
@@ -1119,10 +1057,6 @@ fn test_no_duplicate_message_ids_under_concurrent_sends() {
 }
 
 #[cfg(unix)]
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 #[serial]
 fn test_runtime_daemon_cleanup_guard_adopts_pid_written_after_creation() {
@@ -1168,10 +1102,6 @@ fn test_runtime_daemon_cleanup_guard_adopts_pid_written_after_creation() {
 // Category 9: Inbox Round-Trip Preservation
 // ============================================================================
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_unknown_fields_preserved_through_send() {
     // Inbox with unknown fields should preserve them after a new send
@@ -1221,10 +1151,6 @@ fn test_unknown_fields_preserved_through_send() {
 // Category 10: Edge Case - Team Config Scenarios
 // ============================================================================
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_inbox_command_with_no_messages_anywhere() {
     // Inbox command when all inboxes are empty or nonexistent
@@ -1240,10 +1166,6 @@ fn test_inbox_command_with_no_messages_anywhere() {
         .success();
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_members_command_shows_correct_labels() {
     // Verify no-daemon context renders Unknown (liveness cannot be confirmed).
@@ -1303,10 +1225,6 @@ fn test_members_command_shows_correct_labels() {
     assert!(!stdout.contains("Offline"), "Should not show Offline label");
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_status_command_shows_correct_labels() {
     // Verify no-daemon context renders Unknown (liveness cannot be confirmed).
@@ -1366,10 +1284,6 @@ fn test_status_command_shows_correct_labels() {
     assert!(!stdout.contains("Offline"), "Should not show Offline label");
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_doctor_status_members_consistent_unknown_when_daemon_unreachable() {
     let temp_dir = TempDir::new().unwrap();
@@ -1510,10 +1424,6 @@ fn test_doctor_status_members_consistent_unknown_when_daemon_unreachable() {
 }
 
 #[cfg(unix)]
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 #[serial]
 fn test_dead_pid_stale_lock_starts_daemon_cleanly() {
@@ -1559,6 +1469,7 @@ fn test_dead_pid_stale_lock_starts_daemon_cleanly() {
     fs::create_dir_all(&runtime_home).unwrap();
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", &config_home)
         .envs([("HOME", &config_home)])
         .env("ATM_DAEMON_AUTOSTART", "1")
         .env("ATM_TEAM", "test-team")
@@ -1583,10 +1494,6 @@ fn test_dead_pid_stale_lock_starts_daemon_cleanly() {
 }
 
 #[cfg(unix)]
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 #[serial]
 fn test_identity_mismatch_socket_is_detected_and_restarted() {

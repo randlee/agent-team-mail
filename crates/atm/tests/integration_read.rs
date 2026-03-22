@@ -19,6 +19,7 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     std::fs::create_dir_all(&workdir).ok();
     std::fs::create_dir_all(&runtime_home).ok();
     cmd.env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
@@ -95,14 +96,6 @@ fn create_test_inbox(team_dir: &Path, agent_name: &str, messages: Vec<serde_json
     )
     .unwrap();
 }
-
-// Windows: dirs::home_dir() uses the registry profile path, not the HOME
-// env var, so HOME-based team-config isolation does not work on Windows.
-// The tested logic is platform-independent; only the test setup is not.
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_unread_messages() {
     let temp_dir = TempDir::new().unwrap();
@@ -144,10 +137,6 @@ fn test_read_unread_messages() {
         .success();
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_all_messages() {
     let temp_dir = TempDir::new().unwrap();
@@ -182,10 +171,6 @@ fn test_read_all_messages() {
         .success();
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_default_buckets_hide_history() {
     let temp_dir = TempDir::new().unwrap();
@@ -235,10 +220,6 @@ fn test_read_default_buckets_hide_history() {
         .stdout(predicate::str::contains("1 historical message(s) hidden"));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_history_expands_active_view_with_full_history() {
     let temp_dir = TempDir::new().unwrap();
@@ -284,10 +265,6 @@ fn test_read_history_expands_active_view_with_full_history() {
         .stdout(predicate::str::contains("Pending task"));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_unread_only_filter_shows_only_unread_bucket() {
     let temp_dir = TempDir::new().unwrap();
@@ -333,10 +310,6 @@ fn test_read_unread_only_filter_shows_only_unread_bucket() {
         .stdout(predicate::str::contains("Historical note").not());
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_pending_ack_only_filter_shows_only_pending_ack_bucket() {
     let temp_dir = TempDir::new().unwrap();
@@ -382,10 +355,6 @@ fn test_read_pending_ack_only_filter_shows_only_pending_ack_bucket() {
         .stdout(predicate::str::contains("Historical note").not());
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_json_reports_bucket_counts() {
     let temp_dir = TempDir::new().unwrap();
@@ -439,10 +408,6 @@ fn test_read_json_reports_bucket_counts() {
     assert_eq!(json["count"], 2);
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_no_mark() {
     let temp_dir = TempDir::new().unwrap();
@@ -474,10 +439,6 @@ fn test_read_no_mark() {
     assert_eq!(messages[0]["read"], false);
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_marks_as_read() {
     let temp_dir = TempDir::new().unwrap();
@@ -511,10 +472,6 @@ fn test_read_marks_as_read() {
     assert!(messages[0]["pendingAckAt"].is_string());
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_keeps_message_visible_until_acknowledged() {
     let temp_dir = TempDir::new().unwrap();
@@ -598,10 +555,6 @@ fn test_read_keeps_message_visible_until_acknowledged() {
         .stdout(predicate::str::contains("No messages found"));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_ack_uses_source_team_for_cross_team_reply() {
     let temp_dir = TempDir::new().unwrap();
@@ -638,10 +591,6 @@ fn test_ack_uses_source_team_for_cross_team_reply() {
     assert_eq!(src_messages[0]["text"], "Cross-team reply");
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_filter_by_from() {
     let temp_dir = TempDir::new().unwrap();
@@ -677,10 +626,6 @@ fn test_read_filter_by_from() {
         .success();
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_with_limit() {
     let temp_dir = TempDir::new().unwrap();
@@ -723,10 +668,6 @@ fn test_read_with_limit() {
         .success();
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_empty_inbox() {
     let temp_dir = TempDir::new().unwrap();
@@ -744,10 +685,6 @@ fn test_read_empty_inbox() {
         .success();
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_agent_not_found() {
     let temp_dir = TempDir::new().unwrap();
@@ -763,10 +700,6 @@ fn test_read_agent_not_found() {
         .failure();
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_role_with_team_suffix_resolves_end_to_end() {
     let temp_dir = TempDir::new().unwrap();
@@ -840,10 +773,6 @@ fn test_read_role_with_team_suffix_resolves_end_to_end() {
         .stdout(predicate::str::contains("Role routed read"));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_team_not_found() {
     let temp_dir = TempDir::new().unwrap();
@@ -858,10 +787,6 @@ fn test_read_team_not_found() {
         .failure();
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_json_output() {
     let temp_dir = TempDir::new().unwrap();
@@ -887,10 +812,6 @@ fn test_read_json_output() {
         .success();
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_since_last_seen_default() {
     let temp_dir = TempDir::new().unwrap();
@@ -944,10 +865,6 @@ fn test_read_since_last_seen_default() {
     assert!(ts.starts_with("2026-02-11T10:30:00"));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_since_last_seen_still_shows_older_unread_messages() {
     let temp_dir = TempDir::new().unwrap();
@@ -994,10 +911,6 @@ fn test_read_since_last_seen_still_shows_older_unread_messages() {
         .stdout(predicates::str::contains("Newer read message").not());
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_since_last_seen_first_run_shows_only_pending_action_messages() {
     let temp_dir = TempDir::new().unwrap();
@@ -1042,10 +955,6 @@ fn test_read_since_last_seen_first_run_shows_only_pending_action_messages() {
         .stdout(predicates::str::contains("Historical acknowledged message").not());
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_all_ignores_last_seen_filter() {
     let temp_dir = TempDir::new().unwrap();
@@ -1093,10 +1002,6 @@ fn test_read_all_ignores_last_seen_filter() {
         .stdout(predicates::str::contains("Older read message"));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_no_update_seen() {
     let temp_dir = TempDir::new().unwrap();
@@ -1143,10 +1048,6 @@ fn test_read_no_update_seen() {
     assert!(ts.starts_with("2026-02-11T10:00:00"));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_updates_last_seen_from_displayed_messages_only() {
     let temp_dir = TempDir::new().unwrap();
@@ -1206,10 +1107,6 @@ fn test_read_updates_last_seen_from_displayed_messages_only() {
 }
 
 /// Test: `atm read` (own inbox) with no identity sources → must reject
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_own_inbox_no_identity_rejects() {
     let temp_dir = TempDir::new().unwrap();
@@ -1222,6 +1119,7 @@ fn test_read_own_inbox_no_identity_rejects() {
     let runtime_home = temp_dir.path().join("runtime-home");
     std::fs::create_dir_all(&runtime_home).unwrap();
     cmd.env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_TEAM", "test-team")
@@ -1237,10 +1135,6 @@ fn test_read_own_inbox_no_identity_rejects() {
 }
 
 /// Test: `atm read --as myname` with no hook file → succeeds using explicit identity
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_own_inbox_with_as_flag_succeeds() {
     let temp_dir = TempDir::new().unwrap();
@@ -1263,6 +1157,7 @@ fn test_read_own_inbox_with_as_flag_succeeds() {
     let runtime_home = temp_dir.path().join("runtime-home");
     std::fs::create_dir_all(&runtime_home).unwrap();
     cmd.env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_TEAM", "test-team")
@@ -1279,10 +1174,6 @@ fn test_read_own_inbox_with_as_flag_succeeds() {
 }
 
 /// Test: `--as` overrides ATM_IDENTITY when both are set
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_as_flag_overrides_atm_identity() {
     let temp_dir = TempDir::new().unwrap();
@@ -1316,10 +1207,6 @@ fn test_read_as_flag_overrides_atm_identity() {
 ///
 /// Only the message's owner (arch-ctm) should mark their own inbox as read.
 /// Cross-agent reads are "peek" operations and must be non-destructive.
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_does_not_mark_other_agents_messages() {
     let temp_dir = TempDir::new().unwrap();
@@ -1419,10 +1306,6 @@ fn test_read_does_not_mark_other_agents_messages() {
     );
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_inbox_clear_dry_run_defaults_to_idle_notifications_only() {
     let temp_dir = TempDir::new().unwrap();
@@ -1475,10 +1358,6 @@ fn test_inbox_clear_dry_run_defaults_to_idle_notifications_only() {
     assert_eq!(persisted.len(), 2, "dry-run must not mutate the inbox");
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_inbox_clear_removes_idle_acked_and_old_messages() {
     let temp_dir = TempDir::new().unwrap();

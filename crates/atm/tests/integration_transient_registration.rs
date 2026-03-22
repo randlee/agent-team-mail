@@ -9,6 +9,7 @@ fn configure_cmd(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     fs::create_dir_all(&workdir).unwrap();
     fs::create_dir_all(&runtime_home).unwrap();
     cmd.env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
@@ -116,14 +117,6 @@ fn assert_transient_absent_from_discovery_views(
         "transient identity unexpectedly appeared in doctor output"
     );
 }
-
-// Windows: dirs::home_dir() uses the registry profile path, not the HOME
-// env var, so HOME-based team-config isolation does not work on Windows.
-// The tested logic is platform-independent; only the test setup is not.
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_transient_send_does_not_add_sender_to_roster() {
     let temp_dir = TempDir::new().unwrap();
@@ -150,10 +143,6 @@ fn test_transient_send_does_not_add_sender_to_roster() {
     assert_transient_absent_from_discovery_views(&temp_dir, "atm-dev", "transient-worker");
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_transient_read_does_not_add_reader_to_roster() {
     let temp_dir = TempDir::new().unwrap();
@@ -181,10 +170,6 @@ fn test_transient_read_does_not_add_reader_to_roster() {
     assert_transient_absent_from_discovery_views(&temp_dir, "atm-dev", "transient-reader");
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_transient_spawn_policy_failure_does_not_mutate_roster() {
     let temp_dir = TempDir::new().unwrap();

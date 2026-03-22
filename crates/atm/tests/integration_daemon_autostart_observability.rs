@@ -84,6 +84,7 @@ fn autostart_failure_logs_structured_event_with_stderr_tail_context() {
     fs::set_permissions(&script_path, perms).expect("chmod script");
 
     let _home_guard = EnvGuard::set("ATM_HOME", &home);
+    let _config_home_guard = EnvGuard::set("ATM_CONFIG_HOME", &home);
     let _os_home_guard = EnvGuard::set("HOME", &home);
     let _bin_guard = EnvGuard::set("ATM_DAEMON_BIN", &script_path);
     let _autostart_guard = EnvGuard::set("ATM_DAEMON_AUTOSTART", "1");

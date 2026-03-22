@@ -39,6 +39,7 @@ impl DaemonProcessGuard {
         fs::create_dir_all(&workdir).expect("create daemon test workdir");
         let mut cmd = Command::new(&daemon_bin);
         cmd.env("ATM_HOME", &runtime_home)
+            .env("ATM_CONFIG_HOME", home.path())
             .envs([("HOME", home.path())])
             .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
             .env("ATM_DAEMON_AUTOSTART", "0")

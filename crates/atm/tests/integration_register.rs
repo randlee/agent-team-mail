@@ -21,6 +21,7 @@ fn configure_cmd(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     fs::create_dir_all(&workdir).ok();
     fs::create_dir_all(&runtime_home).ok();
     cmd.env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
@@ -100,14 +101,6 @@ fn create_test_team(temp_dir: &TempDir, team_name: &str, members: &[(&str, bool)
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-
-// Windows: dirs::home_dir() uses the registry profile path, not the HOME
-// env var, so HOME-based team-config isolation does not work on Windows.
-// The tested logic is platform-independent; only the test setup is not.
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_register_team_lead_with_session_id_env() {
     let temp_dir = TempDir::new().unwrap();
@@ -139,10 +132,6 @@ fn test_register_team_lead_with_session_id_env() {
     assert_eq!(config["leadSessionId"], "test-session-lead-001");
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_register_teammate_with_session_id_env() {
     let temp_dir = TempDir::new().unwrap();
@@ -183,10 +172,6 @@ fn test_register_teammate_with_session_id_env() {
     assert_eq!(alice["sessionId"], "test-session-alice-001");
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_register_unknown_name_fails() {
     let temp_dir = TempDir::new().unwrap();
@@ -207,10 +192,6 @@ fn test_register_unknown_name_fails() {
         .stderr(predicate::str::contains("not found in team"));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_register_warns_when_lead_not_registered() {
     let temp_dir = TempDir::new().unwrap();
@@ -228,10 +209,6 @@ fn test_register_warns_when_lead_not_registered() {
         .stdout(predicate::str::contains("WARNING"));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_register_team_lead_wrong_identity_fails() {
     let temp_dir = TempDir::new().unwrap();
@@ -256,10 +233,6 @@ fn test_register_team_lead_wrong_identity_fails() {
         .stderr(predicate::str::contains("Only team-lead may call"));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_register_nonexistent_team_fails() {
     let temp_dir = TempDir::new().unwrap();
@@ -274,10 +247,6 @@ fn test_register_nonexistent_team_fails() {
         .stderr(predicate::str::contains("not found"));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_register_requires_session_id() {
     let temp_dir = TempDir::new().unwrap();
@@ -303,10 +272,6 @@ fn test_register_requires_session_id() {
 
 /// A stale/invalid hook file must still allow registration by falling through
 /// to the session file or CLAUDE_SESSION_ID fallback.
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_register_invalid_hook_file_falls_through_to_env() {
     let temp_dir = TempDir::new().unwrap();
@@ -345,10 +310,6 @@ fn test_register_invalid_hook_file_falls_through_to_env() {
         .stdout(predicate::str::contains("env-session-fallback"));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_register_conflicting_lead_session_blocks_without_force_when_daemon_unreachable() {
     let temp_dir = TempDir::new().unwrap();
@@ -381,10 +342,6 @@ fn test_register_conflicting_lead_session_blocks_without_force_when_daemon_unrea
         .stderr(predicate::str::contains("--force"));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_register_conflicting_lead_session_allows_force_when_daemon_unreachable() {
     let temp_dir = TempDir::new().unwrap();

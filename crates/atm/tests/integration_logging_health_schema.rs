@@ -127,14 +127,6 @@ fn assert_canonical_logging_health(logging_health: &Value) {
             || logging_health["last_error"]["at"].is_null()
     );
 }
-
-// Windows: dirs::home_dir() uses the registry profile path, not the HOME
-// env var, so HOME-based team-config isolation does not work on Windows.
-// The tested logic is platform-independent; only the test setup is not.
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn status_json_includes_extended_logging_fields() {
     let temp_dir = TempDir::new().expect("temp dir");
@@ -144,6 +136,7 @@ fn status_json_includes_extended_logging_fields() {
 
     let output = Command::new(cargo::cargo_bin!("atm"))
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("status")
@@ -176,10 +169,6 @@ fn status_json_includes_extended_logging_fields() {
     assert_eq!(otel_health["last_error"]["code"], "COLLECTOR_EXPORT_FAILED");
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn doctor_json_includes_extended_logging_fields() {
     let temp_dir = TempDir::new().expect("temp dir");
@@ -189,6 +178,7 @@ fn doctor_json_includes_extended_logging_fields() {
 
     let output = Command::new(cargo::cargo_bin!("atm"))
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("doctor")
@@ -215,10 +205,6 @@ fn doctor_json_includes_extended_logging_fields() {
     assert_canonical_otel_health(&value["otel_health"]);
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn daemon_status_json_includes_extended_logging_fields() {
     let temp_dir = TempDir::new().expect("temp dir");
@@ -227,6 +213,7 @@ fn daemon_status_json_includes_extended_logging_fields() {
 
     let output = Command::new(cargo::cargo_bin!("atm"))
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("daemon")
@@ -258,10 +245,6 @@ fn daemon_status_json_includes_extended_logging_fields() {
     assert_eq!(otel_health["collector_state"], "degraded");
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn doctor_and_status_logging_health_schema_parity() {
     let temp_dir = TempDir::new().expect("temp dir");
@@ -271,6 +254,7 @@ fn doctor_and_status_logging_health_schema_parity() {
 
     let status_output = Command::new(cargo::cargo_bin!("atm"))
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("status")
@@ -285,6 +269,7 @@ fn doctor_and_status_logging_health_schema_parity() {
 
     let doctor_output = Command::new(cargo::cargo_bin!("atm"))
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("doctor")
@@ -303,6 +288,7 @@ fn doctor_and_status_logging_health_schema_parity() {
 
     let daemon_output = Command::new(cargo::cargo_bin!("atm"))
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .arg("daemon")

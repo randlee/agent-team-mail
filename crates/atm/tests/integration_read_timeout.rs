@@ -89,14 +89,6 @@ fn setup_team_with_members(members: &[&str]) -> (TempDir, PathBuf) {
 
     (temp_dir, team_dir)
 }
-
-// Windows: dirs::home_dir() uses the registry profile path, not the HOME
-// env var, so HOME-based team-config isolation does not work on Windows.
-// The tested logic is platform-independent; only the test setup is not.
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_timeout_expires() {
     let (temp_dir, team_dir) = setup_team();
@@ -108,6 +100,7 @@ fn test_read_timeout_expires() {
     // Read with short timeout - should exit with code 1
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", runtime_home(&temp_dir))
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_TEAM", "test-team")
@@ -122,10 +115,6 @@ fn test_read_timeout_expires() {
         .stdout(predicate::str::contains("Timeout: No new messages"));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_timeout_message_arrives() {
     let (temp_dir, team_dir) = setup_team();
@@ -154,6 +143,7 @@ fn test_read_timeout_message_arrives() {
     // Read with timeout - should receive message and exit with code 0
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", runtime_home(&temp_dir))
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_TEAM", "test-team")
@@ -168,10 +158,6 @@ fn test_read_timeout_message_arrives() {
         .stdout(predicate::str::contains("From: bob"));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_timeout_json_output() {
     let (temp_dir, team_dir) = setup_team();
@@ -183,6 +169,7 @@ fn test_read_timeout_json_output() {
     // Read with timeout and JSON output
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", runtime_home(&temp_dir))
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_TEAM", "test-team")
@@ -199,10 +186,6 @@ fn test_read_timeout_json_output() {
         .stdout(predicate::str::contains("\"count\": 0"));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_no_timeout_no_messages() {
     let (temp_dir, team_dir) = setup_team();
@@ -214,6 +197,7 @@ fn test_read_no_timeout_no_messages() {
     // Read without timeout - should exit immediately with code 0
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", runtime_home(&temp_dir))
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_TEAM", "test-team")
@@ -225,10 +209,6 @@ fn test_read_no_timeout_no_messages() {
         .stdout(predicate::str::contains("No messages found"));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_timeout_with_existing_messages() {
     let (temp_dir, team_dir) = setup_team();
@@ -250,6 +230,7 @@ fn test_read_timeout_with_existing_messages() {
     // Read with timeout - should return immediately with existing message
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", runtime_home(&temp_dir))
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_TEAM", "test-team")
@@ -264,10 +245,6 @@ fn test_read_timeout_with_existing_messages() {
         .stdout(predicate::str::contains("From: bob"));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_timeout_shows_older_unread_even_when_last_seen_is_newer() {
     let (temp_dir, team_dir) = setup_team();
@@ -306,6 +283,7 @@ fn test_read_timeout_shows_older_unread_even_when_last_seen_is_newer() {
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", runtime_home(&temp_dir))
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_TEAM", "test-team")
@@ -320,10 +298,6 @@ fn test_read_timeout_shows_older_unread_even_when_last_seen_is_newer() {
         .stdout(predicate::str::contains("From: bob"));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_timeout_without_agent_uses_config_identity() {
     let (temp_dir, team_dir) = setup_team_with_members(&["team-lead", "arch-ctm"]);
@@ -358,6 +332,7 @@ fn test_read_timeout_without_agent_uses_config_identity() {
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", runtime_home(&temp_dir))
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
@@ -377,10 +352,6 @@ fn test_read_timeout_without_agent_uses_config_identity() {
         ));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 fn test_read_timeout_with_explicit_agent_overrides_default_identity() {
     let (temp_dir, team_dir) = setup_team_with_members(&["team-lead", "arch-ctm"]);
@@ -415,6 +386,7 @@ fn test_read_timeout_with_explicit_agent_overrides_default_identity() {
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", runtime_home(&temp_dir))
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")

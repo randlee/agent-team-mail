@@ -26,6 +26,7 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
         "ATM_HOME",
         daemon_process_guard::DaemonProcessGuard::runtime_home_path(temp_dir),
     )
+    .env("ATM_CONFIG_HOME", temp_dir.path())
     .envs([("HOME", temp_dir.path())])
     .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
     .env("ATM_DAEMON_AUTOSTART", "0")
@@ -131,6 +132,7 @@ fn test_cli_team_scoped_commands_do_not_bleed_members_across_teams() {
     setup_test_team(&temp_dir, team_a, "alpha-lead", alpha_member);
     setup_test_team(&temp_dir, team_b, "beta-lead", beta_member);
 
+    let _config_home = EnvGuard::set("ATM_CONFIG_HOME", temp_dir.path());
     let _home = EnvGuard::set("HOME", temp_dir.path());
     let mut daemon = DaemonProcessGuard::spawn(&temp_dir, team_a);
     daemon.wait_ready(&temp_dir);
@@ -196,6 +198,7 @@ fn test_status_and_members_preserve_registered_member_state_after_daemon_restart
     let member = "persisted-member";
     setup_test_team(&temp_dir, team, "restart-lead", member);
 
+    let _config_home = EnvGuard::set("ATM_CONFIG_HOME", temp_dir.path());
     let _home = EnvGuard::set("HOME", temp_dir.path());
     let mut daemon = DaemonProcessGuard::spawn(&temp_dir, team);
     daemon.wait_ready(&temp_dir);

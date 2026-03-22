@@ -222,14 +222,6 @@ fn fake_member_states_json(agent: &str, process_id: u32) -> String {
     ])
     .to_string()
 }
-
-// Windows: dirs::home_dir() uses the registry profile path, not the HOME
-// env var, so HOME-based team-config isolation does not work on Windows.
-// The tested logic is platform-independent; only the test setup is not.
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 #[cfg(unix)]
 fn test_status_autostarts_daemon_when_absent() {
@@ -242,6 +234,7 @@ fn test_status_autostarts_daemon_when_absent() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     let output = cmd
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", home)
         .envs([("HOME", home)])
         .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
         .env("ATM_TEAM", team)
@@ -273,10 +266,6 @@ fn test_status_autostarts_daemon_when_absent() {
     );
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 #[cfg(unix)]
 fn test_status_noops_when_daemon_already_healthy() {
@@ -288,6 +277,7 @@ fn test_status_noops_when_daemon_already_healthy() {
     let script = write_fake_daemon_script(home);
     let daemon = Command::new(&script)
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", home)
         .envs([("HOME", home)])
         .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
         .spawn()
@@ -303,6 +293,7 @@ fn test_status_noops_when_daemon_already_healthy() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     let output = cmd
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", home)
         .envs([("HOME", home)])
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", &script)
@@ -325,10 +316,6 @@ fn test_status_noops_when_daemon_already_healthy() {
     );
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 #[cfg(unix)]
 fn test_concurrent_multi_team_status_uses_single_daemon_instance() {
@@ -342,6 +329,7 @@ fn test_concurrent_multi_team_status_uses_single_daemon_instance() {
     let script = write_fake_daemon_script(home);
     let daemon = Command::new(&script)
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", home)
         .envs([("HOME", home)])
         .spawn()
         .unwrap();
@@ -362,6 +350,7 @@ fn test_concurrent_multi_team_status_uses_single_daemon_instance() {
             let mut cmd = cargo::cargo_bin_cmd!("atm");
             let output = cmd
                 .env("ATM_HOME", &runtime_home)
+                .env("ATM_CONFIG_HOME", &home)
                 .envs([("HOME", &home)])
                 .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
                 .env("ATM_TEAM", team)
@@ -391,10 +380,6 @@ fn test_concurrent_multi_team_status_uses_single_daemon_instance() {
     );
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 #[cfg(unix)]
 fn test_status_reports_actionable_error_when_autostart_binary_missing() {
@@ -406,6 +391,7 @@ fn test_status_reports_actionable_error_when_autostart_binary_missing() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     let output = cmd
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", home)
         .envs([("HOME", home)])
         .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
         .env("ATM_TEAM", team)
@@ -428,10 +414,6 @@ fn test_status_reports_actionable_error_when_autostart_binary_missing() {
     );
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 #[cfg(unix)]
 fn test_daemon_kill_autostarts_daemon_when_absent() {
@@ -444,6 +426,7 @@ fn test_daemon_kill_autostarts_daemon_when_absent() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     let output = cmd
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", home)
         .envs([("HOME", home)])
         .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
         .env("ATM_TEAM", team)
@@ -477,10 +460,6 @@ fn test_daemon_kill_autostarts_daemon_when_absent() {
     );
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 #[cfg(unix)]
 fn test_cleanup_agent_autostarts_daemon_when_absent() {
@@ -493,6 +472,7 @@ fn test_cleanup_agent_autostarts_daemon_when_absent() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     let output = cmd
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", home)
         .envs([("HOME", home)])
         .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
         .env("ATM_TEAM", team)
@@ -526,10 +506,6 @@ fn test_cleanup_agent_autostarts_daemon_when_absent() {
     );
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 #[cfg(unix)]
 fn test_doctor_no_daemon_not_running_after_status_autostart() {
@@ -543,6 +519,7 @@ fn test_doctor_no_daemon_not_running_after_status_autostart() {
     let mut status_cmd = cargo::cargo_bin_cmd!("atm");
     status_cmd
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", home)
         .envs([("HOME", home)])
         .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
         .env("ATM_TEAM", team)
@@ -571,6 +548,7 @@ fn test_doctor_no_daemon_not_running_after_status_autostart() {
     let mut doctor_cmd = cargo::cargo_bin_cmd!("atm");
     let output = doctor_cmd
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", home)
         .envs([("HOME", home)])
         .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
         .env("ATM_TEAM", team)
@@ -601,10 +579,6 @@ fn test_doctor_no_daemon_not_running_after_status_autostart() {
     );
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 #[cfg(unix)]
 fn test_doctor_distinguishes_absent_daemon_from_pid_verification_failure() {
@@ -615,6 +589,7 @@ fn test_doctor_distinguishes_absent_daemon_from_pid_verification_failure() {
     let mut absent_cmd = cargo::cargo_bin_cmd!("atm");
     let absent_output = absent_cmd
         .env("ATM_HOME", &absent_runtime_home)
+        .env("ATM_CONFIG_HOME", absent_home.path())
         .envs([("HOME", absent_home.path())])
         .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
         .env("ATM_TEAM", "team-absent")
@@ -634,6 +609,7 @@ fn test_doctor_distinguishes_absent_daemon_from_pid_verification_failure() {
     let mut absent_json_cmd = cargo::cargo_bin_cmd!("atm");
     let absent_json_output = absent_json_cmd
         .env("ATM_HOME", &absent_runtime_home)
+        .env("ATM_CONFIG_HOME", absent_home.path())
         .envs([("HOME", absent_home.path())])
         .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
         .env("ATM_TEAM", "team-absent")
@@ -673,6 +649,7 @@ fn test_doctor_distinguishes_absent_daemon_from_pid_verification_failure() {
     let mut stale_cmd = cargo::cargo_bin_cmd!("atm");
     let stale_output = stale_cmd
         .env("ATM_HOME", &stale_runtime_home)
+        .env("ATM_CONFIG_HOME", stale_home.path())
         .envs([("HOME", stale_home.path())])
         .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
         .env("ATM_TEAM", "team-stale")
@@ -691,6 +668,7 @@ fn test_doctor_distinguishes_absent_daemon_from_pid_verification_failure() {
     let mut stale_json_cmd = cargo::cargo_bin_cmd!("atm");
     let stale_json_output = stale_json_cmd
         .env("ATM_HOME", &stale_runtime_home)
+        .env("ATM_CONFIG_HOME", stale_home.path())
         .envs([("HOME", stale_home.path())])
         .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
         .env("ATM_TEAM", "team-stale")
@@ -712,10 +690,6 @@ fn test_doctor_distinguishes_absent_daemon_from_pid_verification_failure() {
     assert!(!stale_codes.contains(&"DAEMON_NOT_RUNNING"));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 #[cfg(unix)]
 fn test_members_reports_status_session_and_pid_after_daemon_autostart() {
@@ -729,6 +703,7 @@ fn test_members_reports_status_session_and_pid_after_daemon_autostart() {
     let mut members_cmd = cargo::cargo_bin_cmd!("atm");
     let output = members_cmd
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", home)
         .envs([("HOME", home)])
         .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
         .env("ATM_TEAM", team)
@@ -771,10 +746,6 @@ fn test_members_reports_status_session_and_pid_after_daemon_autostart() {
     assert_eq!(member["lastAliveAt"].as_str(), Some("2026-03-20T22:00:00Z"));
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 #[cfg(unix)]
 fn test_status_autostart_recovers_after_stale_restart_cycle() {
@@ -788,6 +759,7 @@ fn test_status_autostart_recovers_after_stale_restart_cycle() {
     let mut first_status = cargo::cargo_bin_cmd!("atm");
     first_status
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", home)
         .envs([("HOME", home)])
         .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
         .env("ATM_TEAM", team)
@@ -809,6 +781,7 @@ fn test_status_autostart_recovers_after_stale_restart_cycle() {
     let mut second_status = cargo::cargo_bin_cmd!("atm");
     second_status
         .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", home)
         .envs([("HOME", home)])
         .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
         .env("ATM_TEAM", team)
@@ -832,10 +805,6 @@ fn test_status_autostart_recovers_after_stale_restart_cycle() {
     );
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
-)]
 #[test]
 #[cfg(windows)]
 fn windows_compile_check() {
