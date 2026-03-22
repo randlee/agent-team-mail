@@ -52,6 +52,13 @@ fn setup_team(temp_dir: &TempDir, team_name: &str) {
     fs::write(inboxes_dir.join("team-lead.json"), "[]").unwrap();
 }
 
+// Windows: dirs::home_dir() uses the registry profile path, not the HOME
+// env var, so HOME-based team-config isolation does not work on Windows.
+// The tested logic is platform-independent; only the test setup is not.
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_monitor_once_emits_alert_for_critical_finding() {
     let temp_dir = TempDir::new().unwrap();
@@ -86,6 +93,10 @@ fn test_monitor_once_emits_alert_for_critical_finding() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_monitor_dedup_suppresses_repeat_within_cooldown() {
     let temp_dir = TempDir::new().unwrap();
@@ -129,6 +140,10 @@ fn test_monitor_dedup_suppresses_repeat_within_cooldown() {
 // `--max-iterations 2` with a 1-second interval so the test completes quickly
 // while still exercising two distinct poll cycles. We measure wall time to
 // confirm the loop actually slept between polls rather than spinning.
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_monitor_polling_loop_runs_multiple_cycles() {
     let temp_dir = TempDir::new().unwrap();
@@ -166,6 +181,10 @@ fn test_monitor_polling_loop_runs_multiple_cycles() {
 // file), which causes `atm doctor` to report DAEMON_NOT_RUNNING as a critical
 // finding. We run the monitor for exactly 2 poll cycles and assert at least one
 // alert was delivered to the inbox within those cycles.
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_monitor_fault_produces_alert_within_two_poll_intervals() {
     let temp_dir = TempDir::new().unwrap();
@@ -227,6 +246,10 @@ fn test_monitor_fault_produces_alert_within_two_poll_intervals() {
 //
 // This confirms that fault resolution followed by re-occurrence (across process
 // restarts / session boundaries) correctly produces a new alert each time.
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_monitor_reintroduced_fault_emits_new_alert() {
     let temp_dir = TempDir::new().unwrap();
@@ -296,6 +319,10 @@ fn test_monitor_reintroduced_fault_emits_new_alert() {
 //   (a) The process exits with code 0 (not a panic or hard error).
 //   (b) All iterations complete — the loop ran to `--max-iterations`.
 //   (c) Alerts were delivered (monitor is active, not silently broken).
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[serial]
 fn test_monitor_survives_daemon_unavailable() {

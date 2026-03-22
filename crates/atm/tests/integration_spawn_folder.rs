@@ -215,6 +215,13 @@ fn wait_for_daemon_socket(home: &Path) {
     );
 }
 
+// Windows: dirs::home_dir() uses the registry profile path, not the HOME
+// env var, so HOME-based team-config isolation does not work on Windows.
+// The tested logic is platform-independent; only the test setup is not.
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_folder_rejects_nonexistent_directory() {
     let temp_dir = TempDir::new().unwrap();
@@ -238,6 +245,10 @@ fn test_spawn_folder_rejects_nonexistent_directory() {
     .stderr(predicate::str::contains("does not exist"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_folder_rejects_existing_file_path() {
     let temp_dir = TempDir::new().unwrap();
@@ -262,6 +273,10 @@ fn test_spawn_folder_rejects_existing_file_path() {
     .stderr(predicate::str::contains("is not a directory"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_folder_and_cwd_mismatch_rejected() {
     let temp_dir = TempDir::new().unwrap();
@@ -290,6 +305,10 @@ fn test_spawn_folder_and_cwd_mismatch_rejected() {
     .stderr(predicate::str::contains("resolve to different directories"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_cwd_only_reaches_daemon_with_json_folder_field() {
     let temp_dir = TempDir::new().unwrap();
@@ -326,6 +345,10 @@ fn test_spawn_cwd_only_reaches_daemon_with_json_folder_field() {
     assert_eq!(parsed["folder"], canonical.to_string_lossy().to_string());
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_dual_flag_match_reaches_daemon_and_keeps_folder_json() {
     let temp_dir = TempDir::new().unwrap();
@@ -366,6 +389,10 @@ fn test_spawn_dual_flag_match_reaches_daemon_and_keeps_folder_json() {
     assert_eq!(parsed["folder"], canonical.to_string_lossy().to_string());
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_relative_folder_normalizes_to_absolute_in_json_output() {
     let temp_dir = TempDir::new().unwrap();
@@ -403,6 +430,10 @@ fn test_spawn_relative_folder_normalizes_to_absolute_in_json_output() {
     assert_eq!(parsed["folder"], canonical.to_string_lossy().to_string());
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_claude_echoes_full_launch_command_on_failure() {
     let temp_dir = TempDir::new().unwrap();
@@ -444,6 +475,10 @@ fn test_spawn_claude_echoes_full_launch_command_on_failure() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_system_prompt_template_renders_before_daemon_probe() {
     let temp_dir = TempDir::new().unwrap();
@@ -526,6 +561,10 @@ custom={{ custom }}
     assert!(rendered.contains("custom=hello"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_system_prompt_plain_markdown_does_not_create_composed_prompt_file() {
     let temp_dir = TempDir::new().unwrap();
@@ -564,6 +603,10 @@ fn test_spawn_system_prompt_plain_markdown_does_not_create_composed_prompt_file(
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_var_requires_key_value_format() {
     let temp_dir = TempDir::new().unwrap();
@@ -590,6 +633,10 @@ fn test_spawn_var_requires_key_value_format() {
     .stderr(predicate::str::contains("Invalid --var value"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_resume_and_continue_are_mutually_exclusive() {
     let temp_dir = TempDir::new().unwrap();
@@ -617,6 +664,10 @@ fn test_spawn_resume_and_continue_are_mutually_exclusive() {
     .stderr(predicate::str::contains("cannot be used with"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_continue_without_tracked_session_returns_stable_not_found_code() {
     let temp_dir = TempDir::new().unwrap();
@@ -644,6 +695,10 @@ fn test_spawn_continue_without_tracked_session_returns_stable_not_found_code() {
 }
 
 #[cfg(unix)]
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[serial]
 fn test_spawn_resume_prefix_ambiguous_returns_stable_error_code() {
@@ -691,6 +746,10 @@ fn test_spawn_resume_prefix_ambiguous_returns_stable_error_code() {
     let _ = daemon.wait();
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_env_team_mismatch_requires_override_team() {
     let temp_dir = TempDir::new().unwrap();
@@ -727,6 +786,10 @@ fn test_spawn_env_team_mismatch_requires_override_team() {
     assert_eq!(fs::read_to_string(&atm_toml_path).unwrap(), toml_content);
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_env_team_mismatch_override_team_uses_env_team_without_modifying_toml() {
     let temp_dir = TempDir::new().unwrap();
@@ -769,6 +832,10 @@ fn test_spawn_env_team_mismatch_override_team_uses_env_team_without_modifying_to
     );
     assert_eq!(fs::read_to_string(&atm_toml_path).unwrap(), toml_content);
 }
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_env_team_matching_toml_does_not_require_override() {
     let temp_dir = TempDir::new().unwrap();
@@ -813,6 +880,10 @@ fn test_spawn_env_team_matching_toml_does_not_require_override() {
     assert!(!stderr.contains("--override-team"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_help_without_atm_toml_includes_generated_launch_reference() {
     let temp_dir = TempDir::new().unwrap();
@@ -827,6 +898,10 @@ fn test_spawn_help_without_atm_toml_includes_generated_launch_reference() {
     assert!(stdout.contains("--color cyan --model haiku"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_policy_blocks_unauthorized_identity() {
     let temp_dir = TempDir::new().unwrap();
@@ -875,6 +950,10 @@ co_leaders = ["arch-atm"]
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_policy_allows_co_leader() {
     let temp_dir = TempDir::new().unwrap();
@@ -927,6 +1006,10 @@ co_leaders = ["arch-atm"]
     assert!(!stderr.contains("SPAWN_UNAUTHORIZED"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_policy_allows_team_lead_identity() {
     let temp_dir = TempDir::new().unwrap();
@@ -979,6 +1062,10 @@ co_leaders = ["arch-atm"]
     assert!(!stderr.contains("SPAWN_UNAUTHORIZED"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_policy_named_spawn_without_team_name_still_checked() {
     let temp_dir = TempDir::new().unwrap();
@@ -1019,6 +1106,10 @@ co_leaders = []
         .stderr(predicate::str::contains("SPAWN_UNAUTHORIZED"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_policy_blocks_unknown_caller_identity_with_preview() {
     let temp_dir = TempDir::new().unwrap();
@@ -1065,6 +1156,10 @@ co_leaders = []
     assert!(stderr.contains("Resolved caller: <unknown>"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_policy_json_unauthorized_includes_launch_command() {
     let temp_dir = TempDir::new().unwrap();
@@ -1122,6 +1217,10 @@ co_leaders = []
     assert!(stderr.contains("Launch command:"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_policy_allows_team_lead_explicitly() {
     // team-lead identity must pass the gate (get daemon-not-running, not SPAWN_UNAUTHORIZED)
@@ -1175,6 +1274,10 @@ co_leaders = []
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_spawn_policy_defaults_leaders_only_when_no_team_section() {
     // .atm.toml with [core] but no [team."atm-dev"] — must default to leaders-only

@@ -851,6 +851,13 @@ sys.exit(1)
     bin_dir
 }
 
+// Windows: dirs::home_dir() uses the registry profile path, not the HOME
+// env var, so HOME-based team-config isolation does not work on Windows.
+// The tested logic is platform-independent; only the test setup is not.
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_gh_monitor_and_control_allow_daemon_responses_over_500ms() {
@@ -910,6 +917,10 @@ fn test_gh_monitor_and_control_allow_daemon_responses_over_500ms() {
     let _ = daemon.wait();
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 #[serial]
@@ -979,6 +990,10 @@ fn test_gh_monitor_workflow_roundtrip_json() {
     let _ = daemon.wait();
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(windows)]
 fn test_gh_command_surface_compiles_on_windows() {
@@ -988,6 +1003,10 @@ fn test_gh_command_surface_compiles_on_windows() {
     let _ = agent_team_mail_core::daemon_client::gh_monitor_health;
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_gh_monitor_lifecycle_status_roundtrip_json() {
@@ -1042,6 +1061,10 @@ fn test_gh_monitor_lifecycle_status_roundtrip_json() {
     let _ = daemon.wait();
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 #[serial]
@@ -1075,6 +1098,10 @@ fn test_gh_status_preflight_disabled_config_shows_atm_gh_init_remediation() {
     let _ = daemon.wait();
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 #[serial]
@@ -1106,6 +1133,10 @@ fn test_gh_monitor_status_accepts_json_flag_after_subcommand() {
     let _ = daemon.wait();
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 #[serial]
@@ -1177,6 +1208,10 @@ fn init_git_repo_with_origin(workdir: &Path, origin_url: &str) {
     assert!(remote_status.success(), "git remote add origin failed");
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 #[serial]
@@ -1209,6 +1244,10 @@ fn test_gh_namespace_status_no_subcommand_returns_json_status() {
     let _ = daemon.wait();
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_gh_monitor_fails_with_actionable_guidance_when_plugin_unconfigured() {
@@ -1229,6 +1268,10 @@ fn test_gh_monitor_fails_with_actionable_guidance_when_plugin_unconfigured() {
         .stderr(predicates::str::contains("atm gh init"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_gh_monitor_json_unavailable_emits_structured_error() {
@@ -1255,6 +1298,10 @@ fn test_gh_monitor_json_unavailable_emits_structured_error() {
         .stderr(predicates::str::contains("Error:").not());
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_gh_init_dry_run_does_not_write_config() {
@@ -1297,6 +1344,10 @@ fn test_gh_init_dry_run_does_not_write_config() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_gh_init_writes_plugin_config() {
@@ -1332,6 +1383,10 @@ fn test_gh_init_writes_plugin_config() {
     assert!(cfg.contains("notify_target = \"team-lead\""));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_gh_init_auto_populates_repo_from_git_remote() {
@@ -1364,6 +1419,10 @@ fn test_gh_init_auto_populates_repo_from_git_remote() {
     assert!(cfg.contains("owner = \"acme\""));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 #[serial]
@@ -1411,6 +1470,10 @@ fn test_gh_monitor_infers_repo_scope_from_git_remote() {
     let _ = daemon.wait();
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 #[serial]
@@ -1466,6 +1529,10 @@ fn test_gh_monitor_repo_override_accepts_github_url_and_cc() {
     let _ = daemon.wait();
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 #[serial]
@@ -1493,6 +1560,10 @@ fn test_gh_monitor_requires_repo_context_when_not_in_git_repo_and_no_override() 
     let _ = daemon.wait();
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 #[serial]
@@ -1540,6 +1611,10 @@ fn test_gh_namespace_status_missing_repo_is_actionable() {
     let _ = daemon.wait();
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_gh_status_surfaces_consistent_when_daemon_unreachable() {
@@ -1609,6 +1684,10 @@ fn test_gh_status_surfaces_consistent_when_daemon_unreachable() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 #[serial]
@@ -1652,6 +1731,10 @@ fn test_gh_monitor_status_json_has_stable_schema() {
     let _ = daemon.wait();
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_gh_namespace_absent_only_advertises_init() {
@@ -1676,6 +1759,10 @@ fn test_gh_namespace_absent_only_advertises_init() {
     assert_eq!(json["actions"], serde_json::json!(["atm gh init"]));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 #[serial]
@@ -1715,6 +1802,10 @@ fn test_gh_namespace_enabled_advertises_full_command_surface() {
     let _ = daemon.wait();
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_gh_monitor_namespace_rejects_removed_one_shot_commands() {
@@ -1737,6 +1828,10 @@ fn test_gh_monitor_namespace_rejects_removed_one_shot_commands() {
     }
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_gh_monitor_list_json_reports_rollups_without_daemon() {
@@ -1807,6 +1902,10 @@ fn test_gh_monitor_list_json_reports_rollups_without_daemon() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_gh_monitor_list_human_output_has_one_line_rollups() {
@@ -1846,6 +1945,10 @@ fn test_gh_monitor_list_human_output_has_one_line_rollups() {
     ));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_gh_pr_list_writes_budget_state_under_overridden_atm_home() {
@@ -1895,6 +1998,10 @@ fn test_gh_pr_list_writes_budget_state_under_overridden_atm_home() {
     assert_eq!(record["budget_used_in_window"].as_u64(), Some(1));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_gh_monitor_report_json_includes_checks_reviews_and_merge_fields() {
@@ -1957,6 +2064,10 @@ fn test_gh_monitor_report_json_includes_checks_reviews_and_merge_fields() {
     assert_eq!(json["pr"]["reviews"].as_array().unwrap().len(), 2);
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_gh_monitor_report_human_output_is_detailed() {
@@ -2004,6 +2115,10 @@ fn test_gh_monitor_report_human_output_is_detailed() {
     assert!(text.contains("clippy | status=completed"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_gh_monitor_report_json_no_reviews_and_skips_are_non_blocking() {
@@ -2063,6 +2178,10 @@ fn test_gh_monitor_report_json_no_reviews_and_skips_are_non_blocking() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_gh_monitor_report_template_renders_custom_output() {
@@ -2111,6 +2230,10 @@ fn test_gh_monitor_report_template_renders_custom_output() {
     assert!(text.contains("title=Add monitor dashboard"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_gh_monitor_report_template_missing_file_is_actionable() {
@@ -2149,6 +2272,10 @@ fn test_gh_monitor_report_template_missing_file_is_actionable() {
         );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_gh_monitor_init_report_writes_starter_template() {
@@ -2174,6 +2301,10 @@ fn test_gh_monitor_init_report_writes_starter_template() {
     assert!(template.contains("{{ pr.number }}"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_gh_monitor_report_template_render_failure_is_actionable() {

@@ -223,6 +223,13 @@ fn fake_member_states_json(agent: &str, process_id: u32) -> String {
     .to_string()
 }
 
+// Windows: dirs::home_dir() uses the registry profile path, not the HOME
+// env var, so HOME-based team-config isolation does not work on Windows.
+// The tested logic is platform-independent; only the test setup is not.
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_status_autostarts_daemon_when_absent() {
@@ -266,6 +273,10 @@ fn test_status_autostarts_daemon_when_absent() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_status_noops_when_daemon_already_healthy() {
@@ -314,6 +325,10 @@ fn test_status_noops_when_daemon_already_healthy() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_concurrent_multi_team_status_uses_single_daemon_instance() {
@@ -376,6 +391,10 @@ fn test_concurrent_multi_team_status_uses_single_daemon_instance() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_status_reports_actionable_error_when_autostart_binary_missing() {
@@ -409,6 +428,10 @@ fn test_status_reports_actionable_error_when_autostart_binary_missing() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_daemon_kill_autostarts_daemon_when_absent() {
@@ -454,6 +477,10 @@ fn test_daemon_kill_autostarts_daemon_when_absent() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_cleanup_agent_autostarts_daemon_when_absent() {
@@ -499,6 +526,10 @@ fn test_cleanup_agent_autostarts_daemon_when_absent() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_doctor_no_daemon_not_running_after_status_autostart() {
@@ -570,6 +601,10 @@ fn test_doctor_no_daemon_not_running_after_status_autostart() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_doctor_distinguishes_absent_daemon_from_pid_verification_failure() {
@@ -677,6 +712,10 @@ fn test_doctor_distinguishes_absent_daemon_from_pid_verification_failure() {
     assert!(!stale_codes.contains(&"DAEMON_NOT_RUNNING"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_members_reports_status_session_and_pid_after_daemon_autostart() {
@@ -732,6 +771,10 @@ fn test_members_reports_status_session_and_pid_after_daemon_autostart() {
     assert_eq!(member["lastAliveAt"].as_str(), Some("2026-03-20T22:00:00Z"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_status_autostart_recovers_after_stale_restart_cycle() {
@@ -789,6 +832,10 @@ fn test_status_autostart_recovers_after_stale_restart_cycle() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(windows)]
 fn windows_compile_check() {

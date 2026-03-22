@@ -58,6 +58,13 @@ fn has_member(team_dir: &Path, name: &str) -> bool {
         .any(|m| m["name"].as_str() == Some(name))
 }
 
+// Windows: dirs::home_dir() uses the registry profile path, not the HOME
+// env var, so HOME-based team-config isolation does not work on Windows.
+// The tested logic is platform-independent; only the test setup is not.
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_teams_join_help_surface() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
@@ -73,6 +80,10 @@ fn test_teams_join_help_surface() {
         .stdout(predicate::str::contains("team-lead-initiated"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_teams_join_team_lead_initiated_json_contract() {
     let temp_dir = TempDir::new().unwrap();
@@ -117,6 +128,10 @@ fn test_teams_join_team_lead_initiated_json_contract() {
     assert!(has_member(&team_dir, "arch-ctm"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_teams_join_rejects_team_mismatch_in_lead_mode() {
     let temp_dir = TempDir::new().unwrap();
@@ -138,6 +153,10 @@ fn test_teams_join_rejects_team_mismatch_in_lead_mode() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_teams_join_requires_team_in_self_join_mode() {
     let temp_dir = TempDir::new().unwrap();
@@ -154,6 +173,10 @@ fn test_teams_join_requires_team_in_self_join_mode() {
         ));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_teams_join_self_join_success_with_explicit_team() {
     let temp_dir = TempDir::new().unwrap();
@@ -187,6 +210,10 @@ fn test_teams_join_self_join_success_with_explicit_team() {
     assert!(has_member(&team_dir, "self-join-agent"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_teams_join_human_output_contains_folder_and_launch_command() {
     let temp_dir = TempDir::new().unwrap();

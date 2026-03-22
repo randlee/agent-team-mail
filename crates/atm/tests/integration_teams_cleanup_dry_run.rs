@@ -73,6 +73,13 @@ fn write_recent_seen_state(home: &TempDir, team: &str, agent: &str) {
     fs::write(state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
 }
 
+// Windows: dirs::home_dir() uses the registry profile path, not the HOME
+// env var, so HOME-based team-config isolation does not work on Windows.
+// The tested logic is platform-independent; only the test setup is not.
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_teams_cleanup_dry_run_preview_table_and_no_mutation() {
     let temp_dir = TempDir::new().unwrap();
@@ -113,6 +120,10 @@ fn test_teams_cleanup_dry_run_preview_table_and_no_mutation() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_teams_cleanup_dry_run_includes_team_lead_protected_row_for_full_team() {
     let temp_dir = TempDir::new().unwrap();
@@ -133,6 +144,10 @@ fn test_teams_cleanup_dry_run_includes_team_lead_protected_row_for_full_team() {
     assert!(!stdout.contains("Nothing to clean up for team atm-dev."));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_teams_cleanup_noop_uses_exact_message() {
     let temp_dir = TempDir::new().unwrap();
@@ -146,6 +161,10 @@ fn test_teams_cleanup_noop_uses_exact_message() {
     assert!(stdout.contains("Nothing to clean up for team atm-dev."));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_teams_cleanup_dry_run_suppresses_session_prune_without_session_id() {
     let temp_dir = TempDir::new().unwrap();
@@ -182,6 +201,10 @@ fn test_teams_cleanup_dry_run_suppresses_session_prune_without_session_id() {
     assert!(!stdout.contains("session-prune  stale-session-metadata"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_teams_cleanup_dry_run_lists_skipped_external_agent_without_session_id() {
     let temp_dir = TempDir::new().unwrap();
@@ -222,6 +245,10 @@ fn test_teams_cleanup_dry_run_lists_skipped_external_agent_without_session_id() 
     assert!(stdout.contains("external-agent-liveness-unknown"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_teams_cleanup_dry_run_treats_codex_agent_type_as_external_for_skip_preview() {
     let temp_dir = TempDir::new().unwrap();
@@ -265,6 +292,10 @@ fn test_teams_cleanup_dry_run_treats_codex_agent_type_as_external_for_skip_previ
     assert!(stdout.contains("external-agent-no-state"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_teams_cleanup_dry_run_totals_match_actual_cleanup_force() {
     let temp_dir = TempDir::new().unwrap();

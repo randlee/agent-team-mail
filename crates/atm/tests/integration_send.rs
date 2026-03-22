@@ -465,6 +465,13 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
     team_dir
 }
 
+// Windows: dirs::home_dir() uses the registry profile path, not the HOME
+// env var, so HOME-based team-config isolation does not work on Windows.
+// The tested logic is platform-independent; only the test setup is not.
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_send_basic_message() {
     let temp_dir = TempDir::new().unwrap();
@@ -497,6 +504,10 @@ fn test_send_basic_message() {
     assert!(messages[0]["message_id"].is_string());
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_send_cross_team_addressing() {
     let temp_dir = TempDir::new().unwrap();
@@ -527,6 +538,10 @@ fn test_send_cross_team_addressing() {
     assert_eq!(messages[0]["text"], "Cross-team message");
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_send_alias_with_team_suffix_resolves_end_to_end() {
     let temp_dir = TempDir::new().unwrap();
@@ -564,6 +579,10 @@ fn test_send_alias_with_team_suffix_resolves_end_to_end() {
     assert_eq!(messages[0]["text"], "Alias routed message");
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_send_role_with_team_suffix_resolves_end_to_end() {
     let temp_dir = TempDir::new().unwrap();
@@ -637,6 +656,10 @@ fn test_send_role_with_team_suffix_resolves_end_to_end() {
     assert_eq!(messages[0]["text"], "Role routed message");
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_send_with_team_flag() {
     let temp_dir = TempDir::new().unwrap();
@@ -661,6 +684,10 @@ fn test_send_with_team_flag() {
     assert!(inbox_path.exists());
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_send_with_summary() {
     let temp_dir = TempDir::new().unwrap();
@@ -688,6 +715,10 @@ fn test_send_with_summary() {
     assert_eq!(messages[0]["summary"], "Custom summary");
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_send_json_output() {
     let temp_dir = TempDir::new().unwrap();
@@ -708,6 +739,10 @@ fn test_send_json_output() {
     // but the command succeeding with --json is a good smoke test
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_send_dry_run() {
     let temp_dir = TempDir::new().unwrap();
@@ -731,6 +766,10 @@ fn test_send_dry_run() {
     assert!(!inbox_path.exists());
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_send_with_stdin() {
     let temp_dir = TempDir::new().unwrap();
@@ -757,6 +796,10 @@ fn test_send_with_stdin() {
     assert_eq!(messages[0]["text"], "Message from stdin");
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_send_with_file_reference() {
     let temp_dir = TempDir::new().unwrap();
@@ -793,6 +836,10 @@ fn test_send_with_file_reference() {
     assert!(text.contains("test-file.txt"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_send_agent_not_found() {
     let temp_dir = TempDir::new().unwrap();
@@ -808,6 +855,10 @@ fn test_send_agent_not_found() {
         .failure();
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_send_team_not_found() {
     let temp_dir = TempDir::new().unwrap();
@@ -822,6 +873,10 @@ fn test_send_team_not_found() {
         .failure();
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_send_file_not_found() {
     let temp_dir = TempDir::new().unwrap();
@@ -838,6 +893,10 @@ fn test_send_file_not_found() {
         .failure();
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_send_multiple_messages_append() {
     let temp_dir = TempDir::new().unwrap();
@@ -946,6 +1005,10 @@ fn setup_team_with_offline_agents(temp_dir: &TempDir, team_name: &str) -> PathBu
     team_dir
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_offline_recipient_detection_auto_tag() {
     let temp_dir = TempDir::new().unwrap();
@@ -973,6 +1036,10 @@ fn test_offline_recipient_detection_auto_tag() {
     assert_eq!(text, "Please review this");
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_offline_recipient_custom_flag() {
@@ -1003,6 +1070,10 @@ fn test_offline_recipient_custom_flag() {
     let _ = daemon.wait();
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[cfg(unix)]
 fn test_offline_recipient_config_override() {
@@ -1041,6 +1112,10 @@ fn test_offline_recipient_config_override() {
     let _ = daemon.wait();
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_offline_recipient_empty_string_opt_out() {
     let temp_dir = TempDir::new().unwrap();
@@ -1070,6 +1145,10 @@ fn test_offline_recipient_empty_string_opt_out() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_online_recipient_no_tag() {
     let temp_dir = TempDir::new().unwrap();
@@ -1098,6 +1177,10 @@ fn test_online_recipient_no_tag() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_unknown_session_state_never_prefixes_even_with_offline_action_override() {
     let temp_dir = TempDir::new().unwrap();
@@ -1131,6 +1214,10 @@ fn test_unknown_session_state_never_prefixes_even_with_offline_action_override()
 }
 
 #[cfg(unix)]
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_send_warns_and_continues_when_register_hint_is_unsupported() {
     let temp_dir = TempDir::new().unwrap();
@@ -1190,6 +1277,10 @@ fn test_send_warns_and_continues_when_register_hint_is_unsupported() {
 }
 
 #[cfg(unix)]
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_send_emits_post_send_idle_without_subscribe_side_effect() {
     let temp_dir = TempDir::new().unwrap();

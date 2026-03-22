@@ -113,6 +113,13 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
 // Category 1: Send → Read → Verify Workflow
 // ============================================================================
 
+// Windows: dirs::home_dir() uses the registry profile path, not the HOME
+// env var, so HOME-based team-config isolation does not work on Windows.
+// The tested logic is platform-independent; only the test setup is not.
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_send_read_verify_basic() {
     let temp_dir = TempDir::new().unwrap();
@@ -153,6 +160,10 @@ fn test_send_read_verify_basic() {
     assert_eq!(messages[0]["read"], true);
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_send_multiple_read_verify_all_marked() {
     let temp_dir = TempDir::new().unwrap();
@@ -195,6 +206,10 @@ fn test_send_multiple_read_verify_all_marked() {
     assert!(messages.iter().all(|m| m["read"] == true));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_send_read_with_from_filter_verify() {
     let temp_dir = TempDir::new().unwrap();
@@ -247,6 +262,10 @@ fn test_send_read_with_from_filter_verify() {
     assert_eq!(sender_y_msg["read"], false);
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_send_read_with_limit_verify() {
     let temp_dir = TempDir::new().unwrap();
@@ -287,6 +306,10 @@ fn test_send_read_with_limit_verify() {
     assert_eq!(read_count, 2);
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_send_read_no_mark_verify_still_unread() {
     let temp_dir = TempDir::new().unwrap();
@@ -320,6 +343,10 @@ fn test_send_read_no_mark_verify_still_unread() {
     assert_eq!(messages[0]["read"], false);
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_send_cross_team_read_verify() {
     let temp_dir = TempDir::new().unwrap();
@@ -360,6 +387,10 @@ fn test_send_cross_team_read_verify() {
     assert_eq!(messages[0]["read"], true);
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_send_read_reread_no_new_messages() {
     let temp_dir = TempDir::new().unwrap();
@@ -404,6 +435,10 @@ fn test_send_read_reread_no_new_messages() {
 // Category 2: Broadcast → Read All Inboxes Workflow
 // ============================================================================
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_broadcast_read_all_inboxes_verify() {
     let temp_dir = TempDir::new().unwrap();
@@ -452,6 +487,10 @@ fn test_broadcast_read_all_inboxes_verify() {
     }
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_broadcast_cross_team_verify() {
     let temp_dir = TempDir::new().unwrap();
@@ -501,6 +540,10 @@ fn test_broadcast_cross_team_verify() {
     }
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_broadcast_multiple_times_verify_all_received() {
     let temp_dir = TempDir::new().unwrap();
@@ -547,6 +590,10 @@ fn test_broadcast_multiple_times_verify_all_received() {
     }
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_broadcast_sender_no_self_message() {
     let temp_dir = TempDir::new().unwrap();
@@ -589,6 +636,10 @@ fn test_broadcast_sender_no_self_message() {
 // Category 3: Config Resolution Integration
 // ============================================================================
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_config_default_team() {
     let temp_dir = TempDir::new().unwrap();
@@ -615,6 +666,10 @@ fn test_config_default_team() {
     assert!(inbox_path.exists());
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_config_env_override() {
     let temp_dir = TempDir::new().unwrap();
@@ -642,6 +697,10 @@ fn test_config_env_override() {
     assert!(inbox_path.exists());
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_config_cli_flag_override() {
     let temp_dir = TempDir::new().unwrap();
@@ -667,6 +726,10 @@ fn test_config_cli_flag_override() {
     assert!(inbox_path.exists());
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_config_identity_from_env() {
     let temp_dir = TempDir::new().unwrap();
@@ -690,6 +753,10 @@ fn test_config_identity_from_env() {
     assert_eq!(messages[0]["from"], "custom-sender");
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_config_precedence_chain() {
     let temp_dir = TempDir::new().unwrap();
@@ -736,6 +803,10 @@ fn test_config_precedence_chain() {
 // Category 4: Complex Multi-Step Workflows
 // ============================================================================
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_conversation_workflow() {
     let temp_dir = TempDir::new().unwrap();
@@ -800,6 +871,10 @@ fn test_conversation_workflow() {
     assert_eq!(messages[0]["read"], true);
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_team_discussion_workflow() {
     let temp_dir = TempDir::new().unwrap();
@@ -859,6 +934,10 @@ fn test_team_discussion_workflow() {
     assert!(messages.iter().all(|m| m["read"] == true));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_cross_team_relay_workflow() {
     let temp_dir = TempDir::new().unwrap();
@@ -924,6 +1003,10 @@ fn test_cross_team_relay_workflow() {
     assert_eq!(messages[0]["read"], true);
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_inbox_summary_workflow() {
     let temp_dir = TempDir::new().unwrap();

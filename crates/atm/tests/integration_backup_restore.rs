@@ -87,6 +87,13 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
 // backup tests
 // ---------------------------------------------------------------------------
 
+// Windows: dirs::home_dir() uses the registry profile path, not the HOME
+// env var, so HOME-based team-config isolation does not work on Windows.
+// The tested logic is platform-independent; only the test setup is not.
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_backup_creates_backup() {
     let temp_dir = TempDir::new().unwrap();
@@ -131,6 +138,10 @@ fn test_backup_creates_backup() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_backup_unknown_team_fails() {
     let temp_dir = TempDir::new().unwrap();
@@ -146,6 +157,10 @@ fn test_backup_unknown_team_fails() {
 // restore tests
 // ---------------------------------------------------------------------------
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_restore_round_trip() {
     let temp_dir = TempDir::new().unwrap();
@@ -201,6 +216,10 @@ fn test_restore_round_trip() {
     assert!(inbox.exists(), "test-member inbox should be restored");
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_restore_dry_run_no_changes() {
     let temp_dir = TempDir::new().unwrap();
@@ -253,6 +272,10 @@ fn test_restore_dry_run_no_changes() {
 // tasks backup / restore integration tests
 // ---------------------------------------------------------------------------
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_backup_includes_tasks_dir() {
     let temp_dir = TempDir::new().unwrap();
@@ -285,6 +308,10 @@ fn test_backup_includes_tasks_dir() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_restore_with_skip_tasks() {
     let temp_dir = TempDir::new().unwrap();
@@ -329,6 +356,10 @@ fn test_restore_with_skip_tasks() {
 // error-path tests
 // ---------------------------------------------------------------------------
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_restore_from_nonexistent_path_fails() {
     let temp_dir = TempDir::new().unwrap();
@@ -349,6 +380,10 @@ fn test_restore_from_nonexistent_path_fails() {
         .stderr(predicates::str::contains("not found").or(predicates::str::contains("No backup")));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_restore_from_backup_missing_tasks_dir_succeeds() {
     // Restoring from a pre-Phase-2 backup (no tasks/ dir) should not error

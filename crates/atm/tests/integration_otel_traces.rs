@@ -153,6 +153,13 @@ fn start_collector() -> (String, mpsc::Receiver<(String, String)>) {
     (format!("http://{}", addr), rx)
 }
 
+// Windows: dirs::home_dir() uses the registry profile path, not the HOME
+// env var, so HOME-based team-config isolation does not work on Windows.
+// The tested logic is platform-independent; only the test setup is not.
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[serial]
 fn cli_status_exports_trace_record_to_collector() {
@@ -266,6 +273,10 @@ fn cli_status_exports_trace_record_to_collector() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[serial]
 fn cli_status_trace_export_is_fail_open_when_collector_unreachable() {
@@ -296,6 +307,10 @@ fn cli_status_trace_export_is_fail_open_when_collector_unreachable() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[serial]
 fn cli_error_exports_log_and_error_trace_to_collector() {

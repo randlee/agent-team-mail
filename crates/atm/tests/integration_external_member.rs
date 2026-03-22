@@ -111,6 +111,13 @@ fn find_member(team_dir: &Path, name: &str) -> serde_json::Value {
 
 // ── Fix A: --team flag on members / status ────────────────────────────────────
 
+// Windows: dirs::home_dir() uses the registry profile path, not the HOME
+// env var, so HOME-based team-config isolation does not work on Windows.
+// The tested logic is platform-independent; only the test setup is not.
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_members_team_flag() {
     let temp_dir = TempDir::new().unwrap();
@@ -125,6 +132,10 @@ fn test_members_team_flag() {
         .success();
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_status_team_flag() {
     let temp_dir = TempDir::new().unwrap();
@@ -141,6 +152,10 @@ fn test_status_team_flag() {
 
 // ── Fix B: Empty message rejection ──────────────────────────────────────────
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[serial]
 fn test_send_empty_message_rejected() {
@@ -178,6 +193,10 @@ fn test_send_empty_message_rejected() {
         .stderr(predicates::str::contains("cannot be empty"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 #[serial]
 fn test_send_empty_string_message_rejected() {
@@ -213,6 +232,10 @@ fn test_send_empty_string_message_rejected() {
 
 // ── 2A/2B: Model Registry and BackendType via add-member ────────────────────
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_add_member_with_session_id() {
     let temp_dir = TempDir::new().unwrap();
@@ -237,6 +260,10 @@ fn test_add_member_with_session_id() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_add_member_with_codex_backend_type() {
     let temp_dir = TempDir::new().unwrap();
@@ -266,6 +293,10 @@ fn test_add_member_with_codex_backend_type() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_add_member_with_claude_code_backend_type_updates_agent_type() {
     let temp_dir = TempDir::new().unwrap();
@@ -295,6 +326,10 @@ fn test_add_member_with_claude_code_backend_type_updates_agent_type() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_add_member_with_human_backend_type() {
     let temp_dir = TempDir::new().unwrap();
@@ -324,6 +359,10 @@ fn test_add_member_with_human_backend_type() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_add_member_without_backend_type_defaults_agent_type_to_codex() {
     let temp_dir = TempDir::new().unwrap();
@@ -350,6 +389,10 @@ fn test_add_member_without_backend_type_defaults_agent_type_to_codex() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_add_member_human_without_username_rejected() {
     let temp_dir = TempDir::new().unwrap();
@@ -368,6 +411,10 @@ fn test_add_member_human_without_username_rejected() {
         .stderr(predicates::str::contains("requires a username"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_add_member_known_model_accepted() {
     let temp_dir = TempDir::new().unwrap();
@@ -397,6 +444,10 @@ fn test_add_member_known_model_accepted() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_add_member_unknown_model_rejected() {
     let temp_dir = TempDir::new().unwrap();
@@ -415,6 +466,10 @@ fn test_add_member_unknown_model_rejected() {
         .stderr(predicates::str::contains("Unknown model"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_add_member_custom_model_accepted() {
     let temp_dir = TempDir::new().unwrap();
@@ -440,6 +495,10 @@ fn test_add_member_custom_model_accepted() {
 
 // ── 2D: MCP collision guard ──────────────────────────────────────────────────
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_add_member_active_name_collision_rejected() {
     let temp_dir = TempDir::new().unwrap();
@@ -478,6 +537,10 @@ fn test_add_member_active_name_collision_rejected() {
         .stderr(predicates::str::contains("already exists and is active"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_add_member_same_agent_id_is_idempotent() {
     let temp_dir = TempDir::new().unwrap();
@@ -506,6 +569,10 @@ fn test_add_member_same_agent_id_is_idempotent() {
 
 // ── 2E: update-member subcommand ─────────────────────────────────────────────
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_update_member_session_id() {
     let temp_dir = TempDir::new().unwrap();
@@ -545,6 +612,10 @@ fn test_update_member_session_id() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_update_member_active_false() {
     let temp_dir = TempDir::new().unwrap();
@@ -584,6 +655,10 @@ fn test_update_member_active_false() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_update_member_not_found_returns_error() {
     let temp_dir = TempDir::new().unwrap();
@@ -602,6 +677,10 @@ fn test_update_member_not_found_returns_error() {
         .stderr(predicates::str::contains("not found"));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_update_member_invalid_model_rejected() {
     let temp_dir = TempDir::new().unwrap();
@@ -635,6 +714,10 @@ fn test_update_member_invalid_model_rejected() {
 
 // ── E.6 combined scenario: full external member lifecycle ────────────────────
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_full_external_member_lifecycle() {
     let temp_dir = TempDir::new().unwrap();
@@ -715,6 +798,10 @@ fn test_full_external_member_lifecycle() {
 /// the daemon *explicitly* confirms the associated session is dead.  Since there
 /// is no running daemon socket in this test environment, the cleanup must skip
 /// the external agent and exit with a non-zero status (incomplete cleanup).
+#[cfg_attr(
+    windows,
+    ignore = "Windows: dirs::home_dir() uses the registry profile path, not the HOME env var, so HOME-based team-config isolation does not work on Windows. The tested logic is platform-independent; only the test setup is not."
+)]
 #[test]
 fn test_cleanup_skips_external_agent_without_session_confirmation() {
     let temp_dir = TempDir::new().unwrap();
