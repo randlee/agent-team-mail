@@ -96,6 +96,10 @@ fn test_send_defaults_to_human_when_no_identity() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows: get_os_home_dir() uses the registry home, so HOME cannot redirect team config for isolated fixture setup; identity logic is covered on non-Windows"
+)]
 fn test_send_with_atm_identity_env() {
     let (temp_dir, _team_dir) = setup_team();
 
@@ -121,6 +125,10 @@ fn test_send_with_atm_identity_env() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows: get_os_home_dir() uses the registry home, so HOME cannot redirect team config for isolated fixture setup; identity logic is covered on non-Windows"
+)]
 fn test_send_with_from_flag_overrides_env() {
     let (temp_dir, _team_dir) = setup_team();
 
@@ -201,6 +209,10 @@ fn test_send_without_team_context_defaults_to_human() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows: get_os_home_dir() uses the registry home, so HOME cannot redirect team config for isolated fixture setup; identity logic is covered on non-Windows"
+)]
 fn test_send_custom_identity_not_in_team() {
     let (temp_dir, _team_dir) = setup_team();
 
