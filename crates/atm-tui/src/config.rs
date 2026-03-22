@@ -174,6 +174,9 @@ mod tests {
         unsafe {
             std::env::set_var("HOME", path);
             std::env::set_var("USERPROFILE", path);
+            // Windows: dirs::home_dir() ignores HOME/USERPROFILE; set ATM_CONFIG_HOME so
+            // get_os_home_dir() resolves the config root to our temp dir on all platforms.
+            std::env::set_var("ATM_CONFIG_HOME", path);
         }
     }
 
@@ -181,6 +184,7 @@ mod tests {
         unsafe {
             std::env::remove_var("HOME");
             std::env::remove_var("USERPROFILE");
+            std::env::remove_var("ATM_CONFIG_HOME");
         }
     }
 
