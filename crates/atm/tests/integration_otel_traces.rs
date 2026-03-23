@@ -164,7 +164,6 @@ fn cli_status_exports_trace_record_to_collector() {
     let mut cmd = Command::new(cargo_bin("atm"));
     cmd.env("ATM_HOME", &runtime_home)
         .env("ATM_CONFIG_HOME", temp.path())
-        .envs([("HOME", temp.path())])
         .env("ATM_TEAM", "atm-dev")
         .env("ATM_IDENTITY", "arch-ctm")
         .env("ATM_RUNTIME", "codex")
@@ -277,7 +276,6 @@ fn cli_status_trace_export_is_fail_open_when_collector_unreachable() {
     let mut cmd = Command::new(cargo_bin("atm"));
     cmd.env("ATM_HOME", &runtime_home)
         .env("ATM_CONFIG_HOME", temp.path())
-        .envs([("HOME", temp.path())])
         .env("ATM_TEAM", "atm-dev")
         .env("ATM_IDENTITY", "arch-ctm")
         .env("ATM_RUNTIME", "codex")
@@ -307,7 +305,6 @@ fn cli_error_exports_log_and_error_trace_to_collector() {
     let mut cmd = Command::new(cargo_bin("atm"));
     cmd.env("ATM_HOME", &runtime_home)
         .env("ATM_CONFIG_HOME", temp.path())
-        .envs([("HOME", temp.path())])
         .env("ATM_TEAM", "atm-dev")
         .env("ATM_IDENTITY", "arch-ctm")
         .env("ATM_RUNTIME", "codex")

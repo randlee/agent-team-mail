@@ -140,13 +140,72 @@ fn lifecycle_trace_hook_slot() -> &'static Mutex<Option<LifecycleTraceHook>> {
     LIFECYCLE_TRACE_HOOK.get_or_init(|| Mutex::new(None))
 }
 
+fn otel_export_serial_lock() -> &'static Mutex<()> {
+    static OTEL_EXPORT_SERIAL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    OTEL_EXPORT_SERIAL_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(test)]
+fn pending_test_otel_export_threads() -> &'static Mutex<Vec<std::thread::JoinHandle<()>>> {
+    static PENDING_TEST_OTEL_EXPORT_THREADS: OnceLock<Mutex<Vec<std::thread::JoinHandle<()>>>> =
+        OnceLock::new();
+    PENDING_TEST_OTEL_EXPORT_THREADS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+#[cfg(test)]
+pub fn wait_for_test_otel_exports() {
+    let handles = {
+        let mut pending = pending_test_otel_export_threads()
+            .lock()
+            .expect("atm-daemon test otel export thread lock poisoned");
+        std::mem::take(&mut *pending)
+    };
+    for handle in handles {
+        handle
+            .join()
+            .expect("atm-daemon test otel export thread should complete");
+    }
+}
+
+fn trace_export_serial_lock() -> &'static Mutex<()> {
+    static TRACE_EXPORT_SERIAL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    TRACE_EXPORT_SERIAL_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn metric_export_serial_lock() -> &'static Mutex<()> {
+    static METRIC_EXPORT_SERIAL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    METRIC_EXPORT_SERIAL_LOCK.get_or_init(|| Mutex::new(()))
+}
+
 pub fn export_otel_best_effort(log_path: &Path, event: &LogEventV1) {
     let hook = otel_export_hook_slot()
         .lock()
         .expect("atm-daemon otel export hook lock poisoned")
         .clone();
     if let Some(hook) = hook {
-        hook(log_path, event);
+        let log_path = log_path.to_path_buf();
+        let event = event.clone();
+        if let Ok(export_thread) = std::thread::Builder::new()
+            .name("atm-daemon-otel-export".to_string())
+            .spawn(move || {
+                let _guard = otel_export_serial_lock()
+                    .lock()
+                    .expect("atm-daemon otel export serial lock poisoned");
+                hook(&log_path, &event);
+            })
+        {
+            #[cfg(test)]
+            {
+                pending_test_otel_export_threads()
+                    .lock()
+                    .expect("atm-daemon test otel export thread lock poisoned")
+                    .push(export_thread);
+            }
+            #[cfg(not(test))]
+            {
+                let _ = export_thread;
+            }
+        }
     }
 }
 
@@ -174,7 +233,16 @@ pub fn export_trace_records_best_effort(records: &[TraceRecord], config: &OtelCo
         .expect("atm-daemon trace export hook lock poisoned")
         .clone();
     if let Some(hook) = hook {
-        hook(records, config);
+        let records = records.to_vec();
+        let config = config.clone();
+        let _ = std::thread::Builder::new()
+            .name("atm-daemon-trace-export".to_string())
+            .spawn(move || {
+                let _guard = trace_export_serial_lock()
+                    .lock()
+                    .expect("atm-daemon trace export serial lock poisoned");
+                hook(&records, &config);
+            });
     }
 }
 
@@ -184,7 +252,16 @@ pub fn export_metric_records_best_effort(records: &[MetricRecord], config: &Otel
         .expect("atm-daemon metric export hook lock poisoned")
         .clone();
     if let Some(hook) = hook {
-        hook(records, config);
+        let records = records.to_vec();
+        let config = config.clone();
+        let _ = std::thread::Builder::new()
+            .name("atm-daemon-metric-export".to_string())
+            .spawn(move || {
+                let _guard = metric_export_serial_lock()
+                    .lock()
+                    .expect("atm-daemon metric export serial lock poisoned");
+                hook(&records, &config);
+            });
     }
 }
 

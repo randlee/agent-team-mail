@@ -21,8 +21,8 @@ use tempfile::TempDir;
 
 /// Set separate config-root and runtime-root env vars on a command.
 ///
-/// `HOME` provides the canonical config root (`~/.claude`), while `ATM_HOME`
-/// is runtime-only for daemon state.
+/// `ATM_CONFIG_HOME` provides the canonical config root (`~/.claude`), while `ATM_HOME`
+/// remains runtime-only for daemon state.
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     // Use a subdirectory as CWD to avoid:
     // 1. .atm.toml config leak from the repo root
@@ -33,7 +33,6 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     std::fs::create_dir_all(&runtime_home).ok();
     cmd.env("ATM_HOME", &runtime_home)
         .env("ATM_CONFIG_HOME", temp_dir.path())
-        .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
         .env_remove("ATM_CONFIG")
@@ -168,7 +167,6 @@ fn spawn_python_script(script: &Path, home: &Path) -> Child {
         .arg(script)
         .env("ATM_HOME", &runtime_home)
         .env("ATM_CONFIG_HOME", home)
-        .envs([("HOME", home)])
         .spawn()
         .unwrap()
 }

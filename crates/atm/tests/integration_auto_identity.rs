@@ -72,7 +72,6 @@ fn set_split_home(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     fs::create_dir_all(&runtime_home).unwrap();
     cmd.env("ATM_HOME", &runtime_home)
         .env("ATM_CONFIG_HOME", temp_dir.path())
-        .envs([("HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0");
 }
 

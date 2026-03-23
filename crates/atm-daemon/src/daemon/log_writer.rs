@@ -418,7 +418,9 @@ fn rotation_path(base: &Path, n: u32) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::observability::{clear_otel_export_hook, install_otel_export_hook};
+    use crate::daemon::observability::{
+        clear_otel_export_hook, install_otel_export_hook, wait_for_test_otel_exports,
+    };
     use agent_team_mail_core::logging_event::new_log_event;
     use serial_test::serial;
     use std::fs::OpenOptions;
@@ -483,6 +485,23 @@ mod tests {
             .open(&otel_path)
             .expect("open test otel output");
         writeln!(file, "{line}").expect("append test otel output");
+    }
+
+    fn wait_for_otel_lines(path: &Path, expected: usize) -> Vec<String> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Ok(raw) = std::fs::read_to_string(path) {
+                let lines: Vec<String> = raw.lines().map(str::to_string).collect();
+                if lines.len() >= expected {
+                    return lines;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "otel output should contain {expected} lines before timeout"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     // ── BoundedQueue unit tests ───────────────────────────────────────────────
@@ -747,27 +766,25 @@ mod tests {
             events.push(event);
         }
         write_events(&config, &events);
+        wait_for_test_otel_exports();
 
         let otel_path = dir.path().join("atm.log.otel.jsonl");
-        let lines: Vec<String> = std::fs::read_to_string(&otel_path)
-            .expect("otel output should exist")
-            .lines()
-            .map(str::to_string)
-            .collect();
+        let lines = wait_for_otel_lines(&otel_path, 3);
         assert_eq!(lines.len(), 3);
-        let exported: Vec<ExportedOtelRecord> = lines
+        let mut exported: Vec<ExportedOtelRecord> = lines
             .iter()
             .map(|line| serde_json::from_str(line).expect("valid otel record json"))
             .collect();
+        exported.sort_by(|left, right| left.name.cmp(&right.name));
         assert_eq!(
             exported
                 .iter()
                 .map(|record| record.name.clone())
                 .collect::<Vec<_>>(),
             vec![
-                "send".to_string(),
+                "compose".to_string(),
                 "register_hint".to_string(),
-                "compose".to_string()
+                "send".to_string()
             ]
         );
         for record in &exported {
