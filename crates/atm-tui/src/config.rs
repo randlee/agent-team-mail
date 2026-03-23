@@ -11,10 +11,10 @@
 //! ~/.config/atm/tui.toml
 //! ```
 //!
-//! Override the base directory with `ATM_HOME`:
+//! Override the config root with `ATM_CONFIG_HOME`:
 //!
 //! ```text
-//! ATM_HOME=/custom/home atm-tui --team atm-dev
+//! ATM_CONFIG_HOME=/custom/home atm-tui --team atm-dev
 //! # loads: /custom/home/.config/atm/tui.toml
 //! ```
 //!
@@ -31,6 +31,7 @@
 use serde::Deserialize;
 
 use agent_team_mail_core::home::get_os_home_dir;
+use std::path::PathBuf;
 
 /// TUI runtime preferences.
 ///
@@ -73,6 +74,11 @@ pub struct TuiConfig {
     /// Defaults to `5`.
     #[serde(default = "default_interrupt_timeout")]
     pub interrupt_timeout_secs: u64,
+}
+
+fn tui_config_path() -> Option<PathBuf> {
+    let config_home = get_os_home_dir().ok()?;
+    Some(config_home.join(".config/atm/tui.toml"))
 }
 
 // ── Serde field defaults ──────────────────────────────────────────────────────
@@ -132,12 +138,9 @@ pub enum InterruptPolicy {
 /// Parse errors are printed to stderr so users can diagnose formatting
 /// mistakes without crashing the TUI.
 pub fn load_tui_config() -> TuiConfig {
-    let home = match get_os_home_dir() {
-        Ok(h) => h,
-        Err(_) => return TuiConfig::default(),
+    let Some(path) = tui_config_path() else {
+        return TuiConfig::default();
     };
-
-    let path = home.join(".config/atm/tui.toml");
 
     if !path.exists() {
         return TuiConfig::default();

@@ -85,6 +85,14 @@ struct ReplayCheckpoint {
     updated_at: String,
 }
 
+fn tui_runtime_home() -> Option<PathBuf> {
+    get_home_dir().ok()
+}
+
+fn tui_config_home() -> Option<PathBuf> {
+    get_os_home_dir().ok()
+}
+
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
 /// ATM TUI — live dashboard and agent stream viewer.
@@ -105,9 +113,9 @@ async fn main() -> Result<()> {
         logging::UnifiedLogMode::ProducerFanIn {
             daemon_socket: agent_team_mail_core::daemon_client::daemon_socket_path()
                 .unwrap_or_else(|_| std::env::temp_dir().join("atm-daemon.sock")),
-            fallback_spool_dir: agent_team_mail_core::home::get_home_dir()
+            fallback_spool_dir: tui_runtime_home()
                 .map(|home| agent_team_mail_core::logging_event::configured_spool_dir(&home))
-                .unwrap_or_else(|_| std::env::temp_dir().join("atm-spool")),
+                .unwrap_or_else(|| std::env::temp_dir().join("atm-spool")),
         },
     )
     .unwrap_or_else(|_| logging::init_stderr_only());
@@ -132,8 +140,8 @@ async fn main() -> Result<()> {
     let log_file_path: std::path::PathBuf = if let Ok(p) = std::env::var("ATM_LOG_FILE") {
         std::path::PathBuf::from(p)
     } else {
-        get_home_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        tui_runtime_home()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join(".config/atm/atm.log.jsonl")
     };
 
@@ -194,7 +202,7 @@ async fn run_app<B: ratatui::backend::Backend>(
     let mut last_daemon_refresh = Instant::now() - DAEMON_REFRESH; // trigger immediately
 
     // Resolve ATM home once for inbox reads.
-    let config_home: PathBuf = get_os_home_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let config_home: PathBuf = tui_config_home().unwrap_or_else(|| PathBuf::from("."));
 
     let mut tick = interval(Duration::from_millis(100));
     let mut codex_adapter = CodexAdapter::new();
@@ -541,7 +549,7 @@ async fn tail_log_file(path: &std::path::Path, pos: u64) -> Result<(Vec<String>,
 }
 
 fn watch_feed_path() -> Option<std::path::PathBuf> {
-    let home = get_home_dir().ok()?;
+    let home = tui_runtime_home()?;
     Some(home.join(".config/atm/watch-stream/events.jsonl"))
 }
 
@@ -692,7 +700,7 @@ fn synthetic_stream_warning(agent_id: &str, message: String) -> serde_json::Valu
 }
 
 fn replay_checkpoint_path(team: &str, agent: &str) -> Option<std::path::PathBuf> {
-    let home = get_home_dir().ok()?;
+    let home = tui_runtime_home()?;
     Some(
         home.join(".config/atm/watch-stream/checkpoints")
             .join(team)

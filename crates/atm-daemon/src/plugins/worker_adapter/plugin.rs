@@ -232,15 +232,11 @@ impl WorkerAdapterPlugin {
     }
 
     fn default_gemini_runtime_home(&self, team: &str, agent: &str) -> PathBuf {
-        let runtime_root = if let Some(ctx) = &self.ctx {
-            ctx.system
-                .claude_root
-                .parent()
-                .unwrap_or(&ctx.system.claude_root)
-                .to_path_buf()
-        } else {
-            agent_team_mail_core::home::get_home_dir().unwrap_or_else(|_| PathBuf::from("."))
-        };
+        let runtime_root = self
+            .ctx
+            .as_ref()
+            .map(|ctx| ctx.system.runtime_home.clone())
+            .unwrap_or_else(|| PathBuf::from("."));
         runtime_root
             .join("runtime")
             .join("gemini")
@@ -250,21 +246,14 @@ impl WorkerAdapterPlugin {
     }
 
     fn config_claude_root(&self) -> PathBuf {
-        agent_team_mail_core::home::config_claude_root_dir().unwrap_or_else(|_| {
-            self.ctx
-                .as_ref()
-                .map(|ctx| ctx.system.claude_root.clone())
-                .unwrap_or_else(|| PathBuf::from(".claude"))
-        })
+        self.ctx
+            .as_ref()
+            .map(|ctx| ctx.system.claude_root.clone())
+            .unwrap_or_else(|| PathBuf::from(".claude"))
     }
 
     fn config_team_root(&self, team_name: &str) -> PathBuf {
-        agent_team_mail_core::home::config_team_dir(team_name).unwrap_or_else(|_| {
-            self.ctx
-                .as_ref()
-                .map(|ctx| ctx.system.claude_root.join("teams").join(team_name))
-                .unwrap_or_else(|| PathBuf::from(".claude").join("teams").join(team_name))
-        })
+        self.config_claude_root().join("teams").join(team_name)
     }
 
     fn resolve_runtime_session_id(

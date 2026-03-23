@@ -11,6 +11,10 @@ use agent_team_mail_core::io::lock::acquire_lock;
 use agent_team_mail_core::schema::InboxMessage;
 use serde_json::Value;
 
+fn runtime_home() -> Option<PathBuf> {
+    get_home_dir().ok()
+}
+
 /// Read the number of messages in an agent's inbox file.
 ///
 /// Returns `0` when the inbox does not exist, is empty, or cannot be parsed.
@@ -194,7 +198,7 @@ pub fn mark_inbox_message_read(
 ///
 /// [`LogEventV1`]: agent_team_mail_core::logging_event::LogEventV1
 pub fn session_log_path(team: &str, agent: &str) -> Option<PathBuf> {
-    let base = get_home_dir().ok()?;
+    let base = runtime_home()?;
     Some(
         base.join(".config/atm/agent-sessions")
             .join(team)
