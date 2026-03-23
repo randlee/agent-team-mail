@@ -418,7 +418,9 @@ fn rotation_path(base: &Path, n: u32) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::observability::{clear_otel_export_hook, install_otel_export_hook};
+    use crate::daemon::observability::{
+        clear_otel_export_hook, install_otel_export_hook, wait_for_test_otel_exports,
+    };
     use agent_team_mail_core::logging_event::new_log_event;
     use serial_test::serial;
     use std::fs::OpenOptions;
@@ -764,6 +766,7 @@ mod tests {
             events.push(event);
         }
         write_events(&config, &events);
+        wait_for_test_otel_exports();
 
         let otel_path = dir.path().join("atm.log.otel.jsonl");
         let lines = wait_for_otel_lines(&otel_path, 3);

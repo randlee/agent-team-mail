@@ -23,7 +23,7 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     fs::create_dir_all(&runtime_home).unwrap();
     cmd.env("ATM_HOME", &runtime_home)
         .env("ATM_CONFIG_HOME", temp_dir.path())
-        .envs([("HOME", temp_dir.path())])
+        .envs([("ATM_HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_CONFIG")
         .env_remove("ATM_TEAM")
@@ -657,7 +657,7 @@ fn test_spawn_resume_prefix_ambiguous_returns_stable_error_code() {
     let mut daemon = Command::new(&script)
         .env("ATM_HOME", &runtime_home)
         .env("ATM_CONFIG_HOME", temp_dir.path())
-        .envs([("HOME", temp_dir.path())])
+        .envs([("ATM_HOME", temp_dir.path())])
         .spawn()
         .expect("failed to launch fake daemon");
     wait_for_daemon_socket(&runtime_home);

@@ -145,6 +145,28 @@ fn otel_export_serial_lock() -> &'static Mutex<()> {
     OTEL_EXPORT_SERIAL_LOCK.get_or_init(|| Mutex::new(()))
 }
 
+#[cfg(test)]
+fn pending_test_otel_export_threads() -> &'static Mutex<Vec<std::thread::JoinHandle<()>>> {
+    static PENDING_TEST_OTEL_EXPORT_THREADS: OnceLock<Mutex<Vec<std::thread::JoinHandle<()>>>> =
+        OnceLock::new();
+    PENDING_TEST_OTEL_EXPORT_THREADS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+#[cfg(test)]
+pub fn wait_for_test_otel_exports() {
+    let handles = {
+        let mut pending = pending_test_otel_export_threads()
+            .lock()
+            .expect("atm-daemon test otel export thread lock poisoned");
+        std::mem::take(&mut *pending)
+    };
+    for handle in handles {
+        handle
+            .join()
+            .expect("atm-daemon test otel export thread should complete");
+    }
+}
+
 fn trace_export_serial_lock() -> &'static Mutex<()> {
     static TRACE_EXPORT_SERIAL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     TRACE_EXPORT_SERIAL_LOCK.get_or_init(|| Mutex::new(()))
@@ -163,14 +185,23 @@ pub fn export_otel_best_effort(log_path: &Path, event: &LogEventV1) {
     if let Some(hook) = hook {
         let log_path = log_path.to_path_buf();
         let event = event.clone();
-        let _ = std::thread::Builder::new()
+        if let Ok(handle) = std::thread::Builder::new()
             .name("atm-daemon-otel-export".to_string())
             .spawn(move || {
                 let _guard = otel_export_serial_lock()
                     .lock()
                     .expect("atm-daemon otel export serial lock poisoned");
                 hook(&log_path, &event);
-            });
+            })
+        {
+            #[cfg(test)]
+            {
+                pending_test_otel_export_threads()
+                    .lock()
+                    .expect("atm-daemon test otel export thread lock poisoned")
+                    .push(handle);
+            }
+        }
     }
 }
 
