@@ -1119,19 +1119,7 @@ fn read_daemon_status_uptime_secs(home_dir: &Path) -> Option<u64> {
 }
 
 fn read_active_install_milestone() -> Option<String> {
-    let exe = std::env::current_exe().ok()?;
-    let bin_dir = exe.parent()?;
-    if bin_dir.file_name()?.to_str()? != "bin" {
-        return None;
-    }
-
-    let manifest_path = bin_dir.parent()?.join("manifest.json");
-    let raw = fs::read_to_string(manifest_path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    value
-        .get("milestone_version")
-        .and_then(serde_json::Value::as_str)
-        .map(ToString::to_string)
+    agent_team_mail_core::install::read_active_install_milestone()
 }
 
 fn check_pid_session_reconciliation(

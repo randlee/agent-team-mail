@@ -634,6 +634,16 @@ fn read_last_request_matching(request_log: &std::path::Path, command: &str) -> s
         .unwrap_or_else(|| panic!("missing {command} request in {}", request_log.display()))
 }
 
+#[cfg(unix)]
+fn read_request_log(request_log: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(request_log)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect()
+}
+
 /// Start the fake daemon with an explicit request log path.
 ///
 /// Use instead of `start_fake_gh_daemon` when the test needs to inspect the
@@ -1461,6 +1471,54 @@ fn test_gh_monitor_repo_override_accepts_github_url_and_cc() {
         request["payload"]["cc"],
         serde_json::json!(["qa-bot", "obs@ops"])
     );
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+}
+
+#[test]
+#[cfg(unix)]
+#[serial]
+fn test_gh_monitor_pr_implicitly_starts_lifecycle() {
+    let temp_dir = TempDir::new().unwrap();
+    setup_test_team(&temp_dir, "test-team");
+    let request_log = temp_dir.path().join("request-log.json");
+    let mut daemon = start_fake_gh_daemon_with_request_log(temp_dir.path(), &request_log);
+    let workdir = temp_dir.path().join("workdir");
+    std::fs::create_dir_all(&workdir).unwrap();
+    write_repo_gh_monitor_config_with_owner(&workdir, "test-team", "acme", "agent-team-mail");
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir, "test-team", false);
+    cmd.env("ATM_TEAM", "test-team")
+        .arg("gh")
+        .arg("--team")
+        .arg("test-team")
+        .arg("--json")
+        .arg("monitor")
+        .arg("pr")
+        .arg("101")
+        .arg("--start-timeout")
+        .arg("0")
+        .assert()
+        .success();
+
+    let requests = read_request_log(&request_log);
+    let start_idx = requests
+        .iter()
+        .position(|request| {
+            request["command"].as_str() == Some("gh-monitor-control")
+                && request["payload"]["action"].as_str() == Some("start")
+        })
+        .expect("start request should be sent");
+    let monitor_idx = requests
+        .iter()
+        .position(|request| request["command"].as_str() == Some("gh-monitor"))
+        .expect("monitor request should be sent");
+    assert!(
+        start_idx < monitor_idx,
+        "monitor lifecycle start must precede monitor request"
+    );
+
     let _ = daemon.kill();
     let _ = daemon.wait();
 }

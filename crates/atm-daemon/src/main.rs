@@ -11,7 +11,7 @@ use agent_team_mail_daemon::daemon::{
 use agent_team_mail_daemon::plugin::{MailService, PluginContext, PluginRegistry};
 use agent_team_mail_daemon::roster::RosterService;
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use sc_observability_types::{MetricRecord, OtelConfig, TraceRecord};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -144,7 +144,11 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    let version =
+        agent_team_mail_core::install::effective_display_version(env!("CARGO_PKG_VERSION"));
+    let version: &'static str = Box::leak(version.into_boxed_str());
+    let matches = Args::command().version(version).get_matches();
+    let args = Args::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
 
     // Initialize shared logging. --verbose maps to ATM_LOG=debug.
     if args.verbose {
