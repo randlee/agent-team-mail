@@ -445,7 +445,12 @@ pub fn execute(args: GhArgs) -> Result<()> {
 
             let output = match monitor.target {
                 MonitorTarget::Pr(pr) => {
-                    ensure_monitor_lifecycle_started(team, &current_dir, &args, &config)?;
+                    ensure_monitor_lifecycle_started(
+                        team,
+                        &current_dir,
+                        args.repo.as_deref(),
+                        &config,
+                    )?;
                     let request = GhMonitorRequest {
                         team: team.to_string(),
                         target_kind: GhMonitorTargetKind::Pr,
@@ -465,7 +470,12 @@ pub fn execute(args: GhArgs) -> Result<()> {
                     })?)
                 }
                 MonitorTarget::Workflow(workflow) => {
-                    ensure_monitor_lifecycle_started(team, &current_dir, &args, &config)?;
+                    ensure_monitor_lifecycle_started(
+                        team,
+                        &current_dir,
+                        args.repo.as_deref(),
+                        &config,
+                    )?;
                     let request = GhMonitorRequest {
                         team: team.to_string(),
                         target_kind: GhMonitorTargetKind::Workflow,
@@ -485,7 +495,12 @@ pub fn execute(args: GhArgs) -> Result<()> {
                     })?)
                 }
                 MonitorTarget::Run(run) => {
-                    ensure_monitor_lifecycle_started(team, &current_dir, &args, &config)?;
+                    ensure_monitor_lifecycle_started(
+                        team,
+                        &current_dir,
+                        args.repo.as_deref(),
+                        &config,
+                    )?;
                     let request = GhMonitorRequest {
                         team: team.to_string(),
                         target_kind: GhMonitorTargetKind::Run,
@@ -1472,16 +1487,13 @@ fn yes_no(v: bool) -> &'static str {
 fn ensure_monitor_lifecycle_started(
     team: &str,
     current_dir: &Path,
-    args: &GhArgs,
+    repo_override: Option<&str>,
     config: &Config,
 ) -> Result<()> {
     let request = GhMonitorControlRequest {
         team: team.to_string(),
         action: GhMonitorLifecycleAction::Start,
-        repo: Some(resolve_daemon_repo_scope(
-            args.repo.as_deref(),
-            current_dir,
-        )?),
+        repo: Some(resolve_daemon_repo_scope(repo_override, current_dir)?),
         drain_timeout_secs: None,
         config_cwd: Some(current_dir.to_string_lossy().to_string()),
         actor: Some(resolve_monitor_caller_identity(config)),

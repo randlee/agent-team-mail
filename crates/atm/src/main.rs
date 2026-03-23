@@ -10,7 +10,7 @@ use agent_team_mail_core::gh_command::{
     flush_local_gh_observability_records, install_cli_teardown_hook, run_cli_teardown_hook,
 };
 use agent_team_mail_core::logging;
-use clap::{CommandFactory, FromArgMatches, Parser};
+use clap::{CommandFactory, FromArgMatches};
 use sc_observability::LogConfig;
 use sc_observability_types::{MetricKind, MetricRecord, OtelConfig, TraceRecord, TraceStatus};
 use std::sync::Arc;
