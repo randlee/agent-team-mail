@@ -816,6 +816,7 @@ fn resolve_resume_session_id_from_prefix(team: &str, prefix_or_id: &str) -> Resu
                 "{SESSION_ID_NOT_FOUND}: unable to query daemon for session IDs in team '{team}'"
             )
         })?
+        .into_option()
         .unwrap_or_default()
         .into_iter()
         .filter_map(|state| state.session_id)

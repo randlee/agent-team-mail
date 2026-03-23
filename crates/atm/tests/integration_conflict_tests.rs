@@ -1290,7 +1290,7 @@ fn test_status_command_shows_correct_labels() {
 }
 
 #[test]
-fn test_doctor_status_members_consistent_unknown_when_daemon_unreachable() {
+fn test_doctor_status_members_surface_explicit_daemon_unavailable_state() {
     let temp_dir = TempDir::new().unwrap();
     let team_dir = temp_dir.path().join(".claude/teams/test-team");
     fs::create_dir_all(team_dir.join("inboxes")).unwrap();
@@ -1343,6 +1343,15 @@ fn test_doctor_status_members_consistent_unknown_when_daemon_unreachable() {
         .stdout
         .clone();
     let members_json: serde_json::Value = serde_json::from_slice(&members_output).unwrap();
+    assert_eq!(
+        members_json["daemonState"]["availability"].as_str(),
+        Some("unavailable")
+    );
+    assert!(
+        members_json["daemonState"]["provenance"]
+            .as_str()
+            .is_some_and(|value| value.contains("query_team_member_states"))
+    );
 
     let mut status_cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut status_cmd, &temp_dir);
@@ -1356,6 +1365,15 @@ fn test_doctor_status_members_consistent_unknown_when_daemon_unreachable() {
         .stdout
         .clone();
     let status_json: serde_json::Value = serde_json::from_slice(&status_output).unwrap();
+    assert_eq!(
+        status_json["daemon_state"]["availability"].as_str(),
+        Some("unavailable")
+    );
+    assert!(
+        status_json["daemon_state"]["provenance"]
+            .as_str()
+            .is_some_and(|value| value.contains("query_team_member_states"))
+    );
 
     let members_liveness: std::collections::HashMap<String, serde_json::Value> = members_json
         .get("members")
@@ -1394,7 +1412,7 @@ fn test_doctor_status_members_consistent_unknown_when_daemon_unreachable() {
     assert_eq!(
         members_liveness.get("online-agent"),
         Some(&serde_json::Value::Null),
-        "daemon unavailable should map to Unknown/null, not Online"
+        "daemon unavailable should preserve null liveness instead of fabricating Online"
     );
     assert_eq!(
         members_liveness.get("offline-agent"),
@@ -1420,7 +1438,7 @@ fn test_doctor_status_members_consistent_unknown_when_daemon_unreachable() {
 
     assert!(doctor_stdout.contains("offline-agent"));
     assert!(doctor_stdout.contains("online-agent"));
-    assert!(doctor_stdout.contains("Unknown"));
+    assert!(doctor_stdout.contains("Daemon state: unavailable"));
     assert!(doctor_stdout.contains("DAEMON_NOT_RUNNING"));
     assert!(
         doctor_stdout.contains("atm-daemon"),
