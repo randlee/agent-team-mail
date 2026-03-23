@@ -266,6 +266,7 @@ fn run_repo_scoped_gh_command(
 }
 
 pub fn validate_gh_cli_prerequisites() -> Result<()> {
+    // NOT_MONITORED_PATH: bootstrap prerequisite probe before gh firewall/routing is active.
     let version = Command::new("gh")
         .arg("--version")
         .output()
@@ -276,6 +277,7 @@ pub fn validate_gh_cli_prerequisites() -> Result<()> {
         );
     }
 
+    // NOT_MONITORED_PATH: bootstrap auth check before gh firewall/routing is active.
     let auth = Command::new("gh")
         .args(["auth", "status"])
         .output()

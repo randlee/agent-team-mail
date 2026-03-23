@@ -708,6 +708,34 @@ fn shared_runtime_test_bypass_enabled(input: &RuntimePolicyInput) -> bool {
         == Some("1")
 }
 
+fn shared_runtime_env_mismatch_hint() -> Option<String> {
+    let raw_atm_home = std::env::var("ATM_HOME").ok()?;
+    let trimmed = raw_atm_home.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let expected_home = canonical_shared_runtime_root().ok()?;
+    let actual_home = canonicalize_lossy(std::path::Path::new(trimmed));
+    let canonical_temp_root = canonicalize_lossy(&std::env::temp_dir());
+    if actual_home == expected_home || actual_home.starts_with(&canonical_temp_root) {
+        return None;
+    }
+
+    Some(format!(
+        "shared runtime requires ATM_HOME unset (canonical root: {}); current ATM_HOME resolves to {}",
+        expected_home.display(),
+        actual_home.display()
+    ))
+}
+
+fn append_shared_runtime_env_mismatch_hint(detail: String) -> String {
+    match shared_runtime_env_mismatch_hint() {
+        Some(hint) => format!("{detail}; {hint}"),
+        None => detail,
+    }
+}
+
 // Enforces BB.2 single-daemon invariant: one canonical runtime root, one
 // binary selection policy. See docs/daemon-spawn-auth/requirements.md.
 fn enforce_shared_runtime_invariant(
@@ -1344,13 +1372,17 @@ pub fn query_team_member_states(
         Ok(None) => {
             return Ok(DaemonAvailability::unavailable(
                 "daemon_client::query_team_member_states",
-                format!("daemon team-scoped state query unavailable for team '{team}'"),
+                append_shared_runtime_env_mismatch_hint(format!(
+                    "daemon team-scoped state query unavailable for team '{team}'"
+                )),
             ));
         }
         Err(err) => {
             return Ok(DaemonAvailability::unavailable(
                 "daemon_client::query_team_member_states",
-                format!("daemon team-scoped state query failed for team '{team}': {err}"),
+                append_shared_runtime_env_mismatch_hint(format!(
+                    "daemon team-scoped state query failed for team '{team}': {err}"
+                )),
             ));
         }
     };
@@ -1358,7 +1390,9 @@ pub fn query_team_member_states(
     if !response.is_ok() {
         return Ok(DaemonAvailability::unavailable(
             "daemon_client::query_team_member_states",
-            format!("daemon rejected team-scoped state query for team '{team}'"),
+            append_shared_runtime_env_mismatch_hint(format!(
+                "daemon rejected team-scoped state query for team '{team}'"
+            )),
         ));
     }
 
@@ -1367,7 +1401,9 @@ pub fn query_team_member_states(
         None => {
             return Ok(DaemonAvailability::unavailable(
                 "daemon_client::query_team_member_states",
-                format!("daemon returned no payload for team-scoped state query '{team}'"),
+                append_shared_runtime_env_mismatch_hint(format!(
+                    "daemon returned no payload for team-scoped state query '{team}'"
+                )),
             ));
         }
     };
@@ -4227,6 +4263,30 @@ sleep 8
             assert!(
                 matches!(result, Ok(DaemonAvailability::Unavailable(_))),
                 "offline daemon must map to explicit unavailable, got: {result:?}"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_query_team_member_states_noncanonical_shared_home_surfaces_atm_home_hint() {
+        with_autostart_disabled(|| {
+            let os_home = crate::home::get_os_home_dir().expect("os home");
+            let tmp = tempfile::tempdir_in(&os_home).expect("tempdir");
+            let _home_guard = EnvGuard::set("ATM_HOME", tmp.path().to_str().unwrap());
+
+            let result = query_team_member_states("atm-dev").expect("query result");
+            let details = match result {
+                DaemonAvailability::Unavailable(details) => details,
+                other => panic!("expected unavailable, got {other:?}"),
+            };
+
+            assert!(
+                details
+                    .detail
+                    .contains("shared runtime requires ATM_HOME unset"),
+                "expected shared-runtime ATM_HOME hint, got: {}",
+                details.detail
             );
         });
     }

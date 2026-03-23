@@ -10,7 +10,7 @@ use agent_team_mail_core::gh_command::{
     flush_local_gh_observability_records, install_cli_teardown_hook, run_cli_teardown_hook,
 };
 use agent_team_mail_core::logging;
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use sc_observability::LogConfig;
 use sc_observability_types::{MetricKind, MetricRecord, OtelConfig, TraceRecord, TraceStatus};
 use std::sync::Arc;
@@ -22,6 +22,14 @@ mod consts;
 mod util;
 
 use commands::Cli;
+
+fn parse_cli() -> Cli {
+    let version =
+        agent_team_mail_core::install::effective_display_version(env!("CARGO_PKG_VERSION"));
+    let version: &'static str = Box::leak(version.into_boxed_str());
+    let matches = Cli::command().version(version).get_matches();
+    Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit())
+}
 
 fn env_nonempty(key: &str) -> Option<String> {
     std::env::var(key).ok().and_then(|value| {
@@ -245,7 +253,7 @@ fn main() {
         }));
     }
 
-    let cli = Cli::parse();
+    let cli = parse_cli();
     let command_name = cli.command_name().to_string();
     let request_id = Uuid::new_v4().to_string();
     let trace_id = agent_team_mail_core::event_log::trace_id_for_request("atm", &request_id);
