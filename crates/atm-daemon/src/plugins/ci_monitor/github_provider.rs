@@ -220,6 +220,7 @@ fn run_gh_subprocess(args: &[String]) -> Result<String, CiProviderError> {
     #[cfg(test)]
     GH_SUBPROCESS_COUNT.fetch_add(1, Ordering::SeqCst);
 
+    // NOT_MONITORED_PATH: provider subprocess execution is the gh firewall boundary being wrapped.
     let output = Command::new("gh").args(args).output().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             CiProviderError::provider("gh CLI not found. Install from https://cli.github.com/")
