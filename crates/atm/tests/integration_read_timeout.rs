@@ -101,7 +101,6 @@ fn test_read_timeout_expires() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", runtime_home(&temp_dir))
         .env("ATM_CONFIG_HOME", temp_dir.path())
-        .envs([("ATM_HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_TEAM", "test-team")
         .env("ATM_IDENTITY", "alice")
@@ -144,7 +143,6 @@ fn test_read_timeout_message_arrives() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", runtime_home(&temp_dir))
         .env("ATM_CONFIG_HOME", temp_dir.path())
-        .envs([("ATM_HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_TEAM", "test-team")
         .env("ATM_IDENTITY", "alice")
@@ -170,7 +168,6 @@ fn test_read_timeout_json_output() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", runtime_home(&temp_dir))
         .env("ATM_CONFIG_HOME", temp_dir.path())
-        .envs([("ATM_HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_TEAM", "test-team")
         .env("ATM_IDENTITY", "alice")
@@ -198,7 +195,6 @@ fn test_read_no_timeout_no_messages() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", runtime_home(&temp_dir))
         .env("ATM_CONFIG_HOME", temp_dir.path())
-        .envs([("ATM_HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_TEAM", "test-team")
         .env("ATM_IDENTITY", "alice")
@@ -231,7 +227,6 @@ fn test_read_timeout_with_existing_messages() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", runtime_home(&temp_dir))
         .env("ATM_CONFIG_HOME", temp_dir.path())
-        .envs([("ATM_HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_TEAM", "test-team")
         .env("ATM_IDENTITY", "alice")
@@ -284,7 +279,6 @@ fn test_read_timeout_shows_older_unread_even_when_last_seen_is_newer() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", runtime_home(&temp_dir))
         .env("ATM_CONFIG_HOME", temp_dir.path())
-        .envs([("ATM_HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env("ATM_TEAM", "test-team")
         .env("ATM_IDENTITY", "alice")
@@ -333,7 +327,6 @@ fn test_read_timeout_without_agent_uses_config_identity() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", runtime_home(&temp_dir))
         .env("ATM_CONFIG_HOME", temp_dir.path())
-        .envs([("ATM_HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
         .env_remove("ATM_IDENTITY")
@@ -387,7 +380,6 @@ fn test_read_timeout_with_explicit_agent_overrides_default_identity() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", runtime_home(&temp_dir))
         .env("ATM_CONFIG_HOME", temp_dir.path())
-        .envs([("ATM_HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
         .env_remove("ATM_IDENTITY")

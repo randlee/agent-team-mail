@@ -40,7 +40,6 @@ impl DaemonProcessGuard {
         let mut cmd = Command::new(&daemon_bin);
         cmd.env("ATM_HOME", &runtime_home)
             .env("ATM_CONFIG_HOME", home.path())
-            .envs([("ATM_HOME", home.path())])
             .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
             .env("ATM_DAEMON_AUTOSTART", "0")
             .env_remove("ATM_CONFIG")

@@ -10,7 +10,6 @@ fn configure_cmd(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     fs::create_dir_all(&runtime_home).unwrap();
     cmd.env("ATM_HOME", &runtime_home)
         .env("ATM_CONFIG_HOME", temp_dir.path())
-        .envs([("ATM_HOME", temp_dir.path())])
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
         .env_remove("ATM_IDENTITY")

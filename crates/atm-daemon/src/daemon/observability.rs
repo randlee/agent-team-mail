@@ -185,7 +185,7 @@ pub fn export_otel_best_effort(log_path: &Path, event: &LogEventV1) {
     if let Some(hook) = hook {
         let log_path = log_path.to_path_buf();
         let event = event.clone();
-        if let Ok(handle) = std::thread::Builder::new()
+        if let Ok(export_thread) = std::thread::Builder::new()
             .name("atm-daemon-otel-export".to_string())
             .spawn(move || {
                 let _guard = otel_export_serial_lock()
@@ -199,7 +199,11 @@ pub fn export_otel_best_effort(log_path: &Path, event: &LogEventV1) {
                 pending_test_otel_export_threads()
                     .lock()
                     .expect("atm-daemon test otel export thread lock poisoned")
-                    .push(handle);
+                    .push(export_thread);
+            }
+            #[cfg(not(test))]
+            {
+                let _ = export_thread;
             }
         }
     }

@@ -21,8 +21,7 @@ use daemon_process_guard::{DaemonProcessGuard, daemon_binary_path, pid_alive, wa
 use env_guard::EnvGuard;
 
 /// Helper to set home directory for cross-platform test compatibility.
-/// Uses `ATM_HOME` which is checked first by `get_home_dir()`, avoiding
-/// platform-specific differences in how `dirs::home_dir()` resolves.
+/// Uses explicit `ATM_HOME` and `ATM_CONFIG_HOME` roots so runtime and config resolution stay deterministic across platforms.
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     set_home_env_path(cmd, temp_dir.path());
 }
@@ -37,7 +36,6 @@ fn set_home_env_path(cmd: &mut assert_cmd::Command, home: &std::path::Path) {
     std::fs::create_dir_all(&runtime_home).ok();
     cmd.env("ATM_HOME", &runtime_home)
         .env("ATM_CONFIG_HOME", home)
-        .envs([("ATM_HOME", home)])
         // Prevent opportunistic daemon autostart from changing expected
         // offline/online label behavior in deterministic integration tests.
         .env("ATM_DAEMON_AUTOSTART", "0")
@@ -260,7 +258,6 @@ async fn test_concurrent_sends_no_data_loss() {
                     let mut cmd = tokio::process::Command::new(&atm_bin_path);
                     cmd.env("ATM_HOME", &runtime_home)
                         .env("ATM_CONFIG_HOME", &temp_path)
-        .envs([("ATM_HOME", &temp_path)])
                         .env("ATM_DAEMON_AUTOSTART", "0")
                         .env_remove("ATM_CONFIG")
                         .env_remove("CLAUDE_SESSION_ID")
@@ -1475,7 +1472,6 @@ fn test_dead_pid_stale_lock_starts_daemon_cleanly() {
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     cmd.env("ATM_HOME", &runtime_home)
         .env("ATM_CONFIG_HOME", &config_home)
-        .envs([("ATM_HOME", &config_home)])
         .env("ATM_DAEMON_AUTOSTART", "1")
         .env("ATM_TEAM", "test-team")
         .env("ATM_IDENTITY", "team-lead")

@@ -31,8 +31,7 @@ Every integration test file MUST use this helper:
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     let runtime_home = temp_dir.path().join("runtime-home");
     cmd.env("ATM_HOME", &runtime_home)
-        .env("ATM_CONFIG_HOME", temp_dir.path())
-        .envs([("ATM_HOME", temp_dir.path())]);
+        .env("ATM_CONFIG_HOME", temp_dir.path());
 }
 ```
 
