@@ -1,14 +1,20 @@
-//! Canonical home directory resolution for ATM
+//! Canonical runtime-root and config-root resolution for ATM.
 //!
-//! Provides a single source of truth for home directory resolution across all ATM crates.
-//! This module ensures consistent behavior on all platforms (Linux, macOS, Windows) and
-//! supports custom deployments and testing via the `ATM_HOME` environment variable.
+//! ATM now distinguishes between:
+//! - a runtime root, controlled by `ATM_HOME`, for daemon sockets, logs, and
+//!   other ephemeral runtime state
+//! - a canonical config root under the OS home directory, for team state under
+//!   `~/.claude` and global ATM config under `~/.config/atm`
+//!
+//! This split keeps test/dev runtime overrides from redirecting the canonical
+//! team config tree away from the operator's real `~/.claude/teams`.
 //!
 //! # Platform Behavior
 //!
-//! - **Linux/macOS**: `dirs::home_dir()` uses `$HOME` environment variable
-//! - **Windows**: `dirs::home_dir()` uses Windows API (`SHGetKnownFolderPath`), which ignores
-//!   both `HOME` and `USERPROFILE` environment variables
+//! - **Linux/macOS**: `get_os_home_dir()` honors `ATM_CONFIG_HOME`, then `$HOME`
+//! - **Windows**: `get_os_home_dir()` honors `ATM_CONFIG_HOME`, then falls back to the
+//!   Windows API (`SHGetKnownFolderPath`) via `dirs::home_dir()`, which ignores both
+//!   `HOME` and `USERPROFILE`
 //!
 //! # Precedence
 //!
@@ -19,11 +25,10 @@
 //!
 //! ```
 //! use agent_team_mail_core::home::get_home_dir;
-//! use std::path::PathBuf;
 //!
 //! # fn example() -> anyhow::Result<()> {
-//! let home = get_home_dir()?;
-//! let config_dir = home.join(".config/atm");
+//! let runtime_root = get_home_dir()?;
+//! let daemon_socket = runtime_root.join(".config/atm/atm-daemon.sock");
 //! # Ok(())
 //! # }
 //! # example().unwrap();
@@ -45,9 +50,10 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-/// Get the home directory for ATM operations
+/// Get the runtime home directory for ATM operations.
 ///
-/// This is the canonical home directory resolution function used by all ATM crates.
+/// This is the canonical runtime-root resolution function used by ATM crates
+/// for daemon sockets, logs, and other runtime-scoped state.
 ///
 /// # Precedence
 ///
@@ -84,7 +90,7 @@ use std::path::{Path, PathBuf};
 /// # example().unwrap();
 /// ```
 pub fn get_home_dir() -> Result<PathBuf> {
-    // Check ATM_HOME first (useful for testing and custom deployments)
+    // Check ATM_HOME first (useful for testing and runtime isolation)
     if let Ok(home) = std::env::var("ATM_HOME") {
         let trimmed = home.trim();
         if !trimmed.is_empty() {
@@ -98,42 +104,102 @@ pub fn get_home_dir() -> Result<PathBuf> {
     dirs::home_dir().context("Could not determine home directory")
 }
 
-/// Get the OS-level home directory, always bypassing `ATM_HOME`.
+/// Get the canonical config-root home directory, bypassing `ATM_HOME`.
 ///
-/// Unlike [`get_home_dir`], this function ignores the `ATM_HOME` environment
-/// variable and returns the platform default home directory directly.
+/// Unlike [`get_home_dir`], this function ignores the `ATM_HOME` runtime-root
+/// override. Tests may override the canonical config root with
+/// `ATM_CONFIG_HOME`; otherwise this falls back to the OS-level home directory.
 ///
 /// This is intentionally distinct from [`get_home_dir`] and is reserved for
-/// locations that must be stable regardless of `ATM_HOME` — specifically the
-/// daemon socket pointer file at `~/.config/atm/daemon-socket.path`, which
-/// needs to be reachable by any CLI invocation even when `ATM_HOME` points to
-/// a different directory.
+/// locations that must remain config-root relative even when `ATM_HOME` points
+/// at a separate runtime directory.
 ///
 /// # Errors
 ///
 /// Returns an error if the platform cannot determine a home directory.
 pub fn get_os_home_dir() -> Result<PathBuf> {
+    if let Ok(home) = std::env::var("ATM_CONFIG_HOME") {
+        let trimmed = home.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+
+    #[cfg(not(windows))]
+    if let Ok(home) = std::env::var("HOME") {
+        let trimmed = home.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+
     dirs::home_dir().context("Could not determine OS home directory")
 }
 
-/// Return the canonical `{ATM_HOME}/.claude` root for ATM-managed state.
+/// Return the canonical `~/.claude` config root, always bypassing `ATM_HOME`.
 pub fn claude_root_dir() -> Result<PathBuf> {
-    Ok(claude_root_dir_for(&get_home_dir()?))
+    Ok(config_claude_root_dir_for(&get_os_home_dir()?))
 }
 
-/// Return the canonical `{ATM_HOME}/.claude` root for the provided home path.
+/// Return the canonical `{runtime_root}/.claude` path for the provided runtime home.
+///
+/// This helper is intentionally runtime-root relative and is kept for legacy
+/// callers that still need an explicit runtime-scoped `.claude` path.
 pub fn claude_root_dir_for(home: &Path) -> PathBuf {
     home.join(".claude")
 }
 
-/// Return the canonical `{ATM_HOME}/.claude/teams` root for ATM team state.
+/// Return the canonical `~/.claude/teams` team-state root, always bypassing `ATM_HOME`.
 pub fn teams_root_dir() -> Result<PathBuf> {
-    Ok(teams_root_dir_for(&get_home_dir()?))
+    Ok(config_teams_root_dir_for(&get_os_home_dir()?))
 }
 
-/// Return the canonical `{ATM_HOME}/.claude/teams` root for the provided home path.
+/// Return the canonical `{runtime_root}/.claude/teams` path for the provided runtime home.
+///
+/// This helper is intentionally runtime-root relative and is kept for legacy
+/// callers that still need an explicit runtime-scoped teams path.
 pub fn teams_root_dir_for(home: &Path) -> PathBuf {
     claude_root_dir_for(home).join("teams")
+}
+
+/// Return the canonical `~/.claude` config root for the current OS home.
+pub fn config_claude_root_dir() -> Result<PathBuf> {
+    Ok(config_claude_root_dir_for(&get_os_home_dir()?))
+}
+
+/// Return the canonical `~/.claude` config root for the provided OS home.
+pub fn config_claude_root_dir_for(os_home: &Path) -> PathBuf {
+    os_home.join(".claude")
+}
+
+/// Return the canonical `~/.claude/teams` team-state root for the current OS home.
+pub fn config_teams_root_dir() -> Result<PathBuf> {
+    Ok(config_teams_root_dir_for(&get_os_home_dir()?))
+}
+
+/// Return the canonical `~/.claude/teams` team-state root for the provided OS home.
+pub fn config_teams_root_dir_for(os_home: &Path) -> PathBuf {
+    config_claude_root_dir_for(os_home).join("teams")
+}
+
+/// Return the canonical team directory under `~/.claude/teams`.
+pub fn config_team_dir(team: &str) -> Result<PathBuf> {
+    Ok(config_team_dir_for(&get_os_home_dir()?, team))
+}
+
+/// Return the canonical team directory under `~/.claude/teams` for the provided OS home.
+pub fn config_team_dir_for(os_home: &Path, team: &str) -> PathBuf {
+    config_teams_root_dir_for(os_home).join(team)
+}
+
+/// Return the canonical team config path under `~/.claude/teams`.
+pub fn config_team_config_path(team: &str) -> Result<PathBuf> {
+    Ok(config_team_config_path_for(&get_os_home_dir()?, team))
+}
+
+/// Return the canonical team config path under `~/.claude/teams` for the provided OS home.
+pub fn config_team_config_path_for(os_home: &Path, team: &str) -> PathBuf {
+    config_team_dir_for(os_home, team).join("config.json")
 }
 
 /// Return the canonical team directory for the provided home and team name.
@@ -168,12 +234,12 @@ pub fn claude_agents_dir_for(home: &Path) -> PathBuf {
     claude_root_dir_for(home).join("agents")
 }
 
-/// Return the canonical `{ATM_HOME}/.config/atm` directory for the provided home.
+/// Return the canonical `{runtime_root}/.config/atm` directory for the provided runtime home.
 pub fn atm_config_dir_for(home: &Path) -> PathBuf {
     home.join(".config").join("atm")
 }
 
-/// Return the canonical agent session directory for the provided home.
+/// Return the canonical agent session directory for the provided runtime home.
 pub fn sessions_dir_for(home: &Path) -> PathBuf {
     atm_config_dir_for(home).join("agent-sessions")
 }
@@ -358,6 +424,7 @@ mod tests {
     #[test]
     fn test_path_helpers_build_canonical_paths() {
         let home = PathBuf::from("test-home");
+        let os_home = PathBuf::from("os-home");
 
         assert_eq!(claude_root_dir_for(&home), home.join(".claude"));
         assert_eq!(
@@ -400,27 +467,117 @@ mod tests {
             sessions_dir_for(&home),
             home.join(".config").join("atm").join("agent-sessions")
         );
+        assert_eq!(
+            config_claude_root_dir_for(&os_home),
+            os_home.join(".claude")
+        );
+        assert_eq!(
+            config_teams_root_dir_for(&os_home),
+            os_home.join(".claude").join("teams")
+        );
+        assert_eq!(
+            config_team_dir_for(&os_home, "atm-dev"),
+            os_home.join(".claude").join("teams").join("atm-dev")
+        );
+        assert_eq!(
+            config_team_config_path_for(&os_home, "atm-dev"),
+            os_home
+                .join(".claude")
+                .join("teams")
+                .join("atm-dev")
+                .join("config.json")
+        );
     }
 
     #[test]
     #[serial]
-    fn test_root_dir_helpers_respect_atm_home() {
+    fn test_runtime_root_helpers_respect_atm_home() {
         let original = env::var("ATM_HOME").ok();
         unsafe { env::set_var("ATM_HOME", "test-home") };
 
+        assert_eq!(get_home_dir().unwrap(), PathBuf::from("test-home"));
+
+        unsafe {
+            match original {
+                Some(v) => env::set_var("ATM_HOME", v),
+                None => env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_config_root_helpers_ignore_atm_home() {
+        let original = env::var("ATM_HOME").ok();
+        let runtime_home = env::temp_dir().join("runtime-home");
+        unsafe { env::set_var("ATM_HOME", &runtime_home) };
+
+        let os_home = dirs::home_dir().unwrap();
+        assert_eq!(claude_root_dir().unwrap(), os_home.join(".claude"));
+        assert_eq!(teams_root_dir().unwrap(), os_home.join(".claude/teams"));
+        assert_eq!(config_claude_root_dir().unwrap(), os_home.join(".claude"));
         assert_eq!(
-            claude_root_dir().unwrap(),
-            PathBuf::from("test-home/.claude")
-        );
-        assert_eq!(
-            teams_root_dir().unwrap(),
-            PathBuf::from("test-home/.claude/teams")
+            config_teams_root_dir().unwrap(),
+            os_home.join(".claude/teams")
         );
 
         unsafe {
             match original {
                 Some(v) => env::set_var("ATM_HOME", v),
                 None => env::remove_var("ATM_HOME"),
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    #[serial]
+    fn test_get_os_home_dir_honors_home_env() {
+        let original_config_home = env::var("ATM_CONFIG_HOME").ok();
+        let original_home = env::var("HOME").ok();
+        let config_home = env::temp_dir().join("config-home");
+        unsafe { env::remove_var("ATM_CONFIG_HOME") };
+        unsafe { env::set_var("HOME", &config_home) };
+
+        assert_eq!(get_os_home_dir().unwrap(), config_home);
+
+        unsafe {
+            match original_config_home {
+                Some(v) => env::set_var("ATM_CONFIG_HOME", v),
+                None => env::remove_var("ATM_CONFIG_HOME"),
+            }
+            match original_home {
+                Some(v) => env::set_var("HOME", v),
+                None => env::remove_var("HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_get_os_home_dir_honors_atm_config_home() {
+        let original_config_home = env::var("ATM_CONFIG_HOME").ok();
+        let original_home = env::var("HOME").ok();
+        let atm_config_home = env::temp_dir().join("atm-config-home");
+        unsafe { env::set_var("ATM_CONFIG_HOME", &atm_config_home) };
+        #[cfg(not(windows))]
+        let ignored_home = env::temp_dir().join("ignored-home");
+        #[cfg(not(windows))]
+        unsafe {
+            env::set_var("HOME", &ignored_home);
+        }
+
+        assert_eq!(get_os_home_dir().unwrap(), atm_config_home);
+
+        unsafe {
+            match original_config_home {
+                Some(v) => env::set_var("ATM_CONFIG_HOME", v),
+                None => env::remove_var("ATM_CONFIG_HOME"),
+            }
+            #[cfg(not(windows))]
+            match original_home {
+                Some(v) => env::set_var("HOME", v),
+                None => env::remove_var("HOME"),
             }
         }
     }

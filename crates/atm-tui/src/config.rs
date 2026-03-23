@@ -11,10 +11,10 @@
 //! ~/.config/atm/tui.toml
 //! ```
 //!
-//! Override the base directory with `ATM_HOME`:
+//! Override the config root with `ATM_CONFIG_HOME`:
 //!
 //! ```text
-//! ATM_HOME=/custom/home atm-tui --team atm-dev
+//! ATM_CONFIG_HOME=/custom/home atm-tui --team atm-dev
 //! # loads: /custom/home/.config/atm/tui.toml
 //! ```
 //!
@@ -30,7 +30,8 @@
 
 use serde::Deserialize;
 
-use agent_team_mail_core::home::get_home_dir;
+use agent_team_mail_core::home::get_os_home_dir;
+use std::path::PathBuf;
 
 /// TUI runtime preferences.
 ///
@@ -73,6 +74,11 @@ pub struct TuiConfig {
     /// Defaults to `5`.
     #[serde(default = "default_interrupt_timeout")]
     pub interrupt_timeout_secs: u64,
+}
+
+fn tui_config_path() -> Option<PathBuf> {
+    let config_home = get_os_home_dir().ok()?;
+    Some(config_home.join(".config/atm/tui.toml"))
 }
 
 // ── Serde field defaults ──────────────────────────────────────────────────────
@@ -132,12 +138,9 @@ pub enum InterruptPolicy {
 /// Parse errors are printed to stderr so users can diagnose formatting
 /// mistakes without crashing the TUI.
 pub fn load_tui_config() -> TuiConfig {
-    let home = match get_home_dir() {
-        Ok(h) => h,
-        Err(_) => return TuiConfig::default(),
+    let Some(path) = tui_config_path() else {
+        return TuiConfig::default();
     };
-
-    let path = home.join(".config/atm/tui.toml");
 
     if !path.exists() {
         return TuiConfig::default();
@@ -169,6 +172,24 @@ pub fn load_tui_config() -> TuiConfig {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    fn set_config_root(path: &std::path::Path) {
+        unsafe {
+            std::env::set_var("HOME", path);
+            std::env::set_var("USERPROFILE", path);
+            // Windows: dirs::home_dir() ignores HOME/USERPROFILE; set ATM_CONFIG_HOME so
+            // get_os_home_dir() resolves the config root to our temp dir on all platforms.
+            std::env::set_var("ATM_CONFIG_HOME", path);
+        }
+    }
+
+    fn clear_config_root() {
+        unsafe {
+            std::env::remove_var("HOME");
+            std::env::remove_var("USERPROFILE");
+            std::env::remove_var("ATM_CONFIG_HOME");
+        }
+    }
 
     // ── Default values ────────────────────────────────────────────────────────
 
@@ -243,13 +264,13 @@ mod tests {
     #[serial]
     fn test_load_tui_config_missing_file_returns_defaults() {
         let dir = tempfile::TempDir::new().unwrap();
-        unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+        set_config_root(dir.path());
 
         let cfg = load_tui_config();
         assert_eq!(cfg.interrupt_policy, InterruptPolicy::Confirm);
         assert!(cfg.follow_mode_default);
 
-        unsafe { std::env::remove_var("ATM_HOME") };
+        clear_config_root();
     }
 
     #[test]
@@ -264,13 +285,13 @@ mod tests {
         )
         .unwrap();
 
-        unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+        set_config_root(dir.path());
 
         let cfg = load_tui_config();
         assert_eq!(cfg.interrupt_policy, InterruptPolicy::Never);
         assert!(!cfg.follow_mode_default);
 
-        unsafe { std::env::remove_var("ATM_HOME") };
+        clear_config_root();
     }
 
     #[test]
@@ -281,12 +302,12 @@ mod tests {
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(config_dir.join("tui.toml"), "this is not valid toml!!!").unwrap();
 
-        unsafe { std::env::set_var("ATM_HOME", dir.path()) };
+        set_config_root(dir.path());
 
         let cfg = load_tui_config();
         // Malformed file must silently fall back to defaults.
         assert_eq!(cfg.interrupt_policy, InterruptPolicy::Confirm);
 
-        unsafe { std::env::remove_var("ATM_HOME") };
+        clear_config_root();
     }
 }

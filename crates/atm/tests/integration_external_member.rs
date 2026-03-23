@@ -9,8 +9,8 @@
 //! - Model registry validation
 //! - BackendType validation including `human:<username>`
 //!
-//! All tests use `ATM_HOME` instead of `HOME`/`USERPROFILE` for cross-platform
-//! Windows CI compatibility (see `docs/cross-platform-guidelines.md`).
+//! Tests drive the effective home via `ATM_HOME` so command paths that honor
+//! `get_home_dir()` stay cross-platform.
 
 use assert_cmd::cargo;
 use chrono::Utc;
@@ -21,13 +21,13 @@ use tempfile::TempDir;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Set the ATM_HOME environment variable on a command, pointing at the temp dir.
-///
+/// Set home env vars on a command.
 /// Uses a subdirectory as CWD to avoid .atm.toml config leaking from the repo.
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     let workdir = temp_dir.path().join("workdir");
     std::fs::create_dir_all(&workdir).ok();
     cmd.env("ATM_HOME", temp_dir.path())
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
         .env_remove("ATM_IDENTITY")
@@ -110,7 +110,6 @@ fn find_member(team_dir: &Path, name: &str) -> serde_json::Value {
 }
 
 // ── Fix A: --team flag on members / status ────────────────────────────────────
-
 #[test]
 fn test_members_team_flag() {
     let temp_dir = TempDir::new().unwrap();

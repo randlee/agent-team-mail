@@ -6,16 +6,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-/// Helper to set home directory for cross-platform test compatibility.
-/// Uses `ATM_HOME` which is checked first by `get_home_dir()`, avoiding
-/// platform-specific differences in how `dirs::home_dir()` resolves.
+/// Set separate config-root and runtime-root env vars on a command.
+///
+/// `ATM_CONFIG_HOME` provides the canonical config root (`~/.claude`), while `ATM_HOME`
+/// remains runtime-only for daemon state.
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     // Use a subdirectory as CWD to avoid:
     // 1. .atm.toml config leak from the repo root
     // 2. auto-identity CWD matching against team member CWD (temp_dir root)
     let workdir = temp_dir.path().join("workdir");
+    let runtime_home = temp_dir.path().join("runtime-home");
     std::fs::create_dir_all(&workdir).ok();
-    cmd.env("ATM_HOME", temp_dir.path())
+    std::fs::create_dir_all(&runtime_home).ok();
+    cmd.env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
         .env_remove("ATM_IDENTITY")
@@ -82,7 +86,6 @@ fn create_test_inbox(team_dir: &Path, agent_name: &str, messages: Vec<serde_json
     )
     .unwrap();
 }
-
 #[test]
 fn test_inbox_single_team() {
     let temp_dir = TempDir::new().unwrap();
@@ -92,7 +95,6 @@ fn test_inbox_single_team() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("inbox")
-        .arg("--no-since-last-seen")
         .assert()
         .success();
 }
@@ -132,16 +134,16 @@ fn test_inbox_shows_correct_counts() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("inbox")
-        .arg("--no-since-last-seen")
         .assert()
         .success()
-        .stdout(contains("Pending"));
+        .stdout(contains("Unread"));
 
-    // When using since-last-seen (default), header should say "New"
+    // When explicitly using since-last-seen, header should say "New"
     let mut cmd2 = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd2, &temp_dir);
     cmd2.env("ATM_TEAM", "test-team")
         .arg("inbox")
+        .arg("--since-last-seen")
         .assert()
         .success()
         .stdout(contains("New"));
@@ -158,7 +160,6 @@ fn test_inbox_no_messages() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "test-team")
         .arg("inbox")
-        .arg("--no-since-last-seen")
         .assert()
         .success();
 }
@@ -173,7 +174,6 @@ fn test_inbox_all_teams() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "team-a")
         .arg("inbox")
-        .arg("--no-since-last-seen")
         .arg("--all-teams")
         .assert()
         .success();
@@ -187,7 +187,6 @@ fn test_inbox_team_not_found() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "nonexistent-team")
         .arg("inbox")
-        .arg("--no-since-last-seen")
         .assert()
         .failure();
 }
@@ -201,7 +200,6 @@ fn test_inbox_with_team_flag() {
     set_home_env(&mut cmd, &temp_dir);
     cmd.env("ATM_TEAM", "default-team")
         .arg("inbox")
-        .arg("--no-since-last-seen")
         .arg("--team")
         .arg("override-team")
         .assert()

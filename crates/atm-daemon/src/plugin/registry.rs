@@ -1,5 +1,5 @@
 use super::traits::ErasedPlugin;
-use super::{Capability, Plugin, PluginContext, PluginError, PluginMetadata, PluginState};
+use super::{Plugin, PluginContext, PluginError, PluginMetadata, PluginState};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -79,15 +79,6 @@ impl PluginRegistry {
             .iter()
             .find(|e| e.plugin.metadata().name == name)
             .map(|e| (e.plugin.metadata(), e.state))
-    }
-
-    /// Get metadata for all plugins with a given capability
-    pub fn get_by_capability(&self, cap: &Capability) -> Vec<(PluginMetadata, PluginState)> {
-        self.plugins
-            .iter()
-            .filter(|e| e.plugin.metadata().capabilities.contains(cap))
-            .map(|e| (e.plugin.metadata(), e.state))
-            .collect()
     }
 
     /// Number of registered plugins
@@ -330,6 +321,7 @@ mod tests {
             "test-host".to_string(),
             Platform::Linux,
             std::env::temp_dir().join(".claude"),
+            std::env::temp_dir(),
             "0.1.0".to_string(),
             "atm-dev".to_string(),
         );

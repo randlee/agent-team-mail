@@ -18,11 +18,29 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+fn run_blocking_export_thread<F>(name: &str, f: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    let _ = std::thread::Builder::new()
+        .name(name.to_string())
+        .spawn(f)
+        .and_then(|handle| {
+            handle
+                .join()
+                .map_err(|_| std::io::Error::other("export thread panicked"))
+        });
+}
+
 fn export_otel_from_entrypoint(
     log_path: &std::path::Path,
     event: &agent_team_mail_core::logging_event::LogEventV1,
 ) {
-    sc_observability::export_otel_best_effort_from_path(log_path, event);
+    let log_path = log_path.to_path_buf();
+    let event = event.clone();
+    run_blocking_export_thread("atm-daemon-otel-export", move || {
+        sc_observability::export_otel_best_effort_from_path(&log_path, &event);
+    });
 }
 
 fn current_otel_health_from_entrypoint(
@@ -32,11 +50,19 @@ fn current_otel_health_from_entrypoint(
 }
 
 fn export_trace_records_from_entrypoint(records: &[TraceRecord], config: &OtelConfig) {
-    let _ = sc_observability_otlp::export_traces(config, records);
+    let records = records.to_vec();
+    let config = config.clone();
+    run_blocking_export_thread("atm-daemon-trace-export", move || {
+        let _ = sc_observability_otlp::export_traces(&config, &records);
+    });
 }
 
 fn export_metric_records_from_entrypoint(records: &[MetricRecord], config: &OtelConfig) {
-    let _ = sc_observability_otlp::export_metrics(config, records);
+    let records = records.to_vec();
+    let config = config.clone();
+    run_blocking_export_thread("atm-daemon-metric-export", move || {
+        let _ = sc_observability_otlp::export_metrics(&config, &records);
+    });
 }
 
 fn export_lifecycle_trace_from_entrypoint(
@@ -74,16 +100,23 @@ fn export_lifecycle_trace_from_entrypoint(
     // so reqwest's blocking OTLP client never constructs/drops its private
     // runtime inside the active tokio context.
     let config = sc_observability::OtelConfig::from_env();
-    let _ = std::thread::Builder::new()
-        .name("atm-daemon-lifecycle-trace-export".to_string())
-        .spawn(move || {
-            sc_observability::export_trace_records_best_effort(&[trace_record], &config);
-        })
-        .and_then(|handle| {
-            handle
-                .join()
-                .map_err(|_| std::io::Error::other("lifecycle trace exporter thread panicked"))
-        });
+    run_blocking_export_thread("atm-daemon-lifecycle-trace-export", move || {
+        sc_observability::export_trace_records_best_effort(&[trace_record], &config);
+    });
+}
+
+fn cleanup_daemon_runtime_artifacts(home_dir: &std::path::Path) {
+    let runtime_dir = agent_team_mail_core::daemon_client::daemon_runtime_dir_for(home_dir);
+    let _ = std::fs::remove_file(runtime_dir.join("atm-daemon.sock"));
+    let _ = std::fs::remove_file(agent_team_mail_core::daemon_client::daemon_status_path_for(
+        home_dir,
+    ));
+    let _ = std::fs::remove_file(
+        agent_team_mail_core::daemon_client::daemon_lock_metadata_path_for(home_dir),
+    );
+    let _ = std::fs::remove_file(
+        agent_team_mail_core::daemon_client::daemon_runtime_metadata_path_for(home_dir),
+    );
 }
 
 /// ATM Daemon - Background service for agent team mail plugins
@@ -121,7 +154,9 @@ async fn main() -> Result<()> {
 
     // Determine home directory early for lock/log path resolution.
     let home_dir =
-        agent_team_mail_core::home::get_home_dir().context("Failed to determine home directory")?;
+        agent_team_mail_core::home::get_home_dir().context("Failed to determine runtime home")?;
+    let config_home =
+        agent_team_mail_core::home::get_os_home_dir().context("Failed to determine config home")?;
     daemon::observability::install_lifecycle_trace_hook(Arc::new(
         export_lifecycle_trace_from_entrypoint,
     ));
@@ -196,16 +231,6 @@ async fn main() -> Result<()> {
             ),
         },
     )?;
-    agent_team_mail_core::daemon_client::write_daemon_lock_metadata(
-        &home_dir,
-        env!("CARGO_PKG_VERSION"),
-        &runtime_owner,
-    )
-    .context("Failed to write daemon lock metadata")?;
-    daemon::startup_auth::persist_runtime_metadata_from_token(&home_dir, &launch_token)
-        .context("Failed to persist launch lease metadata")?;
-    daemon::startup_auth::log_launch_accepted(&home_dir, &launch_token);
-
     // Resolve canonical log writer config once and reuse for startup merge + writer task.
     let log_writer_config = LogWriterConfig::from_env(&home_dir);
     let log_file = log_writer_config.log_path.clone();
@@ -253,7 +278,7 @@ async fn main() -> Result<()> {
     };
 
     let config =
-        agent_team_mail_core::config::resolve_config(&config_overrides, &current_dir, &home_dir)
+        agent_team_mail_core::config::resolve_config(&config_overrides, &current_dir, &config_home)
             .context("Failed to resolve configuration")?;
     emit_event_best_effort(EventFields {
         level: "info",
@@ -274,7 +299,7 @@ async fn main() -> Result<()> {
     }
 
     // Build system context
-    let claude_root = agent_team_mail_core::home::claude_root_dir_for(&home_dir);
+    let claude_root = agent_team_mail_core::home::config_claude_root_dir_for(&config_home);
 
     let system_ctx = agent_team_mail_core::context::SystemContext::new(
         hostname::get()
@@ -283,11 +308,12 @@ async fn main() -> Result<()> {
             .to_string(),
         agent_team_mail_core::context::Platform::detect(),
         claude_root.clone(),
+        home_dir.clone(),
         env!("CARGO_PKG_VERSION").to_string(),
         config.core.default_team.clone(),
     );
 
-    let teams_root = agent_team_mail_core::home::teams_root_dir_for(&home_dir);
+    let teams_root = agent_team_mail_core::home::config_teams_root_dir_for(&config_home);
 
     info!("Teams root: {}", teams_root.display());
 
@@ -315,17 +341,6 @@ async fn main() -> Result<()> {
     {
         registry.register(agent_team_mail_daemon::plugins::ci_monitor::CiMonitorPlugin::new());
         info!("Registered GH Monitor plugin");
-    }
-
-    // Register Issues plugin if configured
-    if let Some(issues_config) = plugin_ctx.plugin_config("issues")
-        && issues_config
-            .get("enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true)
-    {
-        registry.register(agent_team_mail_daemon::plugins::issues::IssuesPlugin::new());
-        info!("Registered Issues plugin");
     }
 
     // Create the shared agent state store.  When the worker adapter plugin is
@@ -471,6 +486,8 @@ async fn main() -> Result<()> {
         &mut registry,
         &plugin_ctx,
         daemon_lock,
+        runtime_owner.clone(),
+        launch_token.clone(),
         cancel_token,
         status_writer,
         state_store,
@@ -483,6 +500,7 @@ async fn main() -> Result<()> {
         log_event_queue,
     )
     .await;
+    cleanup_daemon_runtime_artifacts(&home_dir);
     if let Some(task) = lease_monitor_task {
         let _ = task.await;
     }

@@ -22,7 +22,7 @@ mod registry;
 pub(crate) mod routing;
 #[cfg(unix)]
 pub(crate) mod service;
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) mod types;
 

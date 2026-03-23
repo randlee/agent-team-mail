@@ -15,12 +15,10 @@ pub struct SystemContext {
     pub platform: Platform,
     /// Path to Claude root directory (~/.claude/)
     pub claude_root: PathBuf,
+    /// Path to ATM runtime home (ATM_HOME)
+    pub runtime_home: PathBuf,
     /// Claude Code version string
     pub claude_version: String,
-    /// Schema version (from Sprint 1.2)
-    ///
-    /// TODO: Replace Option with actual SchemaVersion when Sprint 1.2 completes
-    pub schema_version: Option<()>,
     /// Repository context (if running in a git repository)
     pub repo: Option<RepoContext>,
     /// Default team name
@@ -36,6 +34,7 @@ impl SystemContext {
         hostname: String,
         platform: Platform,
         claude_root: PathBuf,
+        runtime_home: PathBuf,
         claude_version: String,
         default_team: String,
     ) -> Self {
@@ -43,8 +42,8 @@ impl SystemContext {
             hostname,
             platform,
             claude_root,
+            runtime_home,
             claude_version,
-            schema_version: None, // TODO: Populate when Sprint 1.2 completes
             repo: None,
             default_team,
         }
@@ -53,12 +52,6 @@ impl SystemContext {
     /// Set the repository context
     pub fn with_repo(mut self, repo: RepoContext) -> Self {
         self.repo = Some(repo);
-        self
-    }
-
-    /// Set the schema version (placeholder for Sprint 1.2)
-    pub fn with_schema_version(mut self, _version: ()) -> Self {
-        self.schema_version = Some(());
         self
     }
 }
@@ -73,6 +66,7 @@ mod tests {
             "test-host".to_string(),
             Platform::Linux,
             PathBuf::from("/home/user/.claude"),
+            PathBuf::from("/home/user"),
             "2.1.39".to_string(),
             "default-team".to_string(),
         );
@@ -80,10 +74,10 @@ mod tests {
         assert_eq!(ctx.hostname, "test-host");
         assert_eq!(ctx.platform, Platform::Linux);
         assert_eq!(ctx.claude_root, PathBuf::from("/home/user/.claude"));
+        assert_eq!(ctx.runtime_home, PathBuf::from("/home/user"));
         assert_eq!(ctx.claude_version, "2.1.39");
         assert_eq!(ctx.default_team, "default-team");
         assert!(ctx.repo.is_none());
-        assert!(ctx.schema_version.is_none());
     }
 
     #[test]
@@ -94,6 +88,7 @@ mod tests {
             "test-host".to_string(),
             Platform::Linux,
             PathBuf::from("/home/user/.claude"),
+            PathBuf::from("/home/user"),
             "2.1.39".to_string(),
             "default-team".to_string(),
         )

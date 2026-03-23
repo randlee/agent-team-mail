@@ -18,8 +18,11 @@ use tempfile::TempDir;
 
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     let workdir = temp_dir.path().join("workdir");
+    let runtime_home = temp_dir.path().join("runtime-home");
     fs::create_dir_all(&workdir).unwrap();
-    cmd.env("ATM_HOME", temp_dir.path())
+    fs::create_dir_all(&runtime_home).unwrap();
+    cmd.env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_CONFIG")
         .env_remove("ATM_TEAM")
@@ -211,7 +214,6 @@ fn wait_for_daemon_socket(home: &Path) {
         socket.display()
     );
 }
-
 #[test]
 fn test_spawn_folder_rejects_nonexistent_directory() {
     let temp_dir = TempDir::new().unwrap();
@@ -507,7 +509,7 @@ custom={{ custom }}
 
     let rendered_path = temp_dir
         .path()
-        .join(".claude/runtime/compose/atm-dev/templated-agent/gemini-system.md");
+        .join("runtime-home/.claude/runtime/compose/atm-dev/templated-agent/gemini-system.md");
     assert!(
         rendered_path.exists(),
         "templated system prompt should be rendered before daemon readiness check"
@@ -554,7 +556,7 @@ fn test_spawn_system_prompt_plain_markdown_does_not_create_composed_prompt_file(
 
     let rendered_path = temp_dir
         .path()
-        .join(".claude/runtime/compose/atm-dev/plain-agent/gemini-system.md");
+        .join("runtime-home/.claude/runtime/compose/atm-dev/plain-agent/gemini-system.md");
     assert!(
         !rendered_path.exists(),
         "plain markdown system prompt should bypass compose rendering path"
@@ -649,11 +651,14 @@ fn test_spawn_resume_prefix_ambiguous_returns_stable_error_code() {
     fs::create_dir_all(&folder).unwrap();
 
     let script = write_fake_spawn_session_daemon_script(temp_dir.path());
+    let runtime_home = temp_dir.path().join("runtime-home");
+    fs::create_dir_all(&runtime_home).unwrap();
     let mut daemon = Command::new(&script)
-        .env("ATM_HOME", temp_dir.path())
+        .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .spawn()
         .expect("failed to launch fake daemon");
-    wait_for_daemon_socket(temp_dir.path());
+    wait_for_daemon_socket(&runtime_home);
 
     let mut cmd = cargo::cargo_bin_cmd!("atm");
     set_home_env(&mut cmd, &temp_dir);

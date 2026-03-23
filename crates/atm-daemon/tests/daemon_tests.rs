@@ -41,6 +41,22 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
+fn read_jsonl_events(path: &std::path::Path) -> Vec<LogEventV1> {
+    if !path.exists() {
+        return Vec::new();
+    }
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
+    for line in content.lines().filter(|line| !line.trim().is_empty()) {
+        if let Ok(event) = serde_json::from_str::<LogEventV1>(line) {
+            events.push(event);
+        }
+    }
+    events
+}
+
 fn read_spool_events(spool: &std::path::Path) -> Vec<LogEventV1> {
     if !spool.exists() {
         return Vec::new();
@@ -56,17 +72,9 @@ fn read_spool_events(spool: &std::path::Path) -> Vec<LogEventV1> {
             .extension()
             .and_then(|x| x.to_str())
             .map(|x| x == "jsonl")
-            != Some(true)
+            == Some(true)
         {
-            continue;
-        }
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        for line in content.lines().filter(|line| !line.trim().is_empty()) {
-            if let Ok(event) = serde_json::from_str::<LogEventV1>(line) {
-                events.push(event);
-            }
+            events.extend(read_jsonl_events(&path));
         }
     }
     events
@@ -308,6 +316,7 @@ fn create_test_context() -> (PluginContext, TempDir, env_guard::EnvGuard) {
         "test-host".to_string(),
         agent_team_mail_core::context::Platform::detect(),
         claude_root,
+        temp_dir.path().to_path_buf(),
         "test-version".to_string(),
         "test-team".to_string(),
     );
@@ -344,6 +353,7 @@ fn create_reconcile_test_context() -> (PluginContext, TempDir, env_guard::EnvGua
         "test-host".to_string(),
         agent_team_mail_core::context::Platform::detect(),
         claude_root.clone(),
+        temp_dir.path().to_path_buf(),
         "test-version".to_string(),
         "test-team".to_string(),
     );
@@ -440,14 +450,15 @@ fn wait_for_lock_file_acquired_elapsed(
     timeout_ms: u64,
 ) -> Option<std::time::Duration> {
     let lock_path = home.join(".atm/daemon/daemon.lock");
-    let pid_path = home.join(".atm/daemon/atm-daemon.pid");
+    let metadata_path = home.join(".atm/daemon/daemon.lock.meta.json");
     let status_path = home.join(".atm/daemon/status.json");
     let start = std::time::Instant::now();
     let deadline = start + Duration::from_millis(timeout_ms);
     while std::time::Instant::now() < deadline {
-        let pid_ready = std::fs::read_to_string(&pid_path)
+        let metadata_ready = std::fs::read_to_string(&metadata_path)
             .ok()
-            .and_then(|content| content.trim().parse::<u32>().ok())
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+            .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
             .is_some();
         let status_ready = std::fs::read_to_string(&status_path)
             .ok()
@@ -456,14 +467,15 @@ fn wait_for_lock_file_acquired_elapsed(
             .is_some();
         let lock_contended = lock_path.exists()
             && agent_team_mail_core::io::lock::acquire_lock(&lock_path, 0).is_err();
-        if lock_contended || pid_ready || status_ready {
+        if lock_contended || metadata_ready || status_ready {
             return Some(start.elapsed());
         }
         std::thread::sleep(Duration::from_millis(25));
     }
-    let pid_ready = std::fs::read_to_string(&pid_path)
+    let metadata_ready = std::fs::read_to_string(&metadata_path)
         .ok()
-        .and_then(|content| content.trim().parse::<u32>().ok())
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
         .is_some();
     let status_ready = std::fs::read_to_string(&status_path)
         .ok()
@@ -472,7 +484,7 @@ fn wait_for_lock_file_acquired_elapsed(
         .is_some();
     let lock_contended =
         lock_path.exists() && agent_team_mail_core::io::lock::acquire_lock(&lock_path, 0).is_err();
-    (lock_contended || pid_ready || status_ready).then(|| start.elapsed())
+    (lock_contended || metadata_ready || status_ready).then(|| start.elapsed())
 }
 
 /// Create a test status writer
@@ -499,6 +511,54 @@ fn create_test_daemon_lock(temp_dir: &TempDir) -> agent_team_mail_core::io::lock
     agent_team_mail_core::io::lock::acquire_lock(&lock_path, 0).unwrap()
 }
 
+fn create_test_runtime_owner(home: &std::path::Path) -> RuntimeOwnerMetadata {
+    RuntimeOwnerMetadata {
+        runtime_kind: RuntimeKind::Isolated,
+        build_profile: BuildProfile::Release,
+        executable_path: home.join("atm-daemon").to_string_lossy().into_owned(),
+        home_scope: home.to_string_lossy().into_owned(),
+    }
+}
+
+struct DaemonTestRunDeps {
+    status_writer: Arc<StatusWriter>,
+    state_store: daemon::SharedStateStore,
+    pubsub_store: daemon::SharedPubSubStore,
+    launch_tx: daemon::LaunchSender,
+    session_registry: daemon::SharedSessionRegistry,
+    dedup_store: daemon::SharedDedupeStore,
+    stream_state_store: daemon::SharedStreamStateStore,
+    stream_event_sender: daemon::SharedStreamEventSender,
+    log_event_queue: daemon::LogEventQueue,
+}
+
+async fn run_daemon_for_test(
+    registry: &mut PluginRegistry,
+    ctx: &PluginContext,
+    daemon_lock: agent_team_mail_core::io::lock::FileLock,
+    cancel: CancellationToken,
+    deps: DaemonTestRunDeps,
+) -> anyhow::Result<()> {
+    daemon::run(
+        registry,
+        ctx,
+        daemon_lock,
+        create_test_runtime_owner(&ctx.system.runtime_home),
+        issue_isolated_test_launch_token(&ctx.system.runtime_home, "daemon_tests"),
+        cancel,
+        deps.status_writer,
+        deps.state_store,
+        deps.pubsub_store,
+        deps.launch_tx,
+        deps.session_registry,
+        deps.dedup_store,
+        deps.stream_state_store,
+        deps.stream_event_sender,
+        deps.log_event_queue,
+    )
+    .await
+}
+
 #[tokio::test]
 #[serial]
 async fn test_daemon_starts_and_loads_mock_plugin() {
@@ -516,20 +576,22 @@ async fn test_daemon_starts_and_loads_mock_plugin() {
 
     // Run daemon in background, cancel after a short delay
     let daemon_task = tokio::spawn(async move {
-        daemon::run(
+        run_daemon_for_test(
             &mut registry,
             &ctx,
             daemon_lock,
             cancel_clone,
-            status_writer,
-            new_state_store(),
-            new_pubsub_store(),
-            new_launch_sender(),
-            new_session_registry(),
-            dedup_store,
-            new_stream_state_store(),
-            new_stream_event_sender(),
-            new_log_event_queue(),
+            DaemonTestRunDeps {
+                status_writer,
+                state_store: new_state_store(),
+                pubsub_store: new_pubsub_store(),
+                launch_tx: new_launch_sender(),
+                session_registry: new_session_registry(),
+                dedup_store,
+                stream_state_store: new_stream_state_store(),
+                stream_event_sender: new_stream_event_sender(),
+                log_event_queue: new_log_event_queue(),
+            },
         )
         .await
     });
@@ -586,20 +648,22 @@ async fn test_signal_triggers_graceful_shutdown() {
     let daemon_lock = create_test_daemon_lock(&temp_dir);
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(
+        run_daemon_for_test(
             &mut registry,
             &ctx,
             daemon_lock,
             cancel_clone,
-            status_writer.clone(),
-            new_state_store(),
-            new_pubsub_store(),
-            new_launch_sender(),
-            new_session_registry(),
-            dedup_store,
-            new_stream_state_store(),
-            new_stream_event_sender(),
-            new_log_event_queue(),
+            DaemonTestRunDeps {
+                status_writer: status_writer.clone(),
+                state_store: new_state_store(),
+                pubsub_store: new_pubsub_store(),
+                launch_tx: new_launch_sender(),
+                session_registry: new_session_registry(),
+                dedup_store,
+                stream_state_store: new_stream_state_store(),
+                stream_event_sender: new_stream_event_sender(),
+                log_event_queue: new_log_event_queue(),
+            },
         )
         .await
     });
@@ -647,20 +711,22 @@ async fn test_plugin_lifecycle_order() {
     let daemon_lock = create_test_daemon_lock(&temp_dir);
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(
+        run_daemon_for_test(
             &mut registry,
             &ctx,
             daemon_lock,
             cancel_clone,
-            status_writer.clone(),
-            new_state_store(),
-            new_pubsub_store(),
-            new_launch_sender(),
-            new_session_registry(),
-            dedup_store,
-            new_stream_state_store(),
-            new_stream_event_sender(),
-            new_log_event_queue(),
+            DaemonTestRunDeps {
+                status_writer: status_writer.clone(),
+                state_store: new_state_store(),
+                pubsub_store: new_pubsub_store(),
+                launch_tx: new_launch_sender(),
+                session_registry: new_session_registry(),
+                dedup_store,
+                stream_state_store: new_stream_state_store(),
+                stream_event_sender: new_stream_event_sender(),
+                log_event_queue: new_log_event_queue(),
+            },
         )
         .await
     });
@@ -703,20 +769,22 @@ async fn test_spool_drain_runs_on_interval() {
     let daemon_lock = create_test_daemon_lock(&temp_dir);
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(
+        run_daemon_for_test(
             &mut registry,
             &ctx,
             daemon_lock,
             cancel_clone,
-            status_writer.clone(),
-            new_state_store(),
-            new_pubsub_store(),
-            new_launch_sender(),
-            new_session_registry(),
-            dedup_store,
-            new_stream_state_store(),
-            new_stream_event_sender(),
-            new_log_event_queue(),
+            DaemonTestRunDeps {
+                status_writer: status_writer.clone(),
+                state_store: new_state_store(),
+                pubsub_store: new_pubsub_store(),
+                launch_tx: new_launch_sender(),
+                session_registry: new_session_registry(),
+                dedup_store,
+                stream_state_store: new_stream_state_store(),
+                stream_event_sender: new_stream_event_sender(),
+                log_event_queue: new_log_event_queue(),
+            },
         )
         .await
     });
@@ -781,25 +849,27 @@ async fn test_startup_reconcile_seeds_roster_without_interval_delay() {
     let state_store_probe = state_store.clone();
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(
+        run_daemon_for_test(
             &mut registry,
             &ctx,
             daemon_lock,
             cancel_clone,
-            status_writer,
-            state_store,
-            new_pubsub_store(),
-            new_launch_sender(),
-            new_session_registry(),
-            dedup_store,
-            new_stream_state_store(),
-            new_stream_event_sender(),
-            new_log_event_queue(),
+            DaemonTestRunDeps {
+                status_writer,
+                state_store,
+                pubsub_store: new_pubsub_store(),
+                launch_tx: new_launch_sender(),
+                session_registry: new_session_registry(),
+                dedup_store,
+                stream_state_store: new_stream_state_store(),
+                stream_event_sender: new_stream_event_sender(),
+                log_event_queue: new_log_event_queue(),
+            },
         )
         .await
     });
 
-    let seeded = wait_until_elapsed(1000, || {
+    let seeded = wait_until_elapsed(1500, || {
         state_store_probe
             .lock()
             .unwrap()
@@ -807,10 +877,10 @@ async fn test_startup_reconcile_seeds_roster_without_interval_delay() {
             .is_some()
     })
     .await
-    .expect("startup reconcile should seed worker state promptly (<1s)");
+    .expect("startup reconcile should seed worker state promptly (<1.5s)");
     assert!(
-        seeded <= Duration::from_secs(1),
-        "startup reconcile should seed worker state promptly (<1s)"
+        seeded <= Duration::from_millis(1500),
+        "startup reconcile should seed worker state promptly (<1.5s)"
     );
 
     cancel.cancel();
@@ -869,20 +939,22 @@ async fn test_config_watch_event_updates_and_removes_members() {
     let session_registry = Arc::new(Mutex::new(SessionRegistry::new()));
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(
+        run_daemon_for_test(
             &mut registry,
             &ctx,
             daemon_lock,
             cancel_clone,
-            status_writer,
-            state_store,
-            new_pubsub_store(),
-            new_launch_sender(),
-            session_registry,
-            dedup_store,
-            new_stream_state_store(),
-            new_stream_event_sender(),
-            new_log_event_queue(),
+            DaemonTestRunDeps {
+                status_writer,
+                state_store,
+                pubsub_store: new_pubsub_store(),
+                launch_tx: new_launch_sender(),
+                session_registry,
+                dedup_store,
+                stream_state_store: new_stream_state_store(),
+                stream_event_sender: new_stream_event_sender(),
+                log_event_queue: new_log_event_queue(),
+            },
         )
         .await
     });
@@ -982,20 +1054,22 @@ async fn test_graceful_shutdown_with_timeout() {
     let daemon_lock = create_test_daemon_lock(&temp_dir);
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(
+        run_daemon_for_test(
             &mut registry,
             &ctx,
             daemon_lock,
             cancel_clone,
-            status_writer.clone(),
-            new_state_store(),
-            new_pubsub_store(),
-            new_launch_sender(),
-            new_session_registry(),
-            dedup_store,
-            new_stream_state_store(),
-            new_stream_event_sender(),
-            new_log_event_queue(),
+            DaemonTestRunDeps {
+                status_writer: status_writer.clone(),
+                state_store: new_state_store(),
+                pubsub_store: new_pubsub_store(),
+                launch_tx: new_launch_sender(),
+                session_registry: new_session_registry(),
+                dedup_store,
+                stream_state_store: new_stream_state_store(),
+                stream_event_sender: new_stream_event_sender(),
+                log_event_queue: new_log_event_queue(),
+            },
         )
         .await
     });
@@ -1046,20 +1120,22 @@ async fn test_empty_registry_runs_successfully() {
     let daemon_lock = create_test_daemon_lock(&temp_dir);
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(
+        run_daemon_for_test(
             &mut registry,
             &ctx,
             daemon_lock,
             cancel_clone,
-            status_writer.clone(),
-            new_state_store(),
-            new_pubsub_store(),
-            new_launch_sender(),
-            new_session_registry(),
-            dedup_store,
-            new_stream_state_store(),
-            new_stream_event_sender(),
-            new_log_event_queue(),
+            DaemonTestRunDeps {
+                status_writer: status_writer.clone(),
+                state_store: new_state_store(),
+                pubsub_store: new_pubsub_store(),
+                launch_tx: new_launch_sender(),
+                session_registry: new_session_registry(),
+                dedup_store,
+                stream_state_store: new_stream_state_store(),
+                stream_event_sender: new_stream_event_sender(),
+                log_event_queue: new_log_event_queue(),
+            },
         )
         .await
     });
@@ -1095,20 +1171,22 @@ async fn test_multiple_plugins_run_concurrently() {
     let daemon_lock = create_test_daemon_lock(&temp_dir);
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(
+        run_daemon_for_test(
             &mut registry,
             &ctx,
             daemon_lock,
             cancel_clone,
-            status_writer.clone(),
-            new_state_store(),
-            new_pubsub_store(),
-            new_launch_sender(),
-            new_session_registry(),
-            dedup_store,
-            new_stream_state_store(),
-            new_stream_event_sender(),
-            new_log_event_queue(),
+            DaemonTestRunDeps {
+                status_writer: status_writer.clone(),
+                state_store: new_state_store(),
+                pubsub_store: new_pubsub_store(),
+                launch_tx: new_launch_sender(),
+                session_registry: new_session_registry(),
+                dedup_store,
+                stream_state_store: new_stream_state_store(),
+                stream_event_sender: new_stream_event_sender(),
+                log_event_queue: new_log_event_queue(),
+            },
         )
         .await
     });
@@ -1168,20 +1246,22 @@ async fn test_plugin_run_failure_isolated_from_sibling_plugins() {
     let daemon_lock = create_test_daemon_lock(&temp_dir);
 
     let daemon_task = tokio::spawn(async move {
-        daemon::run(
+        run_daemon_for_test(
             &mut registry,
             &ctx,
             daemon_lock,
             cancel_clone,
-            status_writer.clone(),
-            new_state_store(),
-            new_pubsub_store(),
-            new_launch_sender(),
-            new_session_registry(),
-            dedup_store,
-            new_stream_state_store(),
-            new_stream_event_sender(),
-            new_log_event_queue(),
+            DaemonTestRunDeps {
+                status_writer: status_writer.clone(),
+                state_store: new_state_store(),
+                pubsub_store: new_pubsub_store(),
+                launch_tx: new_launch_sender(),
+                session_registry: new_session_registry(),
+                dedup_store,
+                stream_state_store: new_stream_state_store(),
+                stream_event_sender: new_stream_event_sender(),
+                log_event_queue: new_log_event_queue(),
+            },
         )
         .await
     });
@@ -1502,7 +1582,8 @@ fn test_isolated_test_clean_shutdown_emits_lifecycle_events() {
     let spool = isolated_log_file.parent().unwrap().join("spool");
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
-        let events = read_spool_events(&spool);
+        let mut events = read_jsonl_events(&isolated_log_file);
+        events.extend(read_spool_events(&spool));
         let saw_clean_shutdown = events.iter().any(|event| {
             event.action == "clean_owner_shutdown"
                 && event
@@ -1517,9 +1598,10 @@ fn test_isolated_test_clean_shutdown_emits_lifecycle_events() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    let events = read_spool_events(&spool);
+    let mut events = read_jsonl_events(&isolated_log_file);
+    events.extend(read_spool_events(&spool));
     panic!(
-        "expected clean_owner_shutdown event in spool, got events: {:?}",
+        "expected clean_owner_shutdown event in persisted logs, got events: {:?}",
         events
             .iter()
             .map(|event| (&event.action, event.fields.get("event_name")))

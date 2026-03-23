@@ -4,16 +4,22 @@ Rules and patterns for ensuring atm works correctly on Ubuntu, macOS, and Window
 
 ## Home Directory Resolution
 
-**Problem**: `dirs::home_dir()` on Windows uses the Windows API (`SHGetKnownFolderPath`), which ignores both `HOME` and `USERPROFILE` environment variables. This breaks integration tests that set `HOME` to a temp directory.
+**Problem**: `dirs::home_dir()` on Windows uses the Windows API (`SHGetKnownFolderPath`), which ignores both `HOME` and `USERPROFILE` environment variables. Tests that only redirect `HOME` do not relocate the canonical `~/.claude` config root on Windows.
 
-**Solution**: Application code uses `get_home_dir()` from `crate::util::settings`, which checks `ATM_HOME` first:
+**Solution**:
+- `ATM_HOME` controls the runtime root for sockets, logs, and other daemon state.
+- `ATM_CONFIG_HOME` controls the canonical config root used by `get_os_home_dir()`.
+- Tests may still set `HOME` for Unix parity, but correctness must not depend on it.
 
 ```rust
-pub fn get_home_dir() -> Result<PathBuf> {
-    if let Ok(home) = std::env::var("ATM_HOME") {
-        return Ok(PathBuf::from(home));
+pub fn get_os_home_dir() -> Result<PathBuf> {
+    if let Ok(home) = std::env::var("ATM_CONFIG_HOME") {
+        let trimmed = home.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
     }
-    dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))
+    dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine OS home directory"))
 }
 ```
 
@@ -23,18 +29,20 @@ Every integration test file MUST use this helper:
 
 ```rust
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
-    cmd.env("ATM_HOME", temp_dir.path());
+    let runtime_home = temp_dir.path().join("runtime-home");
+    cmd.env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp_dir.path());
 }
 ```
 
-**NEVER** use `.env("HOME", ...)` or `.env("USERPROFILE", ...)` in tests. These do not work on Windows.
+`ATM_CONFIG_HOME` is the required cross-platform override for config-root isolation. Setting `HOME` alone is never sufficient on Windows.
 
 ### Verification
 
 Before declaring dev work complete, grep all integration test files:
 ```bash
-grep -rn 'env("HOME"' crates/atm/tests/ && echo "FAIL: Found HOME env usage" || echo "OK"
-grep -rn 'env("USERPROFILE"' crates/atm/tests/ && echo "FAIL: Found USERPROFILE env usage" || echo "OK"
+grep -rn 'ATM_CONFIG_HOME' crates/atm/tests/ || echo "FAIL: Missing ATM_CONFIG_HOME in test helpers"
+grep -rn 'env(\"HOME\"' crates/atm/tests/
 ```
 
 ## Clippy Compliance

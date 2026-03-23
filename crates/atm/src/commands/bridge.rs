@@ -5,7 +5,7 @@ use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::util::settings::{get_home_dir, teams_root_dir_for};
+use crate::util::settings::{config_team_dir, get_os_home_dir};
 
 /// Bridge metrics (subset needed for CLI display)
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -70,7 +70,7 @@ pub fn execute(args: BridgeArgs) -> Result<()> {
 fn execute_status(args: BridgeStatusArgs) -> Result<()> {
     use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 
-    let home_dir = get_home_dir()?;
+    let config_home = get_os_home_dir()?;
     let current_dir = std::env::current_dir()?;
 
     // Resolve configuration to get default team
@@ -78,11 +78,11 @@ fn execute_status(args: BridgeStatusArgs) -> Result<()> {
         team: args.team.clone(),
         ..Default::default()
     };
-    let config = resolve_config(&overrides, &current_dir, &home_dir)?;
+    let config = resolve_config(&overrides, &current_dir, &config_home)?;
     let team_name = &config.core.default_team;
 
     // Load bridge metrics
-    let team_dir = teams_root_dir_for(&home_dir).join(team_name);
+    let team_dir = config_team_dir(team_name)?;
     let metrics_path = team_dir.join(".bridge-metrics.json");
 
     let metrics = if metrics_path.exists() {
@@ -145,7 +145,7 @@ fn execute_status(args: BridgeStatusArgs) -> Result<()> {
 fn execute_sync(args: BridgeSyncArgs) -> Result<()> {
     use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 
-    let home_dir = get_home_dir()?;
+    let config_home = get_os_home_dir()?;
     let current_dir = std::env::current_dir()?;
 
     // Resolve configuration to get default team
@@ -153,7 +153,7 @@ fn execute_sync(args: BridgeSyncArgs) -> Result<()> {
         team: args.team,
         ..Default::default()
     };
-    let config = resolve_config(&overrides, &current_dir, &home_dir)?;
+    let config = resolve_config(&overrides, &current_dir, &config_home)?;
     let team_name = &config.core.default_team;
 
     // Check if bridge is configured
@@ -165,7 +165,7 @@ fn execute_sync(args: BridgeSyncArgs) -> Result<()> {
     println!();
 
     // Trigger sync by touching a sentinel file that the daemon watches
-    let team_dir = teams_root_dir_for(&home_dir).join(team_name);
+    let team_dir = config_team_dir(team_name)?;
     let sync_trigger_path = team_dir.join(".bridge-sync-trigger");
 
     std::fs::create_dir_all(&team_dir)?;

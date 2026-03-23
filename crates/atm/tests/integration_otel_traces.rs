@@ -39,6 +39,12 @@ fn setup_team(home: &Path, team: &str) {
     .expect("write team config");
 }
 
+fn runtime_home(home: &Path) -> std::path::PathBuf {
+    let runtime_home = home.join("runtime-home");
+    fs::create_dir_all(&runtime_home).expect("create runtime home");
+    runtime_home
+}
+
 fn setup_daemon_status(home: &Path) {
     let daemon_dir = home.join(".atm/daemon");
     fs::create_dir_all(&daemon_dir).expect("create daemon dir");
@@ -146,17 +152,18 @@ fn start_collector() -> (String, mpsc::Receiver<(String, String)>) {
 
     (format!("http://{}", addr), rx)
 }
-
 #[test]
 #[serial]
 fn cli_status_exports_trace_record_to_collector() {
     let temp = TempDir::new().expect("temp dir");
+    let runtime_home = runtime_home(temp.path());
     setup_team(temp.path(), "atm-dev");
-    setup_daemon_status(temp.path());
+    setup_daemon_status(&runtime_home);
     let (endpoint, rx) = start_collector();
 
     let mut cmd = Command::new(cargo_bin("atm"));
-    cmd.env("ATM_HOME", temp.path())
+    cmd.env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp.path())
         .env("ATM_TEAM", "atm-dev")
         .env("ATM_IDENTITY", "arch-ctm")
         .env("ATM_RUNTIME", "codex")
@@ -262,11 +269,13 @@ fn cli_status_exports_trace_record_to_collector() {
 #[serial]
 fn cli_status_trace_export_is_fail_open_when_collector_unreachable() {
     let temp = TempDir::new().expect("temp dir");
+    let runtime_home = runtime_home(temp.path());
     setup_team(temp.path(), "atm-dev");
-    setup_daemon_status(temp.path());
+    setup_daemon_status(&runtime_home);
 
     let mut cmd = Command::new(cargo_bin("atm"));
-    cmd.env("ATM_HOME", temp.path())
+    cmd.env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp.path())
         .env("ATM_TEAM", "atm-dev")
         .env("ATM_IDENTITY", "arch-ctm")
         .env("ATM_RUNTIME", "codex")
@@ -290,10 +299,12 @@ fn cli_status_trace_export_is_fail_open_when_collector_unreachable() {
 #[serial]
 fn cli_error_exports_log_and_error_trace_to_collector() {
     let temp = TempDir::new().expect("temp dir");
+    let runtime_home = runtime_home(temp.path());
     let (endpoint, rx) = start_collector();
 
     let mut cmd = Command::new(cargo_bin("atm"));
-    cmd.env("ATM_HOME", temp.path())
+    cmd.env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", temp.path())
         .env("ATM_TEAM", "atm-dev")
         .env("ATM_IDENTITY", "arch-ctm")
         .env("ATM_RUNTIME", "codex")

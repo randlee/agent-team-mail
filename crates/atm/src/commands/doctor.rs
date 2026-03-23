@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    AgentSummary, CanonicalMemberState, DaemonTouchSnapshot, SessionQueryResult, daemon_is_running,
-    daemon_lock_path, daemon_pid_path, daemon_socket_path, daemon_status_path_for,
-    daemon_touch_path_for, gh_rate_limit_audit, query_list_agents, query_list_agents_for_team,
-    query_session_for_team, query_team_member_states, read_daemon_lock_metadata,
+    AgentSummary, CanonicalMemberState, DaemonAvailability, SessionQueryResult, daemon_is_running,
+    daemon_lock_path, daemon_socket_path, daemon_status_path_for, gh_rate_limit_audit,
+    query_list_agents_for_team, query_session_for_team, query_team_member_states,
+    read_daemon_lock_metadata,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::gh_command::{GhRateLimitAudit, GhRateLimitAuditRequest};
@@ -32,7 +32,7 @@ use crate::commands::logging_health::{
 };
 use crate::util::caller_identity::resolve_caller_session_id_optional;
 use crate::util::member_labels::UNREGISTERED_MARKER;
-use crate::util::settings::{claude_root_dir_for, get_home_dir, teams_root_dir_for};
+use crate::util::settings::{claude_root_dir_for, config_team_dir, get_home_dir, get_os_home_dir};
 
 #[derive(Args, Debug)]
 pub struct DoctorArgs {
@@ -137,10 +137,18 @@ struct DoctorReport {
     logging_health: LoggingHealthContract,
     #[serde(default)]
     otel_health: OtelHealthContract,
+    daemon_state: DaemonStateSurface,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     members: Vec<MemberSnapshot>,
     #[serde(skip_serializing, skip_deserializing, default)]
     member_snapshot: Vec<MemberSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DaemonStateSurface {
+    availability: String,
+    provenance: Option<String>,
+    detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -181,15 +189,9 @@ struct PluginStatusSnapshot {
 }
 
 pub fn execute(args: DoctorArgs) -> Result<()> {
-    // Prime daemon connectivity early so doctor reflects post-autostart health.
-    // Must be best-effort: doctor should still produce a report when daemon is
-    // unavailable or autostart fails.
-    // Intentionally uses the unscoped query for connectivity priming only;
-    // doctor findings themselves use team-scoped checks below.
-    let _ = query_list_agents();
-
     let current_dir = std::env::current_dir()?;
     let home_dir = get_home_dir()?;
+    let config_home = get_os_home_dir()?;
 
     let config = resolve_config(
         &ConfigOverrides {
@@ -197,7 +199,7 @@ pub fn execute(args: DoctorArgs) -> Result<()> {
             ..Default::default()
         },
         &current_dir,
-        &home_dir,
+        &config_home,
     )?;
     let team = config.core.default_team.clone();
     let caller_session_id =
@@ -261,11 +263,19 @@ pub(crate) fn monitor_report_json(home_dir: &Path, team: &str) -> Result<serde_j
 
 fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<DoctorReport> {
     let now = Utc::now();
-    let team_dir = teams_root_dir_for(home_dir).join(team);
+    let team_dir = config_team_dir(team)?;
     let config_path = team_dir.join("config.json");
 
     let mut findings: Vec<Finding> = Vec::new();
     let mut daemon_states_by_agent: HashMap<String, CanonicalMemberState> = HashMap::new();
+    let daemon_availability = match query_team_member_states(team) {
+        Ok(availability) => availability,
+        Err(err) => DaemonAvailability::unavailable(
+            "doctor",
+            format!("Daemon team-scoped state query failed for team '{team}': {err}"),
+        ),
+    };
+    let daemon_state = daemon_state_surface(&daemon_availability);
 
     if !team_dir.exists() {
         findings.push(finding(
@@ -298,7 +308,7 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
     // Check 2 + 3 + 4: session/roster/mailbox integrity
     if let Some(cfg) = &team_config {
         let (pid_findings, daemon_states) =
-            check_pid_session_reconciliation_with_query(team, cfg, query_team_member_states);
+            check_pid_session_reconciliation(team, cfg, &daemon_availability);
         daemon_states_by_agent = daemon_states;
         findings.extend(pid_findings);
         findings.extend(check_roster_session_integrity(team, cfg));
@@ -367,9 +377,27 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
         gh_rate_limit_audit: None,
         logging_health,
         otel_health,
+        daemon_state,
         members: member_snapshot.clone(),
         member_snapshot,
     })
+}
+
+fn daemon_state_surface(
+    availability: &DaemonAvailability<Vec<CanonicalMemberState>>,
+) -> DaemonStateSurface {
+    match availability {
+        DaemonAvailability::Available(_) => DaemonStateSurface {
+            availability: "available".to_string(),
+            provenance: None,
+            detail: None,
+        },
+        DaemonAvailability::Unavailable(details) => DaemonStateSurface {
+            availability: "unavailable".to_string(),
+            provenance: Some(details.provenance.clone()),
+            detail: Some(details.detail.clone()),
+        },
+    }
 }
 
 fn build_gh_rate_limit_audit(home_dir: &Path, team: &str) -> Result<Option<GhRateLimitAudit>> {
@@ -907,25 +935,27 @@ fn codex_notify_matches_expected(array: &[toml::Value], expected_script: &str) -
     python_name_matches && script.replace('\\', "/") == expected_script
 }
 
-fn daemon_health_failure(
-    home_dir: &Path,
-    pid_path: &Path,
-    socket_path: &Path,
-) -> (&'static str, String) {
+fn daemon_health_failure(home_dir: &Path, socket_path: &Path) -> (&'static str, String) {
     let status_path = daemon_status_path_for(home_dir);
-    let has_runtime_artifacts = pid_path.exists()
-        || socket_path.exists()
+    let has_runtime_artifacts = socket_path.exists()
         || status_path.exists()
         || read_daemon_lock_metadata(home_dir).is_some();
+    let daemon_pid = read_daemon_lock_metadata(home_dir)
+        .map(|metadata| metadata.pid)
+        .or_else(|| {
+            fs::read_to_string(&status_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|json| json.get("pid").and_then(serde_json::Value::as_u64))
+                .map(|pid| pid as u32)
+        });
 
-    if !pid_path.exists() {
+    if daemon_pid.is_none() {
         if has_runtime_artifacts {
             return (
                 "DAEMON_PID_UNVERIFIABLE",
-                format!(
-                    "Daemon state exists but PID cannot be verified: PID file missing at {}",
-                    pid_path.display()
-                ),
+                "Daemon state exists but PID cannot be verified from status/lock metadata"
+                    .to_string(),
             );
         }
         return (
@@ -937,34 +967,22 @@ fn daemon_health_failure(
         );
     }
 
-    match fs::read_to_string(pid_path) {
-        Ok(raw) => (
-            "DAEMON_PID_UNVERIFIABLE",
-            match raw.trim().parse::<u32>() {
-                Ok(pid) if is_pid_alive(pid) => format!(
-                    "Daemon PID file is present but the daemon socket is not reachable: pid={} path={}",
-                    pid,
-                    pid_path.display()
-                ),
-                Ok(pid) => format!(
-                    "Daemon state exists but PID cannot be verified: pid {} from {} is not alive",
-                    pid,
-                    pid_path.display()
-                ),
-                Err(_) => format!(
-                    "Daemon state exists but PID cannot be verified: invalid pid file contents at {}",
-                    pid_path.display()
-                ),
-            },
-        ),
-        Err(err) => (
-            "DAEMON_PID_UNVERIFIABLE",
+    let pid = daemon_pid.unwrap();
+    (
+        "DAEMON_PID_UNVERIFIABLE",
+        if is_pid_alive(pid) {
             format!(
-                "Daemon state exists but PID cannot be verified: failed to read {} ({err})",
-                pid_path.display()
-            ),
-        ),
-    }
+                "Daemon state exists but PID cannot be verified: live pid={} from status/lock metadata but the daemon socket is not reachable at {}",
+                pid,
+                socket_path.display()
+            )
+        } else {
+            format!(
+                "Daemon state exists but PID cannot be verified: pid {} from status/lock metadata is not alive",
+                pid
+            )
+        },
+    )
 }
 
 fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
@@ -973,13 +991,11 @@ fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
     let running = daemon_is_running();
     let socket_path =
         daemon_socket_path().unwrap_or_else(|_| home_dir.join(".atm/daemon/atm-daemon.sock"));
-    let pid_path =
-        daemon_pid_path().unwrap_or_else(|_| home_dir.join(".atm/daemon/atm-daemon.pid"));
     let lock_path = daemon_lock_path().unwrap_or_else(|_| home_dir.join(".atm/daemon/daemon.lock"));
     let status_path = daemon_status_path_for(home_dir);
 
     if !running {
-        let (code, message) = daemon_health_failure(home_dir, &pid_path, &socket_path);
+        let (code, message) = daemon_health_failure(home_dir, &socket_path);
         findings.push(finding(Severity::Critical, "daemon_health", code, message));
     }
 
@@ -1007,15 +1023,6 @@ fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
         ));
     }
 
-    if !pid_path.exists() {
-        findings.push(finding(
-            Severity::Warn,
-            "daemon_health",
-            "PID_FILE_MISSING",
-            format!("Daemon PID file missing: {}", pid_path.display()),
-        ));
-    }
-
     if !lock_path.exists() {
         findings.push(finding(
             Severity::Info,
@@ -1034,41 +1041,7 @@ fn check_daemon_health(home_dir: &Path) -> Vec<Finding> {
         ));
     }
 
-    findings.extend(check_competing_daemon_touch(home_dir, &pid_path));
-
     findings
-}
-
-fn check_competing_daemon_touch(home_dir: &Path, pid_path: &Path) -> Vec<Finding> {
-    let touch_path = daemon_touch_path_for(home_dir);
-    let Ok(raw) = fs::read_to_string(&touch_path) else {
-        return Vec::new();
-    };
-    let Ok(snapshot) = serde_json::from_str::<DaemonTouchSnapshot>(&raw) else {
-        return Vec::new();
-    };
-    let current_pid = fs::read_to_string(pid_path)
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u32>().ok())
-        .or_else(|| read_daemon_lock_metadata(home_dir).map(|meta| meta.pid));
-
-    snapshot
-        .into_iter()
-        .filter_map(|(team, entry)| {
-            if current_pid.is_some_and(|pid| pid == entry.pid) || !is_pid_alive(entry.pid) {
-                return None;
-            }
-            Some(finding(
-                Severity::Critical,
-                "daemon_health",
-                "COMPETING_DAEMON_DETECTED",
-                format!(
-                    "Team '{}' daemon-touch sidecar points at live foreign pid={} (started_at={}, binary={})",
-                    team, entry.pid, entry.started_at, entry.binary
-                ),
-            ))
-        })
-        .collect()
 }
 
 fn check_plugin_init_failures(home_dir: &Path) -> Vec<Finding> {
@@ -1117,22 +1090,6 @@ fn check_daemon_ownership_mismatch(home_dir: &Path) -> Vec<Finding> {
         ));
     }
 
-    let pid_path = home_dir.join(".atm/daemon/atm-daemon.pid");
-    if let Ok(raw_pid) = fs::read_to_string(&pid_path)
-        && let Ok(pid_from_file) = raw_pid.trim().parse::<u32>()
-        && pid_from_file != metadata.pid
-    {
-        findings.push(finding(
-            Severity::Warn,
-            "daemon_health",
-            "DAEMON_OWNERSHIP_MISMATCH",
-            format!(
-                "Daemon ownership mismatch: pid file ({pid_from_file}) != lock metadata ({})",
-                metadata.pid
-            ),
-        ));
-    }
-
     findings
 }
 
@@ -1177,37 +1134,27 @@ fn read_active_install_milestone() -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn check_pid_session_reconciliation_with_query<F>(
-    team: &str,
+fn check_pid_session_reconciliation(
+    _team: &str,
     cfg: &TeamConfig,
-    query_states: F,
-) -> (Vec<Finding>, HashMap<String, CanonicalMemberState>)
-where
-    F: Fn(&str) -> anyhow::Result<Option<Vec<CanonicalMemberState>>>,
-{
+    daemon_availability: &DaemonAvailability<Vec<CanonicalMemberState>>,
+) -> (Vec<Finding>, HashMap<String, CanonicalMemberState>) {
     let mut findings = Vec::new();
     let (daemon_states, unreachable_reason): (
         HashMap<String, CanonicalMemberState>,
         Option<String>,
-    ) = match query_states(team) {
-        Ok(Some(states)) => (
+    ) = match daemon_availability {
+        DaemonAvailability::Available(states) => (
             states
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|s| (s.agent.clone(), s))
                 .collect::<HashMap<_, _>>(),
             None,
         ),
-        Ok(None) => (
+        DaemonAvailability::Unavailable(details) => (
             HashMap::new(),
-            Some(format!(
-                "Daemon team-scoped state query unavailable for team '{team}'"
-            )),
-        ),
-        Err(err) => (
-            HashMap::new(),
-            Some(format!(
-                "Daemon team-scoped state query failed for team '{team}': {err}"
-            )),
+            Some(format!("{}: {}", details.provenance, details.detail)),
         ),
     };
 
@@ -1285,6 +1232,25 @@ where
     }
 
     (findings, daemon_states)
+}
+
+#[cfg(test)]
+fn check_pid_session_reconciliation_with_query<F>(
+    team: &str,
+    cfg: &TeamConfig,
+    query_states: F,
+) -> (Vec<Finding>, HashMap<String, CanonicalMemberState>)
+where
+    F: Fn(&str) -> anyhow::Result<DaemonAvailability<Vec<CanonicalMemberState>>>,
+{
+    let daemon_availability = match query_states(team) {
+        Ok(availability) => availability,
+        Err(err) => DaemonAvailability::unavailable(
+            "doctor",
+            format!("Daemon team-scoped state query failed for team '{team}': {err}"),
+        ),
+    };
+    check_pid_session_reconciliation(team, cfg, &daemon_availability)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1898,6 +1864,17 @@ fn render_human(report: &DoctorReport) -> String {
             "  delta_consumed_vs_cached: {}\n\n",
             audit.delta_consumed_vs_cached
         ));
+    }
+
+    if report.daemon_state.availability == "unavailable" {
+        out.push_str("Daemon state: unavailable\n");
+        if let Some(provenance) = &report.daemon_state.provenance {
+            out.push_str(&format!("  provenance: {provenance}\n"));
+        }
+        if let Some(detail) = &report.daemon_state.detail {
+            out.push_str(&format!("  detail: {detail}\n"));
+        }
+        out.push('\n');
     }
 
     if !report.member_snapshot.is_empty() {
@@ -2614,8 +2591,12 @@ mod tests {
             unknown_fields: HashMap::new(),
         };
 
-        let (findings, _) =
-            check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| Ok(None));
+        let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
+            Ok(DaemonAvailability::unavailable(
+                "test",
+                "daemon team-scoped state query unavailable",
+            ))
+        });
         assert!(
             findings
                 .iter()
@@ -2637,7 +2618,7 @@ mod tests {
         };
 
         let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
-            Ok(Some(vec![CanonicalMemberState {
+            Ok(DaemonAvailability::available(vec![CanonicalMemberState {
                 agent: "foreign-agent".to_string(),
                 state: "offline".to_string(),
                 activity: "unknown".to_string(),
@@ -2669,7 +2650,7 @@ mod tests {
 
         let (findings_none, _) =
             check_pid_session_reconciliation_with_query("atm-dev", &cfg_none, |_| {
-                Ok(Some(vec![CanonicalMemberState {
+                Ok(DaemonAvailability::available(vec![CanonicalMemberState {
                     agent: "worker-a".to_string(),
                     state: "active".to_string(),
                     activity: "busy".to_string(),
@@ -2698,7 +2679,7 @@ mod tests {
 
         let (findings_false, _) =
             check_pid_session_reconciliation_with_query("atm-dev", &cfg_false, |_| {
-                Ok(Some(vec![CanonicalMemberState {
+                Ok(DaemonAvailability::available(vec![CanonicalMemberState {
                     agent: "worker-a".to_string(),
                     state: "active".to_string(),
                     activity: "busy".to_string(),
@@ -2727,7 +2708,7 @@ mod tests {
 
         let (findings_true, _) =
             check_pid_session_reconciliation_with_query("atm-dev", &cfg_true, |_| {
-                Ok(Some(vec![CanonicalMemberState {
+                Ok(DaemonAvailability::available(vec![CanonicalMemberState {
                     agent: "worker-a".to_string(),
                     state: "active".to_string(),
                     activity: "busy".to_string(),
@@ -2746,7 +2727,7 @@ mod tests {
 
         let (findings_idle_none, _) =
             check_pid_session_reconciliation_with_query("atm-dev", &cfg_none, |_| {
-                Ok(Some(vec![CanonicalMemberState {
+                Ok(DaemonAvailability::available(vec![CanonicalMemberState {
                     agent: "worker-a".to_string(),
                     state: "idle".to_string(),
                     activity: "idle".to_string(),
@@ -2765,7 +2746,7 @@ mod tests {
 
         let (findings_idle_false, _) =
             check_pid_session_reconciliation_with_query("atm-dev", &cfg_false, |_| {
-                Ok(Some(vec![CanonicalMemberState {
+                Ok(DaemonAvailability::available(vec![CanonicalMemberState {
                     agent: "worker-a".to_string(),
                     state: "idle".to_string(),
                     activity: "idle".to_string(),
@@ -2808,7 +2789,7 @@ mod tests {
         };
 
         let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
-            Ok(Some(vec![CanonicalMemberState {
+            Ok(DaemonAvailability::available(vec![CanonicalMemberState {
                 agent: "arch-ctm".to_string(),
                 state: "offline".to_string(),
                 activity: "unknown".to_string(),
@@ -2946,40 +2927,6 @@ mod tests {
 
     #[test]
     #[serial]
-    fn check_daemon_health_reports_competing_live_pid_from_touch_sidecar() {
-        let _guard = EnvGuard::isolate(OVERRIDE_ENV_KEYS);
-        let tmp = tempfile::tempdir().unwrap();
-        let daemon_dir = tmp.path().join(".atm/daemon");
-        let binary = std::env::temp_dir().join("foreign-atm-daemon");
-        fs::create_dir_all(&daemon_dir).unwrap();
-        fs::write(daemon_dir.join("atm-daemon.pid"), "999999\n").unwrap();
-        fs::write(
-            daemon_dir.join("daemon-touch.json"),
-            format!(
-                r#"{{
-  "atm-dev": {{
-    "pid": {},
-    "started_at": "2026-03-16T00:00:00Z",
-    "binary": "{binary}"
-  }}
-}}"#,
-                std::process::id(),
-                binary = binary.to_string_lossy().replace('\\', "/"),
-            ),
-        )
-        .unwrap();
-        unsafe { std::env::set_var("ATM_HOME", tmp.path()) };
-
-        let findings = check_daemon_health(tmp.path());
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.code == "COMPETING_DAEMON_DETECTED")
-        );
-    }
-
-    #[test]
-    #[serial]
     fn check_daemon_health_distinguishes_absent_daemon() {
         let _guard = EnvGuard::isolate(OVERRIDE_ENV_KEYS);
         let tmp = tempfile::tempdir().unwrap();
@@ -3028,8 +2975,8 @@ mod tests {
             daemon.message
         );
         assert!(
-            daemon.message.contains("PID file missing"),
-            "pid-verification message should explain the missing pid file: {}",
+            daemon.message.contains("status/lock metadata"),
+            "pid-verification message should explain the status/lock metadata source: {}",
             daemon.message
         );
     }
@@ -3290,6 +3237,11 @@ mod tests {
             gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
             otel_health: OtelHealthContract::default(),
+            daemon_state: DaemonStateSurface {
+                availability: "available".to_string(),
+                provenance: None,
+                detail: None,
+            },
             members: vec![MemberSnapshot {
                 name: "team-lead".to_string(),
                 agent_type: "team-lead".to_string(),
@@ -3397,6 +3349,11 @@ mod tests {
             gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
             otel_health: OtelHealthContract::default(),
+            daemon_state: DaemonStateSurface {
+                availability: "available".to_string(),
+                provenance: None,
+                detail: None,
+            },
             members: vec![MemberSnapshot {
                 name: "arch-ctm".to_string(),
                 agent_type: "codex".to_string(),
@@ -3449,6 +3406,10 @@ mod tests {
         assert_eq!(
             value["logging_health"]["state"],
             serde_json::Value::String("unavailable".to_string())
+        );
+        assert_eq!(
+            value["daemon_state"]["availability"],
+            serde_json::Value::String("available".to_string())
         );
         assert!(value["logging_health"]["log_root"].is_string());
         assert!(value["logging_health"]["canonical_log_path"].is_string());
@@ -3532,6 +3493,11 @@ mod tests {
             gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
             otel_health: OtelHealthContract::default(),
+            daemon_state: DaemonStateSurface {
+                availability: "available".to_string(),
+                provenance: None,
+                detail: None,
+            },
             members: vec![],
             member_snapshot: vec![],
         };
@@ -3572,6 +3538,11 @@ mod tests {
             gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
             otel_health: OtelHealthContract::default(),
+            daemon_state: DaemonStateSurface {
+                availability: "available".to_string(),
+                provenance: None,
+                detail: None,
+            },
             members: vec![MemberSnapshot {
                 name: "arch-ctm".to_string(),
                 agent_type: "codex".to_string(),
@@ -3634,6 +3605,11 @@ mod tests {
             gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
             otel_health: OtelHealthContract::default(),
+            daemon_state: DaemonStateSurface {
+                availability: "available".to_string(),
+                provenance: None,
+                detail: None,
+            },
             members: vec![
                 MemberSnapshot {
                     name: "arch-ctm".to_string(),

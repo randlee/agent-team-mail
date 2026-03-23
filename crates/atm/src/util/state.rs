@@ -1,17 +1,9 @@
 //! Local state management for ATM CLI (seen tracking).
 
+pub use agent_team_mail_core::util::state::SeenState;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::PathBuf;
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct SeenState {
-    /// Map of team -> agent -> last_seen ISO timestamp
-    #[serde(default)]
-    pub last_seen: HashMap<String, HashMap<String, String>>,
-}
 
 pub fn load_seen_state() -> Result<SeenState> {
     let path = state_path()?;
@@ -56,10 +48,8 @@ pub fn update_last_seen(state: &mut SeenState, team: &str, agent: &str, timestam
 }
 
 pub fn state_path() -> Result<PathBuf> {
-    // Canonical path resolution: ATM_HOME (when set) is home root, and state
-    // file lives under .config/atm for both test and production runs.
-    let home = agent_team_mail_core::home::get_home_dir()?;
-    Ok(home.join(".config/atm/state.json"))
+    let config_home = agent_team_mail_core::home::get_home_dir()?;
+    Ok(config_home.join(".config/atm/state.json"))
 }
 
 #[cfg(test)]

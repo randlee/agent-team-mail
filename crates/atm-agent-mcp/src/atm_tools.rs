@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_team_mail_core::InboxMessage;
-use agent_team_mail_core::home::{get_home_dir, teams_root_dir_for};
+use agent_team_mail_core::home::{config_team_config_path_for, config_team_dir_for, get_home_dir};
 use agent_team_mail_core::io::{inbox_append, inbox_update};
 use agent_team_mail_core::text::{truncate_chars, truncate_chars_slice};
 use serde_json::{Value, json};
@@ -123,8 +123,7 @@ fn parse_to(to: &str, default_team: &str) -> Result<(String, String), String> {
 ///
 /// `<teams_root>/<team>/inboxes/<agent>.json`
 fn inbox_path(home: &std::path::Path, team: &str, agent: &str) -> PathBuf {
-    teams_root_dir_for(home)
-        .join(team)
+    config_team_dir_for(home, team)
         .join("inboxes")
         .join(format!("{agent}.json"))
 }
@@ -467,11 +466,7 @@ pub fn handle_atm_broadcast(id: &Value, args: &Value, identity: &str, team: &str
     };
 
     // Read team config to find members
-    let config_path = home
-        .join(".claude")
-        .join("teams")
-        .join(&effective_team)
-        .join("config.json");
+    let config_path = config_team_config_path_for(&home, &effective_team);
 
     let config_content = match std::fs::read(&config_path) {
         Ok(c) => c,
@@ -922,12 +917,20 @@ mod tests {
     fn set_atm_home(dir: &TempDir) -> String {
         let p = dir.path().to_string_lossy().to_string();
         // SAFETY: single-threaded within a test function; serial attribute prevents races.
-        unsafe { std::env::set_var("ATM_HOME", &p) };
+        unsafe {
+            std::env::set_var("HOME", &p);
+            std::env::set_var("USERPROFILE", &p);
+            std::env::set_var("ATM_HOME", &p);
+        };
         p
     }
 
     fn unset_atm_home() {
-        unsafe { std::env::remove_var("ATM_HOME") };
+        unsafe {
+            std::env::remove_var("HOME");
+            std::env::remove_var("USERPROFILE");
+            std::env::remove_var("ATM_HOME");
+        };
     }
 
     /// Write a minimal team config with the given member names.

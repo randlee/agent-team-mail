@@ -218,10 +218,11 @@ pub fn execute(args: InitArgs) -> Result<()> {
     let current_dir = std::env::current_dir().context("Cannot determine current directory")?;
     let atm_toml_path = current_dir.join(".atm.toml");
     let home_dir = crate::util::settings::get_home_dir()?;
+    let config_home = home_dir.clone();
     let settings_path = resolve_settings_path(install_global)?;
 
     let scripts_dir = if install_global {
-        crate::util::settings::claude_root_dir_for(&home_dir).join("scripts")
+        crate::util::settings::config_claude_root_dir_for(&config_home).join("scripts")
     } else {
         current_dir.join(".claude").join("scripts")
     };
@@ -262,8 +263,7 @@ pub fn execute(args: InitArgs) -> Result<()> {
         };
         let team_status = if args.skip_team {
             TeamStatus::Skipped
-        } else if crate::util::settings::teams_root_dir_for(&home_dir)
-            .join(&args.team)
+        } else if crate::util::settings::config_team_dir_for(&config_home, &args.team)
             .join("config.json")
             .exists()
         {
@@ -282,7 +282,7 @@ pub fn execute(args: InitArgs) -> Result<()> {
         let team_status = if args.skip_team {
             TeamStatus::Skipped
         } else {
-            ensure_team_config(&home_dir, &args.team, &current_dir)?
+            ensure_team_config(&config_home, &args.team, &current_dir)?
         };
         // Materialize hook scripts to disk before writing settings
         materialize_scripts(&scripts_dir)?;
@@ -794,8 +794,8 @@ fn ensure_gitignore_entry(path: &Path, entry: &str) -> Result<()> {
     write_text_atomic(path, &content)
 }
 
-fn ensure_team_config(home_dir: &Path, team: &str, cwd: &Path) -> Result<TeamStatus> {
-    let team_dir = crate::util::settings::teams_root_dir_for(home_dir).join(team);
+fn ensure_team_config(config_home: &Path, team: &str, cwd: &Path) -> Result<TeamStatus> {
+    let team_dir = crate::util::settings::config_team_dir_for(config_home, team);
     let inboxes_dir = team_dir.join("inboxes");
     let config_path = team_dir.join("config.json");
 
@@ -939,7 +939,7 @@ fn resolve_settings_path(global: bool) -> Result<PathBuf> {
     if global {
         let home = crate::util::settings::get_home_dir()
             .context("Cannot resolve home directory for global settings")?;
-        Ok(crate::util::settings::claude_root_dir_for(&home).join("settings.json"))
+        Ok(crate::util::settings::config_claude_root_dir_for(&home).join("settings.json"))
     } else {
         let cwd = std::env::current_dir().context("Cannot determine current directory")?;
         Ok(cwd.join(".claude").join("settings.json"))
@@ -1511,6 +1511,7 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::env;
+    use std::ffi::{OsStr, OsString};
     use tempfile::TempDir;
 
     fn entry_uses_session_hook_schema(entry: &serde_json::Value) -> bool {
@@ -1529,6 +1530,41 @@ mod tests {
     // -----------------------------------------------------------------------
     fn temp_settings(dir: &TempDir) -> PathBuf {
         dir.path().join(".claude").join("settings.json")
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &Path) -> Self {
+            let guard = Self {
+                key,
+                original: env::vars_os().find_map(|(current_key, current_value)| {
+                    (current_key == OsStr::new(key)).then_some(current_value)
+                }),
+            };
+
+            // SAFETY: serialized tests own process env mutations.
+            unsafe {
+                env::set_var(key, value);
+            }
+
+            guard
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: serialized tests own process env mutations.
+            unsafe {
+                match &self.original {
+                    Some(value) => env::set_var(self.key, value),
+                    None => env::remove_var(self.key),
+                }
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1855,27 +1891,15 @@ mod tests {
         assert_eq!(path, cwd.join(".claude").join("settings.json"));
     }
 
-    /// Global path resolution must use `ATM_HOME` (cross-platform pattern).
+    /// Global path resolution must honor `ATM_HOME` when present.
     #[test]
     #[serial]
-    fn test_resolve_settings_path_global_uses_atm_home() {
+    fn test_resolve_settings_path_global_uses_os_home() {
         let dir = TempDir::new().expect("tempdir");
-        let old_home = env::var("ATM_HOME").ok();
-
-        // SAFETY: single-threaded test manipulating env var.
-        unsafe {
-            env::set_var("ATM_HOME", dir.path());
-        }
+        let _atm_home_guard = EnvVarGuard::set_path("ATM_HOME", dir.path());
 
         let path = resolve_settings_path(true).expect("resolve global");
         assert_eq!(path, dir.path().join(".claude").join("settings.json"));
-
-        unsafe {
-            match old_home {
-                Some(v) => env::set_var("ATM_HOME", v),
-                None => env::remove_var("ATM_HOME"),
-            }
-        }
     }
 
     /// Global hook commands must use resolved absolute script paths, not
@@ -1934,12 +1958,8 @@ mod tests {
         let repo_dir = dir.path().join("repo");
         std::fs::create_dir_all(&repo_dir).expect("create repo");
         let original_dir = env::current_dir().expect("original cwd");
-        let old_home = env::var("ATM_HOME").ok();
+        let _atm_home_guard = EnvVarGuard::set_path("ATM_HOME", dir.path());
 
-        // SAFETY: serialized test controls process env and cwd.
-        unsafe {
-            env::set_var("ATM_HOME", dir.path());
-        }
         env::set_current_dir(&repo_dir).expect("set cwd");
 
         let result = execute(InitArgs {
@@ -1952,13 +1972,6 @@ mod tests {
         });
 
         env::set_current_dir(original_dir).expect("restore cwd");
-        // SAFETY: serialized test cleanup.
-        unsafe {
-            match old_home {
-                Some(v) => env::set_var("ATM_HOME", v),
-                None => env::remove_var("ATM_HOME"),
-            }
-        }
 
         assert!(result.is_ok());
         assert!(
@@ -1969,7 +1982,7 @@ mod tests {
             dir.path()
                 .join(".claude/teams/atm-dev/config.json")
                 .exists(),
-            "team config should be created under ATM_HOME"
+            "team config should be created under canonical HOME"
         );
         assert!(
             dir.path().join(".claude/settings.json").exists(),

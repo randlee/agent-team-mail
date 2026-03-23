@@ -2,6 +2,7 @@
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config, resolve_identity};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
+use agent_team_mail_core::home::{config_team_dir_for, get_os_home_dir};
 use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -10,7 +11,7 @@ use clap::{ArgAction, Args};
 use crate::util::addressing::parse_address;
 use crate::util::caller_identity::resolve_caller_session_id_optional;
 use crate::util::hook_identity::read_hook_file_identity;
-use crate::util::settings::{get_home_dir, teams_root_dir_for};
+use crate::util::settings::get_home_dir;
 use crate::util::state::{get_last_seen, load_seen_state, save_seen_state, update_last_seen};
 
 use super::wait::{WaitResult, wait_for_message};
@@ -45,8 +46,8 @@ pub struct ReadArgs {
     #[arg(long, conflicts_with_all = ["unread_only", "pending_ack_only"])]
     history: bool,
 
-    /// Show messages since last seen (default: true)
-    #[arg(long, default_value_t = true)]
+    /// Show only messages newer than the last-seen watermark
+    #[arg(long)]
     since_last_seen: bool,
 
     /// Disable since-last-seen filtering and watermark updates
@@ -88,7 +89,8 @@ pub struct ReadArgs {
 
 /// Execute the read command
 pub fn execute(args: ReadArgs) -> Result<()> {
-    let home_dir = get_home_dir()?;
+    let _runtime_home = get_home_dir()?;
+    let config_home = get_os_home_dir()?;
     let current_dir = std::env::current_dir()?;
 
     let overrides = ConfigOverrides {
@@ -96,7 +98,7 @@ pub fn execute(args: ReadArgs) -> Result<()> {
         ..Default::default()
     };
 
-    let mut config = resolve_config(&overrides, &current_dir, &home_dir)?;
+    let mut config = resolve_config(&overrides, &current_dir, &config_home)?;
 
     if let Some(ref name) = args.reader_as {
         config.core.identity = name.clone();
@@ -146,7 +148,7 @@ pub fn execute(args: ReadArgs) -> Result<()> {
             .ok()
             .flatten();
 
-    let team_dir = teams_root_dir_for(&home_dir).join(&team_name);
+    let team_dir = config_team_dir_for(&config_home, &team_name);
     if !team_dir.exists() {
         anyhow::bail!("Team '{team_name}' not found (directory {team_dir:?} doesn't exist)");
     }
@@ -171,6 +173,8 @@ pub fn execute(args: ReadArgs) -> Result<()> {
         hostname_registry.as_ref(),
     )?;
 
+    // Queue-state filtering is the default. The watermark is only consulted
+    // when the caller explicitly opts in via `--since-last-seen`.
     let use_since_last_seen = args.since_last_seen && !args.no_since_last_seen;
     let last_seen = if use_since_last_seen {
         let state = load_seen_state().unwrap_or_default();
@@ -192,6 +196,14 @@ pub fn execute(args: ReadArgs) -> Result<()> {
             } else {
                 false
             }
+        });
+    }
+
+    if let Some(last_seen_dt) = last_seen {
+        filtered_messages.retain(|m| {
+            DateTime::parse_from_rfc3339(&m.timestamp)
+                .map(|dt| dt.with_timezone(&Utc) > last_seen_dt)
+                .unwrap_or(false)
         });
     }
 
@@ -392,8 +404,6 @@ pub fn execute(args: ReadArgs) -> Result<()> {
 
         println!("Total displayed: {} message(s)", displayed_messages.len());
     }
-
-    let _ = last_seen;
     Ok(())
 }
 

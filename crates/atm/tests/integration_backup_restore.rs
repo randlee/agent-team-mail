@@ -6,14 +6,15 @@ use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
-/// Set ATM_HOME so all commands use the temp directory.
+/// Set home env vars on a command for backup/restore integration tests.
 ///
-/// Uses `ATM_HOME` (not `HOME` or `USERPROFILE`) for cross-platform compatibility.
-/// Also removes ATM_IDENTITY and sets a clean working directory.
+/// These flows now resolve through `get_home_dir()`, so tests must drive the
+/// effective home via `ATM_HOME` for consistent cross-platform behavior.
 fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
     let workdir = temp_dir.path().join("workdir");
     std::fs::create_dir_all(&workdir).ok();
     cmd.env("ATM_HOME", temp_dir.path())
+        .env("ATM_CONFIG_HOME", temp_dir.path())
         .env("ATM_DAEMON_AUTOSTART", "0")
         .env_remove("ATM_TEAM")
         .env_remove("ATM_IDENTITY")
@@ -85,7 +86,6 @@ fn setup_test_team(temp_dir: &TempDir, team_name: &str) -> PathBuf {
 // ---------------------------------------------------------------------------
 // backup tests
 // ---------------------------------------------------------------------------
-
 #[test]
 fn test_backup_creates_backup() {
     let temp_dir = TempDir::new().unwrap();

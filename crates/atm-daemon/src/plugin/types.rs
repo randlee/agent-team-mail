@@ -15,24 +15,14 @@ pub enum Capability {
     // --- Behavioral capabilities (routing/dispatch) ---
     /// Plugin can add synthetic members to teams via RosterService
     AdvertiseMembers,
-    /// Plugin can intercept outbound messages before delivery
-    InterceptSend,
     /// Plugin can inject inbound messages into agent inboxes
     InjectMessages,
     /// Plugin reacts to events (new message, team change, file watch)
     EventListener,
 
     // --- Domain capabilities (metadata/categorization) ---
-    /// Plugin tracks external issues
-    IssueTracking,
     /// Plugin monitors CI pipelines
     CiMonitor,
-    /// Plugin bridges messages across machines
-    Bridge,
-    /// Plugin provides human chat interface
-    Chat,
-    /// Plugin manages message retention
-    Retention,
     /// Custom capability
     Custom(String),
 }

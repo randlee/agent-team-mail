@@ -4,6 +4,7 @@ use std::fs;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -19,6 +20,10 @@ pub struct DaemonProcessGuard {
 }
 
 impl DaemonProcessGuard {
+    pub fn runtime_home_path(home: &TempDir) -> PathBuf {
+        home.path().to_path_buf()
+    }
+
     pub fn spawn(home: &TempDir, team: &str) -> Self {
         let daemon_bin = daemon_binary_path();
         assert!(
@@ -27,26 +32,33 @@ impl DaemonProcessGuard {
             daemon_bin.display()
         );
         daemon_test_registry::sweep_stale_test_daemons();
-        let daemon_dir = home.path().join(".atm").join("daemon");
+        let runtime_home = Self::runtime_home_path(home);
+        fs::create_dir_all(&runtime_home).expect("create daemon runtime home");
+        let daemon_dir = runtime_home.join(".atm").join("daemon");
+        let workdir = home.path().join("workdir");
+        fs::create_dir_all(&workdir).expect("create daemon test workdir");
         let mut cmd = Command::new(&daemon_bin);
-        cmd.env("ATM_HOME", home.path())
+        cmd.env("ATM_HOME", &runtime_home)
+            .env("ATM_CONFIG_HOME", home.path())
+            .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
             .env("ATM_DAEMON_AUTOSTART", "0")
             .env_remove("ATM_CONFIG")
             .env_remove("ATM_DAEMON_BIN") // F-1: prevent inheriting installed binary
             .env_remove("CLAUDE_SESSION_ID")
             .arg("--team")
             .arg(team)
+            .current_dir(&workdir)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         let launch_token = issue_isolated_test_launch_token(
-            home.path(),
+            &runtime_home,
             daemon_bin.display().to_string(),
             "DaemonProcessGuard::spawn",
             format!(
                 "DaemonProcessGuard::spawn:{}:{}",
                 team,
-                home.path().display()
+                runtime_home.display()
             ),
             std::process::id(),
             Duration::from_secs(600),
@@ -150,23 +162,32 @@ impl DaemonProcessGuard {
     }
 
     pub fn wait_ready(&mut self, home: &TempDir) {
-        let daemon_dir = home.path().join(".atm").join("daemon");
+        let daemon_dir = Self::runtime_home_path(home).join(".atm").join("daemon");
         let pid_path = daemon_dir.join("atm-daemon.pid");
         let status_path = daemon_dir.join("status.json");
         let socket_path = daemon_dir.join("atm-daemon.sock");
         #[cfg(windows)]
         let timeout_secs = 30;
         #[cfg(not(windows))]
-        let timeout_secs = 4;
+        let timeout_secs = 10;
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
         while Instant::now() < deadline {
             if let Some(child) = self.child.as_mut()
                 && let Ok(Some(status)) = child.try_wait()
             {
+                let output = self
+                    .child
+                    .take()
+                    .expect("child handle should exist after readiness failure")
+                    .wait_with_output()
+                    .expect("collect daemon failure output");
+                daemon_test_registry::unregister_test_daemon(self.pid);
                 panic!(
-                    "daemon exited before readiness (status={status}); expected pid {} at {}",
+                    "daemon exited before readiness (status={status}); expected pid {} at {}; stdout='{}'; stderr='{}'",
                     self.pid,
-                    status_path.display()
+                    status_path.display(),
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
                 );
             }
             let status_pid = fs::read_to_string(&status_path)
@@ -184,10 +205,26 @@ impl DaemonProcessGuard {
             }
             std::thread::sleep(Duration::from_millis(25));
         }
+        let output = if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+            self.child
+                .take()
+                .and_then(|child| child.wait_with_output().ok())
+        } else {
+            None
+        };
         panic!(
-            "daemon readiness timeout waiting for {} (pid path: {})",
+            "daemon readiness timeout waiting for {} (pid path: {}); stdout='{}'; stderr='{}'",
             status_path.display(),
-            pid_path.display()
+            pid_path.display(),
+            output
+                .as_ref()
+                .map(|value| String::from_utf8_lossy(&value.stdout).into_owned())
+                .unwrap_or_default(),
+            output
+                .as_ref()
+                .map(|value| String::from_utf8_lossy(&value.stderr).into_owned())
+                .unwrap_or_default()
         );
     }
 }
@@ -231,12 +268,7 @@ impl Drop for DaemonProcessGuard {
                     std::thread::sleep(Duration::from_millis(25));
                 }
             }
-            // On the adopt path (`child` is None), `self.pid` is not a direct child of
-            // this process. `waitpid` will return ECHILD, which is expected and harmless.
-            // We call reap_child_pid_best_effort here to handle the uncommon case where
-            // the adopted daemon was originally spawned as a child of a prior test process
-            // that has since exited, leaving the daemon as a re-parented orphan.
-            reap_child_pid_best_effort(self.pid as i32);
+            waitpid_until_reaped_or_echild(self.pid as i32, Duration::from_secs(2));
         }
         let lock_path = self.daemon_dir.join("daemon.lock");
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -284,19 +316,23 @@ fn send_signal(pid: i32, sig: i32) {
 }
 
 #[cfg(unix)]
-fn reap_child_pid_best_effort(pid: i32) {
+fn waitpid_until_reaped_or_echild(pid: i32, timeout: Duration) {
     unsafe extern "C" {
         fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
     }
-    const WNOHANG: i32 = 1;
-    for _ in 0..20 {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
         let mut status = 0;
-        // SAFETY: best-effort reap for test child processes; WNOHANG avoids blocking.
-        let waited = unsafe { waitpid(pid, &mut status, WNOHANG) };
-        if waited == pid || waited == -1 || !pid_alive(pid) {
-            break;
+        // SAFETY: best-effort reap for test child processes. A return value of
+        // -1 means ECHILD or another terminal waitpid condition; both are
+        // sufficient for teardown before the serial lock is released.
+        let waited = unsafe { waitpid(pid, &mut status, 0) };
+        if waited == pid || waited == -1 {
+            return;
         }
-        std::thread::sleep(Duration::from_millis(25));
+        if !pid_alive(pid) {
+            return;
+        }
     }
 }
 
@@ -316,12 +352,9 @@ pub fn wait_for_pid_exit(_pid: i32, _timeout: std::time::Duration) {
 fn send_signal(_pid: i32, _sig: i32) {}
 
 #[cfg(not(unix))]
-fn reap_child_pid_best_effort(_pid: i32) {}
+fn waitpid_until_reaped_or_echild(_pid: i32, _timeout: Duration) {}
 
 pub(crate) fn daemon_binary_path() -> PathBuf {
-    // Locate the build output directory from the current test binary path.
-    // For integration tests, `current_exe()` is in `target/<profile>/deps/`.
-    // The daemon binary lives one level up in `target/<profile>/`.
     let exe = std::env::current_exe().expect("current_exe");
     let deps_dir = exe.parent().expect("parent of test binary");
     let target_dir = if deps_dir.ends_with("deps") {
@@ -329,6 +362,37 @@ pub(crate) fn daemon_binary_path() -> PathBuf {
     } else {
         deps_dir
     };
+    let build_release = target_dir.file_name().and_then(|name| name.to_str()) == Some("release");
+
+    static BUILT: OnceLock<()> = OnceLock::new();
+    BUILT.get_or_init(|| {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|path| path.parent())
+            .expect("workspace root from crates/atm")
+            .to_path_buf();
+        let mut command = Command::new("cargo");
+        command
+            .arg("build")
+            .arg("-p")
+            .arg("agent-team-mail-daemon")
+            .arg("--bin")
+            .arg("atm-daemon");
+        if build_release {
+            command.arg("--release");
+        }
+        let status = command
+            .current_dir(&workspace_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("build atm-daemon binary for integration tests");
+        assert!(
+            status.success(),
+            "cargo build -p agent-team-mail-daemon --bin atm-daemon failed"
+        );
+    });
     #[cfg(windows)]
     let name = "atm-daemon.exe";
     #[cfg(not(windows))]

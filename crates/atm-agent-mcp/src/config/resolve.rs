@@ -11,7 +11,7 @@
 
 use super::types::AgentMcpConfig;
 use agent_team_mail_core::config::{ConfigOverrides, CoreConfig, resolve_config as core_resolve};
-use agent_team_mail_core::home::get_home_dir;
+use agent_team_mail_core::home::get_os_home_dir;
 use std::path::Path;
 
 /// Fully resolved configuration combining ATM core settings with plugin config.
@@ -40,7 +40,7 @@ pub struct ResolvedConfig {
 /// Returns an error if the home directory cannot be determined or if an
 /// explicit `config_path` cannot be read.
 pub fn resolve_config(config_path: Option<&Path>) -> anyhow::Result<ResolvedConfig> {
-    let home_dir = get_home_dir()?;
+    let home_dir = get_os_home_dir()?;
     let current_dir = std::env::current_dir()?;
 
     let mut overrides = ConfigOverrides::default();

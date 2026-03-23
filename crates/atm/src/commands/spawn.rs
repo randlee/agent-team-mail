@@ -580,7 +580,10 @@ fn list_tmux_panes() -> Result<Vec<TmuxPane>> {
 }
 
 fn query_member_running(team: &str, member: &str) -> bool {
-    let Ok(Some(states)) = query_team_member_states(team) else {
+    let Ok(states) = query_team_member_states(team) else {
+        return false;
+    };
+    let Some(states) = states.into_option() else {
         return false;
     };
     states

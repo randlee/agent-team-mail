@@ -1,6 +1,7 @@
 //! Request command implementation (send + wait for response)
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
+use agent_team_mail_core::home::{config_team_dir_for, get_os_home_dir};
 use agent_team_mail_core::io::inbox::{inbox_append, inbox_update};
 use agent_team_mail_core::schema::{InboxMessage, TeamConfig};
 use agent_team_mail_core::text::{
@@ -15,7 +16,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::util::addressing::parse_address;
-use crate::util::settings::{get_home_dir, teams_root_dir_for};
+use crate::util::settings::get_home_dir;
 
 /// Send a message and wait for a response (polling)
 #[derive(Args, Debug)]
@@ -48,11 +49,12 @@ pub struct RequestArgs {
 
 /// Execute the request command
 pub fn execute(args: RequestArgs) -> Result<()> {
-    let home_dir = get_home_dir()?;
+    let _runtime_home = get_home_dir()?;
+    let config_home = get_os_home_dir()?;
     let current_dir = std::env::current_dir()?;
 
     let overrides = ConfigOverrides::default();
-    let config = resolve_config(&overrides, &current_dir, &home_dir)?;
+    let config = resolve_config(&overrides, &current_dir, &config_home)?;
 
     // Enforce explicit team for both sender and destination
     if !args.from.contains('@') && args.from_team.is_none() {
@@ -67,11 +69,11 @@ pub fn execute(args: RequestArgs) -> Result<()> {
     let (to_agent, to_team) = parse_address(&args.to, &args.to_team, &config.core.default_team)?;
 
     // Resolve team dirs and verify both members exist
-    let from_team_dir = teams_root_dir_for(&home_dir).join(&from_team);
+    let from_team_dir = config_team_dir_for(&config_home, &from_team);
     if !from_team_dir.exists() {
         anyhow::bail!("Team '{from_team}' not found (directory {from_team_dir:?} doesn't exist)");
     }
-    let to_team_dir = teams_root_dir_for(&home_dir).join(&to_team);
+    let to_team_dir = config_team_dir_for(&config_home, &to_team);
     if !to_team_dir.exists() {
         anyhow::bail!("Team '{to_team}' not found (directory {to_team_dir:?} doesn't exist)");
     }
