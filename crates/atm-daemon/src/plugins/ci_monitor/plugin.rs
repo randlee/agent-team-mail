@@ -77,6 +77,18 @@ pub struct CiMonitorPlugin {
 }
 
 impl CiMonitorPlugin {
+    fn config_home_from_ctx(ctx: &PluginContext) -> PathBuf {
+        ctx.system
+            .claude_root
+            .parent()
+            .unwrap_or(&ctx.system.claude_root)
+            .to_path_buf()
+    }
+
+    fn runtime_plugin_root(ctx: &PluginContext) -> PathBuf {
+        ctx.system.runtime_home.join(".config/atm")
+    }
+
     /// Create a new CI Monitor plugin instance
     pub fn new() -> Self {
         Self {
@@ -344,11 +356,7 @@ impl CiMonitorPlugin {
             }
         };
 
-        let config_home =
-            agent_team_mail_core::home::get_os_home_dir().map_err(|e| PluginError::Init {
-                message: format!("Could not determine config home: {e}"),
-                source: None,
-            })?;
+        let config_home = Self::config_home_from_ctx(ctx);
         let current_dir = std::env::current_dir().map_err(|e| PluginError::Init {
             message: format!("Could not determine current directory: {e}"),
             source: None,
@@ -1031,17 +1039,7 @@ impl Plugin for CiMonitorPlugin {
             // Provider registry remains runtime-root relative on purpose: it
             // stores executable/provider wiring under the active ATM runtime,
             // not under the canonical team config tree.
-            let atm_home = match agent_team_mail_core::home::get_home_dir() {
-                Ok(home_dir) => home_dir.join(".config/atm"),
-                Err(e) => {
-                    let err = PluginError::Init {
-                        message: format!("Could not determine home directory: {e}"),
-                        source: None,
-                    };
-                    self.project_disabled_config_error(ctx, config_table, &err.to_string());
-                    return Err(err);
-                }
-            };
+            let atm_home = Self::runtime_plugin_root(ctx);
 
             if self.registry.is_none() {
                 self.registry = Some(self.build_registry(&atm_home));
