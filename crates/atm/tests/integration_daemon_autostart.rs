@@ -826,6 +826,10 @@ fn test_state_surfaces_show_master_record_then_explicit_unavailable_after_shutdo
     );
     let doctor_json: serde_json::Value = serde_json::from_slice(&doctor_output.stdout).unwrap();
     assert_eq!(
+        doctor_json["daemon_state"]["availability"].as_str(),
+        Some("available")
+    );
+    assert_eq!(
         doctor_json["members"][0]["session_id"].as_str(),
         Some("fake-session")
     );
@@ -895,6 +899,10 @@ fn test_state_surfaces_show_master_record_then_explicit_unavailable_after_shutdo
         .unwrap();
     assert_eq!(doctor_down.status.code(), Some(2));
     let doctor_down_json: serde_json::Value = serde_json::from_slice(&doctor_down.stdout).unwrap();
+    assert_eq!(
+        doctor_down_json["daemon_state"]["availability"].as_str(),
+        Some("unavailable")
+    );
     let finding_codes = doctor_down_json["findings"]
         .as_array()
         .unwrap()
