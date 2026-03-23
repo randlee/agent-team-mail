@@ -12,8 +12,12 @@ This document defines the minimal post-BB daemon launch contract:
 - one product-owned launch-token surface
 - one manual smoke gate for dogfood validation
 
-Legacy isolated-test lease behavior and dev-shared launch classes are obsolete
-and are no longer part of the product contract.
+dev-shared launch class is obsolete and no longer part of the product contract.
+
+IsolatedTest is retained as a test-infrastructure-only launch class. It is not a
+product-facing surface and MUST NOT be used outside of test harness contexts. Test
+daemons started with IsolatedTest tokens are owned and reaped by their fixture; they
+do not participate in the single-shared-daemon invariant.
 
 ## Ownership Boundary
 
@@ -42,7 +46,8 @@ and are no longer part of the product contract.
 
 Required fields:
 - `launch_class`
-  - enum: `shared`
+  - product-facing enum: `shared`
+  - test-infrastructure enum: `isolated-test` (test harness only; not a product surface)
 - `atm_home`
 - `binary_identity`
 - `issuer`

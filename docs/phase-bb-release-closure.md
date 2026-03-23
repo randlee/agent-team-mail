@@ -23,3 +23,7 @@ Deferred beyond Phase BB:
 - daemon redesign / replacement
 - plugin extraction into separate repos or services
 - broader daemon scope reduction beyond release-risk fixes
+- `mail_inject.rs` `get_home_dir` call (ATM-BB4-QA-002): runtime-home resolution in mail
+  injection path; low-risk for BB posture, deferred to daemon replacement phase
+- `ATM_FAKE_LIST_AGENTS` test escape hatch: remaining test surface that bypasses live daemon
+  availability; deferred pending daemon replacement architecture
