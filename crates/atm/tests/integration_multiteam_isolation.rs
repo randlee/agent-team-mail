@@ -27,7 +27,6 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
         daemon_process_guard::DaemonProcessGuard::runtime_home_path(temp_dir),
     )
     .env("ATM_CONFIG_HOME", temp_dir.path())
-    .envs([("HOME", temp_dir.path())])
     .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
     .env("ATM_DAEMON_AUTOSTART", "0")
     .env_remove("ATM_TEAM")

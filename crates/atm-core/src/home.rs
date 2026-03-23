@@ -509,7 +509,8 @@ mod tests {
     #[serial]
     fn test_config_root_helpers_ignore_atm_home() {
         let original = env::var("ATM_HOME").ok();
-        unsafe { env::set_var("ATM_HOME", "/tmp/runtime-home") };
+        let runtime_home = env::temp_dir().join("runtime-home");
+        unsafe { env::set_var("ATM_HOME", &runtime_home) };
 
         let os_home = dirs::home_dir().unwrap();
         assert_eq!(claude_root_dir().unwrap(), os_home.join(".claude"));
@@ -534,13 +535,11 @@ mod tests {
     fn test_get_os_home_dir_honors_home_env() {
         let original_config_home = env::var("ATM_CONFIG_HOME").ok();
         let original_home = env::var("HOME").ok();
+        let config_home = env::temp_dir().join("config-home");
         unsafe { env::remove_var("ATM_CONFIG_HOME") };
-        unsafe { env::set_var("HOME", "/tmp/config-home") };
+        unsafe { env::set_var("HOME", &config_home) };
 
-        assert_eq!(
-            get_os_home_dir().unwrap(),
-            PathBuf::from("/tmp/config-home")
-        );
+        assert_eq!(get_os_home_dir().unwrap(), config_home);
 
         unsafe {
             match original_config_home {
@@ -559,16 +558,16 @@ mod tests {
     fn test_get_os_home_dir_honors_atm_config_home() {
         let original_config_home = env::var("ATM_CONFIG_HOME").ok();
         let original_home = env::var("HOME").ok();
-        unsafe { env::set_var("ATM_CONFIG_HOME", "/tmp/atm-config-home") };
+        let atm_config_home = env::temp_dir().join("atm-config-home");
+        unsafe { env::set_var("ATM_CONFIG_HOME", &atm_config_home) };
+        #[cfg(not(windows))]
+        let ignored_home = env::temp_dir().join("ignored-home");
         #[cfg(not(windows))]
         unsafe {
-            env::set_var("HOME", "/tmp/ignored-home");
+            env::set_var("HOME", &ignored_home);
         }
 
-        assert_eq!(
-            get_os_home_dir().unwrap(),
-            PathBuf::from("/tmp/atm-config-home")
-        );
+        assert_eq!(get_os_home_dir().unwrap(), atm_config_home);
 
         unsafe {
             match original_config_home {
