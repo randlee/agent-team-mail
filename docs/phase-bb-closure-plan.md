@@ -38,11 +38,25 @@ The following are out of scope for BB closure:
 
 Confirmed blocking findings from the BB end-of-phase review and QA consolidation:
 
-1. `ATM-BB4-QA-003`: daemon plugin path migration incomplete
-2. `ATM-BB4-QA-004`: `atm-tui` path-root migration incomplete
+1. `ATM-BB4-QA-003`: daemon plugin path migration incomplete at:
+   - `crates/atm-daemon/src/plugins/ci_monitor/plugin.rs:348`
+   - `crates/atm-daemon/src/plugins/issues/plugin.rs:317`
+   - `crates/atm-daemon/src/plugins/worker_adapter/plugin.rs:241`
+2. `ATM-BB4-QA-004`: `atm-tui` path-root migration incomplete at:
+   - `crates/atm-tui/src/config.rs:135`
+   - `crates/atm-tui/src/dashboard.rs:201`
+   - `crates/atm-tui/src/main.rs:108`
+   - `crates/atm-tui/src/main.rs:135`
+   - `crates/atm-tui/src/main.rs:197`
+   - `crates/atm-tui/src/main.rs:544`
+   - `crates/atm-tui/src/main.rs:695`
 3. `RUST-001`: `test_concurrent_sends_no_data_loss` tokio panic
 4. `RUST-002`: `test_identity_mismatch_socket_is_detected_and_restarted` tokio panic
-5. `DSQ-001`: test daemons launched with `LaunchClass::Shared` instead of `LaunchClass::IsolatedTest`
+5. `DSQ-001`: `DaemonProcessGuard::spawn` launches test daemons with
+   `LaunchClass::Shared` instead of `LaunchClass::IsolatedTest`
+6. `QA-004`: multiteam isolation regressions:
+   - `crates/atm/tests/integration_multiteam_isolation.rs::test_cli_team_scoped_commands_do_not_bleed_members_across_teams`
+   - `crates/atm/tests/integration_multiteam_isolation.rs::test_status_and_members_preserve_registered_member_state_after_daemon_restart`
 
 Important but not blocking:
 
@@ -60,6 +74,16 @@ The closure strategy is:
 3. close the remaining blocking path/test regressions,
 4. avoid any work that deepens daemon scope.
 
+Implementation order is serial:
+
+1. `CLEAN-1`
+2. `CLEAN-2`
+3. `CLEAN-3`
+
+`CLEAN-1` and `CLEAN-2` both touch daemon readiness / `status.json` behavior.
+`CLEAN-2` must not start until `CLEAN-1` stabilizes async-drop safety and
+daemon availability semantics.
+
 ## Sprint Plan
 
 ### CLEAN-1 Hard Singleton and Test Harness Safety
@@ -69,20 +93,36 @@ test harness around that model.
 
 Scope:
 
-- remove or disable remaining alternate daemon launch/runtime paths that permit
-  multiple daemon instances in product behavior
+- retain valid shared launch classes for product runtimes and retain
+  `LaunchClass::IsolatedTest` for test runtimes; do not delete test isolation
+  support in this closure phase
+- correct `crates/atm/tests/support/daemon_process_guard.rs` so
+  `DaemonProcessGuard::spawn` passes `LaunchClass::IsolatedTest` instead of
+  `LaunchClass::Shared`
 - make second daemon startup fail immediately and predictably
 - fix `DSQ-001` so test daemons do not use shared runtime ownership
-- fix the readiness/runtime panic path behind:
+- fix the root cause behind:
   - `RUST-001`
   - `RUST-002`
+  Root cause: tokio async-drop panic in `SocketServerHandle` drop during daemon
+  teardown/readiness timing, which leaves tests waiting on incomplete readiness
+  publication
+- fix or explicitly triage the multiteam isolation regressions:
+  - `test_cli_team_scoped_commands_do_not_bleed_members_across_teams`
+  - `test_status_and_members_preserve_registered_member_state_after_daemon_restart`
 
 Acceptance:
 
-- product startup has one canonical daemon runtime path
+- product startup has one canonical daemon runtime path for shared daemon
+  classes while explicitly retaining `ProdShared`, `DevShared`, and
+  `LaunchClass::IsolatedTest` as valid launch classes
 - second daemon start fails with a clear single-instance error
-- test daemon helpers do not compete for shared runtime ownership
-- `RUST-001` and `RUST-002` pass
+- `DaemonProcessGuard::spawn` uses `LaunchClass::IsolatedTest`
+- daemon-spawn-qa gate passes for the `DaemonProcessGuard::spawn` launch-class
+  fix
+- `RUST-001` and `RUST-002` pass with async-drop safety addressed, not masked
+- the two `integration_multiteam_isolation` failures either pass or are
+  explicitly deferred with release sign-off and rationale
 
 ### CLEAN-2 Truthful State Surfaces
 
@@ -90,6 +130,13 @@ Goal: make daemon-backed state surfaces reliable enough to trust.
 
 Scope:
 
+- route `atm status`, `atm members`, and `atm doctor` through the shared
+  team-scoped query surface
+  `agent_team_mail_core::daemon_client::query_team_member_states()`
+- introduce one shared daemon-availability contract in
+  `atm-core/daemon_client` so command handlers stop inventing per-command socket
+  checks; use a shared `DaemonAvailability` result instead of ad hoc
+  “query failed so render empty state” logic
 - stop `atm status`, `atm members`, and `atm doctor` from silently flattening
   daemon query failure into misleading empty/unknown output
 - ensure hook/session-derived master state is what these surfaces render
@@ -105,6 +152,14 @@ Acceptance:
   rendered state surfaces
 - when daemon-backed authority is unavailable, the user sees an explicit error
   or degraded-state marker with provenance
+- concrete runnable scenario:
+  1. start daemon
+  2. emit a registered-member hook/session event so the master record contains
+     `session_id` and liveness for that member
+  3. verify `atm status`, `atm members`, and `atm doctor` surface that state
+     through `query_team_member_states()`
+  4. stop the daemon and verify the same commands report explicit
+     daemon-unavailable state rather than normal-looking `unknown`
 
 ### CLEAN-3 Release Closure and Path Migration
 
@@ -112,8 +167,24 @@ Goal: close the remaining BB blockers that still affect release reliability.
 
 Scope:
 
-- fix `ATM-BB4-QA-003` daemon plugin path-root migration sites
-- fix `ATM-BB4-QA-004` `atm-tui` path-root migration sites
+- fix daemon plugin path-root migration at the explicit BB.1 inventory sites:
+  - `crates/atm-daemon/src/plugins/ci_monitor/plugin.rs:348`
+  - `crates/atm-daemon/src/plugins/issues/plugin.rs:317`
+  - `crates/atm-daemon/src/plugins/worker_adapter/plugin.rs:241`
+  The fix shape is not `get_home_dir() -> get_os_home_dir()`. These paths must
+  thread the runtime home from `PluginContext` instead of using the global
+  `get_home_dir()` resolver.
+- fix `atm-tui` path-root handling at:
+  - `crates/atm-tui/src/config.rs:135`
+  - `crates/atm-tui/src/dashboard.rs:201`
+  - `crates/atm-tui/src/main.rs:108`
+  - `crates/atm-tui/src/main.rs:135`
+  - `crates/atm-tui/src/main.rs:197`
+  - `crates/atm-tui/src/main.rs:544`
+  - `crates/atm-tui/src/main.rs:695`
+  Use explicit root ownership rather than a blanket resolver swap:
+  config-facing paths use the config-root contract, runtime/watch/spool paths
+  use explicit runtime-home ownership
 - preserve the CLI usability fixes already landed in BB
 - update docs/release notes to describe actual shipped behavior:
   - single shared daemon only
@@ -121,8 +192,12 @@ Scope:
 
 Acceptance:
 
-- QA blocking path-root findings are closed
-- `atm-tui` uses the intended root split for config/team-state paths
+- QA blocking plugin path findings are closed at the 3 named plugin sites
+- QA blocking `atm-tui` path findings are closed at the 7 named call sites
+- plugin inbox/runtime paths use explicit runtime-home threading from
+  `PluginContext` rather than ambient global resolver behavior
+- `atm-tui` uses the intended split between config-root-owned paths and
+  runtime-home-owned paths
 - release docs match shipped daemon behavior
 
 ## Worktree Split
@@ -143,7 +218,10 @@ BB closure is release-ready only if all of the following are true:
 4. `status`, `members`, and `doctor` do not silently hide daemon failure behind
    normal-looking `unknown` output,
 5. `RUST-001`, `RUST-002`, and targeted daemon-start tests pass,
-6. BB path-root blockers are resolved or explicitly signed off for deferral.
+6. `DaemonProcessGuard::spawn` launch-class behavior passes daemon-spawn-qa,
+7. the two `integration_multiteam_isolation` tests pass or are explicitly
+   signed off for deferral,
+8. BB path-root blockers are resolved or explicitly signed off for deferral.
 
 ## Deferred to Next Phase
 
