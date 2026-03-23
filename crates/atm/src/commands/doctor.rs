@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    AgentSummary, CanonicalMemberState, SessionQueryResult, daemon_is_running, daemon_lock_path,
-    daemon_socket_path, daemon_status_path_for, gh_rate_limit_audit, query_list_agents,
+    AgentSummary, CanonicalMemberState, DaemonAvailability, SessionQueryResult, daemon_is_running,
+    daemon_lock_path, daemon_socket_path, daemon_status_path_for, gh_rate_limit_audit,
     query_list_agents_for_team, query_session_for_team, query_team_member_states,
     read_daemon_lock_metadata,
 };
@@ -137,10 +137,18 @@ struct DoctorReport {
     logging_health: LoggingHealthContract,
     #[serde(default)]
     otel_health: OtelHealthContract,
+    daemon_state: DaemonStateSurface,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     members: Vec<MemberSnapshot>,
     #[serde(skip_serializing, skip_deserializing, default)]
     member_snapshot: Vec<MemberSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DaemonStateSurface {
+    availability: String,
+    provenance: Option<String>,
+    detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -181,13 +189,6 @@ struct PluginStatusSnapshot {
 }
 
 pub fn execute(args: DoctorArgs) -> Result<()> {
-    // Prime daemon connectivity early so doctor reflects post-autostart health.
-    // Must be best-effort: doctor should still produce a report when daemon is
-    // unavailable or autostart fails.
-    // Intentionally uses the unscoped query for connectivity priming only;
-    // doctor findings themselves use team-scoped checks below.
-    let _ = query_list_agents();
-
     let current_dir = std::env::current_dir()?;
     let home_dir = get_home_dir()?;
     let config_home = get_os_home_dir()?;
@@ -267,6 +268,14 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
 
     let mut findings: Vec<Finding> = Vec::new();
     let mut daemon_states_by_agent: HashMap<String, CanonicalMemberState> = HashMap::new();
+    let daemon_availability = match query_team_member_states(team) {
+        Ok(availability) => availability,
+        Err(err) => DaemonAvailability::unavailable(
+            "doctor",
+            format!("Daemon team-scoped state query failed for team '{team}': {err}"),
+        ),
+    };
+    let daemon_state = daemon_state_surface(&daemon_availability);
 
     if !team_dir.exists() {
         findings.push(finding(
@@ -299,7 +308,7 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
     // Check 2 + 3 + 4: session/roster/mailbox integrity
     if let Some(cfg) = &team_config {
         let (pid_findings, daemon_states) =
-            check_pid_session_reconciliation_with_query(team, cfg, query_team_member_states);
+            check_pid_session_reconciliation(team, cfg, &daemon_availability);
         daemon_states_by_agent = daemon_states;
         findings.extend(pid_findings);
         findings.extend(check_roster_session_integrity(team, cfg));
@@ -368,9 +377,27 @@ fn build_report(home_dir: &Path, team: &str, args: &DoctorArgs) -> Result<Doctor
         gh_rate_limit_audit: None,
         logging_health,
         otel_health,
+        daemon_state,
         members: member_snapshot.clone(),
         member_snapshot,
     })
+}
+
+fn daemon_state_surface(
+    availability: &DaemonAvailability<Vec<CanonicalMemberState>>,
+) -> DaemonStateSurface {
+    match availability {
+        DaemonAvailability::Available(_) => DaemonStateSurface {
+            availability: "available".to_string(),
+            provenance: None,
+            detail: None,
+        },
+        DaemonAvailability::Unavailable(details) => DaemonStateSurface {
+            availability: "unavailable".to_string(),
+            provenance: Some(details.provenance.clone()),
+            detail: Some(details.detail.clone()),
+        },
+    }
 }
 
 fn build_gh_rate_limit_audit(home_dir: &Path, team: &str) -> Result<Option<GhRateLimitAudit>> {
@@ -1107,37 +1134,27 @@ fn read_active_install_milestone() -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn check_pid_session_reconciliation_with_query<F>(
-    team: &str,
+fn check_pid_session_reconciliation(
+    _team: &str,
     cfg: &TeamConfig,
-    query_states: F,
-) -> (Vec<Finding>, HashMap<String, CanonicalMemberState>)
-where
-    F: Fn(&str) -> anyhow::Result<Option<Vec<CanonicalMemberState>>>,
-{
+    daemon_availability: &DaemonAvailability<Vec<CanonicalMemberState>>,
+) -> (Vec<Finding>, HashMap<String, CanonicalMemberState>) {
     let mut findings = Vec::new();
     let (daemon_states, unreachable_reason): (
         HashMap<String, CanonicalMemberState>,
         Option<String>,
-    ) = match query_states(team) {
-        Ok(Some(states)) => (
+    ) = match daemon_availability {
+        DaemonAvailability::Available(states) => (
             states
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|s| (s.agent.clone(), s))
                 .collect::<HashMap<_, _>>(),
             None,
         ),
-        Ok(None) => (
+        DaemonAvailability::Unavailable(details) => (
             HashMap::new(),
-            Some(format!(
-                "Daemon team-scoped state query unavailable for team '{team}'"
-            )),
-        ),
-        Err(err) => (
-            HashMap::new(),
-            Some(format!(
-                "Daemon team-scoped state query failed for team '{team}': {err}"
-            )),
+            Some(format!("{}: {}", details.provenance, details.detail)),
         ),
     };
 
@@ -1215,6 +1232,25 @@ where
     }
 
     (findings, daemon_states)
+}
+
+#[cfg(test)]
+fn check_pid_session_reconciliation_with_query<F>(
+    team: &str,
+    cfg: &TeamConfig,
+    query_states: F,
+) -> (Vec<Finding>, HashMap<String, CanonicalMemberState>)
+where
+    F: Fn(&str) -> anyhow::Result<DaemonAvailability<Vec<CanonicalMemberState>>>,
+{
+    let daemon_availability = match query_states(team) {
+        Ok(availability) => availability,
+        Err(err) => DaemonAvailability::unavailable(
+            "doctor",
+            format!("Daemon team-scoped state query failed for team '{team}': {err}"),
+        ),
+    };
+    check_pid_session_reconciliation(team, cfg, &daemon_availability)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1828,6 +1864,17 @@ fn render_human(report: &DoctorReport) -> String {
             "  delta_consumed_vs_cached: {}\n\n",
             audit.delta_consumed_vs_cached
         ));
+    }
+
+    if report.daemon_state.availability == "unavailable" {
+        out.push_str("Daemon state: unavailable\n");
+        if let Some(provenance) = &report.daemon_state.provenance {
+            out.push_str(&format!("  provenance: {provenance}\n"));
+        }
+        if let Some(detail) = &report.daemon_state.detail {
+            out.push_str(&format!("  detail: {detail}\n"));
+        }
+        out.push('\n');
     }
 
     if !report.member_snapshot.is_empty() {
@@ -2544,8 +2591,12 @@ mod tests {
             unknown_fields: HashMap::new(),
         };
 
-        let (findings, _) =
-            check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| Ok(None));
+        let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
+            Ok(DaemonAvailability::unavailable(
+                "test",
+                "daemon team-scoped state query unavailable",
+            ))
+        });
         assert!(
             findings
                 .iter()
@@ -2567,7 +2618,7 @@ mod tests {
         };
 
         let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
-            Ok(Some(vec![CanonicalMemberState {
+            Ok(DaemonAvailability::available(vec![CanonicalMemberState {
                 agent: "foreign-agent".to_string(),
                 state: "offline".to_string(),
                 activity: "unknown".to_string(),
@@ -2599,7 +2650,7 @@ mod tests {
 
         let (findings_none, _) =
             check_pid_session_reconciliation_with_query("atm-dev", &cfg_none, |_| {
-                Ok(Some(vec![CanonicalMemberState {
+                Ok(DaemonAvailability::available(vec![CanonicalMemberState {
                     agent: "worker-a".to_string(),
                     state: "active".to_string(),
                     activity: "busy".to_string(),
@@ -2628,7 +2679,7 @@ mod tests {
 
         let (findings_false, _) =
             check_pid_session_reconciliation_with_query("atm-dev", &cfg_false, |_| {
-                Ok(Some(vec![CanonicalMemberState {
+                Ok(DaemonAvailability::available(vec![CanonicalMemberState {
                     agent: "worker-a".to_string(),
                     state: "active".to_string(),
                     activity: "busy".to_string(),
@@ -2657,7 +2708,7 @@ mod tests {
 
         let (findings_true, _) =
             check_pid_session_reconciliation_with_query("atm-dev", &cfg_true, |_| {
-                Ok(Some(vec![CanonicalMemberState {
+                Ok(DaemonAvailability::available(vec![CanonicalMemberState {
                     agent: "worker-a".to_string(),
                     state: "active".to_string(),
                     activity: "busy".to_string(),
@@ -2676,7 +2727,7 @@ mod tests {
 
         let (findings_idle_none, _) =
             check_pid_session_reconciliation_with_query("atm-dev", &cfg_none, |_| {
-                Ok(Some(vec![CanonicalMemberState {
+                Ok(DaemonAvailability::available(vec![CanonicalMemberState {
                     agent: "worker-a".to_string(),
                     state: "idle".to_string(),
                     activity: "idle".to_string(),
@@ -2695,7 +2746,7 @@ mod tests {
 
         let (findings_idle_false, _) =
             check_pid_session_reconciliation_with_query("atm-dev", &cfg_false, |_| {
-                Ok(Some(vec![CanonicalMemberState {
+                Ok(DaemonAvailability::available(vec![CanonicalMemberState {
                     agent: "worker-a".to_string(),
                     state: "idle".to_string(),
                     activity: "idle".to_string(),
@@ -2738,7 +2789,7 @@ mod tests {
         };
 
         let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
-            Ok(Some(vec![CanonicalMemberState {
+            Ok(DaemonAvailability::available(vec![CanonicalMemberState {
                 agent: "arch-ctm".to_string(),
                 state: "offline".to_string(),
                 activity: "unknown".to_string(),
@@ -3186,6 +3237,11 @@ mod tests {
             gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
             otel_health: OtelHealthContract::default(),
+            daemon_state: DaemonStateSurface {
+                availability: "available".to_string(),
+                provenance: None,
+                detail: None,
+            },
             members: vec![MemberSnapshot {
                 name: "team-lead".to_string(),
                 agent_type: "team-lead".to_string(),
@@ -3293,6 +3349,11 @@ mod tests {
             gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
             otel_health: OtelHealthContract::default(),
+            daemon_state: DaemonStateSurface {
+                availability: "available".to_string(),
+                provenance: None,
+                detail: None,
+            },
             members: vec![MemberSnapshot {
                 name: "arch-ctm".to_string(),
                 agent_type: "codex".to_string(),
@@ -3345,6 +3406,10 @@ mod tests {
         assert_eq!(
             value["logging_health"]["state"],
             serde_json::Value::String("unavailable".to_string())
+        );
+        assert_eq!(
+            value["daemon_state"]["availability"],
+            serde_json::Value::String("available".to_string())
         );
         assert!(value["logging_health"]["log_root"].is_string());
         assert!(value["logging_health"]["canonical_log_path"].is_string());
@@ -3428,6 +3493,11 @@ mod tests {
             gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
             otel_health: OtelHealthContract::default(),
+            daemon_state: DaemonStateSurface {
+                availability: "available".to_string(),
+                provenance: None,
+                detail: None,
+            },
             members: vec![],
             member_snapshot: vec![],
         };
@@ -3468,6 +3538,11 @@ mod tests {
             gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
             otel_health: OtelHealthContract::default(),
+            daemon_state: DaemonStateSurface {
+                availability: "available".to_string(),
+                provenance: None,
+                detail: None,
+            },
             members: vec![MemberSnapshot {
                 name: "arch-ctm".to_string(),
                 agent_type: "codex".to_string(),
@@ -3530,6 +3605,11 @@ mod tests {
             gh_rate_limit_audit: None,
             logging_health: LoggingHealthContract::default(),
             otel_health: OtelHealthContract::default(),
+            daemon_state: DaemonStateSurface {
+                availability: "available".to_string(),
+                provenance: None,
+                detail: None,
+            },
             members: vec![
                 MemberSnapshot {
                     name: "arch-ctm".to_string(),

@@ -2,8 +2,8 @@
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    canonical_activity_label, canonical_liveness_bool, canonical_status_label, query_list_agents,
-    query_team_member_states,
+    CanonicalMemberState, DaemonAvailability, DaemonUnavailableDetails, canonical_activity_label,
+    canonical_liveness_bool, canonical_status_label, query_team_member_states,
 };
 use agent_team_mail_core::schema::TeamConfig;
 use anyhow::Result;
@@ -40,6 +40,13 @@ struct MemberRow {
     in_config: bool,
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+struct DaemonStateSurface {
+    availability: &'static str,
+    provenance: Option<String>,
+    detail: Option<String>,
+}
+
 fn format_session_short(session_id: Option<&str>) -> String {
     let Some(session) = session_id.map(str::trim).filter(|s| !s.is_empty()) else {
         return "-".to_string();
@@ -47,9 +54,23 @@ fn format_session_short(session_id: Option<&str>) -> String {
     session.chars().take(8).collect()
 }
 
-fn render_members_human(team_name: &str, member_rows: &[MemberRow]) -> String {
+fn render_members_human(
+    team_name: &str,
+    member_rows: &[MemberRow],
+    daemon_surface: &DaemonStateSurface,
+) -> String {
     let mut out = String::new();
     out.push_str(&format!("Team: {team_name}\n\n"));
+    if daemon_surface.availability == "unavailable" {
+        out.push_str("Daemon state: unavailable\n");
+        if let Some(provenance) = &daemon_surface.provenance {
+            out.push_str(&format!("  provenance: {provenance}\n"));
+        }
+        if let Some(detail) = &daemon_surface.detail {
+            out.push_str(&format!("  detail: {detail}\n"));
+        }
+        out.push('\n');
+    }
 
     if member_rows.is_empty() {
         out.push_str("  No members\n");
@@ -86,9 +107,14 @@ fn render_members_human(team_name: &str, member_rows: &[MemberRow]) -> String {
     out
 }
 
-fn render_members_json(team_name: &str, member_rows: &[MemberRow]) -> serde_json::Value {
+fn render_members_json(
+    team_name: &str,
+    member_rows: &[MemberRow],
+    daemon_surface: &DaemonStateSurface,
+) -> serde_json::Value {
     json!({
         "team": team_name,
+        "daemonState": daemon_surface,
         "members": member_rows.iter().map(|m| json!({
             "name": m.name,
             "type": m.agent_type,
@@ -107,9 +133,6 @@ fn render_members_json(team_name: &str, member_rows: &[MemberRow]) -> serde_json
 
 /// Execute the members command
 pub fn execute(args: MembersArgs) -> Result<()> {
-    // Prime daemon connectivity so daemon-backed liveness can be queried.
-    let _ = query_list_agents();
-
     let config_home = get_os_home_dir()?;
     let current_dir = std::env::current_dir()?;
 
@@ -133,22 +156,31 @@ pub fn execute(args: MembersArgs) -> Result<()> {
     }
 
     let team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
-    let daemon_states: HashMap<_, _> = query_team_member_states(team_name)
-        .ok()
-        .flatten()
+    let daemon_availability = query_team_member_states(team_name)?;
+    let daemon_surface = daemon_state_surface(&daemon_availability);
+    let daemon_states: HashMap<_, _> = daemon_availability
+        .clone()
+        .into_option()
         .unwrap_or_default()
         .into_iter()
         .map(|s| (s.agent.clone(), s))
         .collect();
 
-    let member_rows = build_member_rows(&team_config, &daemon_states);
+    let member_rows = build_member_rows(
+        &team_config,
+        &daemon_states,
+        daemon_availability.unavailable_details(),
+    );
 
     // Output results
     if args.json {
-        let output = render_members_json(team_name, &member_rows);
+        let output = render_members_json(team_name, &member_rows, &daemon_surface);
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        print!("{}", render_members_human(team_name, &member_rows));
+        print!(
+            "{}",
+            render_members_human(team_name, &member_rows, &daemon_surface)
+        );
     }
 
     Ok(())
@@ -156,7 +188,8 @@ pub fn execute(args: MembersArgs) -> Result<()> {
 
 fn build_member_rows(
     team_config: &TeamConfig,
-    daemon_states: &HashMap<String, agent_team_mail_core::daemon_client::CanonicalMemberState>,
+    daemon_states: &HashMap<String, CanonicalMemberState>,
+    unavailable: Option<&DaemonUnavailableDetails>,
 ) -> Vec<MemberRow> {
     let mut by_name: HashMap<&str, &agent_team_mail_core::schema::AgentMember> = HashMap::new();
     for member in &team_config.members {
@@ -183,8 +216,8 @@ fn build_member_rows(
                     session_id: daemon_state.and_then(|s| s.session_id.clone()),
                     process_id: daemon_state.and_then(|s| s.process_id),
                     last_alive_at: daemon_state.and_then(|s| s.last_alive_at.clone()),
-                    status: canonical_status_label(daemon_state).to_string(),
-                    activity: canonical_activity_label(daemon_state).to_string(),
+                    status: member_state_status_label(daemon_state, unavailable).to_string(),
+                    activity: member_state_activity_label(daemon_state, unavailable).to_string(),
                     liveness: canonical_liveness_bool(daemon_state),
                     in_config: true,
                 }
@@ -196,14 +229,51 @@ fn build_member_rows(
                     session_id: daemon_state.and_then(|s| s.session_id.clone()),
                     process_id: daemon_state.and_then(|s| s.process_id),
                     last_alive_at: daemon_state.and_then(|s| s.last_alive_at.clone()),
-                    status: canonical_status_label(daemon_state).to_string(),
-                    activity: canonical_activity_label(daemon_state).to_string(),
+                    status: member_state_status_label(daemon_state, unavailable).to_string(),
+                    activity: member_state_activity_label(daemon_state, unavailable).to_string(),
                     liveness: canonical_liveness_bool(daemon_state),
                     in_config: false,
                 }
             }
         })
         .collect()
+}
+
+fn daemon_state_surface(
+    availability: &DaemonAvailability<Vec<CanonicalMemberState>>,
+) -> DaemonStateSurface {
+    match availability {
+        DaemonAvailability::Available(_) => DaemonStateSurface {
+            availability: "available",
+            provenance: None,
+            detail: None,
+        },
+        DaemonAvailability::Unavailable(details) => DaemonStateSurface {
+            availability: "unavailable",
+            provenance: Some(details.provenance.clone()),
+            detail: Some(details.detail.clone()),
+        },
+    }
+}
+
+fn member_state_status_label(
+    state: Option<&CanonicalMemberState>,
+    unavailable: Option<&DaemonUnavailableDetails>,
+) -> &'static str {
+    if unavailable.is_some() {
+        return "Unavailable";
+    }
+    canonical_status_label(state)
+}
+
+fn member_state_activity_label(
+    state: Option<&CanonicalMemberState>,
+    unavailable: Option<&DaemonUnavailableDetails>,
+) -> &'static str {
+    if unavailable.is_some() {
+        return "Unavailable";
+    }
+    canonical_activity_label(state)
 }
 
 #[cfg(test)]
@@ -261,7 +331,7 @@ mod tests {
             },
         );
 
-        let rows = build_member_rows(&cfg, &daemon_states);
+        let rows = build_member_rows(&cfg, &daemon_states, None);
         assert!(rows.iter().any(|r| r.name == "team-lead" && r.in_config));
         assert!(rows.iter().any(|r| r.name == "arch-ctm" && !r.in_config));
         assert!(
@@ -287,7 +357,15 @@ mod tests {
             in_config: true,
         }];
 
-        let rendered = render_members_human("atm-dev", &rows);
+        let rendered = render_members_human(
+            "atm-dev",
+            &rows,
+            &DaemonStateSurface {
+                availability: "available",
+                provenance: None,
+                detail: None,
+            },
+        );
         assert!(rendered.contains("123e4567"));
         assert!(rendered.contains("4242"));
         assert!(rendered.contains("Active"));
@@ -311,7 +389,15 @@ mod tests {
             in_config: true,
         }];
 
-        let rendered = render_members_json("atm-dev", &rows);
+        let rendered = render_members_json(
+            "atm-dev",
+            &rows,
+            &DaemonStateSurface {
+                availability: "available",
+                provenance: None,
+                detail: None,
+            },
+        );
         assert_eq!(
             rendered["members"][0]["sessionId"].as_str(),
             Some("123e4567-e89b-12d3-a456-426614174000")

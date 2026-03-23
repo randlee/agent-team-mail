@@ -2,11 +2,16 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const RECENT_REGISTRATION_GRACE: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RegistryEntry {
     pid: u32,
     daemon_bin: String,
+    #[serde(default)]
+    registered_at_epoch_ms: u64,
 }
 
 fn registry_path() -> std::path::PathBuf {
@@ -54,6 +59,19 @@ fn save_entries(entries: &[RegistryEntry]) {
     }
     let json = serde_json::to_string_pretty(entries).unwrap_or_else(|_| "[]".to_string());
     let _ = std::fs::write(path, json);
+}
+
+fn now_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn is_recent_registration(entry: &RegistryEntry) -> bool {
+    let grace_ms = RECENT_REGISTRATION_GRACE.as_millis() as u64;
+    let age_ms = now_epoch_ms().saturating_sub(entry.registered_at_epoch_ms);
+    entry.registered_at_epoch_ms != 0 && age_ms < grace_ms
 }
 
 #[cfg(unix)]
@@ -112,6 +130,10 @@ pub fn sweep_stale_test_daemons() {
         {
             let mut retained = Vec::new();
             for entry in entries.drain(..) {
+                if is_recent_registration(&entry) {
+                    retained.push(entry);
+                    continue;
+                }
                 let pid = entry.pid as i32;
                 if !pid_alive(pid) {
                     continue;
@@ -157,6 +179,7 @@ pub fn register_test_daemon(pid: u32, daemon_bin: &Path) {
             entries.push(RegistryEntry {
                 pid,
                 daemon_bin: daemon_bin.to_string_lossy().to_string(),
+                registered_at_epoch_ms: now_epoch_ms(),
             });
         }
     });

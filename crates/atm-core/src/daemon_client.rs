@@ -336,6 +336,45 @@ pub struct CanonicalMemberState {
     pub in_config: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonUnavailableDetails {
+    pub provenance: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonAvailability<T> {
+    Available(T),
+    Unavailable(DaemonUnavailableDetails),
+}
+
+impl<T> DaemonAvailability<T> {
+    pub fn available(value: T) -> Self {
+        Self::Available(value)
+    }
+
+    pub fn unavailable(provenance: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self::Unavailable(DaemonUnavailableDetails {
+            provenance: provenance.into(),
+            detail: detail.into(),
+        })
+    }
+
+    pub fn unavailable_details(&self) -> Option<&DaemonUnavailableDetails> {
+        match self {
+            Self::Available(_) => None,
+            Self::Unavailable(details) => Some(details),
+        }
+    }
+
+    pub fn into_option(self) -> Option<T> {
+        match self {
+            Self::Available(value) => Some(value),
+            Self::Unavailable(_) => None,
+        }
+    }
+}
+
 fn default_in_config_true() -> bool {
     true
 }
@@ -1285,10 +1324,14 @@ pub fn query_list_agents_for_team(team: &str) -> anyhow::Result<Option<Vec<Agent
 /// Query the daemon for canonical member-state snapshots scoped to one team.
 ///
 /// Returns:
-/// - `Ok(None)` when the daemon is not reachable.
+/// - `Ok(DaemonAvailability::Available(...))` when canonical state is available.
+/// - `Ok(DaemonAvailability::Unavailable(...))` when the daemon cannot provide
+///   team-scoped state and callers should surface that explicitly.
 /// - `Err(...)` when daemon response payload is present but does not match the
 ///   canonical state schema.
-pub fn query_team_member_states(team: &str) -> anyhow::Result<Option<Vec<CanonicalMemberState>>> {
+pub fn query_team_member_states(
+    team: &str,
+) -> anyhow::Result<DaemonAvailability<Vec<CanonicalMemberState>>> {
     let request = SocketRequest {
         version: PROTOCOL_VERSION,
         request_id: new_request_id(),
@@ -1296,21 +1339,40 @@ pub fn query_team_member_states(team: &str) -> anyhow::Result<Option<Vec<Canonic
         payload: serde_json::json!({ "team": team }),
     };
 
-    let response = match query_daemon(&request)? {
-        Some(r) => r,
-        None => return Ok(None),
+    let response = match query_daemon(&request) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return Ok(DaemonAvailability::unavailable(
+                "daemon_client::query_team_member_states",
+                format!("daemon team-scoped state query unavailable for team '{team}'"),
+            ));
+        }
+        Err(err) => {
+            return Ok(DaemonAvailability::unavailable(
+                "daemon_client::query_team_member_states",
+                format!("daemon team-scoped state query failed for team '{team}': {err}"),
+            ));
+        }
     };
 
     if !response.is_ok() {
-        return Ok(None);
+        return Ok(DaemonAvailability::unavailable(
+            "daemon_client::query_team_member_states",
+            format!("daemon rejected team-scoped state query for team '{team}'"),
+        ));
     }
 
     let payload = match response.payload {
         Some(p) => p,
-        None => return Ok(None),
+        None => {
+            return Ok(DaemonAvailability::unavailable(
+                "daemon_client::query_team_member_states",
+                format!("daemon returned no payload for team-scoped state query '{team}'"),
+            ));
+        }
     };
 
-    decode_canonical_member_states_payload(payload).map(Some)
+    decode_canonical_member_states_payload(payload).map(DaemonAvailability::available)
 }
 
 fn decode_canonical_member_states_payload(
@@ -4155,7 +4217,7 @@ sleep 8
 
     #[test]
     #[serial]
-    fn test_query_team_member_states_offline_returns_none() {
+    fn test_query_team_member_states_offline_returns_unavailable() {
         with_autostart_disabled(|| {
             let tmp = tempfile::tempdir().expect("tempdir");
             let _home_guard = EnvGuard::set("ATM_HOME", tmp.path().to_str().unwrap());
@@ -4163,8 +4225,8 @@ sleep 8
             let result = query_team_member_states("atm-dev");
 
             assert!(
-                matches!(result, Ok(None)),
-                "offline daemon must map to Ok(None), got: {result:?}"
+                matches!(result, Ok(DaemonAvailability::Unavailable(_))),
+                "offline daemon must map to explicit unavailable, got: {result:?}"
             );
         });
     }
