@@ -212,19 +212,21 @@ pub async fn start_socket_server(
 
 /// A handle to the running socket server.
 ///
-/// Dropping this handle removes the socket file from disk.
+/// Dropping this handle removes daemon runtime artifacts from disk.
 pub struct SocketServerHandle {
     /// Path to the socket file (removed on drop)
     socket_path: PathBuf,
+    /// Path to the PID file (removed on drop)
+    pid_path: PathBuf,
 }
 
 impl Drop for SocketServerHandle {
     fn drop(&mut self) {
-        cleanup_socket_files(&self.socket_path);
+        cleanup_socket_files(&self.socket_path, &self.pid_path);
     }
 }
 
-fn cleanup_socket_files(socket_path: &PathBuf) {
+fn cleanup_socket_files(socket_path: &PathBuf, pid_path: &PathBuf) {
     if socket_path.exists() {
         if let Err(e) = std::fs::remove_file(socket_path) {
             warn!(
@@ -233,6 +235,13 @@ fn cleanup_socket_files(socket_path: &PathBuf) {
             );
         } else {
             debug!("Removed socket file {}", socket_path.display());
+        }
+    }
+    if pid_path.exists() {
+        if let Err(e) = std::fs::remove_file(pid_path) {
+            warn!("Failed to remove pid file {}: {e}", pid_path.display());
+        } else {
+            debug!("Removed pid file {}", pid_path.display());
         }
     }
 }
@@ -359,6 +368,7 @@ async fn start_unix_socket_server(
 
     let daemon_dir = home_dir.join(".atm/daemon");
     let socket_path = daemon_dir.join("atm-daemon.sock");
+    let pid_path = daemon_dir.join("atm-daemon.pid");
 
     // Ensure the daemon directory exists
     std::fs::create_dir_all(&daemon_dir)?;
@@ -372,6 +382,7 @@ async fn start_unix_socket_server(
     // Bind the Unix listener
     let listener = UnixListener::bind(&socket_path)?;
     info!("Unix socket server listening on {}", socket_path.display());
+    std::fs::write(&pid_path, format!("{}\n", std::process::id()))?;
 
     // Spawn the accept loop
     let accept_socket_path = socket_path.clone();
@@ -393,7 +404,10 @@ async fn start_unix_socket_server(
         .await;
     });
 
-    Ok(SocketServerHandle { socket_path })
+    Ok(SocketServerHandle {
+        socket_path,
+        pid_path,
+    })
 }
 
 #[cfg(unix)]

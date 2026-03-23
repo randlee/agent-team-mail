@@ -1,4 +1,4 @@
-use agent_team_mail_daemon_launch::{LaunchClass, attach_launch_token, issue_launch_token};
+use agent_team_mail_daemon_launch::{attach_launch_token, issue_isolated_test_launch_token};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
@@ -52,11 +52,16 @@ impl DaemonProcessGuard {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let launch_token = issue_launch_token(
-            LaunchClass::Shared,
+        let launch_token = issue_isolated_test_launch_token(
             &runtime_home,
             daemon_bin.display().to_string(),
             "DaemonProcessGuard::spawn",
+            format!(
+                "DaemonProcessGuard::spawn:{}:{}",
+                team,
+                runtime_home.display()
+            ),
+            std::process::id(),
             Duration::from_secs(600),
         );
         attach_launch_token(&mut cmd, &launch_token).expect("encode daemon launch token");

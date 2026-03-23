@@ -18,11 +18,29 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+fn run_blocking_export_thread<F>(name: &str, f: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    let _ = std::thread::Builder::new()
+        .name(name.to_string())
+        .spawn(f)
+        .and_then(|handle| {
+            handle
+                .join()
+                .map_err(|_| std::io::Error::other("export thread panicked"))
+        });
+}
+
 fn export_otel_from_entrypoint(
     log_path: &std::path::Path,
     event: &agent_team_mail_core::logging_event::LogEventV1,
 ) {
-    sc_observability::export_otel_best_effort_from_path(log_path, event);
+    let log_path = log_path.to_path_buf();
+    let event = event.clone();
+    run_blocking_export_thread("atm-daemon-otel-export", move || {
+        sc_observability::export_otel_best_effort_from_path(&log_path, &event);
+    });
 }
 
 fn current_otel_health_from_entrypoint(
@@ -32,11 +50,19 @@ fn current_otel_health_from_entrypoint(
 }
 
 fn export_trace_records_from_entrypoint(records: &[TraceRecord], config: &OtelConfig) {
-    let _ = sc_observability_otlp::export_traces(config, records);
+    let records = records.to_vec();
+    let config = config.clone();
+    run_blocking_export_thread("atm-daemon-trace-export", move || {
+        let _ = sc_observability_otlp::export_traces(&config, &records);
+    });
 }
 
 fn export_metric_records_from_entrypoint(records: &[MetricRecord], config: &OtelConfig) {
-    let _ = sc_observability_otlp::export_metrics(config, records);
+    let records = records.to_vec();
+    let config = config.clone();
+    run_blocking_export_thread("atm-daemon-metric-export", move || {
+        let _ = sc_observability_otlp::export_metrics(&config, &records);
+    });
 }
 
 fn export_lifecycle_trace_from_entrypoint(
@@ -74,16 +100,9 @@ fn export_lifecycle_trace_from_entrypoint(
     // so reqwest's blocking OTLP client never constructs/drops its private
     // runtime inside the active tokio context.
     let config = sc_observability::OtelConfig::from_env();
-    let _ = std::thread::Builder::new()
-        .name("atm-daemon-lifecycle-trace-export".to_string())
-        .spawn(move || {
-            sc_observability::export_trace_records_best_effort(&[trace_record], &config);
-        })
-        .and_then(|handle| {
-            handle
-                .join()
-                .map_err(|_| std::io::Error::other("lifecycle trace exporter thread panicked"))
-        });
+    run_blocking_export_thread("atm-daemon-lifecycle-trace-export", move || {
+        sc_observability::export_trace_records_best_effort(&[trace_record], &config);
+    });
 }
 
 fn cleanup_daemon_runtime_artifacts(home_dir: &std::path::Path) {
