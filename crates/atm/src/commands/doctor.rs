@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    AgentSummary, CanonicalMemberState, SessionQueryResult, daemon_is_running, daemon_lock_path,
-    daemon_socket_path, daemon_status_path_for, gh_rate_limit_audit, query_list_agents,
-    query_list_agents_for_team, query_session_for_team, query_team_member_states,
-    read_daemon_lock_metadata,
+    AgentSummary, CanonicalMemberState, DaemonAvailability, SessionQueryResult, daemon_is_running,
+    daemon_lock_path, daemon_socket_path, daemon_status_path_for, gh_rate_limit_audit,
+    query_list_agents, query_list_agents_for_team, query_session_for_team,
+    query_team_member_states, read_daemon_lock_metadata,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::gh_command::{GhRateLimitAudit, GhRateLimitAuditRequest};
@@ -1113,25 +1113,23 @@ fn check_pid_session_reconciliation_with_query<F>(
     query_states: F,
 ) -> (Vec<Finding>, HashMap<String, CanonicalMemberState>)
 where
-    F: Fn(&str) -> anyhow::Result<Option<Vec<CanonicalMemberState>>>,
+    F: Fn(&str) -> anyhow::Result<DaemonAvailability<Vec<CanonicalMemberState>>>,
 {
     let mut findings = Vec::new();
     let (daemon_states, unreachable_reason): (
         HashMap<String, CanonicalMemberState>,
         Option<String>,
     ) = match query_states(team) {
-        Ok(Some(states)) => (
+        Ok(DaemonAvailability::Available(states)) => (
             states
                 .into_iter()
                 .map(|s| (s.agent.clone(), s))
                 .collect::<HashMap<_, _>>(),
             None,
         ),
-        Ok(None) => (
+        Ok(DaemonAvailability::Unavailable(details)) => (
             HashMap::new(),
-            Some(format!(
-                "Daemon team-scoped state query unavailable for team '{team}'"
-            )),
+            Some(format!("{}: {}", details.provenance, details.detail)),
         ),
         Err(err) => (
             HashMap::new(),
@@ -1828,6 +1826,15 @@ fn render_human(report: &DoctorReport) -> String {
             "  delta_consumed_vs_cached: {}\n\n",
             audit.delta_consumed_vs_cached
         ));
+    }
+
+    if let Some(reason) = report
+        .findings
+        .iter()
+        .find_map(|finding| (finding.code == "DAEMON_UNREACHABLE").then(|| finding.message.clone()))
+    {
+        out.push_str("Daemon state: unavailable\n");
+        out.push_str(&format!("  detail: {reason}\n\n"));
     }
 
     if !report.member_snapshot.is_empty() {
@@ -2544,8 +2551,12 @@ mod tests {
             unknown_fields: HashMap::new(),
         };
 
-        let (findings, _) =
-            check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| Ok(None));
+        let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
+            Ok(DaemonAvailability::unavailable(
+                "test",
+                "daemon team-scoped state query unavailable",
+            ))
+        });
         assert!(
             findings
                 .iter()
@@ -2567,7 +2578,7 @@ mod tests {
         };
 
         let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
-            Ok(Some(vec![CanonicalMemberState {
+            Ok(DaemonAvailability::available(vec![CanonicalMemberState {
                 agent: "foreign-agent".to_string(),
                 state: "offline".to_string(),
                 activity: "unknown".to_string(),
@@ -2599,7 +2610,7 @@ mod tests {
 
         let (findings_none, _) =
             check_pid_session_reconciliation_with_query("atm-dev", &cfg_none, |_| {
-                Ok(Some(vec![CanonicalMemberState {
+                Ok(DaemonAvailability::available(vec![CanonicalMemberState {
                     agent: "worker-a".to_string(),
                     state: "active".to_string(),
                     activity: "busy".to_string(),
@@ -2628,7 +2639,7 @@ mod tests {
 
         let (findings_false, _) =
             check_pid_session_reconciliation_with_query("atm-dev", &cfg_false, |_| {
-                Ok(Some(vec![CanonicalMemberState {
+                Ok(DaemonAvailability::available(vec![CanonicalMemberState {
                     agent: "worker-a".to_string(),
                     state: "active".to_string(),
                     activity: "busy".to_string(),
@@ -2657,7 +2668,7 @@ mod tests {
 
         let (findings_true, _) =
             check_pid_session_reconciliation_with_query("atm-dev", &cfg_true, |_| {
-                Ok(Some(vec![CanonicalMemberState {
+                Ok(DaemonAvailability::available(vec![CanonicalMemberState {
                     agent: "worker-a".to_string(),
                     state: "active".to_string(),
                     activity: "busy".to_string(),
@@ -2676,7 +2687,7 @@ mod tests {
 
         let (findings_idle_none, _) =
             check_pid_session_reconciliation_with_query("atm-dev", &cfg_none, |_| {
-                Ok(Some(vec![CanonicalMemberState {
+                Ok(DaemonAvailability::available(vec![CanonicalMemberState {
                     agent: "worker-a".to_string(),
                     state: "idle".to_string(),
                     activity: "idle".to_string(),
@@ -2695,7 +2706,7 @@ mod tests {
 
         let (findings_idle_false, _) =
             check_pid_session_reconciliation_with_query("atm-dev", &cfg_false, |_| {
-                Ok(Some(vec![CanonicalMemberState {
+                Ok(DaemonAvailability::available(vec![CanonicalMemberState {
                     agent: "worker-a".to_string(),
                     state: "idle".to_string(),
                     activity: "idle".to_string(),
@@ -2738,7 +2749,7 @@ mod tests {
         };
 
         let (findings, _) = check_pid_session_reconciliation_with_query("atm-dev", &cfg, |_| {
-            Ok(Some(vec![CanonicalMemberState {
+            Ok(DaemonAvailability::available(vec![CanonicalMemberState {
                 agent: "arch-ctm".to_string(),
                 state: "offline".to_string(),
                 activity: "unknown".to_string(),

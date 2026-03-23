@@ -166,7 +166,6 @@ pub fn wait_for_test_otel_exports() {
             .expect("atm-daemon test otel export thread should complete");
     }
 }
-
 fn trace_export_serial_lock() -> &'static Mutex<()> {
     static TRACE_EXPORT_SERIAL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     TRACE_EXPORT_SERIAL_LOCK.get_or_init(|| Mutex::new(()))

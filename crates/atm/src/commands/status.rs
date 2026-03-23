@@ -2,7 +2,8 @@
 
 use agent_team_mail_core::config::{ConfigOverrides, resolve_config};
 use agent_team_mail_core::daemon_client::{
-    canonical_liveness_bool, query_list_agents, query_team_member_states,
+    CanonicalMemberState, DaemonAvailability, DaemonUnavailableDetails, canonical_liveness_bool,
+    query_team_member_states,
 };
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::{io::inbox_read_file_tolerant, schema::TeamConfig};
@@ -46,11 +47,15 @@ struct InboxCounts {
     pending: usize,
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+struct DaemonStateSurface {
+    availability: &'static str,
+    provenance: Option<String>,
+    detail: Option<String>,
+}
+
 /// Execute the status command
 pub fn execute(args: StatusArgs) -> Result<()> {
-    // Prime daemon connectivity so daemon-backed liveness fields are available.
-    let _ = query_list_agents();
-
     let home_dir = get_home_dir()?;
     let config_home = get_os_home_dir()?;
     let current_dir = std::env::current_dir()?;
@@ -75,9 +80,11 @@ pub fn execute(args: StatusArgs) -> Result<()> {
     }
 
     let team_config: TeamConfig = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
-    let daemon_states: HashMap<_, _> = query_team_member_states(team_name)
-        .ok()
-        .flatten()
+    let daemon_availability = query_team_member_states(team_name)?;
+    let daemon_surface = daemon_state_surface(&daemon_availability);
+    let daemon_states: HashMap<_, _> = daemon_availability
+        .clone()
+        .into_option()
         .unwrap_or_default()
         .into_iter()
         .map(|s| (s.agent.clone(), s))
@@ -130,6 +137,8 @@ pub fn execute(args: StatusArgs) -> Result<()> {
                 .expect("logging_health should serialize"),
             "otel_health": serde_json::to_value(&otel_health)
                 .expect("otel_health should serialize"),
+            "daemon_state": serde_json::to_value(&daemon_surface)
+                .expect("daemon_state should serialize"),
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
@@ -139,15 +148,18 @@ pub fn execute(args: StatusArgs) -> Result<()> {
         }
         println!("Created: {age}");
         println!();
+        if let Some(details) = daemon_availability.unavailable_details() {
+            println!("Daemon state: unavailable");
+            println!("  provenance: {}", details.provenance);
+            println!("  detail: {}", details.detail);
+            println!();
+        }
 
         let member_count = member_rows.len();
         println!("Members ({member_count}):");
         for member in &member_rows {
-            let active_str = match member.liveness {
-                Some(true) => "Online ",
-                Some(false) => "Offline",
-                None => "Unknown",
-            };
+            let active_str =
+                status_liveness_label(member.liveness, daemon_availability.unavailable_details());
             let counts = inbox_counts.get(&member.name).copied().unwrap_or_default();
             let name = if member.in_config {
                 member.name.clone()
@@ -240,7 +252,7 @@ pub fn execute(args: StatusArgs) -> Result<()> {
 
 fn build_status_member_rows(
     team_config: &TeamConfig,
-    daemon_states: &HashMap<String, agent_team_mail_core::daemon_client::CanonicalMemberState>,
+    daemon_states: &HashMap<String, CanonicalMemberState>,
 ) -> Vec<StatusMemberRow> {
     let mut by_name: HashMap<&str, &agent_team_mail_core::schema::AgentMember> = HashMap::new();
     for member in &team_config.members {
@@ -275,6 +287,37 @@ fn build_status_member_rows(
             }
         })
         .collect()
+}
+
+fn daemon_state_surface(
+    availability: &DaemonAvailability<Vec<CanonicalMemberState>>,
+) -> DaemonStateSurface {
+    match availability {
+        DaemonAvailability::Available(_) => DaemonStateSurface {
+            availability: "available",
+            provenance: None,
+            detail: None,
+        },
+        DaemonAvailability::Unavailable(details) => DaemonStateSurface {
+            availability: "unavailable",
+            provenance: Some(details.provenance.clone()),
+            detail: Some(details.detail.clone()),
+        },
+    }
+}
+
+fn status_liveness_label(
+    liveness: Option<bool>,
+    unavailable: Option<&DaemonUnavailableDetails>,
+) -> &'static str {
+    if unavailable.is_some() {
+        return "Unavailable";
+    }
+    match liveness {
+        Some(true) => "Online ",
+        Some(false) => "Offline",
+        None => "Unknown",
+    }
 }
 
 /// Count unread and pending-action messages in inboxes.

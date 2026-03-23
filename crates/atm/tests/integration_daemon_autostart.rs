@@ -733,6 +733,185 @@ fn test_members_reports_status_session_and_pid_after_daemon_autostart() {
 
 #[test]
 #[cfg(unix)]
+fn test_state_surfaces_show_master_record_then_explicit_unavailable_after_shutdown() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path();
+    let runtime_home = runtime_home(&temp);
+    let team = "team-state-truth";
+    write_team_config(home, team);
+    let script = write_fake_daemon_script(home);
+
+    let mut status_cmd = cargo::cargo_bin_cmd!("atm");
+    let status_output = status_cmd
+        .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", home)
+        .envs([("HOME", home)])
+        .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
+        .env("ATM_TEAM", team)
+        .env("ATM_DAEMON_BIN", &script)
+        .env(
+            "ATM_FAKE_LIST_AGENTS",
+            fake_member_states_json("alice", 4242),
+        )
+        .arg("status")
+        .arg("--team")
+        .arg(team)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(status_output.status.success(), "status should succeed");
+    let status_json: serde_json::Value = serde_json::from_slice(&status_output.stdout).unwrap();
+    assert_eq!(
+        status_json["daemon_state"]["availability"].as_str(),
+        Some("available")
+    );
+    assert_eq!(status_json["members"][0]["liveness"].as_bool(), Some(true));
+
+    wait_for_daemon_socket(&runtime_home);
+    let daemon_pid = read_daemon_pid(&runtime_home).expect("state-truth daemon pid");
+    let daemon_guard = daemon_process_guard::DaemonProcessGuard::adopt_registered_pid(
+        daemon_pid,
+        &script,
+        &runtime_home,
+    );
+
+    let mut members_cmd = cargo::cargo_bin_cmd!("atm");
+    let members_output = members_cmd
+        .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", home)
+        .envs([("HOME", home)])
+        .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
+        .env("ATM_TEAM", team)
+        .env("ATM_DAEMON_BIN", &script)
+        .env(
+            "ATM_FAKE_LIST_AGENTS",
+            fake_member_states_json("alice", 4242),
+        )
+        .arg("members")
+        .arg("--team")
+        .arg(team)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(members_output.status.success(), "members should succeed");
+    let members_json: serde_json::Value = serde_json::from_slice(&members_output.stdout).unwrap();
+    assert_eq!(
+        members_json["daemonState"]["availability"].as_str(),
+        Some("available")
+    );
+    assert_eq!(
+        members_json["members"][0]["sessionId"].as_str(),
+        Some("fake-session")
+    );
+    assert_eq!(members_json["members"][0]["processId"].as_u64(), Some(4242));
+
+    let mut doctor_cmd = cargo::cargo_bin_cmd!("atm");
+    let doctor_output = doctor_cmd
+        .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", home)
+        .envs([("HOME", home)])
+        .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
+        .env("ATM_TEAM", team)
+        .env("ATM_DAEMON_BIN", &script)
+        .env(
+            "ATM_FAKE_LIST_AGENTS",
+            fake_member_states_json("alice", 4242),
+        )
+        .arg("doctor")
+        .arg("--team")
+        .arg(team)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(
+        doctor_output.status.success() || doctor_output.status.code() == Some(2),
+        "doctor should emit a report when daemon state is healthy"
+    );
+    let doctor_json: serde_json::Value = serde_json::from_slice(&doctor_output.stdout).unwrap();
+    assert_eq!(
+        doctor_json["members"][0]["session_id"].as_str(),
+        Some("fake-session")
+    );
+    assert_eq!(doctor_json["members"][0]["status"].as_str(), Some("Online"));
+
+    drop(daemon_guard);
+
+    let mut status_down_cmd = cargo::cargo_bin_cmd!("atm");
+    let status_down = status_down_cmd
+        .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", home)
+        .envs([("HOME", home)])
+        .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
+        .env("ATM_TEAM", team)
+        .env("ATM_DAEMON_AUTOSTART", "0")
+        .arg("status")
+        .arg("--team")
+        .arg(team)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(
+        status_down.status.success(),
+        "status should stay best-effort"
+    );
+    let status_down_json: serde_json::Value = serde_json::from_slice(&status_down.stdout).unwrap();
+    assert_eq!(
+        status_down_json["daemon_state"]["availability"].as_str(),
+        Some("unavailable")
+    );
+
+    let mut members_down_cmd = cargo::cargo_bin_cmd!("atm");
+    let members_down = members_down_cmd
+        .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", home)
+        .envs([("HOME", home)])
+        .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
+        .env("ATM_TEAM", team)
+        .env("ATM_DAEMON_AUTOSTART", "0")
+        .arg("members")
+        .arg("--team")
+        .arg(team)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(
+        members_down.status.success(),
+        "members should stay best-effort"
+    );
+    let members_down_json: serde_json::Value =
+        serde_json::from_slice(&members_down.stdout).unwrap();
+    assert_eq!(
+        members_down_json["daemonState"]["availability"].as_str(),
+        Some("unavailable")
+    );
+
+    let mut doctor_down_cmd = cargo::cargo_bin_cmd!("atm");
+    let doctor_down = doctor_down_cmd
+        .env("ATM_HOME", &runtime_home)
+        .env("ATM_CONFIG_HOME", home)
+        .envs([("HOME", home)])
+        .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
+        .env("ATM_TEAM", team)
+        .env("ATM_DAEMON_AUTOSTART", "0")
+        .arg("doctor")
+        .arg("--team")
+        .arg(team)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(doctor_down.status.code(), Some(2));
+    let doctor_down_json: serde_json::Value = serde_json::from_slice(&doctor_down.stdout).unwrap();
+    let finding_codes = doctor_down_json["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|finding| finding["code"].as_str())
+        .collect::<Vec<_>>();
+    assert!(finding_codes.contains(&"DAEMON_UNREACHABLE"));
+}
+
+#[test]
+#[cfg(unix)]
 fn test_status_autostart_recovers_after_stale_restart_cycle() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
