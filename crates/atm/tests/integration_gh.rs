@@ -1493,6 +1493,8 @@ fn test_gh_monitor_pr_implicitly_starts_lifecycle() {
         .arg("gh")
         .arg("--team")
         .arg("test-team")
+        .arg("--repo")
+        .arg("acme/agent-team-mail")
         .arg("--json")
         .arg("monitor")
         .arg("pr")
