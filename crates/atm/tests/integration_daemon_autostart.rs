@@ -745,7 +745,6 @@ fn test_state_surfaces_show_master_record_then_explicit_unavailable_after_shutdo
     let status_output = status_cmd
         .env("ATM_HOME", &runtime_home)
         .env("ATM_CONFIG_HOME", home)
-        .envs([("HOME", home)])
         .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", &script)
@@ -779,7 +778,6 @@ fn test_state_surfaces_show_master_record_then_explicit_unavailable_after_shutdo
     let members_output = members_cmd
         .env("ATM_HOME", &runtime_home)
         .env("ATM_CONFIG_HOME", home)
-        .envs([("HOME", home)])
         .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", &script)
@@ -809,7 +807,6 @@ fn test_state_surfaces_show_master_record_then_explicit_unavailable_after_shutdo
     let doctor_output = doctor_cmd
         .env("ATM_HOME", &runtime_home)
         .env("ATM_CONFIG_HOME", home)
-        .envs([("HOME", home)])
         .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_BIN", &script)
@@ -840,7 +837,6 @@ fn test_state_surfaces_show_master_record_then_explicit_unavailable_after_shutdo
     let status_down = status_down_cmd
         .env("ATM_HOME", &runtime_home)
         .env("ATM_CONFIG_HOME", home)
-        .envs([("HOME", home)])
         .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_AUTOSTART", "0")
@@ -864,7 +860,6 @@ fn test_state_surfaces_show_master_record_then_explicit_unavailable_after_shutdo
     let members_down = members_down_cmd
         .env("ATM_HOME", &runtime_home)
         .env("ATM_CONFIG_HOME", home)
-        .envs([("HOME", home)])
         .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_AUTOSTART", "0")
@@ -889,7 +884,6 @@ fn test_state_surfaces_show_master_record_then_explicit_unavailable_after_shutdo
     let doctor_down = doctor_down_cmd
         .env("ATM_HOME", &runtime_home)
         .env("ATM_CONFIG_HOME", home)
-        .envs([("HOME", home)])
         .env("ATM_TEST_SHARED_DAEMON_ADMISSION", "1")
         .env("ATM_TEAM", team)
         .env("ATM_DAEMON_AUTOSTART", "0")
