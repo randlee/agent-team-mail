@@ -9,15 +9,14 @@ This document is the source of truth for Claude hook behavior and mapping.
 `docs/requirements.md` should keep only stable invariants and reference this
 document for hook-specific flow details.
 
-For the post-capture redesign, this document should be read together with
-`docs/phase-bc-hook-runtime-design.md`, which freezes the canonical hook-state,
-logging, and trait contracts before implementation resumes.
+The clean post-capture hook-runtime redesign now lives in `schook`. This ATM
+document remains the current-ATM behavior reference and should not be treated
+as the redesign authority.
 
 ## Primary References
 
 - [agent-teams-hooks.md](agent-teams-hooks.md)
 - [requirements.md](requirements.md)
-- [phase-bc-hook-runtime-design.md](phase-bc-hook-runtime-design.md)
 - [settings.json](../.claude/settings.json)
 - [scripts/](../.claude/scripts/)
 
@@ -51,13 +50,7 @@ logging, and trait contracts before implementation resumes.
 
 ## Lifecycle Mapping Strategy
 
-Captured and documented `SessionStart.source` values:
-
-- captured locally: `startup`, `compact`
-- documented by Claude, pending local capture fixture: `resume`, `clear`
-
-Normalized state mapping is defined in
-`docs/phase-bc-hook-runtime-design.md`:
+Current ATM lifecycle notes:
 
 - `SessionStart(startup|resume|clear|compact)` -> `starting`
 - `PreToolUse(*)` -> `busy`

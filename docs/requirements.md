@@ -22,7 +22,6 @@ This primary requirements document registers secondary source-of-truth documents
 - Daemon spawn authorization requirements: `docs/daemon-spawn-auth/requirements.md`
 - Daemon reset requirements: `docs/daemon/requirements.md`
 - Daemon reset architecture: `docs/daemon/architecture.md`
-- Hook runtime post-capture design: `docs/phase-bc-hook-runtime-design.md`
 
 All logging/OpenTelemetry requirements for ATM and companion tools are defined
 in the observability documents above. This file references that contract and
@@ -2567,9 +2566,9 @@ Normative requirements:
 - The hook execution path for state and logging MUST remain single-process; no
   daemon hop may be required for correctness of hook-state persistence or hook
   logging.
-- The normalized runtime state enum and transition table are defined in
-  `docs/phase-bc-hook-runtime-design.md` and must be treated as the
-  implementation baseline.
+- The clean post-capture hook-runtime redesign is tracked in `schook`; this ATM
+  repo records current ATM behavior and migration context, not the redesign
+  authority.
 - Generic hook runtime behavior and ATM-specific enrichment MUST remain split:
   ATM team/identity fields belong in an extension section and must not replace
   generic identity or root resolution.
@@ -2578,8 +2577,8 @@ Normative requirements:
     with the same stem
   - invalid structured input MUST block with exact retryable validation errors
 
-Implementation and acceptance details for the redesign are tracked in:
-- `docs/phase-bc-hook-runtime-design.md`
+Implementation and acceptance details for current ATM hook behavior remain
+tracked in:
 - `docs/claude-hook-strategy.md`
 
 ### 4.10 Install/Upgrade Daemon Freshness

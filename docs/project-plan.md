@@ -2721,11 +2721,14 @@ structured logging path for every hook invocation.
 **Integration branch**: `integrate/phase-BC`
 
 **Design references**:
-- `docs/phase-bc-hook-runtime-design.md`
 - `docs/claude-hook-strategy.md`
 - `docs/requirements.md`
 - `docs/observability/requirements.md`
 - `docs/observability/architecture.md`
+
+**Boundary note**: the clean hook-runtime redesign authority now lives in the
+`schook` repo. This ATM plan section is retained only as cross-repo dependency
+context and must not be treated as the redesign source of truth.
 
 **Prerequisites**:
 - Phase N harness lineage and later harness/capture follow-ons are merged
