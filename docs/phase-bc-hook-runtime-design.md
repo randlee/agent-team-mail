@@ -108,7 +108,8 @@ identity resolution.
 
 - One JSON file per `session_id`
 - Disk file is the source of truth; in-memory state is only a working copy
-- Writes are atomic (`temp + rename` in the same directory); in-place mutation is forbidden
+- Every `session.json` update must use an atomic write (`temp + rename` in the
+  same directory); in-place mutation is forbidden
 - No daemon cache is authoritative for hook-state correctness
 - Session-state storage must use the standard ATM state root, not `/tmp`
 - If the canonical session record is unchanged after handler execution, BC must
@@ -263,8 +264,8 @@ Every hook invocation follows one single path:
 7. Collect handler return values.
 8. Compute the normalized state transition.
 9. Compare the next canonical record to the persisted record; if materially
-   changed, write the updated session-state file atomically with `temp + rename`
-   in the same directory, otherwise skip the state write.
+   changed, perform an atomic write of the updated session-state file with
+   `temp + rename` in the same directory; otherwise skip the state write.
 10. Emit one structured hook log record (plus optional detailed handler records)
     through `sc-observability`.
 11. Return final hook JSON to the runtime.
