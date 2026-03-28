@@ -108,9 +108,15 @@ identity resolution.
 
 - One JSON file per `session_id`
 - Disk file is the source of truth; in-memory state is only a working copy
-- Writes are atomic (`temp + rename`)
+- Writes are atomic (`temp + rename` in the same directory); in-place mutation is forbidden
 - No daemon cache is authoritative for hook-state correctness
 - Session-state storage must use the standard ATM state root, not `/tmp`
+- If the canonical session record is unchanged after handler execution, BC must
+  not rewrite the session-state file
+- `state_revision` increments only when a materially changed canonical record is
+  persisted
+- Hook logging remains mandatory for every invocation even when no session-state
+  write occurs
 
 ### Canonical Schema
 
@@ -154,7 +160,7 @@ identity resolution.
 | `project_root_dir` | string | yes | sourced from provider startup context; no cwd fallback |
 | `session_start_source` | string enum | yes | `startup|resume|clear|compact` |
 | `agent_state` | string enum | yes | normalized runtime state |
-| `state_revision` | integer | yes | increments on every persisted transition |
+| `state_revision` | integer | yes | increments only on persisted material change |
 | `created_at` | RFC3339 UTC string | yes | session record creation time |
 | `updated_at` | RFC3339 UTC string | yes | last write time |
 | `ended_at` | RFC3339 UTC string/null | yes | set when terminal state is persisted |
@@ -225,7 +231,9 @@ Every hook invocation follows one single path:
 6. Execute handlers.
 7. Collect handler return values.
 8. Compute the normalized state transition.
-9. Atomically write the updated session-state file.
+9. Compare the next canonical record to the persisted record; if materially
+   changed, write the updated session-state file atomically with `temp + rename`
+   in the same directory, otherwise skip the state write.
 10. Emit one structured hook log record (plus optional detailed handler records)
     through `sc-observability`.
 11. Return final hook JSON to the runtime.
@@ -243,6 +251,10 @@ implementation.
 
 The sink and health model must use the standardized `sc-observability`
 contracts.
+
+Logging is not conditional on state mutation. A no-op hook invocation still
+must emit the required structured hook log even when the session-state file is
+unchanged.
 
 ### Required Per-Invocation Fields
 

@@ -2556,6 +2556,14 @@ Normative requirements:
   - matched handlers
   - handler return values
   - state before/after
+- Session-state persistence MUST use atomic same-directory `temp + rename`
+  writes; in-place mutation of the canonical session file is forbidden.
+- Hook runtime MUST NOT rewrite the canonical session file when the canonical
+  record is unchanged after handler execution.
+- `state_revision` MUST increment only when a materially changed canonical
+  session record is persisted.
+- Hook logging remains mandatory even when a hook invocation results in no
+  session-state write.
 - The hook execution path for state and logging MUST remain single-process; no
   daemon hop may be required for correctness of hook-state persistence or hook
   logging.
