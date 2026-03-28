@@ -58,6 +58,7 @@ Representative current surfaces:
 - `crates/atm/src/commands/launch.rs`
 - `crates/atm/src/commands/teams.rs`
 - `crates/atm/src/commands/spawn.rs`
+- `crates/atm-daemon/src/roster/`
 
 ### 3. Live Attach / Injection / Stream State
 
@@ -77,6 +78,8 @@ Representative current surfaces:
 - `crates/atm-agent-mcp/src/stream_emit.rs`
 - `crates/atm-tui/src/main.rs`
 - `crates/atm-tui/src/app.rs`
+- `crates/atm-tui/src/daemon_launch.rs`
+- `crates/atm-daemon/src/plugins/worker_adapter/`
 
 ### 4. CI Monitor Runtime And Control
 
@@ -96,6 +99,24 @@ Representative current surfaces:
 - `crates/atm-daemon/src/daemon/gh_monitor_router.rs`
 - `crates/atm/src/commands/gh.rs`
 - `crates/atm-ci-monitor/src/lib.rs`
+
+### 5. Plugin Host Framework
+
+The daemon owns a general plugin-host runtime that survives even if ci-monitor
+is extracted.
+
+What the daemon owns today:
+
+- plugin trait / erased trait abstraction
+- plugin registry and plugin lifecycle management
+- plugin context and shared mail service wiring
+- plugin-oriented runtime composition in the daemon binary
+
+Representative current surfaces:
+
+- `crates/atm-daemon/src/plugin/`
+- `crates/atm-daemon/src/plugins/mod.rs`
+- `crates/atm-daemon/src/main.rs`
 
 ## Dependency Gate
 
@@ -143,6 +164,15 @@ New ownership:
   and health projection
 - `atm-ci-monitor` owns ci-monitor behavior and execute loop
 
+Gate condition:
+
+- ATM observability adapter is merged and used by ATM binaries without daemon
+  log-writer ownership
+- ci-monitor runtime and command implementation live outside daemon-owned
+  plugin code
+- daemon no longer owns ci-monitor business logic; if a daemon plugin remains,
+  it is adapter-only
+
 Result after Phase 1:
 
 - the daemon is no longer needed as the mandatory log writer
@@ -167,6 +197,8 @@ New ownership:
 - `schook` owns lifecycle/session persistence and normalized agent state
 - ATM CLI consumes state files / hook-owned context instead of daemon socket
   state
+- ATM or hook-owned state updates replace daemon roster/session ownership
+  semantics for live members
 
 Result after Phase 2:
 
@@ -193,6 +225,16 @@ New ownership:
 - `scterm` owns attach/detach, PTY input serialization, log replay, and live
   session interaction
 - ATM integrates with `scterm` as a client/adapter instead of via daemon socket
+- worker-adapter responsibilities move to `scterm` or are retired if they are
+  daemon-specific glue only
+
+Gate condition:
+
+- `schook` gate is satisfied and Phase 2 is complete
+- `scterm` provides the required live attach/injection/session surfaces needed
+  by ATM callers
+- no required live interaction flow still depends on daemon-owned
+  `worker_adapter` behavior without an assigned replacement
 
 Result after Phase 3:
 
@@ -208,18 +250,30 @@ Daemon concern(s) removed:
 - daemon launch path
 - daemon management commands and binary packaging
 - daemon-only TUI dependency surfaces
+- daemon plugin host framework
+- daemon roster and daemon-core client/stream helper coupling
 
 Replacement:
 
 - direct ATM CLI ownership where still needed
 - `scterm` or hook-owned state where daemon calls used to exist
 - removal or delegation of daemon-specific CLI commands
+- retirement of the plugin host framework once no remaining daemon-hosted
+  plugins exist
 
 New ownership:
 
 - ATM owns mailbox/config/team-state CLI behavior only
 - launch and live-session behaviors belong to the replacement owners already
   established in Phases 2 and 3
+
+Gate condition:
+
+- Phases 1 through 3 are complete
+- no required ATM binary still calls daemon socket/client surfaces
+- no required ATM binary still depends on `atm-daemon-launch`
+- no required daemon-hosted plugin remains
+- no required TUI path still depends on daemon launch or daemon stream state
 
 Result after Phase 4:
 
@@ -298,6 +352,59 @@ Conclusion:
 - `scterm` is the right owner for live session interaction after state truth and
   observability are moved elsewhere
 
+## Additional Retirement Targets
+
+The final daemon-removal phase must explicitly retire the remaining daemon
+couplings outside `crates/atm-daemon`.
+
+Targets to retire in Phase 4:
+
+- `crates/atm-daemon-launch/`
+- `crates/atm-core/src/daemon_client.rs`
+- `crates/atm-core/src/daemon_stream.rs`
+- `crates/atm/src/commands/daemon.rs`
+- daemon-specific launch/TUI wiring such as
+  `crates/atm-tui/src/daemon_launch.rs`
+
+Worker-adapter-specific targets to move or retire across Phases 2 and 3:
+
+- `crates/atm-daemon/src/plugins/worker_adapter/agent_state.rs`
+- `crates/atm-daemon/src/plugins/worker_adapter/hook_watcher.rs`
+- `crates/atm-daemon/src/plugins/worker_adapter/capture.rs`
+- `crates/atm-daemon/src/plugins/worker_adapter/codex_tmux.rs`
+- `crates/atm-daemon/src/plugins/worker_adapter/pubsub.rs`
+- `crates/atm-daemon/src/plugins/worker_adapter/tmux_sender.rs`
+- `crates/atm-daemon/src/plugins/worker_adapter/lifecycle.rs`
+- `crates/atm-daemon/src/plugins/worker_adapter/nudge.rs`
+
+Planned ownership:
+
+- hook-watching and normalized state responsibilities move with Phase 2 to
+  `schook`
+- tmux/session interaction and live attach/injection responsibilities move with
+  Phase 3 to `scterm`
+- daemon-specific pubsub/router glue is retired in Phase 4 rather than migrated
+
+Roster retirement target:
+
+- `crates/atm-daemon/src/roster/`
+
+Planned ownership:
+
+- roster semantics move with Phase 2 to the hook/state-driven ownership model
+  or into ATM CLI-owned file/state updates, depending on the final `schook`
+  contract
+
+Plugin host retirement target:
+
+- `crates/atm-daemon/src/plugin/`
+
+Planned ownership:
+
+- no new owner is required if ci-monitor and worker-adapter responsibilities
+  have already moved out; the framework is retired in Phase 4 with the daemon
+  binary
+
 ## Open Questions
 
 1. What is the minimum ATM CLI surface that must survive unchanged for daemon
@@ -306,9 +413,7 @@ Conclusion:
    ci-monitor-owned plugin/extension surface?
 3. How much health/status parity is required across `atm status`, `atm doctor`,
    and any daemon-era JSON outputs during the observability transition?
-4. Does Phase 1 need a temporary ATM-local observability path before the final
-   adapter settles, or can the ATM adapter land directly?
-5. Which current TUI features must survive Phase 3, and which may be retired if
+4. Which current TUI features must survive Phase 3, and which may be retired if
    `scterm` provides a different live interaction model?
 
 ## Risks
@@ -323,6 +428,16 @@ runtime contract, the replacement source of truth will still be moving.
 The daemon currently does most of the logging fan-in work. Removing it without
 an ATM-owned observability adapter will create a product-wide regression, not a
 small refactor.
+
+Mitigation:
+
+- Phase 1 should use an interim compatibility shim only if needed, but the
+  default plan should be direct ATM adapter adoption rather than an additional
+  temporary logging architecture
+- ATM binaries should switch to the ATM-owned observability adapter before
+  ci-monitor or daemon-binary removal proceeds
+- status/doctor/log surfaces must be proven against the adapter before Phase 1
+  is considered complete
 
 ### Risk 3. CI Monitor Extraction Stalls Again
 
@@ -344,6 +459,13 @@ The key sequencing rule is:
 - do not start daemon binary retirement until observability fan-in, ci-monitor
   runtime, session/state truth, and live attach/injection each already have a
   replacement owner
+
+The specific sequencing answer for observability is:
+
+- do not create a long-lived temporary observability path unless the direct ATM
+  adapter migration proves too disruptive
+- the default Phase 1 plan should be to land the ATM-owned adapter directly and
+  treat that as the compatibility layer for the rest of the removal work
 
 That keeps daemon removal aligned with product ownership transfer instead of
 turning it into a large, risky internal rewrite.
