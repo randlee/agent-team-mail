@@ -296,6 +296,17 @@ contracts.
 
 ## Trait and Crate Split
 
+### Crate Inventory
+
+| Crate | Role | Notes |
+| --- | --- | --- |
+| `sc-hooks-core` | canonical types and transition engine | no provider-specific parsing, no ATM-specific behavior |
+| `sc-hooks-sdk` | provider/runtime adapter layer | owns registration, dispatch, logging integration, validation helpers |
+| `sc-hooks-session-foundation` | canonical session file ownership | lifecycle hooks and `project_root_dir` chaining |
+| `sc-hooks-agent-spawn-gates` | spawn policy and subagent gating | `PreToolUse(Agent)` only |
+| `sc-hooks-tool-output-gates` | structured tool output enforcement | reusable across providers where tool payloads are normalized |
+| `sc-hooks-atm-extension` | ATM-only enrichment and relay behavior | must not replace generic identity/state logic |
+
 ### `sc-hooks-core`
 
 Owns:
@@ -310,6 +321,59 @@ The hook trait in `sc-hooks-core` must be sealed so only `sc-hooks-sdk` can
 provide base implementations. Unsealed traits would let external crates bypass
 normalized-context and fail-open/fail-closed invariants.
 
+Proposed public API surface:
+
+```rust
+pub struct HookInvocation {
+    pub provider: ProviderKind,
+    pub raw_event_name: String,
+    pub occurred_at: DateTime<Utc>,
+    pub raw_payload: serde_json::Value,
+    pub resolved: ResolvedContext,
+}
+
+pub struct ResolvedContext {
+    pub session_id: SessionId,
+    pub active_pid: ProcessId,
+    pub parent_session_id: Option<SessionId>,
+    pub parent_active_pid: Option<ProcessId>,
+    pub project_root_dir: ProjectRootDir,
+    pub session_start_source: Option<SessionStartSource>,
+    pub agent_state: AgentState,
+    pub extension: ExtensionContext,
+}
+
+pub enum HookDecision {
+    Proceed,
+    Block { reason: String },
+    FailOpen { warning: String },
+}
+
+pub struct HookEffect {
+    pub decision: HookDecision,
+    pub state_transition: Option<StateTransition>,
+    pub log_fields: serde_json::Map<String, serde_json::Value>,
+}
+```
+
+Sealed trait surface:
+
+```rust
+pub trait HookHandler: private::Sealed {
+    fn id(&self) -> &'static str;
+    fn handles(&self, event: &HookInvocation) -> bool;
+    fn evaluate(&self, event: &HookInvocation) -> Result<HookEffect, HookError>;
+}
+```
+
+Type rules:
+
+- `SessionId`, `ProcessId`, and `ProjectRootDir` should be newtypes, not bare
+  primitives.
+- `AgentState` remains a runtime enum, not typestate.
+- `ResolvedContext` is the only context type generic handlers may rely on; they
+  must not inspect provider env directly.
+
 ### `sc-hooks-sdk`
 
 Owns:
@@ -318,6 +382,39 @@ Owns:
 - handler registration
 - standard logging integration
 - common validation helpers
+
+Proposed API responsibilities:
+
+```rust
+pub struct RuntimeRegistry {
+    pub handlers: Vec<Box<dyn RegisteredHandler>>,
+}
+
+pub trait ProviderAdapter {
+    fn parse_invocation(&self, stdin: &str, env: &HookEnv) -> Result<HookInvocation, HookError>;
+}
+
+pub fn run_hook(
+    adapter: &dyn ProviderAdapter,
+    handlers: &[Box<dyn RegisteredHandler>],
+    stdin: &str,
+    env: &HookEnv,
+) -> HookRunResult;
+```
+
+Runtime ownership:
+
+- load canonical session file
+- build `ResolvedContext`
+- execute handlers in deterministic order
+- merge `HookEffect`s
+- atomically write state
+- emit structured log record
+- serialize final hook response
+
+`sc-hooks-sdk` may expose helper builders/macros for registration, but it must
+not permit handlers to bypass `ResolvedContext`, canonical state writes, or
+standard logging.
 
 ### `sc-hooks-session-foundation`
 
@@ -329,6 +426,18 @@ Owns:
 - normalized state persistence
 - `project_root_dir` chaining
 
+Proposed API responsibilities:
+
+- create initial state record on `SessionStart`
+- update `active_pid`, `session_start_source`, and `project_root_dir`
+- apply normalized transitions for:
+  - `SessionStart`
+  - `PreCompact`
+  - `Stop`
+  - `SessionEnd`
+- mark `ended_at`
+- increment `state_revision`
+
 Fail posture: fail-open
 
 ### `sc-hooks-agent-spawn-gates`
@@ -339,6 +448,15 @@ Owns:
 - named-teammate vs background-agent rules
 - fenced JSON validation for subagent launches
 
+Proposed API responsibilities:
+
+- inspect normalized `PreToolUse(Agent)` invocation
+- resolve prompt/schema source for the target agent
+- validate structured payload contract when required
+- return `HookDecision::Block` with exact retryable errors on mismatch
+- record lineage hints (`parent_session_id`, `parent_active_pid`) for allowed
+  launches when the provider payload exposes them
+
 Fail posture: fail-closed
 
 ### `sc-hooks-tool-output-gates`
@@ -347,6 +465,12 @@ Owns:
 
 - fenced JSON validation for tool outputs / tool-call payloads that require
   strict schema conformance
+
+Proposed API responsibilities:
+
+- validate configured tool payloads or output blocks against declared schemas
+- support provider-neutral structured output enforcement
+- return exact validation failures without hiding the offending field path
 
 Fail posture: fail-closed
 
@@ -358,7 +482,27 @@ Owns:
 - ATM-specific relay fields
 - teammate-idle mapping into normalized idle
 
+Proposed API responsibilities:
+
+- resolve and persist `atm_team` / `atm_identity`
+- enrich hook logs with ATM routing fields
+- normalize `teammate_idle` to `idle`
+- preserve compatibility relay behavior needed by ATM without becoming a second
+  state engine
+
 Fail posture: fail-open
+
+### Crate Boundary Rules
+
+- `sc-hooks-core` must not depend on ATM crates, provider CLIs, or
+  `sc-observability`.
+- `sc-hooks-sdk` may depend on `sc-hooks-core` and `sc-observability`.
+- `sc-hooks-session-foundation`, `sc-hooks-agent-spawn-gates`, and
+  `sc-hooks-tool-output-gates` may depend on `sc-hooks-core` and `sc-hooks-sdk`
+  helpers only.
+- `sc-hooks-atm-extension` may depend on ATM-local configuration/identity
+  crates, but generic crates must not depend on it.
+- Provider-specific parsing belongs in adapter code, not in handler crates.
 
 ## Fenced JSON Spawn and Tool Policy
 
