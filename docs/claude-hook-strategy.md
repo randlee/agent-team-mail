@@ -22,6 +22,9 @@ document for hook-specific flow details.
 - Use hooks for fast lifecycle/activity updates.
 - Fail-open for observability hooks; fail-closed only for policy gates.
 - Keep local scripts and installed scripts behaviorally identical.
+- Treat `CLAUDE_PROJECT_DIR` as the authoritative project-root signal for Claude
+  hook execution. `SessionStart` payload stdin does not carry cwd/project-root
+  fields; root association must be established from env and then persisted.
 
 ## Hook Surface and Responsibility
 
@@ -69,6 +72,10 @@ Preferred event mapping:
 - Daemon owns live state transitions and liveness decisions.
 - Hooks provide event signals and identity/session metadata.
 - Session file data supports CLI identity resolution when shell env lacks session metadata.
+- Current ATM gap: the SessionStart session file does not yet persist the
+  authoritative `CLAUDE_PROJECT_DIR` / project-root association alongside
+  `session_id` + `pid`. The post-capture hook design pass must add that
+  association explicitly.
 
 ## Testing Strategy
 

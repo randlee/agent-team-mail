@@ -10,7 +10,7 @@ Claude Code hooks are shell/Python scripts that fire at specific lifecycle point
 
 | Hook | Scope | Trigger | Script | Purpose |
 |------|-------|---------|--------|---------|
-| `SessionStart` | Global | Session start, compact, resume | `~/.claude/scripts/session-start.py` | Announce session ID + ATM context; emit lifecycle event |
+| `SessionStart` | Global | Session start, compact, resume, clear | `~/.claude/scripts/session-start.py` | Announce session ID + ATM context; emit lifecycle event |
 | `SessionEnd` | Global | Session exits | `~/.claude/scripts/session-end.py` | Emit lifecycle event to mark session dead |
 | `PreToolUse(Task)` | Project | Every `Task` tool call | `.claude/scripts/gate-agent-spawns.py` | Enforce safe agent spawning rules |
 | `PreToolUse(Bash)` | Project | Every `Bash` tool call with `atm` command | `.claude/scripts/atm-identity-write.py` | Write hook file for PID-based identity correlation (Phase N.2) |
@@ -23,20 +23,20 @@ Claude Code hooks are shell/Python scripts that fire at specific lifecycle point
 
 **Config**: `~/.claude/settings.json`
 **Script**: `~/.claude/scripts/session-start.py`
-**Fires**: On every interactive session startup, after `/compact`, and on `--continue` resume
+**Fires**: On every interactive session startup, after `/compact`, on `--continue` / `--resume`, and after `/clear`
 **Scope**: All Claude Code sessions on this machine (global)
 
 ### What It Does
 
 Reads the `SessionStart` payload from stdin and prints to stdout (injected into context):
 
-1. **Always**: prints `SESSION_ID=<uuid> (starting fresh|returning from compact)`
+1. **Always**: prints `SESSION_ID=<uuid>` plus a short startup/compact status message
 2. **If `.atm.toml` present in cwd**: prints `ATM team: <default_team>`
 3. **If `.atm.toml` has `welcome-message`**: prints the message text
 
 Example output (injected at session start):
 ```
-SESSION_ID=23551503-3d66-475c-acf2-dfa34f9d68b5 (starting fresh)
+SESSION_ID=23551503-3d66-475c-acf2-dfa34f9d68b5 (startup)
 ATM team: atm-dev
 Welcome: Read docs/project-plan.md before starting
 ```
@@ -46,6 +46,15 @@ Welcome: Read docs/project-plan.md before starting
 **Problem**: `atm teams resume` needs the current session ID to update `leadSessionId` in team config. `CLAUDE_SESSION_ID` is set in Claude Code's process environment but is not exported to bash subshells — so the Rust binary called via Bash tool reads an empty or stale value.
 
 **Solution**: The global hook fires before any tool calls and prints the session ID directly into Claude's context window. Claude can then pass it explicitly via `atm teams resume atm-dev --session-id <id>` (or set `CLAUDE_SESSION_ID` in-process before invoking ATM).
+
+**Verified root-dir signal**:
+- `CLAUDE_PROJECT_DIR` is present at `SessionStart` hook execution time and is
+  the authoritative project-root signal for hook scripts.
+- The `SessionStart` stdin payload itself does **not** include cwd/project-root
+  fields; the current script reads only `session_id` and `source`.
+- ATM does **not** currently persist the initial session -> project-root
+  association in its session file. That is an explicit design gap for the
+  post-capture hook redesign.
 
 **Key facts about sessions**:
 - Session ID is **stable across compaction** — `/compact` does NOT change the session ID
@@ -467,7 +476,7 @@ There are two payload layers:
 | Field | Present In | Description |
 |-------|-----------|-------------|
 | `session_id` | All hooks | UUID of the calling Claude Code session |
-| `source` | `SessionStart` | Claude-native start mode: `"init"` (fresh), `"compact"` (post-compaction), `"resume"` (`--continue`) |
+| `source` | `SessionStart` | Claude-native start mode: `"startup"` (fresh), `"resume"` (`--continue`/`--resume`), `"clear"` (post-`/clear`, new session ID), `"compact"` (post-compaction) |
 | `reason` | `SessionEnd` | `"clear"`, `"logout"`, `"prompt_input_exit"`, `"bypass_permissions_disabled"`, `"other"` |
 | `transcript_path` | `SessionEnd` | Path to the session transcript JSONL file |
 | `tool_name` | `PreToolUse` | Name of the tool being called (e.g., `"Task"`) |
@@ -482,9 +491,12 @@ There are two payload layers:
 | `permission_mode` | `PreToolUse`, `TeammateIdle` | Permission mode (e.g., `"bypassPermissions"`) |
 | `hook_event_name` | All hooks | Hook type identifier (e.g., `"PreToolUse"`, `"TeammateIdle"`) |
 | `tool_use_id` | `PreToolUse` | Unique ID for the tool invocation |
+| `CLAUDE_PROJECT_DIR` | Hook process env (including `SessionStart`) | Authoritative project root for hook scripts; not carried in `SessionStart` stdin JSON |
 
 > **Important**: PreToolUse payloads do **not** include any agent/teammate identity field.
 > The only hook that provides `teammate_name` is `TeammateIdle`.
+> `SessionStart` stdin payload also does **not** include cwd/project-root fields;
+> hook scripts must read `CLAUDE_PROJECT_DIR` from env if they need the root.
 
 ### 2) ATM Daemon Socket Payload (`hook-event`)
 

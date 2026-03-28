@@ -1842,6 +1842,15 @@ when full routing context is available (`session_id` + `team` + `identity`).
 }
 ```
 
+**Verified SessionStart root-dir facts**:
+- `CLAUDE_PROJECT_DIR` is present at SessionStart hook execution time and is the
+  authoritative project-root signal for hook scripts.
+- The SessionStart stdin payload itself includes only `session_id` and `source`;
+  it does not carry cwd or project-root fields.
+- ATM does not currently record the initial session -> project-root association
+  in this file. A future hook redesign that needs canonical per-session project
+  roots must extend the file schema explicitly rather than inferring from cwd.
+
 **Rules**:
 - `pid` MUST be `os.getppid()` — the long-lived Claude session process PID, not the
   short-lived hook subprocess PID.
