@@ -16,3 +16,10 @@ Always follow this sequence for every ATM message:
 4. Immediate completion acknowledgement by receiver
 
 No silent processing.
+
+## Rust Guidance
+
+For Rust design and review work, also read:
+- `$HOME/.claude/skills/rust-best-practices/SKILL.md`
+
+Use it as the baseline for state machines, newtypes, sealed traits, structured error design, and crate-boundary review.
