@@ -1,7 +1,7 @@
 # agent-team-mail (`atm`) — Requirements Document
 
 **Version**: 0.5
-**Date**: 2026-03-10
+**Date**: 2026-03-27
 **Status**: Draft
 
 ---
@@ -22,6 +22,7 @@ This primary requirements document registers secondary source-of-truth documents
 - Daemon spawn authorization requirements: `docs/daemon-spawn-auth/requirements.md`
 - Daemon reset requirements: `docs/daemon/requirements.md`
 - Daemon reset architecture: `docs/daemon/architecture.md`
+- Hook runtime post-capture design: `docs/phase-bc-hook-runtime-design.md`
 
 All logging/OpenTelemetry requirements for ATM and companion tools are defined
 in the observability documents above. This file references that contract and
@@ -2529,6 +2530,49 @@ Failure behavior:
 - Cross-runtime install behavior (Claude/Codex/Gemini detection + per-runtime
   idempotency) MUST have deterministic tests and must not rely on interactive
   shell state.
+
+#### 4.9.5b Hook Runtime Redesign Requirements (Phase BC)
+
+Phase BC freezes the hook-runtime contract before new hook utility
+implementation lands.
+
+Normative requirements:
+
+- Hook-runtime state MUST have one authoritative on-disk JSON source of truth
+  per `session_id`; no daemon cache or temp file may become a second authority.
+- The canonical resolved root field is `project_root_dir`.
+  - For Claude, `project_root_dir` is sourced from `CLAUDE_PROJECT_DIR` at
+    `SessionStart`.
+  - `project_root_dir` MUST be persisted into the canonical session-state file
+    and reused on later hook calls.
+  - Hook handlers MUST NOT infer `project_root_dir` from cwd.
+- The minimal stable runtime association is:
+  - `session_id`
+  - `active_pid`
+  - `project_root_dir`
+- Hook-runtime logging MUST use the standardized `sc-observability` local JSONL
+  contract and MUST log 100% of hook invocations initially, including:
+  - raw hook event
+  - matched handlers
+  - handler return values
+  - state before/after
+- The hook execution path for state and logging MUST remain single-process; no
+  daemon hop may be required for correctness of hook-state persistence or hook
+  logging.
+- The normalized runtime state enum and transition table are defined in
+  `docs/phase-bc-hook-runtime-design.md` and must be treated as the
+  implementation baseline.
+- Generic hook runtime behavior and ATM-specific enrichment MUST remain split:
+  ATM team/identity fields belong in an extension section and must not replace
+  generic identity or root resolution.
+- Structured-input agent/tool gating MUST be schema-driven:
+  - the schema must live in the agent prompt contract or a sibling schema file
+    with the same stem
+  - invalid structured input MUST block with exact retryable validation errors
+
+Implementation and acceptance details for the redesign are tracked in:
+- `docs/phase-bc-hook-runtime-design.md`
+- `docs/claude-hook-strategy.md`
 
 ### 4.10 Install/Upgrade Daemon Freshness
 

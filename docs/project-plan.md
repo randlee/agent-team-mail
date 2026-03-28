@@ -1,8 +1,8 @@
 # agent-team-mail (`atm`) — Project Plan
 
 **Version**: 0.7
-**Date**: 2026-03-10
-**Status**: Phases through BA complete on the current integration branches; released phases through AV are complete (v0.45.0). Phase AW traces/metrics planning updated.
+**Date**: 2026-03-27
+**Status**: Phases through BA complete on the current integration branches; released phases through AV are complete (v0.45.0). Phase AW traces/metrics planning updated; Phase BC post-capture hook-runtime planning added.
 
 ---
 
@@ -188,6 +188,7 @@ All sprint work MUST use dedicated worktrees via `sc-git-worktree` skill. Main r
 | AW | OTel Traces + Metrics Expansion | Add native traces and metrics, Grafana dashboards/smoke, and external repo rollout on top of AV | PLANNED |
 | BA | CLI Message Management + Plugin Boundary | Fix inbox lifecycle noise, add atomic queue/ack semantics, and remove current `atm -> daemon plugin` command coupling | PLANNED |
 | BB | Daemon Reset | Remove multi-daemon support, separate config root from runtime root, collapse daemon artifacts, and rewrite daemon testing around a single-daemon model | PLANNED |
+| BC | Hook Runtime State + Gate Contracts | Freeze the post-capture hook runtime contract, then implement canonical session-state, logging, spawn/tool gates, and ATM hook extensions without daemon-critical-path coupling | PLANNED |
 
 ---
 
@@ -2673,6 +2674,93 @@ gaps before transitioning to post-AF phase work.
 | AF.4 | Cleanup Preview + tmux Sentinel | [#528](https://github.com/randlee/agent-team-mail/pull/528) | `feature/pAF-s4-cleanup-sentinel` | #373, #45 | COMPLETE |
 | AF.5 | Reliability Regression + Documentation Closure | [#529](https://github.com/randlee/agent-team-mail/pull/529) | `feature/pAF-s5-reliability-closeout` | #448, #449, #393, #394, #456, #373, #45 | COMPLETE |
 
+## Phase BB: Daemon Reset — PLANNED
+
+**Goal**: remove multi-daemon support, separate config root from runtime root,
+collapse daemon runtime artifacts to a minimal authoritative set, and replace
+the current daemon test model with a simpler single-daemon strategy.
+
+**Integration branch**: `integrate/phase-BB`
+
+**Prerequisites**: `develop` at `103bd127` or later, with Phases through BA
+merged to `develop`.
+
+**Dependency graph**: `BB.0 -> BB.1 -> BB.2 -> BB.3 -> BB.4` (serial). `BB.3`
+must not land on the phase branch unless the BB.4 compatibility/test changes
+required by PID-file removal are present on the same integration head.
+
+**Design references**:
+- `docs/daemon/requirements.md`
+- `docs/daemon/architecture.md`
+- `docs/phase-bb-daemon-reset.md`
+
+| Sprint | Name | Goal | Branch |
+|--------|------|------|--------|
+| BB.0 | Dead Code Cleanup | Remove obviously dead atm-core / daemon code before the structural reset so later sprints do not preserve obsolete surfaces | `feature/pBB-s0-dead-code-cleanup` |
+| BB.1 | Path Separation | Stop resolving team config from `ATM_HOME`; introduce explicit config-root vs runtime-root APIs and migrate callers | `feature/pBB-s1-path-separation` |
+| BB.2 | Single-Daemon Model Collapse | Remove multi-daemon ownership/runtime-mode support and simplify daemon admission/ownership to one system daemon model | `feature/pBB-s2-single-daemon` |
+| BB.3 | Artifact Collapse + Transactional Startup | Remove redundant daemon artifacts, remove production-dead daemon plugin surfaces, make startup publish state only after readiness, and make restart/cleanup symmetric | `feature/pBB-s3-artifact-collapse` |
+| BB.4 | Test Model Rewrite + Final Deletion | Rewrite daemon tests for serialized/shared-fixture execution and delete obsolete multi-daemon code/docs/env paths | `feature/pBB-s4-test-rewrite-cleanup` |
+
+**Acceptance criteria**:
+1. Team config no longer resolves from `ATM_HOME`.
+2. Multi-daemon support is removed from active daemon requirements and implementation.
+3. Dead-code cleanup identified in BB.0 is complete and obsolete surfaces are not carried into later sprints.
+4. Daemon startup failure leaves no misleading live-daemon state behind.
+5. Stop/restart removes all daemon-owned runtime artifacts deterministically.
+6. Dogfood daemon start/restart/stop passes repeatedly on a clean machine/home under the simplified model and follows the canonical Phase AR smoke protocol.
+7. Net phase outcome is deletion-heavy: daemon complexity and documentation are materially smaller than before Phase BB.
+
+## Phase BC: Hook Runtime State + Gate Contracts — PLANNED
+
+**Goal**: convert the completed Claude hook harness and capture evidence into an
+implementation-ready hook-runtime design, then land the generic hook runtime and
+ATM extension in a way that preserves one source of truth for state and one
+structured logging path for every hook invocation.
+
+**Integration branch**: `integrate/phase-BC`
+
+**Design references**:
+- `docs/phase-bc-hook-runtime-design.md`
+- `docs/claude-hook-strategy.md`
+- `docs/requirements.md`
+- `docs/observability/requirements.md`
+- `docs/observability/architecture.md`
+
+**Prerequisites**:
+- Phase N harness lineage and later harness/capture follow-ons are merged
+- Claude harness evidence includes `SessionStart`, `PreCompact`,
+  `PreToolUse(Agent)`, `PermissionRequest`, `Stop`, and `SessionEnd`
+- `CLAUDE_PROJECT_DIR` at `SessionStart` is treated as the authoritative
+  provider root signal
+
+**Dependency graph**: `BC.0 -> BC.1 -> BC.2 -> {BC.3, BC.4}`. `BC.3` and
+`BC.4` may run in parallel once `BC.2` is complete.
+
+| Sprint | Name | Goal | Branch |
+|--------|------|------|--------|
+| BC.0 | Post-Capture Design Freeze | Freeze canonical session-state schema, normalized state transitions, hook execution path, logging contract, and crate boundaries before implementation resumes | `planning/pBC-s0-design-freeze` |
+| BC.1 | Session Foundation | Implement canonical hook session-state file ownership, `project_root_dir` chaining, and lifecycle handling for `SessionStart`, `SessionEnd`, `PreCompact`, and `Stop` | `feature/pBC-s1-session-foundation` |
+| BC.2 | Logging + Lineage | Integrate hook logging with `sc-observability`, add parent/child linkage fields, and guarantee mandatory per-hook structured logging | `feature/pBC-s2-logging-lineage` |
+| BC.3 | Agent Spawn + Tool Output Gates | Implement `PreToolUse(Agent)` policy checks, fenced JSON schema validation, and deterministic retryable block errors | `feature/pBC-s3-gates` |
+| BC.4 | ATM Hook Extension | Implement ATM-specific team/identity enrichment, teammate-idle normalization, and ATM relay behavior as a separate extension crate | `feature/pBC-s4-atm-extension` |
+
+### Phase BC Success Criteria
+
+1. Hook-runtime state has one authoritative on-disk source of truth per
+   `session_id`.
+2. The minimal stable runtime association
+   (`session_id + active_pid + project_root_dir`) is persisted at
+   `SessionStart` and reused for all later hook calls.
+3. Hook-runtime correctness for state and logging does not require a daemon
+   round-trip.
+4. Every hook invocation emits structured logging through `sc-observability`
+   with raw event, handlers, results, and state before/after.
+5. `PreToolUse(Agent)` and tool-output schema gates block malformed structured
+   input with exact retryable errors.
+6. ATM-specific behavior lives in a separate extension crate and does not
+   replace generic identity, state, or root resolution rules.
+
 ## 24. Scrum Master Agent Prompt
 
 ```
@@ -2722,43 +2810,6 @@ You are the Scrum Master for the agent-team-mail (atm) project.
 
 ---
 
-## Phase BB: Daemon Reset — PLANNED
-
-**Goal**: remove multi-daemon support, separate config root from runtime root,
-collapse daemon runtime artifacts to a minimal authoritative set, and replace
-the current daemon test model with a simpler single-daemon strategy.
-
-**Integration branch**: `integrate/phase-BB`
-
-**Prerequisites**: `develop` at `103bd127` or later, with Phases through BA
-merged to `develop`.
-
-**Dependency graph**: `BB.0 -> BB.1 -> BB.2 -> BB.3 -> BB.4` (serial). `BB.3`
-must not land on the phase branch unless the BB.4 compatibility/test changes
-required by PID-file removal are present on the same integration head.
-
-**Design references**:
-- `docs/daemon/requirements.md`
-- `docs/daemon/architecture.md`
-- `docs/phase-bb-daemon-reset.md`
-
-| Sprint | Name | Goal | Branch |
-|--------|------|------|--------|
-| BB.0 | Dead Code Cleanup | Remove obviously dead atm-core / daemon code before the structural reset so later sprints do not preserve obsolete surfaces | `feature/pBB-s0-dead-code-cleanup` |
-| BB.1 | Path Separation | Stop resolving team config from `ATM_HOME`; introduce explicit config-root vs runtime-root APIs and migrate callers | `feature/pBB-s1-path-separation` |
-| BB.2 | Single-Daemon Model Collapse | Remove multi-daemon ownership/runtime-mode support and simplify daemon admission/ownership to one system daemon model | `feature/pBB-s2-single-daemon` |
-| BB.3 | Artifact Collapse + Transactional Startup | Remove redundant daemon artifacts, remove production-dead daemon plugin surfaces, make startup publish state only after readiness, and make restart/cleanup symmetric | `feature/pBB-s3-artifact-collapse` |
-| BB.4 | Test Model Rewrite + Final Deletion | Rewrite daemon tests for serialized/shared-fixture execution and delete obsolete multi-daemon code/docs/env paths | `feature/pBB-s4-test-rewrite-cleanup` |
-
-**Acceptance criteria**:
-1. Team config no longer resolves from `ATM_HOME`.
-2. Multi-daemon support is removed from active daemon requirements and implementation.
-3. Dead-code cleanup identified in BB.0 is complete and obsolete surfaces are not carried into later sprints.
-4. Daemon startup failure leaves no misleading live-daemon state behind.
-5. Stop/restart removes all daemon-owned runtime artifacts deterministically.
-6. Dogfood daemon start/restart/stop passes repeatedly on a clean machine/home under the simplified model and follows the canonical Phase AR smoke protocol.
-7. Net phase outcome is deletion-heavy: daemon complexity and documentation are materially smaller than before Phase BB.
-
 ## Communication
 
 - Use TaskCreate/TaskUpdate to track sprint tasks
@@ -2769,5 +2820,5 @@ required by PID-file removal are present on the same integration head.
 ---
 
 **Document Version**: 0.7
-**Last Updated**: 2026-03-10
+**Last Updated**: 2026-03-27
 **Maintained By**: Claude (ARCH-ATM)

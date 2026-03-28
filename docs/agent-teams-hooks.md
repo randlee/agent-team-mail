@@ -12,7 +12,7 @@ Claude Code hooks are shell/Python scripts that fire at specific lifecycle point
 |------|-------|---------|--------|---------|
 | `SessionStart` | Global | Session start, compact, resume, clear | `~/.claude/scripts/session-start.py` | Announce session ID + ATM context; emit lifecycle event |
 | `SessionEnd` | Global | Session exits | `~/.claude/scripts/session-end.py` | Emit lifecycle event to mark session dead |
-| `PreToolUse(Task)` | Project | Every `Task` tool call | `.claude/scripts/gate-agent-spawns.py` | Enforce safe agent spawning rules |
+| `PreToolUse(Task)` | Project | Every current ATM `Task` tool call | `.claude/scripts/gate-agent-spawns.py` | Enforce safe agent spawning rules |
 | `PreToolUse(Bash)` | Project | Every `Bash` tool call with `atm` command | `.claude/scripts/atm-identity-write.py` | Write hook file for PID-based identity correlation (Phase N.2) |
 | `PostToolUse(Bash)` | Project | After every `Bash` tool call | `.claude/scripts/atm-identity-cleanup.py` | Delete hook file after tool completes (Phase N.2) |
 | `TeammateIdle` | Project | Teammate goes idle | `.claude/scripts/teammate-idle-relay.py` | Relay idle lifecycle event to daemon |
@@ -130,6 +130,11 @@ This enables:
 **Script**: `.claude/scripts/gate-agent-spawns.py`
 **Fires**: Before every `Task` tool call
 **Scope**: This project only (all interactive sessions in this directory)
+
+> **Post-capture design note**: modern Claude harness captures show the spawn
+> surface as `PreToolUse` with `tool_name = "Agent"`, not `Task`. This document
+> describes the current ATM script/config shape; Phase BC planning normalizes
+> the redesign on `Agent` as the authoritative modern surface.
 
 ### What It Does
 
