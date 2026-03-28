@@ -118,6 +118,21 @@ identity resolution.
 - Hook logging remains mandatory for every invocation even when no session-state
   write occurs
 
+### Storage Root Resolution
+
+- The runtime root env var is `ATM_HOME`.
+- Path resolution must follow the standard ATM home lookup:
+  1. non-empty `ATM_HOME`
+  2. platform home directory from the canonical ATM home resolver
+- The canonical BC session-state directory is:
+  - `<atm_home>/.atm/hooks/state/sessions/`
+- The canonical BC hook-log directory remains owned by `sc-observability`; hook
+  state must not invent a second log root.
+- All paths must be constructed with path-join APIs, not string concatenation.
+- Hardcoded absolute paths, `/tmp`, and Unix-only separators are forbidden.
+- Cross-platform path behavior must follow
+  [cross-platform-guidelines.md](/Users/randlee/Documents/github/agent-team-mail-worktrees/planning/s9-post-capture-design/docs/cross-platform-guidelines.md).
+
 ### Canonical Schema
 
 ```json
@@ -190,6 +205,22 @@ The normalized runtime enum is:
 - `ended`
 
 This is a runtime enum, not typestate.
+
+### Design Decision: State Representation
+
+BC uses a runtime enum for `agent_state`, not typestate.
+
+Why:
+
+- `agent_state` must round-trip through JSON persistence.
+- Hook invocations are separate OS processes, so compile-time typestate cannot
+  represent persisted cross-process lifecycle.
+- Observability, replay, and recovery all need a serializable state value.
+
+Constraint:
+
+- state transitions are still restricted to validated transition functions in
+  `sc-hooks-core`; handlers do not mutate enum values directly.
 
 ### Transition Table
 
@@ -336,6 +367,18 @@ normalized-context and fail-open/fail-closed invariants.
 Proposed public API surface:
 
 ```rust
+pub enum ProviderKind {
+    Claude,
+    Codex,
+    Gemini,
+    Cursor,
+    OpenCode,
+}
+
+pub struct SessionId(String);
+pub struct ActivePid(u32);
+pub struct ProjectRootDir(PathBuf);
+
 pub struct HookInvocation {
     pub provider: ProviderKind,
     pub raw_event_name: String,
@@ -346,9 +389,9 @@ pub struct HookInvocation {
 
 pub struct ResolvedContext {
     pub session_id: SessionId,
-    pub active_pid: ProcessId,
+    pub active_pid: ActivePid,
     pub parent_session_id: Option<SessionId>,
-    pub parent_active_pid: Option<ProcessId>,
+    pub parent_active_pid: Option<ActivePid>,
     pub project_root_dir: ProjectRootDir,
     pub session_start_source: Option<SessionStartSource>,
     pub agent_state: AgentState,
@@ -366,11 +409,34 @@ pub struct HookEffect {
     pub state_transition: Option<StateTransition>,
     pub log_fields: serde_json::Map<String, serde_json::Value>,
 }
+
+pub enum HookError {
+    InvalidPayload { message: String },
+    InvalidContext { message: String },
+    StateIo { message: String },
+    Validation { message: String },
+    Internal { message: String },
+}
+
+pub struct StateTransition {
+    pub next_state: AgentState,
+    pub reason: String,
+}
+
+pub struct ExtensionContext {
+    pub atm_team: Option<String>,
+    pub atm_identity: Option<String>,
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
 ```
 
 Sealed trait surface:
 
 ```rust
+mod private {
+    pub trait Sealed {}
+}
+
 pub trait HookHandler: private::Sealed {
     fn id(&self) -> &'static str;
     fn handles(&self, event: &HookInvocation) -> bool;
@@ -378,10 +444,28 @@ pub trait HookHandler: private::Sealed {
 }
 ```
 
-Type rules:
+### Sealed Trait Implementation
 
-- `SessionId`, `ProcessId`, and `ProjectRootDir` should be newtypes, not bare
-  primitives.
+- `private::Sealed` lives in `sc-hooks-core` next to `HookHandler` and is not
+  re-exported.
+- `sc-hooks-sdk` owns the concrete built-in handler wrappers and may provide
+  blanket impls for SDK-owned registration helpers only.
+- External plugin executables do not implement `HookHandler` directly. They
+  communicate with the runtime through normalized JSON contracts and provider
+  process boundaries.
+- This seal is part of the public API freeze; unsealed trait adoption would be
+  a future breaking change.
+
+### Type Safety: Identity Types
+
+- `SessionId`, `ActivePid`, and `ProjectRootDir` are mandatory newtypes, not
+  bare primitives.
+- Each newtype validates at construction time:
+  - `SessionId`: non-empty, provider-compatible session token
+  - `ActivePid`: positive long-lived process PID
+  - `ProjectRootDir`: absolute normalized path
+- Identity newtypes must not implement `Deref` to their inner types.
+- Conversion back to primitive/string/path forms must be explicit.
 - `AgentState` remains a runtime enum, not typestate.
 - `ResolvedContext` is the only context type generic handlers may rely on; they
   must not inspect provider env directly.
@@ -398,6 +482,16 @@ Owns:
 Proposed API responsibilities:
 
 ```rust
+pub struct HookEnv {
+    pub vars: BTreeMap<String, String>,
+}
+
+pub trait RegisteredHandler {
+    fn id(&self) -> &'static str;
+    fn handles(&self, event: &HookInvocation) -> bool;
+    fn evaluate(&self, event: &HookInvocation) -> Result<HookEffect, HookError>;
+}
+
 pub struct RuntimeRegistry {
     pub handlers: Vec<Box<dyn RegisteredHandler>>,
 }
@@ -412,6 +506,12 @@ pub fn run_hook(
     stdin: &str,
     env: &HookEnv,
 ) -> HookRunResult;
+
+pub struct HookRunResult {
+    pub response_json: serde_json::Value,
+    pub final_decision: HookDecision,
+    pub state_changed: bool,
+}
 ```
 
 Runtime ownership:
@@ -427,6 +527,21 @@ Runtime ownership:
 `sc-hooks-sdk` may expose helper builders/macros for registration, but it must
 not permit handlers to bypass `ResolvedContext`, canonical state writes, or
 standard logging.
+
+### Logging Bridge
+
+- `HookEffect.log_fields` is additive structured metadata supplied by the
+  handler.
+- `sc-hooks-sdk` owns the bridge that merges:
+  - required per-invocation fields
+  - canonical state before/after fields
+  - ordered handler result summaries
+  - `HookEffect.log_fields`
+- Handler-provided `log_fields` may add namespaced fields, but may not override
+  required canonical keys such as `session_id`, `active_pid`,
+  `project_root_dir`, `hook_event`, or `state_revision`.
+- The merged record is what `sc-observability` receives as the canonical hook
+  log event payload.
 
 ### `sc-hooks-session-foundation`
 
@@ -515,6 +630,19 @@ Fail posture: fail-open
 - `sc-hooks-atm-extension` may depend on ATM-local configuration/identity
   crates, but generic crates must not depend on it.
 - Provider-specific parsing belongs in adapter code, not in handler crates.
+
+### Error Posture Matrix
+
+| Crate | Error posture | Canonical error type |
+| --- | --- | --- |
+| `sc-hooks-core` | library only | `HookError` / typed variants only |
+| `sc-hooks-sdk` | mixed by merged handler decision | `HookError` / `HookRunResult` only |
+| `sc-hooks-session-foundation` | fail-open | `HookError` |
+| `sc-hooks-agent-spawn-gates` | fail-closed | `HookError` |
+| `sc-hooks-tool-output-gates` | fail-closed | `HookError` |
+| `sc-hooks-atm-extension` | fail-open | `HookError` |
+
+`anyhow` is not part of the public hook-runtime API surface.
 
 ## Fenced JSON Spawn and Tool Policy
 
