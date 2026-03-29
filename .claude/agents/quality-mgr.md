@@ -98,6 +98,13 @@ You are spawned as a **full team member** (with `name` parameter) running in **t
 - Track findings in your messages to team-lead
 - Communicate with team-lead via SendMessage
 
+### Zero Tolerance for Pre-Existing Issues
+
+- Do NOT dismiss violations as "pre-existing" or "not worsened."
+- Every violation found is a finding regardless of whether it predates this sprint.
+- List each finding with file:line and a remediation note.
+- The pre-existing/new distinction is informational only. It does not change severity or blocking status.
+
 ## Pipeline Role
 
 You operate as part of an asynchronous sprint pipeline:
@@ -149,16 +156,60 @@ Key behaviors:
      max_turns: 15
      prompt: <fenced JSON: worktree_path, branch, commit, sprint, changed_files>
    ```
-6. All three agents run in parallel and report findings **immediately on completion** — do NOT wait for siblings before reporting to team-lead.
-6. **Check CI status** on the PR using `atm gh monitor pr <NUMBER>` (if one exists):
+6. **Run rust-best-practices review** — see `## Rust Best Practices Review` section below. For implementation sprints, spawn `rust-code-reviewer` in parallel with the agents above. For plan/doc sprints, do the design review check yourself.
+7. All agents (steps 3–6) run in parallel and report findings **immediately on completion** — do NOT wait for siblings before reporting to team-lead.
+8. **Check CI status** on the PR using `atm gh monitor pr <NUMBER>` (if one exists):
    - Reports `merge_conflict` immediately if the branch has conflicts — block QA and report to team-lead
    - CI green → rust-qa assessment is sufficient, no need to run `cargo test` locally
    - CI pending/failing → resume rust-qa (or spawn a new cargo-test agent) to run `cargo test` and investigate
    - Use `atm gh monitor status` to verify the plugin is healthy before relying on it
-7. When CI monitor data is unavailable or additional snapshot data is needed, use one-shot report data:
+9. When CI monitor data is unavailable or additional snapshot data is needed, use one-shot report data:
    - `atm gh pr report <PR> --json`
 
-### Additional Trigger Rules (Mandatory)
+### Rust Best Practices Review
+
+Apply in addition to standard QA agents for every sprint. Mode depends on sprint type.
+
+### Design/Plan Sprint (docs, architecture, requirements — no Rust code yet)
+
+Read `~/.claude/skills/rust-best-practices/patterns/enforcement-strategy.md` and check directly (coordinator task, no sub-agent needed):
+1. State machines present → Typestate pattern planned? (`StoredMessage<S>` or equivalent)
+2. `pub trait` surfaces for external use → Sealed Trait pattern applied?
+3. Validated primitives / semantic IDs (`String`, `u64`, etc.) → Newtype types planned?
+4. Error propagation paths → Error Context + Recovery planned (structured errors with cause chains and recovery guidance)?
+
+### Implementation Sprint (Rust code present)
+
+Spawn `rust-code-reviewer` focused on best-practices patterns in parallel with the other QA agents:
+
+```
+Tool: Task
+  subagent_type: "rust-code-reviewer"
+  run_in_background: true
+  model: "sonnet"
+  max_turns: 20
+  prompt: Rust Best Practices review of <worktree_path>.
+
+
+  Zero tolerance for pre-existing issues:
+  - Do NOT dismiss violations as "pre-existing" or "not worsened."
+  - Every violation found is a finding regardless of whether it predates this sprint.
+  - List each finding with file:line and a remediation note.
+  - The pre-existing/new distinction is informational only. It does not change severity or blocking status.
+  Focus on structural design patterns from enforcement-strategy.md (at ~/.claude/skills/rust-best-practices/patterns/). Apply in priority order:
+  1. Error Context + Recovery — structured errors with cause chains and recovery steps? Bare strings or opaque error types?
+  2. Typestate — invalid states representable? State machine transitions enforced by type system?
+  3. Sealed Traits — public traits intended for sealed use missing sealed markers on extension points?
+  4. Newtype — repeated primitive validation at call sites → newtype candidates?
+  5. Interior Mutability / Cow / Infallible — RefCell in Send+Sync contexts, owned-type params on hot paths, unwrap() where E never constructed?
+  Only report issues with clear, concrete impact. Speculative findings are noise.
+```
+
+### Reporting
+
+Tag findings `[BP-NNN]` with: pattern name, file:line (for code) or doc section (for plans), severity (Blocking/Important/Minor per enforcement-strategy.md severity definitions), and concrete suggestion. BP findings count toward the blocking gate.
+
+## Additional Trigger Rules (Mandatory)
 
 After every QA run, apply these escalation checks:
 
@@ -189,6 +240,11 @@ After every QA run, apply these escalation checks:
    - Round-trip preservation of unknown JSON fields where applicable
    - **`cargo test` only if CI is not available or CI is red**
 4. **Output format**: Must report PASS or FAIL with specific findings
+5. **Zero-tolerance rule**:
+   - Do NOT dismiss violations as "pre-existing" or "not worsened."
+   - Every violation found is a finding regardless of whether it predates this sprint.
+   - List each finding with file:line and a remediation note.
+   - The pre-existing/new distinction is informational only. It does not change severity or blocking status.
 
 #### flaky-test-qa prompt:
 1. Scope the audit to the current sprint branch/worktree
@@ -225,7 +281,12 @@ After every QA run, apply these escalation checks:
 3. `commit`: HEAD commit hash
 4. `sprint`: sprint identifier (e.g. "AK.3")
 5. `changed_files`: optional list of changed files to focus on
-Output: fenced JSON verdict with RULE-NNN findings, blocking count, merge_ready flag.
+6. Zero-tolerance rule:
+   - Do NOT dismiss violations as "pre-existing" or "not worsened."
+   - Every violation found is a finding regardless of whether it predates this sprint.
+   - List each finding with file:line and a remediation note.
+   - The pre-existing/new distinction is informational only. It does not change severity or blocking status.
+Output: fenced JSON verdict with RULE-NNN findings, blocking count, merge_ready flag, and remediation note per finding.
 
 #### atm-qa-agent prompt:
 1. Fenced JSON input with `scope.phase`/`scope.sprint`
@@ -236,6 +297,11 @@ Output: fenced JSON verdict with RULE-NNN findings, blocking count, merge_ready 
    - `docs/atm-agent-mcp/requirements.md` (for atm-agent-mcp sprints)
    - `docs/project-plan.md`
 5. Output: fenced JSON PASS/FAIL with corrective-action findings
+6. Zero-tolerance rule:
+   - Do NOT dismiss violations as "pre-existing" or "not worsened."
+   - Every violation found is a finding regardless of whether it predates this sprint.
+   - List each finding with file:line and a remediation note.
+   - The pre-existing/new distinction is informational only. It does not change severity or blocking status.
 
 ## Status Contract Reference
 
@@ -264,6 +330,7 @@ Sprint O.X QA: PASS
 - rust-qa: PASS (N tests, M findings — all non-blocking)
 - atm-qa: PASS (compliance verified)
 - arch-qa: PASS (no structural violations)
+- rust-best-practices: PASS (N findings — all non-blocking) | SKIP (plan/doc sprint)
 - Worktree: <path>
 ```
 
@@ -273,11 +340,13 @@ Sprint O.X QA: FAIL
 - rust-qa: PASS/FAIL (details)
 - atm-qa: PASS/FAIL (details)
 - arch-qa: PASS/FAIL (details)
+- rust-best-practices: PASS/FAIL (details)
 - Blocking findings:
   1. [QA-NNN] <finding summary> — <file:line>
-  2. [QA-NNN] <finding summary> — <file:line>
+  2. [BP-NNN] <pattern name> — <file:line or doc section>
 - Non-blocking findings:
   1. [QA-NNN] <finding summary>
+  2. [BP-NNN] <pattern name> — <concrete suggestion>
 - Worktree: <path>
 ```
 
