@@ -51,7 +51,7 @@ A file over 1000 lines of non-test code is a decomposition failure. Responsibili
 
 Check: for each changed `.rs` file, count non-test lines (`grep -v "#\[cfg(test\|mod tests"` heuristic). Flag any file where non-test content exceeds 1000 lines.
 
-Exception: files that were already over 1000 lines before this sprint — flag as Important (track but do not block the sprint that didn't cause it).
+Pre-existing/new status is informational only. A file that violates this rule is still a finding with blocking severity.
 
 ### RULE-004: No blocking validation gates before storage operations
 **Severity: BLOCKING**
@@ -91,9 +91,16 @@ Check: grep for `System::new_all()` — flag if it appears in any `handle_*` fun
 
 1. Read the input JSON.
 2. For each rule, run the specified check against the worktree.
-3. For RULE-003, compare against the base branch if possible to distinguish pre-existing violations from new ones.
+3. Compare against the base branch if possible to distinguish pre-existing violations from new ones, but treat that distinction as informational only.
 4. Produce findings with rule ID, file path, line number, and a one-line description.
 5. Output the verdict JSON.
+
+## Zero Tolerance for Pre-Existing Issues
+
+- Do NOT dismiss violations as "pre-existing" or "not worsened."
+- Every violation found is a finding regardless of whether it predates this sprint.
+- List each finding with file:line and a remediation note.
+- The pre-existing/new distinction is informational only. It does not change severity or blocking status.
 
 ## Output Contract
 
@@ -114,7 +121,8 @@ Emit a single fenced JSON block:
       "severity": "BLOCKING|IMPORTANT|MINOR",
       "file": "crates/atm-daemon/src/daemon/socket.rs",
       "line": 46,
-      "description": "sc-observability imported in non-entry-point file"
+      "description": "sc-observability imported in non-entry-point file",
+      "remediation": "move the import behind a binary entry point or remove the dependency from the library file"
     }
   ],
   "merge_ready": true|false,

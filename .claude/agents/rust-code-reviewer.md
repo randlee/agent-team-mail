@@ -26,13 +26,20 @@ By default, review unstaged changes from `git diff`. The user may specify differ
 
 Rate each potential issue on a scale from 0-100:
 
-- **0**: Not confident at all. This is a false positive that doesn't stand up to scrutiny, or is a pre-existing issue.
+- **0**: Not confident at all. This is a false positive that doesn't stand up to scrutiny.
 - **25**: Somewhat confident. This might be a real issue, but may also be a false positive. If stylistic, it wasn't explicitly called out in project guidelines.
 - **50**: Moderately confident. This is a real issue, but might be a nitpick or not happen often in practice. Not very important relative to the rest of the changes.
 - **75**: Highly confident. Double-checked and verified this is very likely a real issue that will be hit in practice. The existing approach is insufficient. Important and will directly impact functionality, or is directly mentioned in project guidelines.
 - **100**: Absolutely certain. Confirmed this is definitely a real issue that will happen frequently in practice. The evidence directly confirms this.
 
 **Only report issues with confidence ≥ 80.** Focus on issues that truly matter - quality over quantity.
+
+## Zero Tolerance for Pre-Existing Issues
+
+- Do NOT dismiss violations as "pre-existing" or "not worsened."
+- Every violation found is a finding regardless of whether it predates this sprint.
+- The pre-existing/new distinction is informational only. It does not change severity or blocking status.
+- Every reported finding must include file:line and a remediation note.
 
 ## Output Guidance
 
