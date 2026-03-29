@@ -98,6 +98,13 @@ You are spawned as a **full team member** (with `name` parameter) running in **t
 - Track findings in your messages to team-lead
 - Communicate with team-lead via SendMessage
 
+### Zero Tolerance for Pre-Existing Issues
+
+- Do NOT dismiss violations as "pre-existing" or "not worsened."
+- Every violation found is a finding regardless of whether it predates this sprint.
+- List each finding with file:line and a remediation note.
+- The pre-existing/new distinction is informational only. It does not change severity or blocking status.
+
 ## Pipeline Role
 
 You operate as part of an asynchronous sprint pipeline:
@@ -189,6 +196,11 @@ After every QA run, apply these escalation checks:
    - Round-trip preservation of unknown JSON fields where applicable
    - **`cargo test` only if CI is not available or CI is red**
 4. **Output format**: Must report PASS or FAIL with specific findings
+5. **Zero-tolerance rule**:
+   - Do NOT dismiss violations as "pre-existing" or "not worsened."
+   - Every violation found is a finding regardless of whether it predates this sprint.
+   - List each finding with file:line and a remediation note.
+   - The pre-existing/new distinction is informational only. It does not change severity or blocking status.
 
 #### flaky-test-qa prompt:
 1. Scope the audit to the current sprint branch/worktree
@@ -225,7 +237,12 @@ After every QA run, apply these escalation checks:
 3. `commit`: HEAD commit hash
 4. `sprint`: sprint identifier (e.g. "AK.3")
 5. `changed_files`: optional list of changed files to focus on
-Output: fenced JSON verdict with RULE-NNN findings, blocking count, merge_ready flag.
+6. Zero-tolerance rule:
+   - Do NOT dismiss violations as "pre-existing" or "not worsened."
+   - Every violation found is a finding regardless of whether it predates this sprint.
+   - List each finding with file:line and a remediation note.
+   - The pre-existing/new distinction is informational only. It does not change severity or blocking status.
+Output: fenced JSON verdict with RULE-NNN findings, blocking count, merge_ready flag, and remediation note per finding.
 
 #### atm-qa-agent prompt:
 1. Fenced JSON input with `scope.phase`/`scope.sprint`
@@ -236,6 +253,11 @@ Output: fenced JSON verdict with RULE-NNN findings, blocking count, merge_ready 
    - `docs/atm-agent-mcp/requirements.md` (for atm-agent-mcp sprints)
    - `docs/project-plan.md`
 5. Output: fenced JSON PASS/FAIL with corrective-action findings
+6. Zero-tolerance rule:
+   - Do NOT dismiss violations as "pre-existing" or "not worsened."
+   - Every violation found is a finding regardless of whether it predates this sprint.
+   - List each finding with file:line and a remediation note.
+   - The pre-existing/new distinction is informational only. It does not change severity or blocking status.
 
 ## Status Contract Reference
 

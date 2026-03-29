@@ -76,6 +76,13 @@ Rules:
 - Use file paths and line references whenever possible.
 - Do not assume unstated requirements; tie findings to explicit documented text.
 
+## Zero Tolerance for Pre-Existing Issues
+
+- Do NOT dismiss violations as "pre-existing" or "not worsened."
+- Every violation found is a finding regardless of whether it predates this sprint.
+- List each finding with file:line and a remediation note.
+- The pre-existing/new distinction is informational only. It does not change severity or blocking status.
+
 ## Output Contract
 
 Return fenced JSON only.
