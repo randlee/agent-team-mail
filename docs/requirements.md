@@ -580,7 +580,7 @@ atm read --all                   # read all messages (not just unread)
 - When reading your own inbox (no agent argument), identity resolution order is:
   1. `--as <name>` (explicit reader identity)
   2. `ATM_IDENTITY`
-  3. `.atm.toml [core].identity` when it resolves to a concrete team member
+  3. `.atm.toml [atm].identity` when it resolves to a concrete team member
 - If identity remains unresolved, `atm read` must fail with an actionable error and must not silently default to `human`.
 
 #### `atm inbox`
@@ -1627,7 +1627,7 @@ Additional config-path override:
 #### Configuration File (`.atm.toml`)
 
 ```toml
-[core]
+[atm]
 default_team = "backend-ci-team"    # default team for commands
 identity = "team-lead"              # from field on sent messages
 
@@ -1643,17 +1643,12 @@ timestamps = "relative"             # relative | absolute | iso8601
 arch-atm = "team-lead"   # alias-name → inbox-identity mapping
                          # used as shorthand when the actual identity name is long or changes
 
-[roles]
-team-lead = "arch-atm"   # role-name → inbox-identity mapping
-                         # roles take precedence over aliases in resolution order
-                         # resolution order: roles → aliases → literal fallback
-
 [team."backend-ci-team"]
 spawn_policy = "leaders-only"       # leaders-only | any-member
 co_leaders = ["arch-atm", "quality-mgr"]
 ```
 
-**Identity resolution**: The `[aliases]` and `[roles]` tables allow symbolic names to route to actual inbox identities. Resolution order: `[roles]` first (for semantic role names), then `[aliases]` (for stable shorthand), then literal fallback. Resolution is non-recursive and case-sensitive.
+**Identity resolution**: The `[aliases]` table allows symbolic names to route to actual inbox identities. Resolution order: `[aliases]` first (for stable shorthand), then literal fallback. Resolution is non-recursive and case-sensitive.
 
 **Spawn authorization defaults**:
 - `spawn_policy` defaults to `leaders-only` when omitted.
