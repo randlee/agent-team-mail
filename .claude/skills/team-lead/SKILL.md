@@ -89,10 +89,43 @@ When assigning work to any teammate:
    - The task and its scope (link to worktree, relevant issues, design docs)
    - Applicable development guidelines (`docs/cross-platform-guidelines.md`, Rust guidelines, etc.)
    - Expected deliverables and acceptance criteria
-3. **Use Jinja2 templates** (see `/codex-orchestration` skill) that require:
-   - **Immediate ACK** when the agent starts the skill
-   - **Intermediate status** notifications at meaningful milestones
-   - **Completion notification** with commit/PR reference when done
+3. **Render all task messages via `sc-compose`** from a Jinja2 template (see `/codex-orchestration` skill). Never hand-write prose for task assignments.
+
+### Template Rendering with sc-compose
+
+All dev and QA assignments MUST be rendered via `sc-compose` before sending:
+
+```bash
+# Dev assignment
+sc-compose render .claude/skills/codex-orchestration/dev-template.xml.j2 \
+  --var-file vars.json
+
+# QA assignment
+sc-compose render .claude/skills/codex-orchestration/qa-template.xml.j2 \
+  --var-file vars.json
+```
+
+Example `vars.json` for a dev assignment:
+
+```json
+{
+  "task_id": "SC-EXAMPLE-1",
+  "sprint": "S10-EXAMPLE",
+  "assignee": "arch-ctm",
+  "description": "Short description of the task.",
+  "worktree_path": "/Users/randlee/Documents/github/schook-worktrees/feature-example",
+  "branch": "feature/example",
+  "pr_target": "integrate/phase-x",
+  "deliverables": "- Deliverable one\n- Deliverable two",
+  "acceptance_criteria": "- cargo test --workspace PASS\n- cargo clippy -- -D warnings PASS",
+  "references": "- docs/requirements.md\n- docs/architecture.md"
+}
+```
+
+Rendered output is sent directly as the task message body. Required fields are
+defined in the frontmatter of each template. Scalar strings (not JSON arrays)
+must be used for list fields — see the `/codex-orchestration` skill for the
+full render contract and tested examples.
 
 ### Communication Rules
 
