@@ -2,6 +2,12 @@
 default_team = "atm-dev"
 identity = "team-lead"
 
+[atm]
+default_team = "atm-dev"
+post_send_hook = ["scripts/atm-nudge.sh"]
+post_send_hook_senders = ["*"]
+post_send_hook_recipients = ["arch-ctm", "team-lead"]
+
 [plugins.gh_monitor]
 team = "atm-dev"
 repo = "randlee/agent-team-mail"
