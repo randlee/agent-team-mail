@@ -580,7 +580,7 @@ atm read --all                   # read all messages (not just unread)
 - When reading your own inbox (no agent argument), identity resolution order is:
   1. `--as <name>` (explicit reader identity)
   2. `ATM_IDENTITY`
-  3. `.atm.toml [atm].identity` when it resolves to a concrete team member
+  3. `.atm.toml [core].identity` when it resolves to a concrete team member
 - If identity remains unresolved, `atm read` must fail with an actionable error and must not silently default to `human`.
 
 #### `atm inbox`
@@ -1627,7 +1627,7 @@ Additional config-path override:
 #### Configuration File (`.atm.toml`)
 
 ```toml
-[atm]
+[core]
 default_team = "backend-ci-team"    # default team for commands
 identity = "team-lead"              # from field on sent messages
 
@@ -1647,6 +1647,35 @@ arch-atm = "team-lead"   # alias-name → inbox-identity mapping
 spawn_policy = "leaders-only"       # leaders-only | any-member
 co_leaders = ["arch-atm", "quality-mgr"]
 ```
+
+#### Recipient-Only Post-Send Hooks
+
+Post-send hooks are configured only through recipient-bound rules. Sender-based
+matching and split sender/recipient filter lists are out of scope.
+
+```toml
+[[atm.post_send_hooks]]
+recipient = "team-lead"
+command = ["scripts/nudge-team-lead.sh"]
+
+[[atm.post_send_hooks]]
+recipient = "*"
+command = ["bash", "-c", "printf '%s\n' \"$ATM_POST_SEND\" >> /tmp/atm-hook.log"]
+```
+
+Requirements:
+
+- Each rule binds exactly one `recipient` and one `command`.
+- `recipient` must be either a concrete team member name or `"*"`.
+- Multiple matching rules may run for a single send, in config order.
+- If `command[0]` is path-like, it resolves relative to the declaring
+  `.atm.toml` directory.
+- If `command[0]` is a bare executable name such as `bash`, `python3`, or
+  `tmux`, it must be resolved by normal `PATH` lookup rather than being joined
+  against the config directory.
+- Recipient non-match is expected behavior and must not produce operator-facing
+  warnings.
+- Only actual execution failures (spawn failure, non-zero exit) may warn.
 
 **Identity resolution**: The `[aliases]` table allows symbolic names to route to actual inbox identities. Resolution order: `[aliases]` first (for stable shorthand), then literal fallback. Resolution is non-recursive and case-sensitive.
 

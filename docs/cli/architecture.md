@@ -74,6 +74,18 @@ For core commands:
 3. Core/daemon performs work.
 4. CLI renders result.
 
+For `atm send` post-send hooks specifically:
+
+1. CLI resolves the effective recipient after roles/aliases.
+2. Shared config supplies a recipient-only rule list.
+3. CLI executes each matching rule after durable inbox write success.
+4. Matching uses only:
+   - exact recipient identity, or
+   - wildcard `*`
+5. Path-like commands are already normalized relative to the declaring
+   `.atm.toml`; bare executable names remain `PATH`-resolved.
+6. Recipient non-match is a silent no-op, not a warning path.
+
 ### 3.2 Plugin Commands
 
 For plugin commands:

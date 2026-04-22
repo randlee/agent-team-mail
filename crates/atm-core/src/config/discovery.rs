@@ -1,6 +1,6 @@
 //! Configuration discovery and resolution
 
-use super::types::{Config, OutputFormat};
+use super::types::{Config, OutputFormat, PostSendHookRule};
 use crate::schema::SettingsJson;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -70,7 +70,7 @@ pub fn resolve_config(
     let global_config_path = home_dir.join(".config/atm/config.toml");
     if global_config_path.exists() {
         if let Ok(file_config) = load_config_file(&global_config_path) {
-            merge_config(&mut config, file_config);
+            merge_config(&mut config, file_config, Some(&global_config_path));
         } else {
             warn!("Failed to parse global config at {global_config_path:?}");
         }
@@ -79,7 +79,7 @@ pub fn resolve_config(
     // 3. Try repo-local config (current dir or git root)
     if let Some(repo_config) = find_repo_local_config(current_dir) {
         if let Ok(file_config) = load_config_file(&repo_config) {
-            merge_config(&mut config, file_config);
+            merge_config(&mut config, file_config, Some(&repo_config));
         } else {
             warn!("Failed to parse repo config at {repo_config:?}");
         }
@@ -90,7 +90,7 @@ pub fn resolve_config(
     // must surface as errors so operators can correct the path immediately.
     if let Some(path) = config_path_override {
         let file_config = load_config_file(&path)?;
-        merge_config(&mut config, file_config);
+        merge_config(&mut config, file_config, Some(&path));
     }
 
     // 2. Apply environment variables
@@ -183,7 +183,7 @@ fn config_file_declares_plugin(path: &Path, plugin_name: &str) -> bool {
 }
 
 /// Merge file config into base config
-fn merge_config(base: &mut Config, file: Config) {
+fn merge_config(base: &mut Config, file: Config, source_path: Option<&Path>) {
     // Merge core config
     base.core.default_team = file.core.default_team;
     base.core.identity = file.core.identity;
@@ -196,6 +196,11 @@ fn merge_config(base: &mut Config, file: Config) {
     // Merge messaging config
     if file.messaging.offline_action.is_some() {
         base.messaging.offline_action = file.messaging.offline_action;
+    }
+
+    // Merge ATM config
+    if !file.atm.post_send_hooks.is_empty() {
+        base.atm.post_send_hooks = normalize_post_send_hooks(file.atm.post_send_hooks, source_path);
     }
 
     // Merge retention config
@@ -215,6 +220,37 @@ fn merge_config(base: &mut Config, file: Config) {
     for (name, table) in file.plugins {
         base.plugins.insert(name, table);
     }
+}
+
+fn normalize_post_send_hooks(
+    hooks: Vec<PostSendHookRule>,
+    source_path: Option<&Path>,
+) -> Vec<PostSendHookRule> {
+    let Some(config_dir) = source_path.and_then(Path::parent) else {
+        return hooks;
+    };
+
+    hooks
+        .into_iter()
+        .map(|mut hook| {
+            hook.working_dir = Some(config_dir.to_path_buf());
+            if let Some(program) = hook.command.first_mut()
+                && command_looks_like_path(program)
+            {
+                let resolved = if Path::new(program).is_absolute() {
+                    PathBuf::from(&*program)
+                } else {
+                    config_dir.join(&*program)
+                };
+                *program = resolved.to_string_lossy().into_owned();
+            }
+            hook
+        })
+        .collect()
+}
+
+fn command_looks_like_path(program: &str) -> bool {
+    program.contains('/') || program.contains('\\')
 }
 
 /// Apply environment variable overrides
@@ -871,5 +907,118 @@ enabled = false
         std::fs::create_dir_all(&repo_dir).unwrap();
 
         assert!(resolve_plugin_config_location("gh_monitor", &repo_dir, home_dir).is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn test_post_send_hook_relative_script_resolves_from_declaring_config_dir() {
+        use tempfile::TempDir;
+        let _env_guard = EnvGuard::isolate(RESOLVE_ENV_KEYS);
+
+        let temp_dir = TempDir::new().unwrap();
+        let repo_dir = temp_dir.path().join("repo");
+        std::fs::create_dir_all(repo_dir.join("scripts")).unwrap();
+        std::fs::write(
+            repo_dir.join(".atm.toml"),
+            r#"
+[core]
+default_team = "repo-team"
+identity = "repo-user"
+
+[[atm.post_send_hooks]]
+recipient = "team-lead"
+command = ["scripts/nudge.sh"]
+"#,
+        )
+        .unwrap();
+
+        let config =
+            resolve_config(&ConfigOverrides::default(), &repo_dir, temp_dir.path()).unwrap();
+        assert_eq!(config.atm.post_send_hooks.len(), 1);
+        let hook = &config.atm.post_send_hooks[0];
+        assert_eq!(hook.recipient, "team-lead");
+        assert_eq!(
+            hook.command[0],
+            repo_dir.join("scripts/nudge.sh").to_string_lossy()
+        );
+        assert_eq!(hook.working_dir.as_deref(), Some(repo_dir.as_path()));
+    }
+
+    #[test]
+    #[serial]
+    fn test_post_send_hook_bare_bash_uses_path_resolution_not_config_join() {
+        use tempfile::TempDir;
+        let _env_guard = EnvGuard::isolate(RESOLVE_ENV_KEYS);
+
+        let temp_dir = TempDir::new().unwrap();
+        let repo_dir = temp_dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::fs::write(
+            repo_dir.join(".atm.toml"),
+            r#"
+[core]
+default_team = "repo-team"
+identity = "repo-user"
+
+[[atm.post_send_hooks]]
+recipient = "*"
+command = ["bash", "-c", "echo hi"]
+"#,
+        )
+        .unwrap();
+
+        let config =
+            resolve_config(&ConfigOverrides::default(), &repo_dir, temp_dir.path()).unwrap();
+        assert_eq!(config.atm.post_send_hooks.len(), 1);
+        let hook = &config.atm.post_send_hooks[0];
+        assert_eq!(hook.command[0], "bash");
+        assert_eq!(hook.working_dir.as_deref(), Some(repo_dir.as_path()));
+    }
+
+    #[test]
+    #[serial]
+    fn test_repo_post_send_hooks_replace_global_post_send_hooks() {
+        use tempfile::TempDir;
+        let _env_guard = EnvGuard::isolate(RESOLVE_ENV_KEYS);
+
+        let temp_dir = TempDir::new().unwrap();
+        let home_dir = temp_dir.path();
+        let repo_dir = temp_dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+
+        let global_cfg_dir = home_dir.join(".config/atm");
+        std::fs::create_dir_all(&global_cfg_dir).unwrap();
+        std::fs::write(
+            global_cfg_dir.join("config.toml"),
+            r#"
+[core]
+default_team = "global-team"
+identity = "global-user"
+
+[[atm.post_send_hooks]]
+recipient = "*"
+command = ["global-hook.sh"]
+"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            repo_dir.join(".atm.toml"),
+            r#"
+[core]
+default_team = "repo-team"
+identity = "repo-user"
+
+[[atm.post_send_hooks]]
+recipient = "team-lead"
+command = ["repo-hook.sh"]
+"#,
+        )
+        .unwrap();
+
+        let config = resolve_config(&ConfigOverrides::default(), &repo_dir, home_dir).unwrap();
+        assert_eq!(config.atm.post_send_hooks.len(), 1);
+        assert_eq!(config.atm.post_send_hooks[0].recipient, "team-lead");
+        assert_eq!(config.atm.post_send_hooks[0].command[0], "repo-hook.sh");
     }
 }

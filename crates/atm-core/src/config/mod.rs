@@ -19,6 +19,6 @@ pub use discovery::{
     resolve_plugin_config_location, resolve_settings,
 };
 pub use types::{
-    CleanupStrategy, Config, CoreConfig, DisplayConfig, MessagingConfig, OutputFormat,
-    RetentionConfig, TimestampFormat,
+    AtmConfig, CleanupStrategy, Config, CoreConfig, DisplayConfig, MessagingConfig, OutputFormat,
+    PostSendHookRule, RetentionConfig, TimestampFormat,
 };

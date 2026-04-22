@@ -75,6 +75,22 @@ For the GitHub monitor stack specifically:
 - The sender's own lifecycle state must be updated through explicit lifecycle
   logic, not by piggybacking on recipient-idle subscription behavior.
 
+#### 3.1.1 Recipient-Only Post-Send Hooks
+
+- `atm send` may execute post-send hooks after a successful inbox write.
+- Hook configuration must use recipient-only rules:
+  `[[atm.post_send_hooks]] recipient = <name-or-*> command = [..]`.
+- Sender-based hook filters are forbidden.
+- Each rule binds exactly one recipient selector and one command argv.
+- `recipient = "*"` matches all recipients.
+- Multiple matching rules must execute in config order.
+- Recipient non-match is expected behavior and must be silent.
+- Only actual hook execution failures may emit warnings.
+- Path-like `command[0]` values must resolve relative to the declaring
+  `.atm.toml`.
+- Bare executable names such as `bash` or `python3` must use normal `PATH`
+  lookup.
+
 ### 3.2 Lifecycle Notification Subscriptions
 
 - Busy/idle notifications for orchestration must be explicit and edge-triggered.

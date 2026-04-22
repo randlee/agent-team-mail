@@ -1,6 +1,8 @@
 //! Send command implementation
 
-use agent_team_mail_core::config::{Config, ConfigOverrides, resolve_config, resolve_identity};
+use agent_team_mail_core::config::{
+    Config, ConfigOverrides, PostSendHookRule, resolve_config, resolve_identity,
+};
 use agent_team_mail_core::daemon_client::{RegisterHintOutcome, SessionQueryResult};
 use agent_team_mail_core::event_log::{EventFields, emit_event_best_effort};
 use agent_team_mail_core::home::{config_team_dir_for, get_os_home_dir};
@@ -9,8 +11,10 @@ use agent_team_mail_core::schema::{AgentMember, BackendType, InboxMessage, TeamC
 use anyhow::Result;
 use chrono::Utc;
 use clap::Args;
+use serde_json::json;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use tracing::{debug, info};
 use uuid::Uuid;
 
@@ -379,6 +383,15 @@ pub fn execute(args: SendArgs) -> Result<()> {
         }
     }
 
+    run_post_send_hooks(
+        &config,
+        &config.core.identity,
+        &sender_team,
+        &agent_name,
+        &team_name,
+        &inbox_message,
+    );
+
     Ok(())
 }
 
@@ -451,6 +464,64 @@ fn resolve_offline_action(args: &SendArgs, config: &Config) -> String {
     }
 
     String::new()
+}
+
+fn run_post_send_hooks(
+    config: &Config,
+    sender: &str,
+    sender_team: &str,
+    recipient_agent: &str,
+    recipient_team: &str,
+    inbox_message: &InboxMessage,
+) {
+    let payload = json!({
+        "from": format!("{sender}@{sender_team}"),
+        "sender": sender,
+        "sender_team": sender_team,
+        "recipient": recipient_agent,
+        "team": recipient_team,
+        "to": format!("{recipient_agent}@{recipient_team}"),
+        "text": inbox_message.text,
+        "summary": inbox_message.summary,
+        "message_id": inbox_message.message_id,
+    });
+
+    for hook in config
+        .atm
+        .post_send_hooks
+        .iter()
+        .filter(|hook| hook_matches_recipient(hook, recipient_agent))
+    {
+        if let Err(err) = execute_post_send_hook(hook, &payload.to_string()) {
+            eprintln!("Warning: post-send hook failed: {err}");
+        }
+    }
+}
+
+fn hook_matches_recipient(hook: &PostSendHookRule, recipient_agent: &str) -> bool {
+    hook.recipient == "*" || hook.recipient == recipient_agent
+}
+
+fn execute_post_send_hook(hook: &PostSendHookRule, payload: &str) -> Result<()> {
+    let Some(program) = hook.command.first() else {
+        anyhow::bail!("configured post-send hook has empty command");
+    };
+
+    let mut command = Command::new(program);
+    command
+        .args(&hook.command[1..])
+        .env("ATM_POST_SEND", payload);
+
+    if let Some(ref working_dir) = hook.working_dir {
+        command.current_dir(working_dir);
+    }
+
+    let status = command.status()?;
+    if !status.success() {
+        anyhow::bail!("command {:?} exited with {status}", hook.command);
+    }
+
+    Ok(())
 }
 
 fn is_self_send(
@@ -957,6 +1028,39 @@ mod tests {
         let args = make_send_args(Some(String::new()));
         let config = Config::default();
         assert_eq!(resolve_offline_action(&args, &config), "");
+    }
+
+    #[test]
+    fn test_hook_matches_recipient_exact() {
+        let hook = PostSendHookRule {
+            recipient: "team-lead".to_string(),
+            command: vec!["echo".to_string()],
+            working_dir: None,
+        };
+        assert!(hook_matches_recipient(&hook, "team-lead"));
+        assert!(!hook_matches_recipient(&hook, "arch-ctm"));
+    }
+
+    #[test]
+    fn test_hook_matches_recipient_wildcard() {
+        let hook = PostSendHookRule {
+            recipient: "*".to_string(),
+            command: vec!["echo".to_string()],
+            working_dir: None,
+        };
+        assert!(hook_matches_recipient(&hook, "team-lead"));
+        assert!(hook_matches_recipient(&hook, "arch-ctm"));
+    }
+
+    #[test]
+    fn test_execute_post_send_hook_rejects_empty_command() {
+        let hook = PostSendHookRule {
+            recipient: "*".to_string(),
+            command: Vec::new(),
+            working_dir: None,
+        };
+        let err = execute_post_send_hook(&hook, "{}").unwrap_err();
+        assert!(err.to_string().contains("empty command"));
     }
 
     #[test]

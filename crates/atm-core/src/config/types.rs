@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// Complete configuration
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -15,6 +16,9 @@ pub struct Config {
     /// Messaging configuration
     #[serde(default)]
     pub messaging: MessagingConfig,
+    /// ATM-specific configuration
+    #[serde(default)]
+    pub atm: AtmConfig,
     /// Retention configuration
     #[serde(default)]
     pub retention: RetentionConfig,
@@ -97,6 +101,28 @@ pub struct MessagingConfig {
     /// If set to empty string, disables prepend entirely.
     #[serde(default)]
     pub offline_action: Option<String>,
+}
+
+/// ATM-specific configuration
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AtmConfig {
+    /// Post-send hook rules matched only by recipient identity.
+    #[serde(default)]
+    pub post_send_hooks: Vec<PostSendHookRule>,
+}
+
+/// One post-send hook rule.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PostSendHookRule {
+    /// Recipient identity to match, or "*" for all recipients.
+    pub recipient: String,
+    /// Command argv to execute when the hook matches.
+    pub command: Vec<String>,
+    /// Internal execution working directory derived from the declaring config.
+    #[serde(skip)]
+    pub working_dir: Option<PathBuf>,
 }
 
 /// Timestamp display format
@@ -196,6 +222,54 @@ mod tests {
         assert_eq!(config.core.default_team, deserialized.core.default_team);
         assert_eq!(config.core.identity, deserialized.core.identity);
         assert_eq!(config.display.format, deserialized.display.format);
+    }
+
+    #[test]
+    fn test_post_send_hooks_round_trip() {
+        let toml_str = r#"
+[core]
+default_team = "test-team"
+identity = "test-user"
+
+[[atm.post_send_hooks]]
+recipient = "team-lead"
+command = ["scripts/nudge-team-lead.sh"]
+
+[[atm.post_send_hooks]]
+recipient = "*"
+command = ["bash", "-c", "echo hi"]
+"#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.atm.post_send_hooks.len(), 2);
+        assert_eq!(config.atm.post_send_hooks[0].recipient, "team-lead");
+        assert_eq!(
+            config.atm.post_send_hooks[0].command,
+            vec!["scripts/nudge-team-lead.sh"]
+        );
+        assert!(config.atm.post_send_hooks[0].working_dir.is_none());
+
+        let reserialized = toml::to_string(&config).unwrap();
+        let config2: Config = toml::from_str(&reserialized).unwrap();
+        assert_eq!(config2.atm.post_send_hooks.len(), 2);
+        assert_eq!(config2.atm.post_send_hooks[1].recipient, "*");
+    }
+
+    #[test]
+    fn test_old_post_send_filter_shape_is_rejected() {
+        let toml_str = r#"
+[core]
+default_team = "test-team"
+identity = "test-user"
+
+[atm]
+post_send_hook = ["scripts/nudge.sh"]
+post_send_hook_senders = ["*"]
+post_send_hook_recipients = ["team-lead"]
+"#;
+
+        let err = toml::from_str::<Config>(toml_str).unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
     }
 
     #[test]

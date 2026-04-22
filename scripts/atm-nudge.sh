@@ -1,15 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
-to="$(echo "$ATM_POST_SEND" | jq -r '.to' 2>/dev/null)"
-task_id="$(echo "$ATM_POST_SEND" | jq -r '.task_id // empty' 2>/dev/null)"
-msg="You have unread ATM messages. Run: atm read --team atm-dev${task_id:+ (task: $task_id)}"
+recipient="${1:?recipient required}"
+msg="You have unread ATM messages. Run: atm read --team atm-dev"
 
-case "$to" in
-    arch-ctm@*)
+case "$recipient" in
+    arch-ctm)
         pane="atm-dev:1.2"
         ;;
-    team-lead@*)
+    team-lead)
         pane="atm-dev:1.1"
         ;;
     *)
@@ -17,8 +16,6 @@ case "$to" in
         ;;
 esac
 
-tmux send-keys -t "$pane" -l "$msg"
-sleep 0.2
-tmux send-keys -t "$pane" Enter
-sleep 0.5
+tmux set-buffer -- "$msg"
+tmux paste-buffer -t "$pane"
 tmux send-keys -t "$pane" Enter

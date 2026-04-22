@@ -184,6 +184,31 @@ color = true
 timestamps = "relative"  # relative | absolute | iso8601
 ```
 
+### Recipient-Only Post-Send Hooks
+
+Post-send hooks are configured as recipient-only rules. Each rule binds one
+recipient (`"team-lead"`, `"arch-ctm"`, or `"*"`) to one command argv.
+
+```toml
+[[atm.post_send_hooks]]
+recipient = "team-lead"
+command = ["scripts/nudge-team-lead.sh"]
+
+[[atm.post_send_hooks]]
+recipient = "arch-ctm"
+command = ["bash", "-c", "printf '%s\n' \"$ATM_POST_SEND\" >> /tmp/atm-hook.log"]
+```
+
+Rules are evaluated after a successful `atm send` inbox write:
+
+- exact recipient rules match that member only
+- `recipient = "*"` matches all recipients
+- multiple matching rules all run, in config order
+- if `command[0]` looks like a path, it resolves relative to the declaring
+  `.atm.toml`
+- bare executables like `bash` or `python3` use normal `PATH` resolution
+- recipient non-match is silent; only actual hook execution failures warn
+
 ### Environment Variables
 
 - `ATM_TEAM` — Default team name

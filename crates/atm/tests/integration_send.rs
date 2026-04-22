@@ -41,6 +41,16 @@ fn set_home_env(cmd: &mut assert_cmd::Command, temp_dir: &TempDir) {
         .current_dir(&workdir);
 }
 
+fn test_workdir(temp_dir: &TempDir) -> PathBuf {
+    temp_dir.path().join("workdir")
+}
+
+fn write_repo_atm_toml(temp_dir: &TempDir, contents: &str) {
+    let workdir = test_workdir(temp_dir);
+    fs::create_dir_all(&workdir).unwrap();
+    fs::write(workdir.join(".atm.toml"), contents).unwrap();
+}
+
 #[cfg(unix)]
 fn write_fake_daemon_script(home: &Path) -> PathBuf {
     let script = home.join("fake-daemon.py");
@@ -1232,4 +1242,190 @@ fn test_send_emits_post_send_idle_without_subscribe_side_effect() {
 
     let _ = daemon.kill();
     let _ = daemon.wait();
+}
+
+#[cfg(unix)]
+#[test]
+fn test_send_runs_post_send_hook_for_exact_recipient_with_bare_bash_command() {
+    let temp_dir = TempDir::new().unwrap();
+    let _team_dir = setup_test_team(&temp_dir, "test-team");
+    let hook_log = temp_dir.path().join("hook.log");
+
+    write_repo_atm_toml(
+        &temp_dir,
+        r#"
+[core]
+default_team = "test-team"
+identity = "team-lead"
+
+[[atm.post_send_hooks]]
+recipient = "test-agent"
+command = ["bash", "-c", "printf '%s\n' \"$ATM_POST_SEND\" >> \"$ATM_HOOK_LOG\""]
+"#,
+    );
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_HOOK_LOG", &hook_log)
+        .arg("send")
+        .arg("test-agent")
+        .arg("hook me")
+        .assert()
+        .success();
+
+    let hook_output = fs::read_to_string(&hook_log).unwrap();
+    assert!(hook_output.contains("\"recipient\":\"test-agent\""));
+    assert!(hook_output.contains("\"to\":\"test-agent@test-team\""));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_send_post_send_hook_non_match_is_silent() {
+    let temp_dir = TempDir::new().unwrap();
+    let _team_dir = setup_test_team(&temp_dir, "test-team");
+    let hook_log = temp_dir.path().join("hook.log");
+
+    write_repo_atm_toml(
+        &temp_dir,
+        r#"
+[core]
+default_team = "test-team"
+identity = "team-lead"
+
+[[atm.post_send_hooks]]
+recipient = "test-agent"
+command = ["bash", "-c", "printf '%s\n' \"$ATM_POST_SEND\" >> \"$ATM_HOOK_LOG\""]
+"#,
+    );
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    let assert = cmd
+        .env("ATM_HOOK_LOG", &hook_log)
+        .arg("send")
+        .arg("team-lead")
+        .arg("no hook")
+        .assert()
+        .success();
+
+    assert!(!hook_log.exists());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(!stderr.contains("post-send hook failed"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_send_runs_post_send_hook_for_wildcard_recipient() {
+    let temp_dir = TempDir::new().unwrap();
+    let _team_dir = setup_test_team(&temp_dir, "test-team");
+    let hook_log = temp_dir.path().join("hook.log");
+
+    write_repo_atm_toml(
+        &temp_dir,
+        r#"
+[core]
+default_team = "test-team"
+identity = "team-lead"
+
+[[atm.post_send_hooks]]
+recipient = "*"
+command = ["bash", "-c", "printf '%s\n' \"$ATM_POST_SEND\" >> \"$ATM_HOOK_LOG\""]
+"#,
+    );
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_HOOK_LOG", &hook_log)
+        .arg("send")
+        .arg("team-lead")
+        .arg("wildcard hook")
+        .assert()
+        .success();
+
+    let hook_output = fs::read_to_string(&hook_log).unwrap();
+    assert!(hook_output.contains("\"recipient\":\"team-lead\""));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_send_runs_post_send_hook_with_relative_script_command() {
+    let temp_dir = TempDir::new().unwrap();
+    let _team_dir = setup_test_team(&temp_dir, "test-team");
+    let workdir = test_workdir(&temp_dir);
+    let scripts_dir = workdir.join("scripts");
+    let hook_log = temp_dir.path().join("hook.log");
+    fs::create_dir_all(&scripts_dir).unwrap();
+
+    let script_path = scripts_dir.join("record-hook.sh");
+    fs::write(
+        &script_path,
+        "#!/usr/bin/env bash\nprintf '%s\\n' \"$ATM_POST_SEND\" >> \"$ATM_HOOK_LOG\"\n",
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&script_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script_path, perms).unwrap();
+
+    write_repo_atm_toml(
+        &temp_dir,
+        r#"
+[core]
+default_team = "test-team"
+identity = "team-lead"
+
+[[atm.post_send_hooks]]
+recipient = "test-agent"
+command = ["scripts/record-hook.sh"]
+"#,
+    );
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_HOOK_LOG", &hook_log)
+        .arg("send")
+        .arg("test-agent")
+        .arg("relative hook")
+        .assert()
+        .success();
+
+    let hook_output = fs::read_to_string(&hook_log).unwrap();
+    assert!(hook_output.contains("\"recipient\":\"test-agent\""));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_send_runs_multiple_matching_post_send_hooks() {
+    let temp_dir = TempDir::new().unwrap();
+    let _team_dir = setup_test_team(&temp_dir, "test-team");
+    let hook_log = temp_dir.path().join("hook.log");
+
+    write_repo_atm_toml(
+        &temp_dir,
+        r#"
+[core]
+default_team = "test-team"
+identity = "team-lead"
+
+[[atm.post_send_hooks]]
+recipient = "test-agent"
+command = ["bash", "-c", "printf 'exact:%s\n' \"$ATM_POST_SEND\" >> \"$ATM_HOOK_LOG\""]
+
+[[atm.post_send_hooks]]
+recipient = "*"
+command = ["bash", "-c", "printf 'wild:%s\n' \"$ATM_POST_SEND\" >> \"$ATM_HOOK_LOG\""]
+"#,
+    );
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_HOOK_LOG", &hook_log)
+        .arg("send")
+        .arg("test-agent")
+        .arg("multi hook")
+        .assert()
+        .success();
+
+    let hook_output = fs::read_to_string(&hook_log).unwrap();
+    assert!(hook_output.contains("exact:{"));
+    assert!(hook_output.contains("wild:{"));
 }
