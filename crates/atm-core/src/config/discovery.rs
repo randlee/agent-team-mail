@@ -33,6 +33,10 @@ pub enum ConfigError {
     /// Configuration not found
     #[error("Configuration not found")]
     NotFound,
+
+    /// Hook command path could not be represented as UTF-8
+    #[error("Hook command path is not valid UTF-8: {0}")]
+    NonUtf8HookCommandPath(PathBuf),
 }
 
 /// Command-line overrides for configuration
@@ -70,7 +74,7 @@ pub fn resolve_config(
     let global_config_path = home_dir.join(".config/atm/config.toml");
     if global_config_path.exists() {
         if let Ok(file_config) = load_config_file(&global_config_path) {
-            merge_config(&mut config, file_config, Some(&global_config_path));
+            merge_config(&mut config, file_config, Some(&global_config_path))?;
         } else {
             warn!("Failed to parse global config at {global_config_path:?}");
         }
@@ -79,7 +83,7 @@ pub fn resolve_config(
     // 3. Try repo-local config (current dir or git root)
     if let Some(repo_config) = find_repo_local_config(current_dir) {
         if let Ok(file_config) = load_config_file(&repo_config) {
-            merge_config(&mut config, file_config, Some(&repo_config));
+            merge_config(&mut config, file_config, Some(&repo_config))?;
         } else {
             warn!("Failed to parse repo config at {repo_config:?}");
         }
@@ -90,7 +94,7 @@ pub fn resolve_config(
     // must surface as errors so operators can correct the path immediately.
     if let Some(path) = config_path_override {
         let file_config = load_config_file(&path)?;
-        merge_config(&mut config, file_config, Some(&path));
+        merge_config(&mut config, file_config, Some(&path))?;
     }
 
     // 2. Apply environment variables
@@ -183,7 +187,11 @@ fn config_file_declares_plugin(path: &Path, plugin_name: &str) -> bool {
 }
 
 /// Merge file config into base config
-fn merge_config(base: &mut Config, file: Config, source_path: Option<&Path>) {
+fn merge_config(
+    base: &mut Config,
+    file: Config,
+    source_path: Option<&Path>,
+) -> Result<(), ConfigError> {
     // Merge core config
     base.core.default_team = file.core.default_team;
     base.core.identity = file.core.identity;
@@ -200,7 +208,8 @@ fn merge_config(base: &mut Config, file: Config, source_path: Option<&Path>) {
 
     // Merge ATM config
     if !file.atm.post_send_hooks.is_empty() {
-        base.atm.post_send_hooks = normalize_post_send_hooks(file.atm.post_send_hooks, source_path);
+        base.atm.post_send_hooks =
+            normalize_post_send_hooks(file.atm.post_send_hooks, source_path)?;
     }
 
     // Merge retention config
@@ -220,14 +229,16 @@ fn merge_config(base: &mut Config, file: Config, source_path: Option<&Path>) {
     for (name, table) in file.plugins {
         base.plugins.insert(name, table);
     }
+
+    Ok(())
 }
 
 fn normalize_post_send_hooks(
     hooks: Vec<PostSendHookRule>,
     source_path: Option<&Path>,
-) -> Vec<PostSendHookRule> {
+) -> Result<Vec<PostSendHookRule>, ConfigError> {
     let Some(config_dir) = source_path.and_then(Path::parent) else {
-        return hooks;
+        return Ok(hooks);
     };
 
     hooks
@@ -242,9 +253,12 @@ fn normalize_post_send_hooks(
                 } else {
                     config_dir.join(&*program)
                 };
-                *program = resolved.to_string_lossy().into_owned();
+                *program = resolved
+                    .to_str()
+                    .ok_or_else(|| ConfigError::NonUtf8HookCommandPath(resolved.clone()))?
+                    .to_string();
             }
-            hook
+            Ok(hook)
         })
         .collect()
 }

@@ -1394,6 +1394,50 @@ command = ["scripts/record-hook.sh"]
 
 #[cfg(unix)]
 #[test]
+fn test_send_runs_post_send_hook_with_python_command() {
+    let temp_dir = TempDir::new().unwrap();
+    let _team_dir = setup_test_team(&temp_dir, "test-team");
+    let workdir = test_workdir(&temp_dir);
+    let scripts_dir = workdir.join("scripts");
+    let hook_log = temp_dir.path().join("hook.log");
+    fs::create_dir_all(&scripts_dir).unwrap();
+
+    let script_path = scripts_dir.join("record_hook.py");
+    fs::write(
+        &script_path,
+        "import os\nfrom pathlib import Path\nPath(os.environ['ATM_HOOK_LOG']).write_text(os.environ['ATM_POST_SEND'] + '\\n')\n",
+    )
+    .unwrap();
+
+    write_repo_atm_toml(
+        &temp_dir,
+        r#"
+[core]
+default_team = "test-team"
+identity = "team-lead"
+
+[[atm.post_send_hooks]]
+recipient = "test-agent"
+command = ["python3", "scripts/record_hook.py"]
+"#,
+    );
+
+    let mut cmd = cargo::cargo_bin_cmd!("atm");
+    set_home_env(&mut cmd, &temp_dir);
+    cmd.env("ATM_HOOK_LOG", &hook_log)
+        .arg("send")
+        .arg("test-agent")
+        .arg("python hook")
+        .assert()
+        .success();
+
+    let hook_output = fs::read_to_string(&hook_log).unwrap();
+    assert!(hook_output.contains("\"recipient\":\"test-agent\""));
+    assert!(hook_output.contains("\"to\":\"test-agent@test-team\""));
+}
+
+#[cfg(unix)]
+#[test]
 fn test_send_runs_multiple_matching_post_send_hooks() {
     let temp_dir = TempDir::new().unwrap();
     let _team_dir = setup_test_team(&temp_dir, "test-team");

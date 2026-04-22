@@ -113,7 +113,7 @@ pub struct AtmConfig {
 }
 
 /// One post-send hook rule.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PostSendHookRule {
     /// Recipient identity to match, or "*" for all recipients.

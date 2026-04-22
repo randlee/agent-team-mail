@@ -84,6 +84,8 @@ For the GitHub monitor stack specifically:
 - Each rule binds exactly one recipient selector and one command argv.
 - `recipient = "*"` matches all recipients.
 - Multiple matching rules must execute in config order.
+- The shipped example for post-send nudging should be Python-based, but the
+  engine itself remains command-agnostic.
 - Recipient non-match is expected behavior and must be silent.
 - Only actual hook execution failures may emit warnings.
 - Path-like `command[0]` values must resolve relative to the declaring

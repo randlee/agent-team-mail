@@ -1656,7 +1656,7 @@ matching and split sender/recipient filter lists are out of scope.
 ```toml
 [[atm.post_send_hooks]]
 recipient = "team-lead"
-command = ["scripts/nudge-team-lead.sh"]
+command = ["python3", "scripts/atm-nudge.py", "team-lead"]
 
 [[atm.post_send_hooks]]
 recipient = "*"
@@ -1668,6 +1668,8 @@ Requirements:
 - Each rule binds exactly one `recipient` and one `command`.
 - `recipient` must be either a concrete team member name or `"*"`.
 - Multiple matching rules may run for a single send, in config order.
+- The shipped example for recipient-only nudge behavior should be Python-based
+  for portability, but the hook engine itself remains command-agnostic.
 - If `command[0]` is path-like, it resolves relative to the declaring
   `.atm.toml` directory.
 - If `command[0]` is a bare executable name such as `bash`, `python3`, or
@@ -2480,6 +2482,14 @@ Policy rules:
   dependencies, and are exempt from product runtime portability requirements.
 - Hook commands must invoke Python scripts directly; shell wrapper forms such as
   `bash -c "python ..."` are not allowed in product hook wiring.
+
+Scope clarification:
+- This Python-only policy applies to ATM-managed runtime script paths such as
+  installed Claude hooks, `atm init` generated configuration, and shipped
+  launcher/relay flows.
+- User-configured `[[atm.post_send_hooks]]` commands are command-agnostic and
+  may invoke `python3`, `bash`, `tmux`, or other executables directly, subject
+  to normal path-resolution and platform-availability constraints.
 
 Verification requirements:
 - Runtime script behavior must be covered by pytest in `tests/hook-scripts/`.
